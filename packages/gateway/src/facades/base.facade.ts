@@ -17,6 +17,7 @@ import type { IRepositories } from "@pcc/store";
 import { trace, SpanStatusCode } from "@opentelemetry/api";
 import { getReputationService } from "../services/reputation-service.js";
 import { isTransientError, TRANSIENT_ERROR_CODE } from "./transient-error.js";
+import { logSafeId } from "../redaction.js";
 import {
   NotFoundError,
   BadRequestError,
@@ -30,16 +31,7 @@ import {
 /** Shared tracer for all facade spans */
 const facadeTracer = trace.getTracer("pcc-gateway-facades", "2.0.0");
 
-/**
- * N71 round 7 (astra pack 83f): the closed set of facade names every BaseFacade
- * subclass's own super() call passes (verified empirically — every subclass in the
- * gateway package, grep-checked). Narrowing `facadeName` from `string` to this union
- * makes it a provably-closed value by DECLARATION (a literal-type union, not a name
- * allowlist): the sink scanner resolves its static type and accepts any value whose
- * type is wholly composed of literal types. Adding a new BaseFacade subclass with a
- * name outside this set is a compile error here, by design — the set is extended
- * deliberately, not silently.
- */
+/** Declared facade names; observability also formats them at runtime. */
 export type FacadeName = "job" | "kernel" | "settlement" | "capability" | "compliance" | "AgentFacade";
 
 export abstract class BaseFacade {
@@ -69,9 +61,9 @@ export abstract class BaseFacade {
     fn: () => Promise<T>,
   ): Promise<Result<T>> {
     return facadeTracer.startActiveSpan(
-      `${this.facadeName}.${operation}`,
+      `${logSafeId(this.facadeName)}.${operation}`,
       async (span) => {
-        span.setAttribute("facade.name", this.facadeName);
+        span.setAttribute("facade.name", logSafeId(this.facadeName));
         span.setAttribute("facade.operation", operation);
         try {
           const data = await fn();
@@ -276,7 +268,7 @@ export abstract class BaseFacade {
       // The OTel span in execute() provides proper structured tracing.
       pipelineTelemetry.emit(
         `facade-${Date.now()}`,
-        this.facadeName as import("../telemetry.js").PipelinePhase,
+        logSafeId(this.facadeName) as import("../telemetry.js").PipelinePhase,
         status,
         { metadata: { operation, ...metadata } },
       );

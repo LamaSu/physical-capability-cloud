@@ -788,6 +788,6 @@ describe("an addEvent that fails", () => {
     expect(result).toMatchObject({ success: false, error: "a gcode_received event of this job could not be recorded (storage full), so its evidence is incomplete" });
     expect(bundles, "bundles finalized").toEqual([]);
     expect(emitter.getEvents("job-failing-add", STEP), "the failed run's step, detached").toEqual([]);
-    expect(console.error).toHaveBeenCalledWith(expect.objectContaining({ message: "storage full" }));
+    expect(console.error).toHaveBeenCalledWith("job_evidence_record_failed", "Error");
   });
 });

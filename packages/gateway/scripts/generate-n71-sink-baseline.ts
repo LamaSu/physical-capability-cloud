@@ -29,7 +29,7 @@ import {
   N71_SCOPE_FILES,
   BASELINE_PATH,
   loadBaseline,
-  newViolations,
+  validateReviewedAdditions,
   type Violation,
 } from "../src/__tests__/n71-sink-scanner-engine.js";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -41,25 +41,7 @@ function reviewedAdditions(current: Violation[]): Violation[] {
     throw new Error("Usage: generate-n71-sink-baseline.ts [--reviewed-additions <json>]");
   }
   const entries: unknown = JSON.parse(readFileSync(args[1], "utf8"));
-  if (!Array.isArray(entries)) throw new Error("Reviewed additions must be an array");
-  const key = (v: Violation) => JSON.stringify([v.file, v.sink, v.argText]);
-  const available = new Set(newViolations(current, loadBaseline()).map(key));
-  const seen = new Set<string>();
-  return entries.map((entry: unknown) => {
-    if (!entry || typeof entry !== "object") throw new Error("Invalid reviewed addition");
-    const row = entry as Record<string, unknown>;
-    if (typeof row.file !== "string" || typeof row.sink !== "string" || typeof row.argText !== "string"
-      || row.classification !== "not_a_leak" || typeof row.reason !== "string" || !row.reason.trim()) {
-      throw new Error("Each reviewed addition needs file, sink, argText, not_a_leak classification and reason");
-    }
-    const violation: Violation = { file: row.file, sink: row.sink, argText: row.argText };
-    const fingerprint = key(violation);
-    if (N71_SCOPE_FILES.includes(row.file) || !available.has(fingerprint) || seen.has(fingerprint)) {
-      throw new Error("Reviewed additions must be distinct, currently new rows outside N71's scope");
-    }
-    seen.add(fingerprint);
-    return violation;
-  });
+  return validateReviewedAdditions(entries, current, loadBaseline());
 }
 
 function main(): void {
@@ -82,7 +64,7 @@ function main(): void {
   const otherViolations: Violation[] = result.violations.filter((v) => !N71_SCOPE_FILES.includes(v.file));
   const otherUnresolved: Violation[] = result.unresolvedCallees
     .filter((v) => !N71_SCOPE_FILES.includes(v.file))
-    .map((v) => ({ file: v.file, sink: "<unresolved-callee>", argText: v.argText }));
+    .map((v) => ({ ...v, sink: "<unresolved-callee>" }));
   const combined = [...otherViolations, ...otherUnresolved];
 
   // Validate the review before making any baseline changes.
@@ -91,8 +73,8 @@ function main(): void {
   for (const row of additions) {
     const sinks = baseline[row.file] ??= {};
     const args = sinks[row.sink] ??= [];
-    args.push(row.argText);
-    args.sort();
+    args.push({ argText: row.argText, fingerprint: row.fingerprint });
+    args.sort((a, b) => a.fingerprint.localeCompare(b.fingerprint) || a.argText.localeCompare(b.argText));
   }
   if (additions.length > 0) {
     writeFileSync(BASELINE_PATH, JSON.stringify(baseline, null, 2) + "\n", "utf8");

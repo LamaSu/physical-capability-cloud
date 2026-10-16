@@ -1,837 +1,3334 @@
 {
   "agent-bridge.ts": {
     "console.log": [
-      "agentId",
-      "result.data.revoked"
+      {
+        "argText": "result.data.revoked",
+        "fingerprint": "1be0fbe85ebb1c60835477ba6d3d0e5d4c0cf447646300bcd1193411abd36b45"
+      },
+      {
+        "argText": "agentId",
+        "fingerprint": "9905a29d354341b45af7d1436e8b9d91493379042c23b6cfc4f5a2a417b946f0"
+      }
     ],
     "console.error": [
-      "agentId",
-      "result.error"
+      {
+        "argText": "result.error",
+        "fingerprint": "5d789960c95a358474c864dfc9053f097f9d864afa6311016dbcb026f15ed2e6"
+      },
+      {
+        "argText": "agentId",
+        "fingerprint": "aa84d5a91568cf1a3307635fe8b9ef7fef29b7f2cd6af1823ad53bd610b5e5b2"
+      }
     ],
     "console.warn": [
-      "err"
+      {
+        "argText": "err",
+        "fingerprint": "ac8c69ed2680a7db18f118b61064523febe04238829cab93bace37e5a66c8dd3"
+      }
     ]
   },
   "db.ts": {
     "console.log": [
-      "dbPath"
+      {
+        "argText": "dbPath",
+        "fingerprint": "18b4ac078f827df67d7d1057a2c14ddc615eb9aef550078dd79e6e387e521a3e"
+      }
     ]
   },
   "otel.ts": {
     "otel.resourceFromAttributes": [
-      "process.env.OTEL_SERVICE_NAME",
-      "process.env.OTEL_SERVICE_VERSION"
+      {
+        "argText": "process.env.OTEL_SERVICE_NAME",
+        "fingerprint": "99d162dd1366852ed8e82d38baf26f7b1b672d0159335c2d87927dc4fde8989c"
+      },
+      {
+        "argText": "process.env.OTEL_SERVICE_VERSION",
+        "fingerprint": "ae31bd0f86bceea3b73584ac4a385ba74a2aff9fc64f332109313ec15fffc5ef"
+      }
     ],
     "console.log": [
-      "otlpEndpoint"
+      {
+        "argText": "otlpEndpoint",
+        "fingerprint": "0cb5928527454891bbc700b957ac0f8f157a67d1828c1474ea5665315af541d4"
+      }
     ],
     "console.error": [
-      "err"
+      {
+        "argText": "err",
+        "fingerprint": "35d9027410d91213bd9a2803e8a06e9ad530d0491ad59f7643ae5055fc6a77c8"
+      }
     ]
   },
   "sentry.ts": {
-    "Sentry.init": [
-      "SENTRY_DSN",
-      "beforeBreadcrumb(breadcrumb) { const urls = [breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message]; return urls.some((url) => typeof url === \"string\" && isWalletRequest(url)) ? null ",
-      "beforeSendSpan(span) { const urls = [span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])]; const route = span.data[\"http.route\"]; return urls.some((url) => typeof url === \"string\"",
-      "process.env.NODE_ENV",
-      "walletSafeSentryEvent"
-    ],
-    "console.log": [
-      "\"[sentry] Distributed tracing initialised (dsn=…\" + SENTRY_DSN.slice(-12) + \")\""
-    ],
     "Sentry.get": [
-      "value"
+      {
+        "argText": "value",
+        "fingerprint": "8574516e8f8519243e3a26a9879ce329c2cdab92ca5d9d494bf1609397bbc1a9"
+      }
     ],
     "Sentry.set": [
-      "value"
+      {
+        "argText": "value",
+        "fingerprint": "2663f93bdf1090c0010bc10e20544c6b3f4eb80712170870336dba6ec9e4a51f"
+      },
+      {
+        "argText": "value",
+        "fingerprint": "660c48c0a5774117b81fb1746b79c24c8f9c0b339230df29e7ff5c6d26f9b2e9"
+      },
+      {
+        "argText": "output",
+        "fingerprint": "a35c5a20b6c074db3c872c1404f473752b794bf0d11cbeb970302175fe1ad061"
+      },
+      {
+        "argText": "value",
+        "fingerprint": "c6a8d5a82391c7d3e9d6b9230a1fa366da6a2dc799c18a0c787faaba09ecd99a"
+      }
     ],
     "Sentry.withoutWalletHeader": [
-      "breadcrumb",
-      "event",
-      "item",
-      "seen",
-      "span"
+      {
+        "argText": "breadcrumb",
+        "fingerprint": "338eaac985387d564e262a95a682ec3d446c2f67f72a7b86e3510072220f523f"
+      },
+      {
+        "argText": "event",
+        "fingerprint": "8d8c64dd80204a3a134c148192851cb6e4025e849241eb0ecb834ea828816b24"
+      },
+      {
+        "argText": "item",
+        "fingerprint": "980491ff6cc6690fdb91c54a611eddf007974ce9e0367f569a2b31e30372b079"
+      },
+      {
+        "argText": "seen",
+        "fingerprint": "b8c4f8d08450952888ea68040e4f5271a88dfc1baeea3ec3132727ed65c97bc0"
+      },
+      {
+        "argText": "span",
+        "fingerprint": "eb6bb07b5de83fbcf1638f361bf3d8e7be8c8ffc63a230aa170caa6f4a3b3bcc"
+      }
     ],
-    "Sentry.has": [
-      "route"
+    "Sentry.init": [
+      {
+        "argText": "walletSafeSentryEvent",
+        "fingerprint": "2cf1564940827109dfbae3c41059b3b6de24bd6073114565158f6ffa78f3fc14"
+      },
+      {
+        "argText": "walletSafeSentryEvent",
+        "fingerprint": "3738b018b0011001cab90df6064f8f5478a9b4e065aeaedd5941d21aa85c3cd3"
+      },
+      {
+        "argText": "beforeSendSpan(span) {\n      const urls = [span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])];\n      const route = span.data[\"http.route\"];\n      return urls.some((url) => typeof url === \"string\" && isWalletRequest(url))\n        ? { ...span, description: typeof route === \"string\" && WALLET_ROUTE_TEMPLATES.has(route)\n          ? route : \"/api/wallets/<redacted>\", data: {} }\n        : withoutWalletHeader(span);\n    }",
+        "fingerprint": "87a553475b6e01a18703a033ed32e74d98e2743f30f3dca9b22f1b52dc614ce0"
+      },
+      {
+        "argText": "beforeBreadcrumb(breadcrumb) {\n      const urls = [breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message];\n      return urls.some((url) => typeof url === \"string\" && isWalletRequest(url)) ? null : withoutWalletHeader(breadcrumb);\n    }",
+        "fingerprint": "a4fd63e30a6ee8ae2f49708e24f3016ee63512f3c6c5976c5041d03e58c225fa"
+      },
+      {
+        "argText": "SENTRY_DSN",
+        "fingerprint": "caaa11ddf40ca2ef0e00532ede6af68fc148067df414cd6ff5bb01e59581d6d0"
+      },
+      {
+        "argText": "process.env.NODE_ENV",
+        "fingerprint": "f90ca39fb795cab7908ddf75b602f61c4360add9d7bd707a91b837f0bd9fc7dd"
+      }
+    ],
+    "console.log": [
+      {
+        "argText": "\"[sentry] Distributed tracing initialised (dsn=…\" + SENTRY_DSN.slice(-12) + \")\"",
+        "fingerprint": "0effe74314ffd67259136849d1bbdccf2b125ab000b4ff4e4a0d1a1c7b5a205e"
+      }
+    ],
+    "<unresolved-callee>": [
+      {
+        "argText": "urls.some((url) => typeof url === \"string\" && isWalletRequest(url))",
+        "fingerprint": "1256e00bcb331acb11f8c9282f1679586cea0e0b438d8d296c91bd4677b2a3ee"
+      },
+      {
+        "argText": "WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])",
+        "fingerprint": "5a668f0331c7d1002718023587bcda7ec5b03a93c8adb1b83a8906ecf04f083a"
+      },
+      {
+        "argText": "urls.some((url) => typeof url === \"string\" && isWalletRequest(url))",
+        "fingerprint": "6c78fdff28a13812a9e07aaf2e382621febb822ace821610dd3a5e40ffbd052f"
+      },
+      {
+        "argText": "urls.some((url) => typeof url === \"string\" && isWalletRequest(url))",
+        "fingerprint": "9545dc74f1a13accce74c00dc3ab998643c103f3e1aae9cef8ac2270768cfcc0"
+      }
     ]
   },
   "server.ts": {
+    "log.info": [
+      {
+        "argText": "msg",
+        "fingerprint": "1f13a496be468bde0b91e79366ac1bd74dad15449ccb28c342a23edc65a9a218"
+      },
+      {
+        "argText": "m",
+        "fingerprint": "3300937e4050769e9647a8466e318bd70c252c8166c4d0e504925bb38b81d48f"
+      },
+      {
+        "argText": "msg",
+        "fingerprint": "3fc287230c63ab4021de05a098a1dbf371aabd19e9c6d79395ed058332e1ad08"
+      },
+      {
+        "argText": "msg",
+        "fingerprint": "6d7b64a3b9164833d3a6ad9970cbc32f2b75c5ba6956a6e3978f6aa04053763f"
+      },
+      {
+        "argText": "dispatch.reason",
+        "fingerprint": "cc807ba5fe7e3a43cb32ffe35bc480364f8ee66143abc79742ca8172d5ac9feb"
+      },
+      {
+        "argText": "dispatch.ok",
+        "fingerprint": "e777f9fbd8d033afcce8ad3e7e5f8219fbd0ca17509fdcb72b62cc8b3011a2f6"
+      },
+      {
+        "argText": "msg",
+        "fingerprint": "f364638e3a17895b086fa34696e219ab40c3909fc7fd1fe3b9b1970dd2945574"
+      },
+      {
+        "argText": "jobSubmitQueueOnly()",
+        "fingerprint": "f5d96895e80ab87eec5cfc15b7c38a7ac07bfb09d9e6b08d87ac61d7de100420"
+      }
+    ],
     "Sentry.setupFastifyErrorHandler": [
-      "app"
+      {
+        "argText": "app",
+        "fingerprint": "9c281ee38cd5ca14a0848feadc2ba369eb21fef10509078b5483e3dbf2118332"
+      }
     ],
     "Sentry.captureException": [
-      "error",
-      "request.method",
-      "request.url"
-    ],
-    "log.info": [
-      "jobSubmitQueueOnly()",
-      "m",
-      "msg"
+      {
+        "argText": "request.url",
+        "fingerprint": "0b5878a16e9f8630bc31391d9959344e24faaac4956a61985ad35c3bae5297ed"
+      },
+      {
+        "argText": "error",
+        "fingerprint": "2527048adcb6012eb1abc51c78a8540d6e53cd266b1557daeadd9bd76ae5b66c"
+      },
+      {
+        "argText": "request.method",
+        "fingerprint": "6c9a6e308f29124e9863fc6eb08f9f2279d44a672e31143a8815c30aa5baf126"
+      }
     ],
     "log.warn": [
-      "String(err)",
-      "err.message",
-      "m",
-      "msg"
+      {
+        "argText": "msg",
+        "fingerprint": "0130c5aa39dfd8142dbf6e03a3ebc9abc062114e37ef327b4217250365136fe3"
+      },
+      {
+        "argText": "msg",
+        "fingerprint": "0ab040fb292583b206477f9d7c29618f7455a2e1cbf67c774bc31267f9578687"
+      },
+      {
+        "argText": "msg",
+        "fingerprint": "31d5b5c9f4c7aa777c9a0018b9ec033912e6d4b070194a2c50fd612f74a4e609"
+      },
+      {
+        "argText": "m",
+        "fingerprint": "3d792c426a5adb23e5d6275a3e008fb703a016e425baf6584ac33ba87c033d94"
+      },
+      {
+        "argText": "err.message",
+        "fingerprint": "404a7e6d70b0e935923cda0ec4fb2e1dc23aa4906a92fbce647370695266c3c8"
+      },
+      {
+        "argText": "msg",
+        "fingerprint": "9131ad90e6799771ff28f5f809dc3bd34d186b58a3cfd2bb0cfb4d0eddb2b486"
+      },
+      {
+        "argText": "String(err)",
+        "fingerprint": "a3e01de36cdf1bc2d1f933743930ffacf797d3766e59799536f17e71b086e59e"
+      }
     ],
     "console.log": [
-      "address",
-      "dashboardPath",
-      "handle.intervalSec",
-      "port",
-      "process.pid"
+      {
+        "argText": "port",
+        "fingerprint": "29fe1f7ce13d8d9f910ec949102f50182381953c72bfcec0fc27be63467ce2e5"
+      },
+      {
+        "argText": "dashboardPath",
+        "fingerprint": "969a0060db59bab594de853911518f165414c68cfa60826ee931b2ab454222c1"
+      },
+      {
+        "argText": "handle.intervalSec",
+        "fingerprint": "9791129c44018ff54d0da260ef06e76ebbe0a435556fc1e11f436b6f2c76b1cd"
+      },
+      {
+        "argText": "address",
+        "fingerprint": "bee1cdfdc0847772475d6ebdfc767b87a31df7467d5a219322db9aeebf4f2708"
+      },
+      {
+        "argText": "process.pid",
+        "fingerprint": "cbcb1e57e353bd79120076fc3bbecce1990eada5ec804d30ed73f57cc54acc53"
+      },
+      {
+        "argText": "handle.intervalSec",
+        "fingerprint": "d2fa51dd01186a3a9647266b7d9752d39268bdb66b9422333a4f772206269cb5"
+      }
     ],
     "console.warn": [
-      "err"
+      {
+        "argText": "err",
+        "fingerprint": "385cab7f52178e59ae0cc5e1c1a3adbcbfece2bbeb665f268f8e6d08c69d20be"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "525cdfed8c95ba317099d98435136a09ce697c382030a85220109132e0942162"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "a6d91d284792c6537160138e1da68f81d221246f3152cd3d380f0564fbce215d"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "b465f5954ff8b9c820c8768fd06792f9623fb1bb8158cd34c91d640a2860b1d0"
+      }
     ],
     "console.error": [
-      "err",
-      "reason"
+      {
+        "argText": "reason",
+        "fingerprint": "56f026fe0b039f93e0cbaeb92b070f02b426ce55fb36b09e1e1540c41e79881c"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "8302b47877b1b3f402fb3cb92bfcc7403df406fbcd524af7b25f31553617ea09"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "ce022d44c7682bca330cc90991a6762a2f3bfc233731039eae7afaabd6c0efdc"
+      }
     ]
   },
   "services.ts": {
     "console.error": [
-      "err"
+      {
+        "argText": "err",
+        "fingerprint": "ce022d44c7682bca330cc90991a6762a2f3bfc233731039eae7afaabd6c0efdc"
+      }
     ],
     "console.log": [
-      "process.env[\"EVIDENCE_STORAGE\"]"
+      {
+        "argText": "process.env[\"EVIDENCE_STORAGE\"]",
+        "fingerprint": "b916c3bebfd238b68d03ab4605b391e1b86f441e8d1a3772acd8af610077897e"
+      }
     ],
     "console.warn": [
-      "(err as Error).message"
+      {
+        "argText": "(err as Error).message",
+        "fingerprint": "40955d7f09879cb3ab67196d8897448e8d4e2625b288d0a5dc2419b2f4620e3d"
+      }
     ],
     "<unresolved-callee>": [
-      "_evidenceStorage.init()",
-      "_evidenceStorage.stop()"
+      {
+        "argText": "_evidenceStorage.init()",
+        "fingerprint": "30b1142b2bf17dd986011fadcb7310da7851256148f1e7570c603f4841d75e55"
+      },
+      {
+        "argText": "_evidenceStorage.stop()",
+        "fingerprint": "ad3532d8bca404c49ebf433f64e7934be04bd54592b01cfff4d1a4fb7acb518c"
+      },
+      {
+        "argText": "_evidenceStorage.init()",
+        "fingerprint": "e1da1a4e362753e69f6501de637651a78335f36e1b2db0fd82c4e2b9e746cd6d"
+      }
     ]
   },
   "telemetry.ts": {
     "pipelineTelemetry._addEvent": [
-      "event",
-      "jobId"
+      {
+        "argText": "event",
+        "fingerprint": "19b55c84ef89eda1c5b7c11d1d77aef093c0b4822fd3c86bd6118e01bc1c5627"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "c3b677991e92c25f213a2c4099cd65ba5f3ba97206198346aa3afa41133e916e"
+      }
     ],
     "pipelineTelemetry.set": [
-      "(this.minuteBuckets.get(bucket) ?? 0) + 1",
-      "bucket",
-      "buf",
-      "jobId"
+      {
+        "argText": "jobId",
+        "fingerprint": "1501b58e5ef30d412229b65d3adaf83460f06ff345c69c3c2ae7e5b8f7d872bd"
+      },
+      {
+        "argText": "bucket",
+        "fingerprint": "37dc609d277bf85da1c67ab342e2e058b81a5c894093e4469460b5a5bb80ea48"
+      },
+      {
+        "argText": "buf",
+        "fingerprint": "6155725a2144f081f2911d072a6b96d1eca0746ed028bf3cec373b96b817fc6e"
+      },
+      {
+        "argText": "(this.minuteBuckets.get(bucket) ?? 0) + 1",
+        "fingerprint": "c22680ec9a86b35aa40f29e0c42d8c977d6f43b67c788f79d4660aa57ae96afe"
+      }
     ],
     "pipelineTelemetry.get": [
-      "bucket",
-      "jobId"
+      {
+        "argText": "jobId",
+        "fingerprint": "43991a4a787cc24703acb1115213501cdbbcf7ba6a2ac32a71f56a5afadc01b5"
+      },
+      {
+        "argText": "bucket",
+        "fingerprint": "7780bb11475164f150baed5295154706e06627f74ef55b0fdfac406d623e0d9f"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "c2bf9717f5e89c6c96c89286ef203b9981bdc18186ef63d2816323e948c3aa5f"
+      }
     ],
     "pipelineTelemetry.delete": [
-      "k",
-      "oldest"
+      {
+        "argText": "k",
+        "fingerprint": "906cf43ec8b9cb5b004e45e4170c0bf6f2c9b9320fa1168fe28971068db7550a"
+      },
+      {
+        "argText": "oldest",
+        "fingerprint": "d495e032b93625be5c8bb63775f00563d626cfc305a51c778b6077f700b99c71"
+      }
     ],
     "Sentry.addBreadcrumb": [
-      "event.duration_ms",
-      "event.source",
-      "jobId",
-      "new Date(event.timestamp).getTime() / 1000"
-    ],
-    "pipelineTelemetry.addEvent": [
-      "event.duration_ms",
-      "event.source",
-      "jobId"
+      {
+        "argText": "new Date(event.timestamp).getTime() / 1000",
+        "fingerprint": "ac14a935656ca5c416de6ae62456c98250f64977725aeaed55880d0ec9ef7dd8"
+      }
     ],
     "pipelineTelemetry.push": [
-      "event",
-      "evts.length",
-      "evts[0].timestamp",
-      "jobId",
-      "last.timestamp"
+      {
+        "argText": "jobId",
+        "fingerprint": "612f33751d997c00b161291c6f7687fe712b04be6c169eb82123ac619e592980"
+      }
+    ],
+    "<unresolved-callee>": [
+      {
+        "argText": "bucketValues.reduce((a, b) => a + b, 0)",
+        "fingerprint": "3691515571764c589c340a94ef599b86993c8061549348a751181dfac046b397"
+      },
+      {
+        "argText": "summaries.sort(\n      (a, b) => new Date(b.lastUpdated).getTime() - new Date(a.lastUpdated).getTime(),\n    )",
+        "fingerprint": "befd74804611e5aa95a978767e605b1d1ea7704f7d52e4f1090c556c16e06bc7"
+      }
     ]
   },
   "tracing.ts": {
     "Sentry.startSpan": [
-      "fn",
-      "opts.attributes",
-      "opts.operation",
-      "opts.service"
-    ]
-  },
-  "contracts/batch-settlement.ts": {
-    "console.log": [
-      "_smartAccount.smartAccountAddress"
-    ],
-    "console.error": [
-      "err"
-    ]
-  },
-  "mcp/docs-mcp-server.ts": {
-    "log.error": [
-      "error"
-    ]
-  },
-  "mcp/http-mcp-server.ts": {
-    "log.error": [
-      "error"
-    ]
-  },
-  "mcp/mcp-app-view.ts": {
-    "console.warn": [
-      "message"
-    ]
-  },
-  "middleware/security-monitor.ts": {
-    "log.warn": [
-      "bot.reason",
-      "clientIpOf(req)",
-      "fp.path",
-      "h",
-      "path",
-      "rate.count"
-    ]
-  },
-  "middleware/x402-gate.ts": {
-    "log.error": [
-      "err"
-    ]
-  },
-  "readmodels/legacy-settlement.ts": {
-    "log.warn": [
-      "error",
-      "jobId",
-      "source"
-    ]
-  },
-  "routes/agent-feedback.ts": {
-    "otel.setAttribute": [
-      "body.agent_kind",
-      "body.confused_about",
-      "body.last_endpoint",
-      "body.last_error_code",
-      "report_id",
-      "trace_id"
-    ],
-    "otel.addEvent": [
-      "body.summary.length",
-      "report_id",
-      "trace_id"
-    ]
-  },
-  "routes/build.ts": {
-    "pipelineTelemetry.emit": [
-      "\"pipeline-\" + Date.now()",
-      "assuranceTier",
-      "type"
-    ]
-  },
-  "routes/capture-3d.ts": {
-    "pipelineTelemetry.emit": [
-      "err.code",
-      "err.message",
-      "jobId",
-      "result.durationMs",
-      "result.trace.frameCount",
-      "result.trace.model"
-    ],
-    "log.error": [
-      "err",
-      "err.code"
-    ]
-  },
-  "routes/capture-sim.ts": {
-    "pipelineTelemetry.emit": [
-      "err.code",
-      "err.message",
-      "jobId",
-      "result.durationMs",
-      "result.trace.frameCount",
-      "result.trace.model",
-      "result.trace.scene.simulator",
-      "result.trace.scene.taskId"
-    ],
-    "log.error": [
-      "err",
-      "err.code"
-    ]
-  },
-  "routes/capture.ts": {
-    "pipelineTelemetry.emit": [
-      "(err as Error).message",
-      "challenge.challengeId",
-      "effectiveLimit",
-      "jobId",
-      "result.gatesFailed",
-      "result.gatesPassed",
-      "rows.length",
-      "ttl",
-      "tx.blockNumber",
-      "tx.gasUsed",
-      "tx.txHash",
-      "verdict.jobId",
-      "verdictId"
-    ],
-    "log.error": [
-      "err"
-    ]
-  },
-  "routes/carrier.ts": {
-    "log.error": [
-      "bought.shipmentId",
-      "bought.trackingCode",
-      "code",
-      "created.shipmentId",
-      "entry.eventId",
-      "err",
-      "err.code",
-      "err.detail",
-      "jobId",
-      "missingAtBoot",
-      "params.jobId",
-      "reason",
-      "trackerEvent.trackingCode"
-    ],
-    "log.warn": [
-      "!!headerValue",
-      "caller",
-      "entry.eventId",
-      "err.code",
-      "err.detail",
-      "err.status",
-      "existing.ownerId",
-      "jobId",
-      "rawBody.length",
-      "trackerEvent.providerMode",
-      "trackerEvent.trackingCode"
-    ],
-    "log.info": [
-      "result.ledgered === true",
-      "trackerEvent.trackingCode"
-    ]
-  },
-  "routes/csd.ts": {
-    "console.warn": [
-      "String(err)",
-      "err",
-      "err.message",
-      "storyErr",
-      "storyErr.message"
-    ]
-  },
-  "routes/dht-ws.ts": {
-    "pipelineTelemetry.emit": [
-      "\"pipeline-\" + Date.now()",
-      "filter.type",
-      "results.length"
-    ],
-    "<unresolved-callee>": [
-      "socket.close(4001, \"Authentication required for DHT peer connections\")"
-    ]
-  },
-  "routes/diagnostic-logs.ts": {
-    "log.info": [
-      "`diagnostic-logs: received bundle ${uploadId} from kernel ${kernelId ?? \"?\"} ` + `(${bundleSize ?? 0} bytes, ${logLineCount ?? 0} lines)`"
-    ]
-  },
-  "routes/discover.ts": {
-    "log.warn": [
-      "message"
-    ],
-    "<unresolved-callee>": [
-      "bonjour.destroy()",
-      "bonjour.find({ type: \"ipp\" }, (service: { name: string; host: string; port: number; txt?: Record<string, string>; }) => { const host = service.host; const port = service.port ?? 631; const path = serv",
-      "browser.stop()"
-    ]
-  },
-  "routes/evidence-encrypted.ts": {
-    "console.log": [
-      "litMsg",
-      "litStatus.network",
-      "req.params.bundleId",
-      "result.reason",
-      "result.role"
-    ],
-    "pipelineTelemetry.emit": [
-      "\"pipeline-\" + Date.now()",
-      "bundle.jobId",
-      "req.params.bundleId",
-      "result.cid",
-      "result.role"
-    ],
-    "<unresolved-callee>": [
-      "storage.archiveBundle(bundle)",
-      "storage.archiveEncryptedBundle(bundle)",
-      "storage.retrieveBundle(req.params.cid)"
-    ]
-  },
-  "routes/feedback.ts": {
-    "console.error": [
-      "err",
-      "res.status"
-    ]
-  },
-  "routes/fiat-ramp.ts": {
-    "console.warn": [
-      "err",
-      "err.message"
-    ]
-  },
-  "routes/identify-device.ts": {
-    "log.error": [
-      "err"
-    ]
-  },
-  "routes/ip.ts": {
-    "console.warn": [
-      "dbErr",
-      "dbErr.message",
-      "dist.ipId",
-      "err",
-      "err.message"
-    ]
-  },
-  "routes/jobs.ts": {
-    "log.warn": [
-      "error",
-      "req.params.jobId",
-      "source"
-    ]
-  },
-  "routes/lit-provision.ts": {
-    "console.log": [
-      "body.kernelId",
-      "body.operatorDid",
-      "data",
-      "err.message",
-      "fetchErr.message",
-      "res.status",
-      "text"
-    ]
-  },
-  "routes/lob.ts": {
-    "log.error": [
-      "missingAtBoot"
-    ],
-    "log.warn": [
-      "!!signature",
-      "!!timestamp",
-      "b.jobId",
-      "caller",
-      "existing.ownerId",
-      "timestamp"
-    ],
-    "log.info": [
-      "event.eventType",
-      "event.lobLetterId"
-    ]
-  },
-  "routes/negotiation.ts": {
-    "pipelineTelemetry.emit": [
-      "body.capabilityType",
-      "body.kernelId",
-      "sessionId"
-    ],
-    "log.error": [
-      "String(err)",
-      "body.capabilityType",
-      "body.kernelId",
-      "err.message"
-    ],
-    "console.warn": [
-      "settlementError"
-    ]
-  },
-  "routes/onboard.ts": {
-    "log.error": [
-      "e",
-      "err"
-    ],
-    "console.warn": [
-      "(e as Error).message"
-    ],
-    "pipelineTelemetry.emit": [
-      "proofs.length",
-      "reg.id",
-      "registration.category",
-      "registration.id",
-      "registration.name"
-    ],
-    "Sentry.startSpan": [
-      "req.params.id"
-    ]
-  },
-  "routes/operator-channels.ts": {
-    "console.log": [
-      "`[op-channel] ${ch.transport} transport not implemented; would dispatch to ` + `operator=${ch.operatorSlug} endpoint=${JSON.stringify(ch.endpoint)} ` + `describe=\"${ch.describe.slice(0, 80)}\" payload="
-    ],
-    "console.warn": [
-      "ch.id",
-      "ch.operatorSlug",
-      "e.reason"
-    ]
-  },
-  "routes/operator-relay.ts": {
-    "log.warn": [
-      "jobId"
-    ],
-    "log.error": [
-      "insertErr"
-    ]
-  },
-  "routes/operator-work.ts": {
-    "log.error": [
-      "error"
-    ],
-    "log.warn": [
-      "error",
-      "source"
-    ]
-  },
-  "routes/operator.ts": {
-    "log.warn": [
-      "err",
-      "kernelId",
-      "req.params.kernelId",
-      "status"
-    ]
-  },
-  "routes/paid-job-flow.ts": {
-    "console.log": [
-      "addTx",
-      "addr",
-      "assuranceTier",
-      "ms.amount",
-      "ms.stepId",
-      "normalizedMilestones.length",
-      "tokenAddr",
-      "totalFundAmount",
-      "txHash"
-    ],
-    "console.warn": [
-      "addr",
-      "archiveErr",
-      "archiveErr.message",
-      "easErr",
-      "easErr.message",
-      "evErr",
-      "evErr.message",
-      "zkErr",
-      "zkErr.message"
-    ],
-    "pipelineTelemetry.emit": [
-      "String(e1)",
-      "String(e2)",
-      "String(evErr)",
-      "anchorBundleId",
-      "auditTrail.length",
-      "bundleHash",
-      "bundleId",
-      "capabilityType",
-      "e1.message",
-      "e2.message",
-      "easBridge.attestationUid",
-      "easBridge.submitted",
-      "easMeta.schema",
-      "escrowAddress",
-      "escrowId",
-      "evErr.message",
-      "ipfsCid",
-      "isMockSettlement()",
-      "jobId",
-      "kernelId",
-      "oracleResponse.result.reason",
-      "paymentMethod",
-      "proof.id",
-      "result.jobId",
-      "scopeId",
-      "scopeStatus",
-      "session.capabilityType",
-      "session.id",
-      "session.kernelId",
-      "sessionId",
-      "starknetTxHash"
-    ],
-    "<unresolved-callee>": [
-      "storage.archiveBundle({ id: anchorBundleId, jobId, stepId: job.stepId, kernelId: job.kernelId, assuranceTier: jobAssuranceTier, bundleHash, events: anchorEvents, // StoredSignature → the strict spec S"
-    ]
-  },
-  "routes/passkey.ts": {
-    "log.error": [
-      "err"
-    ],
-    "log.warn": [
-      "err"
-    ]
-  },
-  "routes/provision.ts": {
-    "log.warn": [
-      "record.id"
-    ]
-  },
-  "routes/requests.ts": {
-    "log.warn": [
-      "err"
-    ],
-    "<unresolved-callee>": [
-      "(store.db as any).delete(schema.capabilityRequests).run()"
-    ]
-  },
-  "routes/settlement-read.ts": {
-    "log.error": [
-      "e",
-      "unitId"
-    ]
-  },
-  "routes/settlement.ts": {
-    "pipelineTelemetry.emit": [
-      "\"epoch-\" + summary.epochId",
-      "summary.epochId",
-      "summary.totalIntents"
-    ]
-  },
-  "routes/storage.ts": {
-    "log.error": [
-      "err"
-    ]
-  },
-  "routes/support-messages.ts": {
-    "console.error": [
-      "err",
-      "res.status"
-    ]
-  },
-  "routes/telemetry.ts": {
-    "pipelineTelemetry.getTimeline": [
-      "jobId",
-      "summary.jobId"
-    ],
-    "pipelineTelemetry.emit": [
-      "duration_ms",
-      "jobId",
-      "level",
-      "sanitizedMetadata",
-      "source"
-    ]
-  },
-  "routes/tool-search.ts": {
-    "log.info": [
-      "m"
-    ],
-    "log.warn": [
-      "String(e)",
-      "e.message",
-      "m"
-    ]
-  },
-  "routes/wizard.ts": {
-    "console.error": [
-      "message"
-    ]
-  },
-  "routes/aggregator/invoke.ts": {
-    "log.warn": [
-      "String(err)",
-      "err.message"
-    ]
-  },
-  "routes/aggregator/search.ts": {
-    "log.warn": [
-      "String(e)",
-      "e.message"
-    ]
-  },
-  "services/agent-heartbeat-monitor.ts": {
-    "console.error": [
-      "agentId",
-      "cbErr",
-      "err"
-    ],
-    "console.log": [
-      "`[heartbeat-monitor] Started (interval=${this.checkIntervalMs}ms, ` + `suspicious>=${this.suspiciousThreshold}, rogue>=${this.rogueThreshold})`",
-      "agentId",
-      "card.id",
-      "card.name",
-      "count"
-    ],
-    "console.warn": [
-      "agentId",
-      "missed"
-    ]
-  },
-  "services/cid-blob-storage.ts": {
-    "console.warn": [
-      "(err as Error).message"
-    ],
-    "<unresolved-callee>": [
-      "heliaCid.toString()",
-      "this.fs.addBytes(bytes)",
-      "this.fs.cat(cidParsed)",
-      "this.fs.cat(cidParsed, { offset: start, length: end - start + 1 })",
-      "this.helia.stop()"
-    ]
-  },
-  "services/erc8004-identity-sweeper.ts": {
-    "console.log": [
-      "m"
-    ],
-    "console.warn": [
-      "message"
-    ]
-  },
-  "services/event-bus-otel-bridge.ts": {
-    "otel.startSpan": [
-      "e.duration_ms",
-      "e.kind",
-      "e.level",
-      "e.session_id",
-      "e.sponsor",
-      "e.t",
-      "e.text",
-      "e.text.slice(0, 1021)"
-    ],
-    "otel.recordException": [
-      "e.kind",
-      "e.sponsor",
-      "e.text"
-    ],
-    "otel.setStatus": [
-      "e.text"
-    ],
-    "otel.end": [
-      "e.t",
-      "e.t + e.duration_ms"
-    ]
-  },
-  "services/kernel-ttl-sweeper.ts": {
-    "console.warn": [
-      "raw"
-    ],
-    "console.log": [
-      "result.capabilitiesExpired",
-      "result.kernelsExpired",
-      "result.scannedCapabilities",
-      "result.scannedKernels"
-    ],
-    "console.error": [
-      "err"
-    ]
-  },
-  "services/oracle-client.ts": {
-    "console.warn": [
-      "`[oracle] Mock verification REFUSED for paid tier ${request.assuranceTier} ` + `(job ${request.jobId}) — no real oracle configured. Failing closed (verified:false).`"
-    ]
-  },
-  "services/settlement-keeper.ts": {
-    "console.warn": [
-      "`[settlement-keeper] SETTLEMENT_KEEPER_INTERVAL_SEC=\"${raw}\" out of band ` + `[${KEEPER_INTERVAL_LOWER_BOUND_SEC},${KEEPER_INTERVAL_UPPER_BOUND_SEC}]; using ${KEEPER_INTERVAL_DEFAULT_SEC}`",
-      "m"
-    ],
-    "console.log": [
-      "m"
-    ]
-  },
-  "services/settlement-service.ts": {
-    "console.warn": [
-      "`[settlement] Refusing to settle job ${jobId}: bundle ${bundle.id} contains ` + `fabricated (simulated/mock) events at paid tier ${bundle.assuranceTier}. ` + `Evidence archived + persisted but NOT set",
-      "dbErr",
-      "dbErr.message",
-      "err",
-      "err.message",
-      "storyErr",
-      "storyErr.message"
-    ],
-    "Sentry.startSpan": [
-      "bundle.events.length",
-      "bundle.id",
-      "contractAddress",
-      "isWriteEnabled()",
-      "jobId"
-    ],
-    "pipelineTelemetry.emit": [
-      "String(err)",
-      "String(storyErr)",
-      "bundle.id",
-      "contractAddress",
-      "err.message",
-      "job?.capabilityId",
-      "jobId",
-      "link.childIpId",
-      "link.parentIpId",
-      "result.cid",
-      "result.evidenceTxHash",
-      "result.releaseTxHash",
-      "storyErr.message"
-    ],
-    "console.log": [
-      "childIpId",
-      "royaltyAmount",
-      "royaltyPercent"
-    ]
-  },
-  "sse/producers.ts": {
-    "console.log": [
-      "this.producers.length",
-      "this.producers.map((p) => p.name).join(\", \")"
-    ]
-  },
-  "readmodels/job-execution.ts": {
-    "<unresolved-callee>": [
-      "db .select() .from(jobs)",
-      "db .select() .from(jobs) .where(and(eq(jobs.cwmId, cwm), eq(jobs.stepId, job.stepId)))",
-      "db .select() .from(jobs) .where(and(eq(jobs.cwmId, cwm), eq(jobs.stepId, job.stepId))) .all()",
-      "db .select() .from(negotiationSessions)",
-      "db .select() .from(negotiationSessions) .where( cwm ? or(eq(negotiationSessions.escrowAddress, escrow.contractAddress), eq(negotiationSessions.cwmId, cwm)) : eq(negotiationSessions.escrowAddress, escr",
-      "db .select() .from(negotiationSessions) .where(eq(negotiationSessions.jobId, job.id))",
-      "db .select() .from(negotiationSessions) .where(eq(negotiationSessions.jobId, job.id)) .all()",
-      "db .select({ jobId: negotiationSessions.jobId, sessions: sql<number>`count(*)` }) .from(negotiationSessions)",
-      "db .select({ jobId: negotiationSessions.jobId, sessions: sql<number>`count(*)` }) .from(negotiationSessions) .where(or(...candidates.map((jobId) => eq(negotiationSessions.jobId, jobId))))",
-      "db .select({ jobId: negotiationSessions.jobId, sessions: sql<number>`count(*)` }) .from(negotiationSessions) .where(or(...candidates.map((jobId) => eq(negotiationSessions.jobId, jobId)))) .groupBy(neg",
-      "db .select({ jobId: negotiationSessions.jobId, userAgentId: negotiationSessions.userAgentId }) .from(negotiationSessions)",
-      "db .select({ jobId: negotiationSessions.jobId, userAgentId: negotiationSessions.userAgentId }) .from(negotiationSessions) .where(sql`lower(trim(${negotiationSessions.userAgentId})) = ${wallet}`)",
-      "db .select({ jobId: negotiationSessions.jobId, userAgentId: negotiationSessions.userAgentId }) .from(negotiationSessions) .where(sql`lower(trim(${negotiationSessions.userAgentId})) = ${wallet}`) .all(",
-      "db.select().from(escrows)",
-      "db.select().from(escrows).where(eq(escrows.contractAddress, address))",
-      "db.select().from(escrows).where(eq(escrows.contractAddress, address)).all()",
-      "db.select().from(escrows).where(eq(escrows.cwmId, cwmId))",
-      "db.select().from(escrows).where(eq(escrows.cwmId, cwmId)).all()"
-    ]
-  },
-  "readmodels/operator-work.ts": {
-    "<unresolved-callee>": [
-      "db .select() .from(schema.pendingApprovals)",
-      "db .select() .from(schema.pendingApprovals) .where(and(eq(schema.pendingApprovals.kernelId, id), eq(schema.pendingApprovals.status, \"pending\")))",
-      "db .select() .from(schema.pendingApprovals) .where(and(eq(schema.pendingApprovals.kernelId, id), eq(schema.pendingApprovals.status, \"pending\"))) .all()",
-      "db.select().from(schema.disputes)",
-      "db.select().from(schema.disputes).where(eq(schema.disputes.escrowId, escrowId))",
-      "db.select().from(schema.disputes).where(eq(schema.disputes.escrowId, escrowId)).all()",
-      "db.select().from(schema.shopKernels)",
-      "db.select().from(schema.shopKernels).all()"
-    ]
-  },
-  "services/posthog-service.ts": {
-    "<unresolved-callee>": [
-      "posthog.capture({ distinctId: distinctId || \"pcc-gateway\", event, properties: { ...properties, source: \"gateway\", environment: process.env.NODE_ENV, }, })",
-      "posthog.identify({ distinctId, properties: { ...properties, kind: \"agent_journey\", source: \"gateway\", environment: process.env.NODE_ENV, }, })",
-      "posthog?.shutdown?.()"
+      {
+        "argText": "opts.operation",
+        "fingerprint": "42f297c2a2953aa6cf5095033e6d0e43ab34583edfe45c572dfc601259a7ab09"
+      },
+      {
+        "argText": "fn",
+        "fingerprint": "a0aa7d323be3f365d150e840bc5700b4dc876170c074d4ca9b4cb793fe5779f7"
+      },
+      {
+        "argText": "opts.service",
+        "fingerprint": "a3642ed2b812f7b8e6909160e38ef5674d2524719e0e4390f7b000dcf03435fc"
+      },
+      {
+        "argText": "opts.attributes",
+        "fingerprint": "d5a8ec587f77ce61520b7648c203c8a30037b56e556b27cf4f99d94a72fdcbaf"
+      }
     ]
   },
   "config/seed-policy.ts": {
     "console.warn": [
-      "shouldSeedDemoData(undefined, nodeEnv)"
+      {
+        "argText": "shouldSeedDemoData(undefined, nodeEnv)",
+        "fingerprint": "d2ee06fe0fa34a96a38fba116c890cc9f3f6456bed81d5b01573b97bdb55b1dc"
+      }
+    ]
+  },
+  "contracts/batch-settlement.ts": {
+    "console.log": [
+      {
+        "argText": "_smartAccount.smartAccountAddress",
+        "fingerprint": "36a5f6ea86ba99ec0a7c97f8fa5d08b864e3a15cd514febd094c55b524c86967"
+      }
+    ],
+    "console.error": [
+      {
+        "argText": "err",
+        "fingerprint": "dd6002fd6cf6c3d99ec685c88a5ac7ebb026745b6c098d04997ba8190976372a"
+      }
+    ]
+  },
+  "mcp/docs-mcp-server.ts": {
+    "log.error": [
+      {
+        "argText": "error",
+        "fingerprint": "110a358708ec19384f7937b8f24b0d93a0f273d6bc55b3fb6aeec8285f5f4c77"
+      },
+      {
+        "argText": "error",
+        "fingerprint": "98697b1d444ff22c4b4f6ddf79ac7474aab83aa04b468084761c108e0ee69f07"
+      },
+      {
+        "argText": "error",
+        "fingerprint": "b67077b78eb5b81ba4a2841d01a23bf9ad26a66736fe9eb401b294eb22dec8de"
+      }
+    ]
+  },
+  "mcp/http-mcp-server.ts": {
+    "log.error": [
+      {
+        "argText": "error",
+        "fingerprint": "07eb9c6e3387f7a264a1785dff1089b390609f44810670f55be1050b909a94b3"
+      },
+      {
+        "argText": "error",
+        "fingerprint": "606a5f081c77a0475b498f67b7345d6a08fc1b16044c1cb7ff93d434ad3edc9b"
+      },
+      {
+        "argText": "error",
+        "fingerprint": "9cf9f4778a81064ac96617b9d31759b9d7a62123316e8ec6b0b932cb9ae5132b"
+      }
+    ]
+  },
+  "mcp/mcp-app-view.ts": {
+    "console.warn": [
+      {
+        "argText": "message",
+        "fingerprint": "345006fbc235adbcf1be218dea27c45842bbf93b3561d438a3e5c1d93202e288"
+      }
+    ]
+  },
+  "middleware/security-monitor.ts": {
+    "trackServerEvent": [
+      {
+        "argText": "safeProps",
+        "fingerprint": "0bc9e4dafb416c0ba3b54049d4467b2dbf9fd290160c7f6cd54b9edabc002291"
+      },
+      {
+        "argText": "safeProps.clientId",
+        "fingerprint": "971d45f48d9d4610baf9c15add6eb768edd2a00edd90ec66d11bf49ac86ac8c0"
+      }
+    ],
+    "log.warn": [
+      {
+        "argText": "clientIpOf(req)",
+        "fingerprint": "0195aa71cd01fc2b225fac48625de785360a85a53c74c8ba973a76f3db8e0e52"
+      },
+      {
+        "argText": "urlAttack",
+        "fingerprint": "19a29f6d7bb29e46779753b1099b8ee05f03908d54d3b982a545884927458017"
+      },
+      {
+        "argText": "fp.path",
+        "fingerprint": "1e82f5e431a9a73e259c04ecbe79aa5fc9a4123ed3324bdaa296b7400fc7e353"
+      },
+      {
+        "argText": "attack",
+        "fingerprint": "44aa9428322361032b2acdcfae1998d60cb109f85a2694b2c199cc8a9f3bb419"
+      },
+      {
+        "argText": "fp.path",
+        "fingerprint": "538dd2ae7fedc033721e320c5d2e5d3e0636847780e7a7fef225ee80d2ec1d43"
+      },
+      {
+        "argText": "attack",
+        "fingerprint": "59fb517e11a94f4fb408956ee27993f5eae9d529a6484e9793faf6d25068ca66"
+      },
+      {
+        "argText": "fp.path",
+        "fingerprint": "63d4e9a58618b6b6b67225b9f5b30d4eb28cfcd8cdaf489eb5bbe8848607bb1d"
+      },
+      {
+        "argText": "attack",
+        "fingerprint": "7a3fba9562170f64f0aa99e94ff2cbb0c6aef927b7aef420b6779265cfd37b79"
+      },
+      {
+        "argText": "h",
+        "fingerprint": "7f0d1936b1a7e030b7a249fa8f99d1e91b050409f737a0d233126bc848882967"
+      },
+      {
+        "argText": "fp.path",
+        "fingerprint": "938ea8fea6f72041048ddd81ccfe7af2975a46ed9694beb3b6aa8e0752a8f69a"
+      },
+      {
+        "argText": "fp.uaClass",
+        "fingerprint": "96100f10869314d9def088ee7ec7f8319c18ade2e27d7f242405cc47b7dad61f"
+      },
+      {
+        "argText": "clientIpOf(req)",
+        "fingerprint": "9c9ef17e8b74503ccc56947d53cc6676a9edadcfb09171cf0147775b835a759d"
+      },
+      {
+        "argText": "bot.type",
+        "fingerprint": "a6e92de3febf9dd41934fe997b4c843399ae3111458e3729f13a422d1ec9d7bd"
+      },
+      {
+        "argText": "clientIpOf(req)",
+        "fingerprint": "ba18a2e92e0984f8b37ae31ccd5c27a88e31d76ff75c74e4879c369f52dfc13a"
+      },
+      {
+        "argText": "clientIpOf(req)",
+        "fingerprint": "bf90cade55ca8274a6be76bb047fc0e1cbf0259742f9cbfacf1ea7cc119b14f5"
+      },
+      {
+        "argText": "clientIpOf(req)",
+        "fingerprint": "c35c60b02547b7887cc6333448eaf7bf19e41021466c0fbb9ddcee813bf2a8ad"
+      },
+      {
+        "argText": "clientIpOf(req)",
+        "fingerprint": "cb7b40109893e80dea198e8e97e86ed37ed11954b2d53a4a8bb88e392729fb59"
+      },
+      {
+        "argText": "path",
+        "fingerprint": "e22c438bca3b80e72443b24fe020bf3142c00ab826ec86313e92df987100e5ec"
+      },
+      {
+        "argText": "rate.count",
+        "fingerprint": "f69fbb06893c84f725cc3e37f450faaa244120764209d07c3181a26c7255080c"
+      },
+      {
+        "argText": "clientIpOf(req)",
+        "fingerprint": "f6f4204118a327e23ee48c1e464060fb5208b0cde8ee23c7713d8b901de95b66"
+      },
+      {
+        "argText": "bot.reason",
+        "fingerprint": "ffd1dd9e552932616754fd6ac38baa683c0e96756caab2a56b884d2f4d9f8aab"
+      }
+    ]
+  },
+  "middleware/x402-gate.ts": {
+    "log.error": [
+      {
+        "argText": "err",
+        "fingerprint": "9749569a5d7ee825f796e4fb22b11e95952d34ecaab7d45a4297a43664b2502e"
+      }
+    ]
+  },
+  "readmodels/legacy-settlement.ts": {
+    "log.warn": [
+      {
+        "argText": "source",
+        "fingerprint": "39d5f94221a759f5c91a7ca82e8582fda7d56137e93eddaef033104b6842518f"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "63bacaed969bc9d063334aca48246761b2d7ea4ca50ccccdc62d102e8ccb8b61"
+      },
+      {
+        "argText": "error",
+        "fingerprint": "74faf04e58121b41e5e142c1c4c018580c7ce4c59d26a11b08127bcf7fb5bcf3"
+      }
+    ]
+  },
+  "routes/agent-feedback.ts": {
+    "otel.setAttribute": [
+      {
+        "argText": "body.confused_about",
+        "fingerprint": "0724e753b81697e0f30c2cc298cbe7fcf8f8856bef0f1cc4fa9ef1e0b365ddb8"
+      },
+      {
+        "argText": "body.last_error_code",
+        "fingerprint": "0b25f2f35ff1872789e533dcdd38f0e62188fa10c064abb6a651f9827472de8a"
+      },
+      {
+        "argText": "trace_id",
+        "fingerprint": "1525eaccd2248822b365490c204e56ac607eb7c8172f7ee3da516a32a1c921f6"
+      },
+      {
+        "argText": "body.last_endpoint",
+        "fingerprint": "26a05aab5375a379bf8e162c57dee30badc938ab1f033fbc63a1cd2e1511837b"
+      },
+      {
+        "argText": "report_id",
+        "fingerprint": "63ef3ab41876ac32da76b9b41b05a9a6666d9aac82de9b2b230961a894248f76"
+      },
+      {
+        "argText": "body.agent_kind",
+        "fingerprint": "ac6cae7bbcc661a07f889f63ccdb14ded1d8a32200ee7e272d6d2c3874ee7d00"
+      }
+    ],
+    "trackServerEvent": [
+      {
+        "argText": "body.last_error_code",
+        "fingerprint": "015ee94a6a8cce6ccb97a87875c7305ce24063d62cbc846e8efb665851b4d27e"
+      },
+      {
+        "argText": "trace_id",
+        "fingerprint": "2194b79ef53781d0099ddcb7ed67488dfc2bf8d0479fddb575bea44d2f519680"
+      },
+      {
+        "argText": "body.agent_kind",
+        "fingerprint": "dddd111184df5d818da22b14b6ff7649e49a6e8e8e0631458531d6045fc44452"
+      },
+      {
+        "argText": "body.confused_about",
+        "fingerprint": "e7503bec166322312bb1e30784ccc448dd4d49257e190de1f97cce88257675e8"
+      },
+      {
+        "argText": "report_id",
+        "fingerprint": "f3eba53473bdae3b628fb65a017e6ea1b6be5e3367c1744cccc20b9598db62da"
+      }
+    ],
+    "otel.addEvent": [
+      {
+        "argText": "trace_id",
+        "fingerprint": "37d43395f77de239c4bfc3d8f67a71293c820114d016181a322391827782c01b"
+      },
+      {
+        "argText": "report_id",
+        "fingerprint": "9365705b09b713f3854578e9be0a106c4b614ec98c82d7d5f5c932e559187bae"
+      },
+      {
+        "argText": "body.summary.length",
+        "fingerprint": "fd0e41fadc9d0e24e37cb9b5a91b1146b827a0733e26d7c84611ab49e0db7a94"
+      }
+    ]
+  },
+  "routes/build.ts": {
+    "pipelineTelemetry.emit": [
+      {
+        "argText": "type",
+        "fingerprint": "0b7c65b265fb78fa5258db14abaf410ba09c0166bb426a1c63d25536c8a9024d"
+      },
+      {
+        "argText": "desc.kind",
+        "fingerprint": "3b8fb8020b3551a90a007b59f5eeef99840ee4628b41ffc1f8d5f47d2acf995a"
+      },
+      {
+        "argText": "assuranceTier",
+        "fingerprint": "3da0ad26b7981220cde7da25efd764cc2c9781ec421cef2d294314a1aea216e3"
+      },
+      {
+        "argText": "\"pipeline-\" + Date.now()",
+        "fingerprint": "52da14de60b2e2767fff05051c26189999f73e0db492633bf3490907f52fc0fd"
+      },
+      {
+        "argText": "type",
+        "fingerprint": "56c256a629d8a247be2ebf8dd751be85115c8f4a2e44be74b19570c6bdaf385d"
+      },
+      {
+        "argText": "desc.kind",
+        "fingerprint": "7181954874dc62933f2544e2c5286e9f7ced072600feb58793f578799a01cfa3"
+      },
+      {
+        "argText": "type",
+        "fingerprint": "cdab5e5243455b009ab592476cfeec28b47f52e42a5e26f64457a1e58b376cb5"
+      },
+      {
+        "argText": "desc.kind",
+        "fingerprint": "d0aa6672f0d65d9d7a77d8ca1b88f7fb1d3b9c0f6d56f69588fc248252f10000"
+      },
+      {
+        "argText": "\"pipeline-\" + Date.now()",
+        "fingerprint": "d3dee5a53c4f50d87a39710b08e97aa5dd0ae44811e9baf83b79a51601fe35bf"
+      },
+      {
+        "argText": "\"pipeline-\" + Date.now()",
+        "fingerprint": "f75416bee9e43cb64a31a91035ead66205841f7a955a333f2753a9cf46f3cf13"
+      }
+    ]
+  },
+  "routes/capture-3d.ts": {
+    "pipelineTelemetry.emit": [
+      {
+        "argText": "result.trace.model",
+        "fingerprint": "29a8c6db1d4dab9a7a986f444e1fd38afee3e8d4ea4a4f6070b429a022426113"
+      },
+      {
+        "argText": "result.trace.frameCount",
+        "fingerprint": "3fe09c6824c3004722c171d4a0a338f5237a3c5ad1aad138f09320f2a812624a"
+      },
+      {
+        "argText": "err.code",
+        "fingerprint": "644c782fc003a0cb0a734c07214e6bda4af949043d5cc7b5ba60401f47c2183c"
+      },
+      {
+        "argText": "err.message",
+        "fingerprint": "78355dbb5e3ebdbc86fc0de05288abd2d00964066d8a7d07d951c66eef3684bf"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "a2e88760ec5d5e7371f8699011348f368191ee070ab8bdac50ae13be9352c397"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "a88573d6bfda7613bc755ce52202762030df91256b655e0e14ce824499d335cf"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "ac680465c1a916e0153303dfca2c18a356f2e7841d816156e42a0b4a7ae98911"
+      },
+      {
+        "argText": "result.durationMs",
+        "fingerprint": "ae59d002a4a5f6807f5b40090234456f0b62ede8e2beb6b81a1de54cd4c43604"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "c96d15ee88f7b08c08c47e860543e6bba239d763942ed0112d7f61ec5d9660c7"
+      },
+      {
+        "argText": "result.stubbed",
+        "fingerprint": "db602bd77a0ce9434a9274e41ee04d58a1b9c81ee22640214ebeef1c4a4593ee"
+      },
+      {
+        "argText": "result.trace.mode",
+        "fingerprint": "dfdfe7419c5dbf1ab7f1b7d0c1b23d2b10e6e308ecbc6487c775997caf4ef301"
+      }
+    ],
+    "log.error": [
+      {
+        "argText": "err",
+        "fingerprint": "47485cb7736eed6b9e6e1181307cc75c806659a0016ea279f6c511b9c2c9587c"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "4e28d81dcacdbabdd44c1e6090f9606d0e75129654d676a339ab4f19ef53e1b1"
+      },
+      {
+        "argText": "err.code",
+        "fingerprint": "57f250c05e243fa230eb11fb18ec35994c8935d003ab0bb7162b761e5613ed04"
+      }
+    ]
+  },
+  "routes/capture-sim.ts": {
+    "pipelineTelemetry.emit": [
+      {
+        "argText": "jobId",
+        "fingerprint": "0d50cb51c9feca1dd47893c84d55de55279c31a288d447856703f9c275c7f89d"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "12370b1e10361b43e44236e698ef499a2e8b948500439b70f14d31cdd7e95cc1"
+      },
+      {
+        "argText": "err.message",
+        "fingerprint": "316d7f8412339bd7308b63dbc30b17a37cafbfd93ac41f2d1d033b00c6c3e431"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "638234db64063ed06a88eba3df9f99e978dff03de33299788b64940ca34314ca"
+      },
+      {
+        "argText": "result.stubbed",
+        "fingerprint": "70907b22f094082ec145e376e37a62d815731ab8dd052da07abc6b6596dfa611"
+      },
+      {
+        "argText": "err.code",
+        "fingerprint": "74f0d31de27c40438ba0d1c04ef8ccbf339975a26ecf06c98099285321edaa65"
+      },
+      {
+        "argText": "result.trace.scene.simulator",
+        "fingerprint": "84d434a326d14add2550e1eda9cb0764c4b529e138546459f15db0fd4e7266aa"
+      },
+      {
+        "argText": "result.trace.scene.taskId",
+        "fingerprint": "e8e0a022f6a07028446b7b2fa6c0ee94914214d0a044d840c49dcb1847f93818"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "f1031880e13e34daadea6824940d78bdd5a1d910690e5369a81f7620eb952d3c"
+      },
+      {
+        "argText": "result.trace.model",
+        "fingerprint": "f1b7f78e626ef705bafbe0fd0c62c51c4feea86c4b4f1ea0ee3715ee7d2e98cd"
+      },
+      {
+        "argText": "result.durationMs",
+        "fingerprint": "f1d0ab2c8b4d1e47d31ac64ea23ecfa824dfe44f9953dec37eb8d2a884cc9665"
+      },
+      {
+        "argText": "result.trace.frameCount",
+        "fingerprint": "f22cd70ae28a406e11d107feae3d67942138b1f3ceffa827a7b872bfe4e7be51"
+      }
+    ],
+    "log.error": [
+      {
+        "argText": "err",
+        "fingerprint": "08321f7db5cf7084f62fb988c36bb2f9b89a8e553d052ba844d668640dab1742"
+      },
+      {
+        "argText": "err.code",
+        "fingerprint": "33a42d9a706e8829426f3cbddcc727f5bc249e1a3f83ee297a1a816650daeee3"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "e5767f28bf4657f982bd2a365a49f4696432bdeae0348b4a716b9199b9f5492f"
+      }
+    ]
+  },
+  "routes/capture.ts": {
+    "pipelineTelemetry.emit": [
+      {
+        "argText": "verdictId",
+        "fingerprint": "04d1337f59b85329d6103f20c32a3ab47a9d7a5125b7effbaceadbce65041270"
+      },
+      {
+        "argText": "verdictId",
+        "fingerprint": "04eae6509ff390f76352f323eba25d8e53e9e45f6c9b01beeff45214c2dcebee"
+      },
+      {
+        "argText": "verdict.jobId",
+        "fingerprint": "053143634af6dfe407cbf2c94387f03d58a8ed57c382c2e9d9c3a9f32974d27b"
+      },
+      {
+        "argText": "ttl",
+        "fingerprint": "1acb66d45bdef3caf58a9d02dbad9b2dabc5998cb9ad3f2399a0446767ddaf49"
+      },
+      {
+        "argText": "result.anchorCandidate",
+        "fingerprint": "291274a006fc68adbbf45164e6996eb817dd08af2031849230787103de1d0fb5"
+      },
+      {
+        "argText": "verdictId",
+        "fingerprint": "2bc7629221938d9a60798f6124ace39be548328add2ed9def181f3d88a3d9790"
+      },
+      {
+        "argText": "tx.txHash",
+        "fingerprint": "3003a383145ad3c8f7e6ec0a3adb944662486019b06c29531b8416e179b5ef32"
+      },
+      {
+        "argText": "result.declaredClass",
+        "fingerprint": "32d725359b58401a10fbf3140884ec5e6123ab8223d889ca06574ad0b0a14a12"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "3fcd254b88ffc50e6b8a4239bb86837da333efca4dcca56fe452a48fe40dda64"
+      },
+      {
+        "argText": "result.verdict",
+        "fingerprint": "5c2a2fa15df9134a032ca492e7fd3f8dbdea7648d7b2e526d7cc27904a4808ea"
+      },
+      {
+        "argText": "effectiveLimit",
+        "fingerprint": "6052cbf193bdb7e53b8bdb5a50076a9a2eee3cc828c1f19653f64ab0c15064b6"
+      },
+      {
+        "argText": "declaredClass",
+        "fingerprint": "6dea06b6ac6b5eec71a56b73086952f04f3c68bb6d6ed24ae37a3b7a4f7051cc"
+      },
+      {
+        "argText": "result.gatesPassed",
+        "fingerprint": "6e3862db6e489fe2c71910afa2e3c2c421f74d91521e9837a059fc86b7686d41"
+      },
+      {
+        "argText": "tx.gasUsed",
+        "fingerprint": "717026b749be3f0c6eecddfcac5ace9775873b0ba4a2b1897c5d620df33f671a"
+      },
+      {
+        "argText": "rows.length",
+        "fingerprint": "794ff1d6350a8df6da5638847e28761cee4186ea8d7d57bfbb3bc9198ef675b5"
+      },
+      {
+        "argText": "result.verifiedClass",
+        "fingerprint": "96410963b9676c7e3344f88e3edcd94cca160c0ee5f7903dd6e514b6b53c95e6"
+      },
+      {
+        "argText": "verdictId",
+        "fingerprint": "99de2fed06b89d4c3526198454535f28d59f33f06bafef4a2daa958924eb82b2"
+      },
+      {
+        "argText": "verdict.jobId",
+        "fingerprint": "9df4aa78a1790be10b16868990c3f0de126e6c0bae5df613a40620122da83787"
+      },
+      {
+        "argText": "result.gatesFailed",
+        "fingerprint": "a43985a7b7d15a0f728f0a12e21bfb68ed479ad5c002b9eeb5438c98ff05ea8d"
+      },
+      {
+        "argText": "verdictId",
+        "fingerprint": "af74a0f5f9015962c6d6fd0354a99040d073e0b0807271a1e914b2c4ca39bb41"
+      },
+      {
+        "argText": "(err as Error).message",
+        "fingerprint": "c62077699128fe26abd694a5f5c6e82b5fc7ec0c9445cfa17f89afc036efbba2"
+      },
+      {
+        "argText": "tx.blockNumber",
+        "fingerprint": "cf6daebe79561787169742593304ea20d3b2c8c5c88d6f545ef4a6c983db4983"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "d1f3d1b71665e8f037fd90d3694537d278b8ca57ebfb817e819d75b9cfef5e77"
+      },
+      {
+        "argText": "verdict.jobId",
+        "fingerprint": "ddddbb5e10f6a49dc08e89565d50817ba34287f4e73ee51cbabb6cf1357d1a92"
+      },
+      {
+        "argText": "challenge.challengeId",
+        "fingerprint": "ddfda75da0758a6229117fcce7f0eddfde174ae4d54a087ee21070f1c00b2ad2"
+      },
+      {
+        "argText": "verdictId",
+        "fingerprint": "e4acd51657e343fd3a22c9efb0c0b3c1a2a92460dc34ebdad917fcd6c0decb84"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "ebaa0334753519988c474adc31489fca7d6b5770e44fe47bb0226583784d8f28"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "f6731ddc85f04dc240a1419884b9c97fff4888e6729509ed43708b035abba4b3"
+      },
+      {
+        "argText": "verdictId",
+        "fingerprint": "f71ba6e0abda96f12b3fb815d2f6bbb97b3cd922366d88b2d70b69d8f5574b7c"
+      },
+      {
+        "argText": "verdictId",
+        "fingerprint": "f9c71d664d5f475afd9d10033ff00331683d094d052a149772b87eca5c553547"
+      }
+    ],
+    "log.error": [
+      {
+        "argText": "err",
+        "fingerprint": "5c8af457550a3b247d5ede403e0fb7ee618a5db265c07804fc746ebc241274fa"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "6ab6db91f948171df070e6fe7c97721df65813d54392a51947a1e68ceb5890fb"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "7df067667f551ecb0f5c8c39f8f15b4698fa15f14633f84cd9a37bb81e9e22ea"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "bc609a2a2414ba0698f90a0a2c2d677b341824967aa855f16f5e4b4bf1308816"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "bf09eb2de5b6496f1d3db656d12edf73f8833c2244830e509be5d1976e93ddce"
+      }
+    ]
+  },
+  "routes/carrier.ts": {
+    "log.error": [
+      {
+        "argText": "created.shipmentId",
+        "fingerprint": "047105324179f2e41323dc620b9b1fd63ac31940d2856b5bb73c3bb3240194b5"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "09508f169f40ea347075be40934f61cdb6da6896ebf5aabce6094a71f7c3f217"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "0c5f3833e570ccfceeb338684e4b4ec3319f8233b56a594af76e138df3e6eb31"
+      },
+      {
+        "argText": "err.code",
+        "fingerprint": "0c87fef3cf7f9086271c9f98c0ebb118a04b1a619d67f4512295dcd1ac10cb5b"
+      },
+      {
+        "argText": "bought.trackingCode",
+        "fingerprint": "0ea885b3581f4219bd3d84d90c45257e2808f3b6525bb37576b819579e56cd5a"
+      },
+      {
+        "argText": "code",
+        "fingerprint": "158f78308bf5b9c5c00dc9c9235f9f81207d7f8bd1d1b8ca9820a6f9af12a1e2"
+      },
+      {
+        "argText": "entry.eventId",
+        "fingerprint": "354c6456e84bbfed24989c126bfe8763dfcf1c149309fe06fff2663c68112171"
+      },
+      {
+        "argText": "code",
+        "fingerprint": "393ba931999743672533a971a5e726fab8d6f0380cc271e1b56edf64f6da6f86"
+      },
+      {
+        "argText": "code",
+        "fingerprint": "3b617ea6164ecda7f27feafe92a659c2179d1199cc615b1cc091c1517a78e271"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "43f7a04f20926c201467cb892299697ddf106e090b008809450e5be60b4145c9"
+      },
+      {
+        "argText": "params.jobId",
+        "fingerprint": "4595e82e3cbda1672b3bf79eba39185dc74a3e3402538a4a6db9214ff52927b0"
+      },
+      {
+        "argText": "entry.eventId",
+        "fingerprint": "45b41f9defbcd08a7793fe2a2b19f41ef3ecb5de52dcbc5ac5cdb3b4cc2e7c61"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "52719a8b165cc602c75460c63889798045ec63b070459e18118041b0ad829973"
+      },
+      {
+        "argText": "code",
+        "fingerprint": "52d598b37c95beb5eeb94e653f2a17d9f039ad34e03b904b75a7fbf3fe110e83"
+      },
+      {
+        "argText": "code",
+        "fingerprint": "52f836193adf10f8b5d9fe90a9fae80aa5e913d2dc2f7c1180475895ce3353e4"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "54f9d442d9cf40c7cd0717ac6535560a21b0d155808bb39fc0fe3af374e65268"
+      },
+      {
+        "argText": "entry.eventId",
+        "fingerprint": "609fbb3d6f4a4cc93059e47a19718e5ec1f37e42124e8d5db7c0f950cbc3f217"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "643a95c7fe4ba1c259a10fa495bdada1316a871ed6f285a0a641ba6d414f4cac"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "6a2c3699d366d1cbf9430a8e792160632b1777257e6419d7b62be98ddb87ed72"
+      },
+      {
+        "argText": "entry.eventId",
+        "fingerprint": "7a1300c4667a6aa142c68b87af5500c4ff6af88a053485ad42a7adfb0b41bfb9"
+      },
+      {
+        "argText": "code",
+        "fingerprint": "7bcdf77ee9095bf2be8483a3bea7177b9d22524b05eccd7aa187b3869fec2c73"
+      },
+      {
+        "argText": "code",
+        "fingerprint": "8632b8bffb06f13348bedc4bfb58ac7180c84cf36d7b07e641950e2b8ebded85"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "906fd014e78f16e1d415d20abd2cdfa3e9bee0814aebaaa67d7cd3666d5c08eb"
+      },
+      {
+        "argText": "trackerEvent.trackingCode",
+        "fingerprint": "9299ab9dc1c42a6a213e42cdeb2ee0eac18d10a330bfd39257b10876391af1d1"
+      },
+      {
+        "argText": "bought.shipmentId",
+        "fingerprint": "a8b59b002452cd2f38f474771afd1ff200f610eb13d492f67710fd72ee4ee5ec"
+      },
+      {
+        "argText": "reason",
+        "fingerprint": "cfbcb62ab3a692dc22a36f3735b359fcb4aebe46f7af790d4d768e96c0f1dc37"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "d3fdb4a852afeb43a26371eeab321f1353e43de5054a9e31679f852181d4ca91"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "d49ecda8288d4507607e1de6f8309a02878cbc651f8b55bb59edf68f3df8e705"
+      },
+      {
+        "argText": "missingAtBoot",
+        "fingerprint": "d798ee88d946795d7edfc17c75a0e23b3be2465d2973446051bf1e47728f8b3f"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "d844c81e0b3399fe8aa2b17abe4b1cd7dc93a93ac67fffa7424cad16521b4ee4"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "dfde4fde3649974499661f05b7a310006cfb652e9fbe3bf94b012f13bc71d9b2"
+      },
+      {
+        "argText": "code",
+        "fingerprint": "e44c1e7d577f2f72b3af987166d458d5ee096a2e851d2fa661611779d0bde3e6"
+      },
+      {
+        "argText": "err.detail",
+        "fingerprint": "ebc4056585413c9536d4458bc98b724b4306d4868de6de68bf684b1f4ce68959"
+      }
+    ],
+    "log.warn": [
+      {
+        "argText": "err.code",
+        "fingerprint": "0d5f4dac28c9e5e46667f4bd573664a1095d48b5ea71e955aa763e70b314852f"
+      },
+      {
+        "argText": "rawBody.length",
+        "fingerprint": "0e1bc4164f1569a9d9b59de1e413a620a63a2e194b71abb014fe40e41938cbbd"
+      },
+      {
+        "argText": "trackerEvent.trackingCode",
+        "fingerprint": "1db0bba2ed4fb3cf258ae995039da8b0f9e7f13a82732fbaf31b27d6516460c7"
+      },
+      {
+        "argText": "err.status",
+        "fingerprint": "270cd31f7b64e78a460183399fb3413f1b6fc77cb15a8bb8204824692584ac72"
+      },
+      {
+        "argText": "caller",
+        "fingerprint": "516ca03dc30f1a86a26e9844ba7f0cf4fd57b2c6a6da46ce64010e470f8aef08"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "638a6b77709ae49d467ba5f4b5118a879b447b06de106ed96197d90d60b9df2f"
+      },
+      {
+        "argText": "res.reason",
+        "fingerprint": "66125cbdc11ed0f9d3c80d2815460d30f5492e7402b1645b8a2cd4e124e1985c"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "684e51c595f224dd49378136a9b1d8e1e9aefbafd3d79e23c3495c699c86d927"
+      },
+      {
+        "argText": "trackerEvent.trackingCode",
+        "fingerprint": "97de68fe963cc7b41abf65cdef49905dc3c6804823eb9d9d389d294673111a8c"
+      },
+      {
+        "argText": "trackerEvent.providerMode",
+        "fingerprint": "b9af9d02a264563e3a73fe1ee906bb6cf628caaee09501c25474db8d3dc4bd93"
+      },
+      {
+        "argText": "trackerEvent.trackingCode",
+        "fingerprint": "c535849adda55324761005fa43cd5ce465082893be9ca09428853b639f0c19fe"
+      },
+      {
+        "argText": "entry.eventId",
+        "fingerprint": "cf50cac234000317a017d3f1fea716746ec31aede8fc59d6a1a4b17ec708ed6f"
+      },
+      {
+        "argText": "!!headerValue",
+        "fingerprint": "deb2495bd2b6d0950b3fa764b13a570da67bec7c81a4402fe62d4b56fd2835b9"
+      },
+      {
+        "argText": "res.reason",
+        "fingerprint": "e0029b15e6b8ec6152498ff8cb67a51fdd87533ab73309a4251db5253840b85c"
+      },
+      {
+        "argText": "existing.ownerId",
+        "fingerprint": "e096575ac61cccecffafd4f21ac0109df5be16bce09edb116d410052def6e3ab"
+      },
+      {
+        "argText": "err.detail",
+        "fingerprint": "e26fea9e9516e8855eb0506356bece03a7dba63d8b1ad42dc791b3785b1ed33f"
+      },
+      {
+        "argText": "result.reason",
+        "fingerprint": "f45446c7cbea5a2773cf21c8f58c93a5a3b5f4d668b0426eb95b4b6133b6f1f9"
+      },
+      {
+        "argText": "entry.eventId",
+        "fingerprint": "f5ce23890d2c20ca4b20839c17a03920f61fa4cf2ccf1fcd1862cd4bbbb0b60c"
+      }
+    ],
+    "log.info": [
+      {
+        "argText": "trackerEvent.trackingCode",
+        "fingerprint": "12638f3cc429a4f90d522334f4a41707f6fdda8b264344b9cf54e98fbc063681"
+      },
+      {
+        "argText": "result.ledgered === true",
+        "fingerprint": "2f0dca7b954013925016f59a027045d38c0c70ddd1c2d54d38f738780627b8bc"
+      },
+      {
+        "argText": "result.reason",
+        "fingerprint": "ee8315bd53de90412df2703930bef42b6283c651aaa3dff237bdd9e58ab33f04"
+      }
+    ]
+  },
+  "routes/csd.ts": {
+    "console.warn": [
+      {
+        "argText": "err.message",
+        "fingerprint": "051297dcec5d46995ea1515b634872c3d45d613014376c6cbfee8fdbc5e10b59"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "27d3855d3807e1f19082b242bf64837a001d57c92540e268f75fd6025af912e2"
+      },
+      {
+        "argText": "storyErr",
+        "fingerprint": "96839c72305be92407b256aa55ebd088bc3e4045115543d62d3de2e3180e6c63"
+      },
+      {
+        "argText": "err.message",
+        "fingerprint": "d24352b72de8b638fb84fc2dab841298f65edd7c047b71123f7c4f2e81905e52"
+      },
+      {
+        "argText": "storyErr.message",
+        "fingerprint": "e0c4758189e76a2df97b122b751c1ec5e645808be97f7b39ba134397a0895977"
+      },
+      {
+        "argText": "String(err)",
+        "fingerprint": "f2f693b30c2ab02ee66a569467edefe11345689671d226c7132f502be6b7efe8"
+      }
+    ]
+  },
+  "routes/dht-ws.ts": {
+    "pipelineTelemetry.emit": [
+      {
+        "argText": "filter.type",
+        "fingerprint": "11c57250677169e6a14513bbded62a0f2567aaefcf7165ccdaff42fdceaffe16"
+      },
+      {
+        "argText": "results.length",
+        "fingerprint": "237a720cdd3d627c167e83b762a8179c93aaaae613bfb1d5fa18c12d2cd1922e"
+      },
+      {
+        "argText": "\"pipeline-\" + Date.now()",
+        "fingerprint": "5b5a64fd6deaacf39714e126924b1d36e01a49195d2d0820faaa1d034e7f588b"
+      }
+    ],
+    "<unresolved-callee>": [
+      {
+        "argText": "socket.close(4001, \"Authentication required for DHT peer connections\")",
+        "fingerprint": "816d6a9af8674f64cb2ec60ff21beed19bc2362cc3e3c5704e30a287f6f96bbf"
+      }
+    ]
+  },
+  "routes/diagnostic-logs.ts": {
+    "log.info": [
+      {
+        "argText": "`diagnostic-logs: received bundle ${uploadId} from kernel ${kernelId ?? \"?\"} ` +\n      `(${bundleSize ?? 0} bytes, ${logLineCount ?? 0} lines)`",
+        "fingerprint": "b2678e4d21854e54305f9b112683b0d18d3db691fb19f006adf88b28bfa2e4db"
+      }
+    ]
+  },
+  "routes/discover.ts": {
+    "log.warn": [
+      {
+        "argText": "message",
+        "fingerprint": "67efb40a47a032a321c927221231811e9337ab7fd15e8335b692728149760102"
+      }
+    ],
+    "<unresolved-callee>": [
+      {
+        "argText": "bonjour.find({ type: \"ipp\" }, (service: {\n        name: string;\n        host: string;\n        port: number;\n        txt?: Record<string, string>;\n      }) => {\n        const host = service.host;\n        const port = service.port ?? 631;\n        const path = service.txt?.rp ?? \"ipp/print\";\n        const uri = `ipp://${host}:${port}/${path}`;\n        const makeModel = service.txt?.ty ?? service.name;\n\n        found.push({\n          protocol: \"ipp\",\n          name: service.name,\n          uri,\n          makeModel,\n          capabilities: {\n            color: service.txt?.Color === \"T\",\n            duplex: service.txt?.Duplex === \"T\",\n            mediaSizes: [],\n            resolutions: [],\n            mediaTypes: [],\n          },\n        });\n      })",
+        "fingerprint": "54b19bec4abd3a38a11226d0d3a437a0f131c65969b49dcf9213419ec5dace00"
+      },
+      {
+        "argText": "browser.stop()",
+        "fingerprint": "9deac9f9472e9e2838dd0d2c31ec4ce6250e34988dae6147f824412b31c5f1c6"
+      },
+      {
+        "argText": "bonjour.destroy()",
+        "fingerprint": "bcd832ecf0306891a6ba71485043ae4ade5bed1f97dd2435dde8ddf68d0bc657"
+      }
+    ]
+  },
+  "routes/evidence-encrypted.ts": {
+    "console.log": [
+      {
+        "argText": "result.reason",
+        "fingerprint": "0e05122e57c0762fdb2a057b1cb67e69b48f46a0450845bafdb2fc8aeaddef60"
+      },
+      {
+        "argText": "req.params.bundleId",
+        "fingerprint": "1d0d618fd2d420dfdfd88ea6aed3bceb4f923bfc9b810597facffe58991b5c60"
+      },
+      {
+        "argText": "litStatus.network",
+        "fingerprint": "34dec2859127b5e9ede806de9de5e41ce78988801d25f57159ee93c15f9eac29"
+      },
+      {
+        "argText": "litStatus.connected",
+        "fingerprint": "75c03ef4424b61cdcd2e5cfed53815082cf6a8681f1b2efe7b467c0a5d0e0350"
+      },
+      {
+        "argText": "result.role",
+        "fingerprint": "8dfe499e44afe7c3a72cc8f1bde077b95d962929dc49ef8fd5cbb653e223779b"
+      },
+      {
+        "argText": "req.params.bundleId",
+        "fingerprint": "94bf4eeaeb75504aa05f1526845702a62e174467e3e6a6102ce5c96b6a7a04ef"
+      },
+      {
+        "argText": "litStatus.mode",
+        "fingerprint": "b03180ba47e7a410e06eb9278658f6602c76078058fa66f1f77ee5fac44fec3c"
+      },
+      {
+        "argText": "litMsg",
+        "fingerprint": "f3eeaa2aa7b2dabeb01c406494b9eef38d8bf374c15ac94e4b738efd2984da15"
+      },
+      {
+        "argText": "req.params.bundleId",
+        "fingerprint": "fdcc4d9cac89f484e49b71422a9a04191b0c70f2b68509f1cdbe0935e5226369"
+      }
+    ],
+    "pipelineTelemetry.emit": [
+      {
+        "argText": "req.params.bundleId",
+        "fingerprint": "1dbadfd8d994bf8b6002e7f7a24a4eed2d0681b1c74df1ee1c0ff2f080335d68"
+      },
+      {
+        "argText": "\"pipeline-\" + Date.now()",
+        "fingerprint": "215873f9a554f8dbf89f874b8f9a1ad6746b819aa4eee1b869d6f6f567755565"
+      },
+      {
+        "argText": "req.params.bundleId",
+        "fingerprint": "53b99e12b88ae502666ef9797d249a2bc0259c7ae4cab4560b67fbac239c9faa"
+      },
+      {
+        "argText": "result.cid",
+        "fingerprint": "5e7d7de86f51a6637d02818019003cf9016fe1af746efa72f516596546912f3e"
+      },
+      {
+        "argText": "bundle.jobId",
+        "fingerprint": "615c3422614e21cd2766870f3e12f696e5ceee28b3da871efccf5fa862766f08"
+      },
+      {
+        "argText": "result.role",
+        "fingerprint": "8b16a485e8cd66992d224aece633822ae9a1228026604607a7ef568b88583472"
+      }
+    ],
+    "trackServerEvent": [
+      {
+        "argText": "result.cid",
+        "fingerprint": "2c552a9200ddb04a2fed95ae929dbb7dc13d0930baf8397458cb969dd6c4083e"
+      },
+      {
+        "argText": "result.cid",
+        "fingerprint": "3ed9d91fa132aafadf21144d5c1be97ea07302bb87818afdecad17d5902d6000"
+      },
+      {
+        "argText": "req.params.bundleId",
+        "fingerprint": "421f9070f41048d45a03598bb0dcbb58676a6fc5ccf3a0dbc1c6d327a9fbed38"
+      },
+      {
+        "argText": "(req as any).operatorId",
+        "fingerprint": "5910fef77858038c705a6e3dadfd2cdaf0ffb87a69bb41f13a6a4198f4e9a2c3"
+      },
+      {
+        "argText": "req.params.bundleId",
+        "fingerprint": "7b6f61513ec20416295b6d0ce9ffb555a35b53f48b0796d02bee74ed8e60858e"
+      },
+      {
+        "argText": "(req as any).operatorId",
+        "fingerprint": "be699457e7a4c9e18e3abea3b8a828776a90949590afd7a2b36fa4260e395de2"
+      },
+      {
+        "argText": "req.params.bundleId",
+        "fingerprint": "cfa53e9344eaf68fc94326174d26dd59c6ce8e485ab8d22c5f6120bdc8052f04"
+      },
+      {
+        "argText": "result.role",
+        "fingerprint": "d9731ef05efb0a43df589eaf9adedbb1100318da970f5de5b89eb42da319e8c8"
+      },
+      {
+        "argText": "(req as any).operatorId",
+        "fingerprint": "e03465a0eea5a7c1f0f7b109f52b9965f825ea7d9d8d3d181d05dbd6d05b3944"
+      },
+      {
+        "argText": "bundle.jobId",
+        "fingerprint": "e3d90c33bf3e2c8f3a745b668b9482b2f957d182b8e267fd868bda8ff2eb5d72"
+      },
+      {
+        "argText": "(req as any).operatorId",
+        "fingerprint": "f9545bfecf00cffea9de311832b02e6844b1f81a814de9189b779cb83fb3756d"
+      }
+    ],
+    "<unresolved-callee>": [
+      {
+        "argText": "storage.archiveBundle(bundle)",
+        "fingerprint": "7d5d495527412bd7d82d6f8df988458704cf06c288ab78aacdadcde034e0b0ba"
+      },
+      {
+        "argText": "storage.retrieveBundle(req.params.cid)",
+        "fingerprint": "ae7077430eed57c57838dcab08fb7f84fd4cd497e1612b3a16c71039fcf0bbb8"
+      },
+      {
+        "argText": "storage.archiveEncryptedBundle(bundle)",
+        "fingerprint": "d42c92be77f43e545393c989b534fd91ad496f5a244449b11413eb564240e892"
+      }
+    ]
+  },
+  "routes/feedback.ts": {
+    "console.error": [
+      {
+        "argText": "err",
+        "fingerprint": "b7e5bca06144ad52341f2abc3381387c02f7b935b44822342e086fa8ad92f328"
+      },
+      {
+        "argText": "res.status",
+        "fingerprint": "fcf05c204efb323dd545d3cfd20e70f3b4ff06bc49f13d9b128ad41b19b38730"
+      }
+    ],
+    "trackServerEvent": [
+      {
+        "argText": "rec.errorCode",
+        "fingerprint": "07cdfd979874dd2890393b1d0a58ab346bc9650fc83b9e27f1c588458c87ef58"
+      },
+      {
+        "argText": "f.outcome",
+        "fingerprint": "2bd6f700155aa4fa74b77cdecd3c9fc0023a6ba8e5321babc3091405c13ad08d"
+      },
+      {
+        "argText": "rec.severity",
+        "fingerprint": "2cb8c3f8a2f27af611232747d91c85db515b225f8c33bbc5468cfe67b3a7cc36"
+      },
+      {
+        "argText": "rec.httpStatus",
+        "fingerprint": "311be79c6c65f2a84ecab08bf498b82be535f4959b590edbf2ffb8d003bef6ee"
+      },
+      {
+        "argText": "rec.id",
+        "fingerprint": "4250c3dfbb8c832573646b72193484cd9a45ff2346dff4e7fdfe9881ef8496b8"
+      },
+      {
+        "argText": "rec.type",
+        "fingerprint": "45e96663c8eea4d14875b054a7de5f3edc8a6e9a9d12ad2440ec6b5527da0595"
+      },
+      {
+        "argText": "f.durationMs",
+        "fingerprint": "49407936f430ed327e6b7e489c5439e4b52fef4d6e63fd989b93f9a61c6f1b5d"
+      },
+      {
+        "argText": "rec.traceId",
+        "fingerprint": "63cfb11a693d4f0552df47653b286c6e225571589294b136f2b3167dcf946831"
+      },
+      {
+        "argText": "rec.logs?.length",
+        "fingerprint": "8111b4cbea73f2106e0c673c4d526adeae86f7175f580a5917bc065122258838"
+      },
+      {
+        "argText": "rec.agentId",
+        "fingerprint": "87fb9a7938a301c9cd3fa81e6feb3762e9f7eca952de884e0b4b036592adb0c8"
+      },
+      {
+        "argText": "(f.tokens as { source?: string } | null)?.source",
+        "fingerprint": "8fb4ba4ed13769b7553aa549da72fd7188001b60edf9ac701157e189a80a8be2"
+      },
+      {
+        "argText": "(f.harness as { name?: string | null } | null)?.name",
+        "fingerprint": "a067075283a0b0e8c6acf6eeff51f793e4886f8f374e241dc17470792f3307df"
+      },
+      {
+        "argText": "f.sessionId",
+        "fingerprint": "a84cf42bf18264b77238a7b8405dc2fc287dcfdbe6ad3bbcbbbde1e9b95de6bf"
+      },
+      {
+        "argText": "f.proposal !== null",
+        "fingerprint": "b0ec1bab3a2b87b3e28821b33089ae91015d846bc1783422b4c14e7d8cd94a25"
+      },
+      {
+        "argText": "f.phase",
+        "fingerprint": "bf29fcc56a770299547100f9d663350c7b4db29cc31d28b147b97949b04e1060"
+      },
+      {
+        "argText": "rec.endpoint",
+        "fingerprint": "d192ee9f0c74325a117b84eed9debeb821735054059759754408973dbe006cc5"
+      },
+      {
+        "argText": "(f.device as { class?: string | null } | null)?.class",
+        "fingerprint": "d3e13f461cdbf1dfbae59d4c67f90a81512f26401f6b284c7a4ae5e7ee383e00"
+      },
+      {
+        "argText": "rec.id",
+        "fingerprint": "dfb607e4c69164ebccad3a93c1c49faaa0840cfbd742b088c2323a65d94bbc19"
+      }
+    ]
+  },
+  "routes/fiat-ramp.ts": {
+    "console.warn": [
+      {
+        "argText": "err.message",
+        "fingerprint": "75dfd478ed54291f8b75c655afbf5c70057a9e53b7ae79bf31b1f1c820f69a38"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "d428ccf75682801ed7944a8d45b9302783f38673a52c698c242cfbd3583e2443"
+      }
+    ]
+  },
+  "routes/identify-device.ts": {
+    "log.error": [
+      {
+        "argText": "err",
+        "fingerprint": "8a17bf3a6eeb1a798060c10f904f8fc26329f85804a8b14a78c889e2c992ddc7"
+      }
+    ]
+  },
+  "routes/ip.ts": {
+    "console.warn": [
+      {
+        "argText": "dbErr.message",
+        "fingerprint": "0e7b9e3d85c98a1ccabd5534ad4a8b39dec656d69d55f8d707f769973412deb4"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "105626916c9a9cbec926111ccfe684c3c26817d321be9f618892cba536d6613f"
+      },
+      {
+        "argText": "dist.ipId",
+        "fingerprint": "20edd495beba1721c5f9fc3744a5d8e183202a38e5307c1bd6637f46a845ab08"
+      },
+      {
+        "argText": "err.message",
+        "fingerprint": "394f29ebeed6748b950de8f1af7e639b0714d11d2806dac44dd7bf6237d145b3"
+      },
+      {
+        "argText": "dbErr.message",
+        "fingerprint": "3f1a146689fe643d870c85888ad50e140a80903d1d7cf3277bb5b155e80afc26"
+      },
+      {
+        "argText": "dbErr",
+        "fingerprint": "496e9206d6d42b8d7e16ca5d952fb168b1e35230709839951865429014047d08"
+      },
+      {
+        "argText": "dbErr.message",
+        "fingerprint": "600bcb9bc55857e7aeaa5697a4bc3a6ab6037ce45ac27cc2767853604bc68f00"
+      },
+      {
+        "argText": "dbErr",
+        "fingerprint": "7ac6de63fe2e41707e34ad868fe628310bcc1295075b84b1becc453fa66e1326"
+      },
+      {
+        "argText": "dbErr.message",
+        "fingerprint": "88d80fb913b5b4ecbcc2f2743b42d3fb86d9380a107869842208ea44e6a30738"
+      },
+      {
+        "argText": "dbErr",
+        "fingerprint": "d28944bb012f2cfbafbacf878f0f1a36f159938bc230a76d914163b5c5883f64"
+      },
+      {
+        "argText": "dbErr",
+        "fingerprint": "e3b45908ec59eb73571ebff6e25fdbb47aa3c53130a27816df91fa65e5f61d12"
+      }
+    ]
+  },
+  "routes/jobs.ts": {
+    "log.warn": [
+      {
+        "argText": "source",
+        "fingerprint": "0c2d09fda06afebb758a435d1ae5fce2b435c89d54442770d17d6aa3d67d8295"
+      },
+      {
+        "argText": "req.params.jobId",
+        "fingerprint": "687ac0b2f29c822fdb42597f775f2843140d5010f6d0a203565644421dd10152"
+      },
+      {
+        "argText": "error",
+        "fingerprint": "71e14cbc588179d112ca0257f8aec4f2844dc2d797ad2073a1da5fece3ea02ad"
+      }
+    ]
+  },
+  "routes/lit-provision.ts": {
+    "console.log": [
+      {
+        "argText": "body.kernelId",
+        "fingerprint": "04023bba3d46b7eb7c0d80d7cccfb854a9a57cd24e25040b1f7338b491a47c18"
+      },
+      {
+        "argText": "err.message",
+        "fingerprint": "063fb187bfdf5a88c876525f75a0247b0820409530106a5ad2945462f934120d"
+      },
+      {
+        "argText": "fetchErr.message",
+        "fingerprint": "0a0dfe947340b91bbe93a0ac48e28df891a329c7dd34d783e07e8656d39512cb"
+      },
+      {
+        "argText": "res.status",
+        "fingerprint": "3adb7ccda037ad9ae7bc9fb23e46224c972cadf580aea8b3011315e1a364936e"
+      },
+      {
+        "argText": "body.operatorDid",
+        "fingerprint": "4fb6e9e515e966efc62be8d41c1fb1ece9f7d6fc898cbc182a4f178104732985"
+      },
+      {
+        "argText": "data",
+        "fingerprint": "86c955cbd1f91dacfb0d129982f026d7bc1b29bb618d8d5279da19e2fe6407f0"
+      },
+      {
+        "argText": "body.kernelId",
+        "fingerprint": "de7833cc57638091715e0898485dd672ff85358f45535c6cf3212df45d42c6fc"
+      },
+      {
+        "argText": "text",
+        "fingerprint": "e0e7c8c41d152f4397b250649519447f3051486d350504075f348491bfffa40b"
+      }
+    ],
+    "trackServerEvent": [
+      {
+        "argText": "body.kernelId",
+        "fingerprint": "47a5537b417efd35c623dabc7d8174cf0605b859bcb3290c2ac5ef5ee04792db"
+      },
+      {
+        "argText": "body.operatorDid",
+        "fingerprint": "a86ea4d6260ee8fb08a5c68298f78d726e81eb5519ee599db3247a21351e0c66"
+      }
+    ]
+  },
+  "routes/lob.ts": {
+    "log.error": [
+      {
+        "argText": "missingAtBoot",
+        "fingerprint": "ce14e1e7d8ca3f36b4946caee2d69d1d29649cc19ef3d55ab70064bee3b3f176"
+      }
+    ],
+    "log.warn": [
+      {
+        "argText": "existing.ownerId",
+        "fingerprint": "6729ac33cce80d9ef5910b9c983fa0625ece2a38c136d476bc4fc12ef61e3ea1"
+      },
+      {
+        "argText": "b.jobId",
+        "fingerprint": "67474b03d40c755c015b270dda967241a9aec39bc62b9dc8f599aaff36b6bd8b"
+      },
+      {
+        "argText": "timestamp",
+        "fingerprint": "7c5394ca7c6294e268bf1cc602a90a46b03d23e7b87c30cc0ad2ab8b98ce8f3e"
+      },
+      {
+        "argText": "!!timestamp",
+        "fingerprint": "9689a02ce609d53641b155d53767559420b624568d31955d0d2696dd58f26ae5"
+      },
+      {
+        "argText": "!!signature",
+        "fingerprint": "9cd28252825007d40cfdd247424eebbb15c1e72cde29e745fe2e829b4b4003f2"
+      },
+      {
+        "argText": "b.jobId",
+        "fingerprint": "b03b2743c87892aecd59f6be865d47463b1c7e9e4e1e2092d7c50789a00939cd"
+      },
+      {
+        "argText": "caller",
+        "fingerprint": "dacf3f751572ac51d9e3e736afe67429e5bc455ce8bb307590ba36f169bd5c2e"
+      }
+    ],
+    "log.info": [
+      {
+        "argText": "event.lobLetterId",
+        "fingerprint": "237df1dcbeedbb90ff758c572cdcc1d939790eb3ef2b3e40c4e40e8034d66f8f"
+      },
+      {
+        "argText": "event.eventType",
+        "fingerprint": "65abc1884547bcf5f077f0446c788d2b0a23a37049543a9722a2d2e7772a36ed"
+      }
+    ]
+  },
+  "routes/marketplace.ts": {
+    "trackServerEvent": [
+      {
+        "argText": "order.quantity",
+        "fingerprint": "0f09c7bb8b925f2108abaa7bd36ad7e8b27bc04d5c8d3f1e851acff09690daa3"
+      },
+      {
+        "argText": "order.listingId",
+        "fingerprint": "25c6e2abc06dae2ca77357fe92772a65a94adb323cf67849f73af098002b11c3"
+      },
+      {
+        "argText": "order.totalPrice",
+        "fingerprint": "2f488d9c09239fb9dd688bc244ae9c772a2ba92b010fb468680f55ed238a19de"
+      },
+      {
+        "argText": "listing.category",
+        "fingerprint": "3b2c56b5ab9a3e9c3a675f89080df916cc1b5cdd489ea349a183bf56b4af8cc9"
+      },
+      {
+        "argText": "listing.pricePerUnit",
+        "fingerprint": "62441df7911c8443c277970cf9009e925f8b25777151d5aebbca634c875558a1"
+      },
+      {
+        "argText": "listing.currency",
+        "fingerprint": "9dd87cf86ffe1daf9a9a1f2d9330ea48aa0f71d8f4271c4ef8bd004e53e53269"
+      },
+      {
+        "argText": "(req as any).operatorId",
+        "fingerprint": "d54e0b692de85a397452b937cc28cab824b968dbe4b36a05f0dacf16ad68cc1b"
+      },
+      {
+        "argText": "listing.id",
+        "fingerprint": "d71f243590e2aaa4c5a2a60824ac41c8d2da86d4403fb8cc8bae9b135f34c50e"
+      },
+      {
+        "argText": "order.id",
+        "fingerprint": "dafaab07150d5e4c7ebbbbef7f27ddf41fea59e49961c0852f1ee7f55021b72a"
+      },
+      {
+        "argText": "(req as any).operatorId",
+        "fingerprint": "f93b6b4d9a83744956705d3aba5563cae00f976cc97170a7356cb1088c13c88f"
+      }
+    ]
+  },
+  "routes/near.ts": {
+    "trackServerEvent": [
+      {
+        "argText": "(req as any).operatorId",
+        "fingerprint": "07bf3c8e95f32c9bd6e44e640f2340df2c07b517bff6e7106adba3b8b338ee37"
+      },
+      {
+        "argText": "(req as any).operatorId",
+        "fingerprint": "085c8884f255c381375980e11f713a9bef4d81b10158126e69c71ec401e27246"
+      },
+      {
+        "argText": "body.fromAsset",
+        "fingerprint": "1d9db1108c01bdb49fac22582bb460b820f4ef39b0bd4a813eef4213533a5359"
+      },
+      {
+        "argText": "body.toChain",
+        "fingerprint": "288ae1d75ae7e738052c918a66a6fa2c0c8e5e67e808614236b260b03438296e"
+      },
+      {
+        "argText": "body.toAsset",
+        "fingerprint": "8ed2944092611f832405e210349b46a35f0003fad9fffd898b8342d0b686436f"
+      },
+      {
+        "argText": "body.quoteId",
+        "fingerprint": "bb88645f5dbf594be64dddd6a8ac9543503e0824a7acb0a65d07b5eddfac86b0"
+      },
+      {
+        "argText": "intent.intentId",
+        "fingerprint": "c060040c5c6f643703111f54697faa7f87420dc29c5489186f97524392414fbe"
+      },
+      {
+        "argText": "body.fromChain",
+        "fingerprint": "d3d06ca4243cc21d0da0bc69a0826bd0c5a52d0eb4fa9b4e069bf59eba77e907"
+      },
+      {
+        "argText": "body.workflowId",
+        "fingerprint": "ef312780e936a0f296d3f17b974865547a84078830f5e84aeb39f29a9c3c03a2"
+      }
+    ]
+  },
+  "routes/negotiation.ts": {
+    "pipelineTelemetry.emit": [
+      {
+        "argText": "body.capabilityType",
+        "fingerprint": "6d25d7c8bbf7894a1392b2a01d6970cabb4cc19df8a1b09e5abf1199a8c9c393"
+      },
+      {
+        "argText": "body.kernelId",
+        "fingerprint": "7df6d50073a4abb6ad6715d18b0500954a1ee8b45db1e38bff8e5ba5a16ee08b"
+      },
+      {
+        "argText": "sessionId",
+        "fingerprint": "8d28bfe29c989ea61c02233bde9ec5f273672509b4d9a8c18a65f3ab23f0a902"
+      }
+    ],
+    "log.error": [
+      {
+        "argText": "body.capabilityType",
+        "fingerprint": "10b1a3e10b49e3f4e57e7d40660a2c5089303652a73bcc7b52040a45b18e5c93"
+      },
+      {
+        "argText": "body.kernelId",
+        "fingerprint": "2be4a63fa90a4c81cc709e7ac3347081589f32918837f1b82a19de2880f62003"
+      },
+      {
+        "argText": "String(err)",
+        "fingerprint": "67dd2633605b5708e32139ba9000a36ff421f8c37a19cc479191afdf5f4f5a8f"
+      },
+      {
+        "argText": "err.message",
+        "fingerprint": "a7b62a3b49fef71f1346fc2ad66c8e26b5e24715210e610abfbaa9beeefd6dc6"
+      }
+    ],
+    "console.warn": [
+      {
+        "argText": "settlementError",
+        "fingerprint": "61785e4048e14c8acf571447617f85e3b16ab5a6fd95abd6bec179217caa89a9"
+      },
+      {
+        "argText": "settlementError",
+        "fingerprint": "d003166f5b6a1ffff9b1087d31b1cdb83808b246cbe02a76357397d76bc0be8b"
+      }
+    ]
+  },
+  "routes/onboard.ts": {
+    "trackServerEvent": [
+      {
+        "argText": "proofs.length",
+        "fingerprint": "18137038cbca18c3c43b5ffc691ba2e6a6286b4f4f59fb82c259cb72dc1645a3"
+      },
+      {
+        "argText": "analysis.suggestedCapabilities[0]?.type",
+        "fingerprint": "3ec1520d390de5b575b58cc156bfa18db0dd3e886e73d22ddd5aaa4fef2f7fdb"
+      },
+      {
+        "argText": "mode",
+        "fingerprint": "4c4215f95f35268f8d96f214b65f2b4457536365e469fafc6a396608c978f8e7"
+      },
+      {
+        "argText": "registration.category",
+        "fingerprint": "5be12f833b32cd060de54918391ce11251719ac91882627e0ba20ea7e2054021"
+      },
+      {
+        "argText": "registration.name",
+        "fingerprint": "f850184ea25feb8800c45e03db78799a5a00facd77f237f3e1d2c602837e583f"
+      }
+    ],
+    "log.error": [
+      {
+        "argText": "err",
+        "fingerprint": "0bb88886ba24d2cc81b3a6448dec18bd5afc85c429caefb21729ec16e0c8621d"
+      },
+      {
+        "argText": "e",
+        "fingerprint": "aa92b4e9da9bdef0e4269dd88d633cc2c85442441008530df444217ed4c169e1"
+      }
+    ],
+    "console.warn": [
+      {
+        "argText": "(e as Error).message",
+        "fingerprint": "7783df289c73af6160d7ec6477e68714569551bb691648e65050156f5848ac82"
+      }
+    ],
+    "pipelineTelemetry.emit": [
+      {
+        "argText": "reg.id",
+        "fingerprint": "4d86ca0bf5ca80f9c86dfdbf39b1c6cbc1a4f0a3d06f6ffa8be016138c425c77"
+      },
+      {
+        "argText": "proofs.length",
+        "fingerprint": "8884704524fa3415a467534a77b8bcf170810419f0e762402cf064577e1724dc"
+      },
+      {
+        "argText": "registration.category",
+        "fingerprint": "96b3b1ad812417bb48d3dc4110057d8ff8dee3281facba674d6bb5a82083783b"
+      },
+      {
+        "argText": "registration.name",
+        "fingerprint": "b3d5c372d24b484098f2840e93b9a5e7f019328fc826dab0fa0f440cbdaa3a3f"
+      },
+      {
+        "argText": "registration.id",
+        "fingerprint": "ccee62f212980c9b5cd03c0e0dc07d4f0ea2528b332ed3401a98193d1dad0c13"
+      }
+    ],
+    "Sentry.startSpan": [
+      {
+        "argText": "req.params.id",
+        "fingerprint": "eb1f5bce24370c9f394b075ba5944afedd9d11a8dcb8d2ea14800ddb5a64dfd9"
+      }
+    ]
+  },
+  "routes/operator-channels.ts": {
+    "console.log": [
+      {
+        "argText": "`[op-channel] ${ch.transport} transport not implemented; would dispatch to ` +\n            `operator=${ch.operatorSlug} endpoint=${JSON.stringify(ch.endpoint)} ` +\n            `describe=\"${ch.describe.slice(0, 80)}\" payload=${JSON.stringify(p)}`",
+        "fingerprint": "35ec25027f5b82eefcc5d9ecd6174a772dcc4357d900b644cbf2facc3950cb93"
+      }
+    ],
+    "console.warn": [
+      {
+        "argText": "ch.operatorSlug",
+        "fingerprint": "1c2596b11a83eaaa9b91bb9a82d53776711b7f3f25d372ded74a94d65d4742f8"
+      },
+      {
+        "argText": "ch.operatorSlug",
+        "fingerprint": "870652dfb8efb22f00090e95b52008d3c25ac4553ab261b992b67f9623b7ceb3"
+      },
+      {
+        "argText": "ch.id",
+        "fingerprint": "9a1314984e8d758e0914c1e0472dc96a45a1f33783000dead7b860a3d3a418c8"
+      },
+      {
+        "argText": "e.code",
+        "fingerprint": "d2e25c6f6124355f2da0fd5f919e226fb3c8d5e3427541b252c6b8e3c594d73f"
+      },
+      {
+        "argText": "ch.id",
+        "fingerprint": "f9cbfc6d5860d13a6d68f1db0495bc017ef4d8327053dafd6ec23efb01b80591"
+      },
+      {
+        "argText": "e.reason",
+        "fingerprint": "fc29616e542a0493b1052bac3b78d17c31943747bae7bf7d7bbe90775db6924b"
+      }
+    ]
+  },
+  "routes/operator-relay.ts": {
+    "log.warn": [
+      {
+        "argText": "jobId",
+        "fingerprint": "6e8d48a3ffb97f3e5f8795caf2accd6e138515c9e7fac718e0813c9024e796a1"
+      }
+    ],
+    "log.error": [
+      {
+        "argText": "insertErr",
+        "fingerprint": "249b1773029b787d84bb5294c15d3968a2b31c5d4859188443eac4f02cd895c0"
+      }
+    ]
+  },
+  "routes/operator-work.ts": {
+    "log.error": [
+      {
+        "argText": "error",
+        "fingerprint": "da503ba37945f9abb49df1da6e38cfea8c2ad112c1f8f9f42cc5098a7329f07d"
+      }
+    ],
+    "log.warn": [
+      {
+        "argText": "source",
+        "fingerprint": "6a3f84dd96d95391e1ef57db42a832ce7f8bb588e1075ae3cafe34439685ea39"
+      },
+      {
+        "argText": "error",
+        "fingerprint": "a2653cc0632f88a1bf3be67f160810927946f654fc95b979cd0a6ff8920768c2"
+      }
+    ]
+  },
+  "routes/operator.ts": {
+    "log.warn": [
+      {
+        "argText": "err",
+        "fingerprint": "2461ce30267974c9d44c4d4accc35ce327ad34e0c03bfcbdceb2afcdb181bc02"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "39e8d45478dbfbd82d73ecc3629d651aea531c140a71c1feb669d2e7705b7adb"
+      },
+      {
+        "argText": "kernelId",
+        "fingerprint": "3fe98583d884ab292013e026f42cf8e38156a8627e8fd217c32a22202617e8a7"
+      },
+      {
+        "argText": "status",
+        "fingerprint": "869a0fa582934d42a13370100a55d12202ded797c9055e903d7295c53b32d380"
+      },
+      {
+        "argText": "req.params.kernelId",
+        "fingerprint": "f2dd81767749e02c5ee17c13e72d890ab720f873017e75f92d1fb8026eec097e"
+      }
+    ]
+  },
+  "routes/paid-job-flow.ts": {
+    "console.log": [
+      {
+        "argText": "txHash",
+        "fingerprint": "14e7f8946b833e11aea64c32f8b73845ce8dbf2b8e5386ad8ac480643c1ba3f3"
+      },
+      {
+        "argText": "ms.stepId",
+        "fingerprint": "21e41b2bf2b14bd2dd295673dc7cfd39ab2c99844dd025ee62751645ca77ada5"
+      },
+      {
+        "argText": "addr",
+        "fingerprint": "385dd6bef52dbb2600fdb661cbea0fef544d8e0daebd896d4ee7f55a6cbe9865"
+      },
+      {
+        "argText": "addr",
+        "fingerprint": "3d0150930564a9880c5dfe90dc21cd3b73df0fdc2bea91538631e88c3abb9589"
+      },
+      {
+        "argText": "addr",
+        "fingerprint": "4bb4b2bf8465fda952cc480c294399eb30371429b780ca466414238843a67820"
+      },
+      {
+        "argText": "ms.amount",
+        "fingerprint": "547ad5ba2b46448baae4684ad281099c71e4e60cfae24c5c9b32d92d96ebe6d4"
+      },
+      {
+        "argText": "attempt",
+        "fingerprint": "75125f4c5e60aa3c3f8bf2746b514590f2fd6220d6c3eadb353767ab784e7649"
+      },
+      {
+        "argText": "attempt",
+        "fingerprint": "7cc1cc615fffd02f0a56e39e7acea2b86b19ccf16c60b26ac3518e60c2f70e29"
+      },
+      {
+        "argText": "assuranceTier",
+        "fingerprint": "a1c74bc5d435183dc23acfd672761a0ff1c17d7a300023db8b30fed81e62a28e"
+      },
+      {
+        "argText": "addTx",
+        "fingerprint": "a1f16e88c6429288dc4836629d53b44610f250f011793b4821abd13c2646e009"
+      },
+      {
+        "argText": "normalizedMilestones.length",
+        "fingerprint": "a2f6022bc4ee6b363b294f2682bb1211b616b0c312eb06e9d6236a528bd6127c"
+      },
+      {
+        "argText": "tokenAddr",
+        "fingerprint": "a955cb0113c654ae889142958fd0bd9b1937a1b3be13839402aaaada8023a5f9"
+      },
+      {
+        "argText": "ms.amount",
+        "fingerprint": "b1d71ed79949b35c940d2f78cde98ddeff2e33493d8ec3068f2313923fef272a"
+      },
+      {
+        "argText": "addr",
+        "fingerprint": "b1ddb58694a1a29bc4cea60ba206633a3a3861eb9d8cedbff5bacdd7ec1802e6"
+      },
+      {
+        "argText": "normalizedMilestones.length",
+        "fingerprint": "d9a198185f6d2392a1c7d91c36b6ff57070663d5ecbf2dc708f3e4f447da1818"
+      },
+      {
+        "argText": "tokenAddr",
+        "fingerprint": "f33364b292a95be495032d3f41eaa5a53a9f9ee64ae190ccabdf2b518bcfb845"
+      },
+      {
+        "argText": "totalFundAmount",
+        "fingerprint": "f5806b4971bb673e0e585696ed7288ffee94ef5e5a3fe5c86cb322c9079c516f"
+      },
+      {
+        "argText": "ms.stepId",
+        "fingerprint": "fc0d0c954bfcd97cd2ed513534f81af8ce29966d33bb1e4667446ed24886f761"
+      },
+      {
+        "argText": "addTx",
+        "fingerprint": "ff61cbb89667bf7c0e422658df38e853552e78bc0c06e759547a4d9c69870555"
+      }
+    ],
+    "console.warn": [
+      {
+        "argText": "easErr.message",
+        "fingerprint": "28457556692d4421aa71bdddf4af99f51e53ef7b45a079d5fead4159ea384fb2"
+      },
+      {
+        "argText": "evErr",
+        "fingerprint": "30f5bf83199fecfc412bb2bdf017161aeb054772002767e8a7ea53127785cedd"
+      },
+      {
+        "argText": "zkErr",
+        "fingerprint": "3bab3f15f7f24e6e6a63361860143d87bba706aacd2103ca85912a69a68179f1"
+      },
+      {
+        "argText": "evErr.message",
+        "fingerprint": "621fd8eb21ab362a5894e967f4c9f33b73e220d3a7f052a729858d8e45203204"
+      },
+      {
+        "argText": "addr",
+        "fingerprint": "6fe87ed8f83e1afcec215fc9c4d363fa6fe707d63800184ea3141476e670158f"
+      },
+      {
+        "argText": "archiveErr",
+        "fingerprint": "6fff0c9aebdab08d86c3ea8f1694db558de58a5b65be28ba5e7b2e51f661974a"
+      },
+      {
+        "argText": "attempt",
+        "fingerprint": "70fd4bed04184d12e5218e74e232ffdc22f964897f3a3af689537dca00569fe2"
+      },
+      {
+        "argText": "easErr",
+        "fingerprint": "7e341142c029cd1e00328a1ecb80b744269e397f47d6f0a6bd515c674e58daa3"
+      },
+      {
+        "argText": "zkErr.message",
+        "fingerprint": "8ff6ff515509ff705dac87a72252b102532d09b5147a37f4c6d10a498baff5fd"
+      },
+      {
+        "argText": "archiveErr.message",
+        "fingerprint": "b88185200336df7a9f3c41efb9b38b3cae2fc0bf844da285637694a63894b613"
+      }
+    ],
+    "pipelineTelemetry.emit": [
+      {
+        "argText": "oracleResponse.result.verified === true",
+        "fingerprint": "09193fce6ed6a14e448a7912e2f82aaf985a238288c40fb6acedc5ce47941e51"
+      },
+      {
+        "argText": "sessionId",
+        "fingerprint": "132d2a7fc747adbd2f4c2d21c8bd9ad677aa6c8dc84b7af2b45e21185ec9e9ff"
+      },
+      {
+        "argText": "oracleResponse.result.reason",
+        "fingerprint": "1463962dee958f51aed5296d11f975fd7c487908b566591709098620a4168ef3"
+      },
+      {
+        "argText": "escrowId",
+        "fingerprint": "2b5435108aab8890421c289b3ee50b79a8a7ddc215d0e16c58b79dd786b8972e"
+      },
+      {
+        "argText": "String(e2)",
+        "fingerprint": "2c86071ca65839c62387c2b9953f127474142069a86f1c8dac5e1f367e7981e5"
+      },
+      {
+        "argText": "easMeta.schema",
+        "fingerprint": "37dafd2e5c16dddc1ed68624b3f32f34db01cba017dadaeb26b9908d69aac1df"
+      },
+      {
+        "argText": "result.jobId",
+        "fingerprint": "3b81af9b233b0890cc806610fc25ae644c9dd04c60ddda7af20b06249f8c9922"
+      },
+      {
+        "argText": "anchorBundleId",
+        "fingerprint": "3c37c6b0cbd756c8e752b4dec4d91fb0743cbc83df1380783b5f447f2c5f37d1"
+      },
+      {
+        "argText": "anchorBundleId",
+        "fingerprint": "3d1ee548cc2d916b1a5dc693f7eb391cc9fa599402f4238f0ed323da0ffc2d05"
+      },
+      {
+        "argText": "scopeId",
+        "fingerprint": "3dc886ad0430d147c9ddeac282cd4318a48f4710977fe08bac41fcd99cf45ed6"
+      },
+      {
+        "argText": "String(evErr)",
+        "fingerprint": "420156848af9724a541ca4af7818162f5f01d074a596ab96dddcc333ea7b11f5"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "46cb492dffd26a2a7a874bf78294f72b234193c5887bf11fff837023bddfcac5"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "48b2dae625dc6dbac15a2a6e7a98a1523fbf49c88ee1fcb3be8b18be73e55830"
+      },
+      {
+        "argText": "session.kernelId",
+        "fingerprint": "4cddfbcadd548c9bbabfaa9f0b6c6a559531b29eed3094423aea62b7f2086884"
+      },
+      {
+        "argText": "String(e1)",
+        "fingerprint": "4d372e4547b8e3d4ad044e37789ee5ef9a64649c150d8636fa08e417c5e2609d"
+      },
+      {
+        "argText": "bundleHash",
+        "fingerprint": "5218d3ad728452bba730457cd810bb1603d20c90e9b1527582b2458bd3cd71c5"
+      },
+      {
+        "argText": "chainSettled",
+        "fingerprint": "5439c3df9bdd61d5cedf5b8f751ddce4bd06cc8eb9b37ad09ab1039afba6a6d4"
+      },
+      {
+        "argText": "chainOutcome",
+        "fingerprint": "56cbc4b8106ec30a6241979f764ec95a3577a5c5ecbbf2a60c31cc64d543d08f"
+      },
+      {
+        "argText": "e1.message",
+        "fingerprint": "5ae86641bedd4f3f326a3b2b08d5b1b675fc3e686ff39c5006a8797c7e59f11b"
+      },
+      {
+        "argText": "escrowAddress",
+        "fingerprint": "5d9d0e902d9884eedee79d120439e4c5cb758f8a19a3d0626f7d3a64a2ce2b69"
+      },
+      {
+        "argText": "bundleHash",
+        "fingerprint": "5dca9f6c37f71f21af640dc6d76d4379fdb54af8f8cfd51b5e40a12362e2ea82"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "671254edde5f414e2702e82eaf0fc9f301688f01614452ea4af10cf23ffab36d"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "6c4389641ae0e216256ec7c38fe5bf1eec65f8a3346510d2df29cebefe035720"
+      },
+      {
+        "argText": "ipfsCid",
+        "fingerprint": "6d8b16b825aaf646ccb24e28f5529f914e7b9f7389d30f785c838eb286342c67"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "745d6bd193af85f80a3968fb418cc745f5169fbb8aa653903da1bc7acae81d25"
+      },
+      {
+        "argText": "isMockSettlement()",
+        "fingerprint": "79ca6a56f4a4bc1a718d03f5a3d610fa6eecaeecfcf7992f3408913990355566"
+      },
+      {
+        "argText": "starknetTxHash",
+        "fingerprint": "7c7bfcb3f6d6aad0fd880293fc609e14bd755afca4e1ae47bfa576c84dfa5a51"
+      },
+      {
+        "argText": "isMockSettlement()",
+        "fingerprint": "8b83a7500076c1b72b33709a54ddc5500ff765dffcf9bf8bdacb6950e66fb0c1"
+      },
+      {
+        "argText": "oracleResponse.result.verified === true",
+        "fingerprint": "910399a62e332822dda4cf408cf243a3739576236dd94445dbfdc4e7d8a09c4f"
+      },
+      {
+        "argText": "escrowAddress",
+        "fingerprint": "9814072d0913d0c687a78807bed200d64e187581fc844ef5f55d789d7b7319b2"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "a446cc4cb7a771a9e970ba0133b5125b221d194c1b636d93a80ee870b192ebe8"
+      },
+      {
+        "argText": "bundleId",
+        "fingerprint": "abdd4e5c4dbc454d9a4faf36586112305cb286f014e4e85027e2d9a9e0e3959b"
+      },
+      {
+        "argText": "session.id",
+        "fingerprint": "ac4ff9476a8f048bae9d8180048c82a3be544a3f80d6a8ebd024f653d5856af8"
+      },
+      {
+        "argText": "bundleId",
+        "fingerprint": "af40109e1f212eb7a67071ea98e777cf88fb064d26b8a79d91aca8f96620b7f9"
+      },
+      {
+        "argText": "chainOutcome",
+        "fingerprint": "b10bcdd53513c05792d9900ff4998b239a79a11f63501eb238dab49c81e23c88"
+      },
+      {
+        "argText": "escrowAddress",
+        "fingerprint": "b5134b1766a3290dfc0c20684208bb50f00f35aa9b4dffe1ad5eb6f4745564f9"
+      },
+      {
+        "argText": "proof.id",
+        "fingerprint": "bb9c7c82cf2b7a90a34da88ecb8d4e4974688bab999118536fbd5462f48785c7"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "bfb7a3b57e14b26383b97db4b6e511d53008fc050cf07ef055f266573f615a97"
+      },
+      {
+        "argText": "scopeStatus",
+        "fingerprint": "c47a477cc9ea7581595718ac22d0764a1a788ad05b93f6f9205a46ef712adab9"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "c51de0f5abfabb6b1ed3b25c0b3b2d858353f7236ad98cef7252e55482d299e4"
+      },
+      {
+        "argText": "capabilityType",
+        "fingerprint": "c6130bc823d2d17df798c0973152b46e7e9c42c5f9b6becd6269ed3f1ff1fa57"
+      },
+      {
+        "argText": "jobAssuranceTier",
+        "fingerprint": "c687fd77b7dda50de9d3d28598001b4784eaec76f5aa5ce1ccc2a51e24f690bf"
+      },
+      {
+        "argText": "jobAssuranceTier",
+        "fingerprint": "cb74b3621b0354bce5f6f5f1dc991e88289b4f1ba6007e43f8207db75823cf18"
+      },
+      {
+        "argText": "bundleHash",
+        "fingerprint": "cb9798e5dc5e248243beac3911b32d4594cdd3c46b3f48e365ba513e5378387b"
+      },
+      {
+        "argText": "paymentMethod",
+        "fingerprint": "d1bd0ef4f66b1145b337340a36ecfa6a399813492632a5611d78e10d10a8771d"
+      },
+      {
+        "argText": "easBridge.submitted",
+        "fingerprint": "d693dd084c065e59f73c65012528c7dddc646fe5029eacb411d39a7f5907684e"
+      },
+      {
+        "argText": "kernelId",
+        "fingerprint": "d7e20cc94f84d06ed7e5e0d97fa81207e9c703e39ed6e69766d303d6e24d8a55"
+      },
+      {
+        "argText": "e2.message",
+        "fingerprint": "dadedcde7a0c446019e2af0e053137f3bf3e1bea2c9b0e7d8a56b027ca7cc85b"
+      },
+      {
+        "argText": "auditTrail.length",
+        "fingerprint": "df8135b686d786f50d8e85310eebce48b05e7b6ae53e72f4056a53f47bd8ba4c"
+      },
+      {
+        "argText": "isMockSettlement()",
+        "fingerprint": "e27a51dad0bb8d11ab2ea57ed83073c146675e6fc5b39795ad91c5787b6c4b3e"
+      },
+      {
+        "argText": "session.capabilityType",
+        "fingerprint": "e291a07bd7da967e47a6aecb31deebd1fefdc2cad85cbbff0ca8c2f6ee5816dd"
+      },
+      {
+        "argText": "evErr.message",
+        "fingerprint": "e4b23a8069f75f81bf6d94591d7c9f92acfcc58da94eaecd6257f8ec3816d3ba"
+      },
+      {
+        "argText": "easBridge.attestationUid",
+        "fingerprint": "ebc720b6ea43420af71668214f1c7892f0385c5fcc91c32d5462af6479d8f10c"
+      },
+      {
+        "argText": "isMockSettlement()",
+        "fingerprint": "f2afb0b8f9c4b7e263155f36ee2c984988f6a0799b9ff86b6b29256a5186a343"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "f2e8ef255d661cd1321b3bf5eca7959fd9aa0e8e5cb533769e9392467d352b5a"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "fba8d6404592f7be3b2427c9099bbbb12968eb301d6d09e7dfa41f87534fdc26"
+      }
+    ],
+    "<unresolved-callee>": [
+      {
+        "argText": "storage.archiveBundle({\n          id: anchorBundleId,\n          jobId,\n          stepId: job.stepId,\n          kernelId: job.kernelId,\n          assuranceTier: jobAssuranceTier,\n          bundleHash,\n          events: anchorEvents,\n          // StoredSignature → the strict spec Signature (device sig or the gateway\n          // placeholder; both ed25519, signer is a 0x-string).\n          kernelSignature: settlementSignature as Signature,\n          createdAt: now,\n        })",
+        "fingerprint": "2ef00b1a7b7564546be735edc1e80b4d2ea9ed707e61a5dafb5dabde61a28849"
+      }
+    ]
+  },
+  "routes/passkey.ts": {
+    "log.error": [
+      {
+        "argText": "err",
+        "fingerprint": "4dd76fdd453c016f8a957f524b6ffb7f29bfecb041e49640b27d8b50dbbab682"
+      }
+    ],
+    "log.warn": [
+      {
+        "argText": "err",
+        "fingerprint": "fdc486f55ff70815721e6222bfca590c0e30d41b4661cc8a47e0c1cd4ba8cb45"
+      }
     ]
   },
   "routes/product-home.ts": {
     "log.warn": [
-      "source"
+      {
+        "argText": "source",
+        "fingerprint": "d88c27216664f83d89614653d90899af04144e564ba9a210e6a2d72f29387bed"
+      }
+    ]
+  },
+  "routes/provision.ts": {
+    "trackServerEvent": [
+      {
+        "argText": "body.capability",
+        "fingerprint": "54c6c696620f29a8d33d434b69c20932f4e0e0b3ac92e01a69904db31dc90b77"
+      },
+      {
+        "argText": "body.email",
+        "fingerprint": "8e0250823ca1e30ef64c9e423325738c45ced5641846fd1d3c67a5247b004335"
+      }
+    ],
+    "log.warn": [
+      {
+        "argText": "code",
+        "fingerprint": "0e19e12a16cf9015f356b5cc3a7b9b59557dc4c21ccee9a9d797836c5f077033"
+      },
+      {
+        "argText": "record.id",
+        "fingerprint": "1f1ec8f03bc2148486463bdd5ee9d0043c46a9e6c435a82a2abcb124a70a03bf"
+      }
+    ]
+  },
+  "routes/requests.ts": {
+    "log.warn": [
+      {
+        "argText": "err",
+        "fingerprint": "7c4a37fe2f0820b227162ccdd1e0923c95376fd84123af86fe3e57da80703136"
+      }
+    ],
+    "<unresolved-callee>": [
+      {
+        "argText": "(store.db as any).delete(schema.capabilityRequests).run()",
+        "fingerprint": "bf225533e7123cfee900126e5e055b387dd936cb516ac368676038ac70c8f233"
+      }
+    ]
+  },
+  "routes/settlement-read.ts": {
+    "log.error": [
+      {
+        "argText": "e",
+        "fingerprint": "4fd2f7e2fc476e209dc60f69ac82556b2098072a2d5fe52694e981cedb698b81"
+      },
+      {
+        "argText": "unitId",
+        "fingerprint": "cd2e8905c88285da293873e6f0a0e7dc1a0ba1a0cf14005632ddd7dcb37e8d47"
+      }
+    ]
+  },
+  "routes/settlement.ts": {
+    "pipelineTelemetry.emit": [
+      {
+        "argText": "\"epoch-\" + summary.epochId",
+        "fingerprint": "096629724f0488fa789accc0a3b83644c8b261a55a945c2397b9ec1c8a4e43d3"
+      },
+      {
+        "argText": "summary.totalIntents",
+        "fingerprint": "13101aca10f3d88c7f319bd01e88dae3f98017af6cff83f072384cf6d32506d9"
+      },
+      {
+        "argText": "summary.epochId",
+        "fingerprint": "f39ca0b261a345114d453e69110b5599781790cdeb8a0b4f30147baa5deb9c69"
+      }
+    ]
+  },
+  "routes/storage.ts": {
+    "log.error": [
+      {
+        "argText": "err",
+        "fingerprint": "922b835f6304e2693cb1779f9f6be074af23acfff7ce285a2acfc92c6322fdc3"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "a5ccd7909095ce3b1cda3316850599e2a2e5a3fd732a1da867362134b37b9cce"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "fd740afa12dd3b3cb27e1819873adb9439844e165f923329e8622c10b7717ad2"
+      }
+    ]
+  },
+  "routes/support-messages.ts": {
+    "console.error": [
+      {
+        "argText": "err",
+        "fingerprint": "b7e5bca06144ad52341f2abc3381387c02f7b935b44822342e086fa8ad92f328"
+      },
+      {
+        "argText": "res.status",
+        "fingerprint": "fcf05c204efb323dd545d3cfd20e70f3b4ff06bc49f13d9b128ad41b19b38730"
+      }
+    ]
+  },
+  "routes/telemetry.ts": {
+    "pipelineTelemetry.getTimeline": [
+      {
+        "argText": "summary.jobId",
+        "fingerprint": "7c1b114fe4c38650142d4312b7ac6bfe05ebe94bf713084d9618f1a8c79d79be"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "c2380895c60375e7ae99454a9e3d9c11af2447410ee0e0a0542614a995538de0"
+      }
+    ],
+    "pipelineTelemetry.emit": [
+      {
+        "argText": "duration_ms",
+        "fingerprint": "6ab6227a9bb75685768eaa1cd54059fce91be5a3675d5846a9bb5c8ec775b501"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "795e38468efc9201bcaff18fb78f987f2414d13be54b261f5a1082aea9506448"
+      },
+      {
+        "argText": "source",
+        "fingerprint": "a725470da712a3394b0ab7dca49acf00f951da1f67e9ce21e381de9561afaa96"
+      },
+      {
+        "argText": "phase",
+        "fingerprint": "b85d8680eb09e0ff6b7a934ecf6d977a6d2ac7a300ce01f41d98cacea48ff092"
+      },
+      {
+        "argText": "level",
+        "fingerprint": "bd8aba54ae6e3704167aef20795a77806b5677bea0fdf028c88bbe6402f8d72f"
+      },
+      {
+        "argText": "status",
+        "fingerprint": "d148935eea207e5b90f3eb2c8aa72e2d2bf9202f17b8d133ece219f83a330831"
+      },
+      {
+        "argText": "sanitizedMetadata",
+        "fingerprint": "d4e49a774dc5a98ff1f9a2fd45ab5cf7947851935b206f9b5a2b9006e2386f17"
+      }
+    ]
+  },
+  "routes/tool-search.ts": {
+    "log.info": [
+      {
+        "argText": "m",
+        "fingerprint": "8969002a3e5848885e7f327dc3e96088693adb7f2622e87da9bde6de3a84f590"
+      },
+      {
+        "argText": "m",
+        "fingerprint": "8d6ccff89ac91e0bb3d63d5b572f1fc65ae3adb90aee3f91b76973c0adb94dc5"
+      },
+      {
+        "argText": "m",
+        "fingerprint": "c6121d0631f06deac5ca34d458ba11072ce9692672e2a127b4aed73cf7ef7a0d"
+      }
+    ],
+    "log.warn": [
+      {
+        "argText": "e.message",
+        "fingerprint": "18f4e2bf92ffc57bac236a7ee2b4ce939ebc1731a8f4a87bd871001548afac88"
+      },
+      {
+        "argText": "m",
+        "fingerprint": "2231b5b96938eb79a74988cf12ba5878733e7ba967bd6bdfe6cd978a50e60613"
+      },
+      {
+        "argText": "m",
+        "fingerprint": "7071fd5f3e270c3450e5477497de89e2dd3422e34629fd5f4e4cb6a747665efe"
+      },
+      {
+        "argText": "m",
+        "fingerprint": "8b3582d30e2ccc36738f0089c17e533a01097428b1605eaac28d85a017898e79"
+      },
+      {
+        "argText": "String(e)",
+        "fingerprint": "f89b439f2c3920b8ac8f198bdb0cd6b90ac8f6f8a5c67833fc99df843bf35369"
+      }
+    ]
+  },
+  "routes/wizard.ts": {
+    "console.error": [
+      {
+        "argText": "message",
+        "fingerprint": "25edab76fa123fe3481bb2460d7945c020224a43aca0fdad872a55cbe09ad6bb"
+      },
+      {
+        "argText": "message",
+        "fingerprint": "b9d0d63cbbb52b51375217b330c515a35383600f70ad490945fbf36547683c70"
+      }
+    ]
+  },
+  "routes/zk-proofs.ts": {
+    "trackServerEvent": [
+      {
+        "argText": "(req as any).operatorId",
+        "fingerprint": "207ef2ef7e6e2e614c0d4eb37f1229cd1805397349efbca21d35f53bf3289135"
+      },
+      {
+        "argText": "(req as any).operatorId",
+        "fingerprint": "49e0839354b3d78f00593d7ee67b8f14a89c044c9753e7a79ae3f469fc0fa6dd"
+      },
+      {
+        "argText": "starknetService.isMock()",
+        "fingerprint": "5bff0a1a5dfc743d62b6a5008fa2cc52032e679fe8774913d51b5228e95099b3"
+      },
+      {
+        "argText": "anchor.txHash",
+        "fingerprint": "75792c5e157ab5f701499a7dfa74a714735cef8959764ea6aaee0d40ee2d5947"
+      },
+      {
+        "argText": "body.proofId",
+        "fingerprint": "765d7c0f53ef1472a05aafd2ff47e091952599fc932eeb63ffc00d4c02f5cb60"
+      },
+      {
+        "argText": "anchor.txHash",
+        "fingerprint": "d8383ce44513a640a79695f4a0adf805cd921c8249a2df5230ea0dcddd98b5cc"
+      },
+      {
+        "argText": "body.merkleRoot",
+        "fingerprint": "de324f90e15784fcf4e4844b8619f7cf4ac211e72fca56fe5e2d16f09e2c445c"
+      },
+      {
+        "argText": "starknetService.isMock()",
+        "fingerprint": "ee4e5aef6f85de6f25aa1f0e63891cc582acee74ec3c003cc370e4a3d30877af"
+      }
+    ]
+  },
+  "routes/aggregator/invoke.ts": {
+    "log.warn": [
+      {
+        "argText": "String(err)",
+        "fingerprint": "03ff4e0a21d89f7dc7f2faa625005505bd80b541d124a8c4df16732c77d1779f"
+      },
+      {
+        "argText": "err.message",
+        "fingerprint": "7bd34df4381cf87aa839ad514b84772fef0171a510b795dee58aac1381924a00"
+      }
+    ]
+  },
+  "routes/aggregator/search.ts": {
+    "log.warn": [
+      {
+        "argText": "String(e)",
+        "fingerprint": "8c29d413762bd3d01e41d33fb6aff6ab25d4fc74a4efacbcc099f30e5aa81cf3"
+      },
+      {
+        "argText": "e.message",
+        "fingerprint": "b272caca53b8f3d5c6403182335424ba0e13f591e54a844953a400212186e7b0"
+      }
+    ]
+  },
+  "services/agent-heartbeat-monitor.ts": {
+    "console.error": [
+      {
+        "argText": "err",
+        "fingerprint": "16563c5dfe3c9792b37b05a976aed1691efe563780d313d0ab026807eb1f6fd3"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "2851d719da527a7744c2047900e479c9542ccd02567c7a347f7669f556146ec4"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "7b7ced01ea0f292c909debe2d55d9da8fce829009966999d20a77dca06718897"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "890d343b94da7cfa82c2b882506346fd71db64c9754c3fc385ae60951a63a4c8"
+      },
+      {
+        "argText": "agentId",
+        "fingerprint": "8f85d83f8a61ca4930b466420fde14f2fd5da8005d46a555ec69805130fff5c4"
+      },
+      {
+        "argText": "agentId",
+        "fingerprint": "ae3c202f26fd020c6b81d5dc815f032a809b7c774dc7daf1844863b35d930b18"
+      },
+      {
+        "argText": "agentId",
+        "fingerprint": "c2a66dcec3787b3eaecd0883bed4b3bc75b49abd091e330caf1602c7c69c4b45"
+      },
+      {
+        "argText": "agentId",
+        "fingerprint": "cc3379e899bcd819734a1b435d766219de5582e98f56473fd97706c95cad0f02"
+      },
+      {
+        "argText": "cbErr",
+        "fingerprint": "d5f0721aced340658bbaca1146736019027bbe33a009149a4a07a04f7151ebfc"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "df39d61ea498c36a03affa47d623dabc970500906cbe09ebb31673895ad041a8"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "f646c173b06162354d38d709db39437afd2f4bc3adb297387b167720a7c4cd3c"
+      }
+    ],
+    "console.log": [
+      {
+        "argText": "agentId",
+        "fingerprint": "42b55c0ae5ac52685c453799cc62ef88ec92330763cefc85db9c6e3611529a30"
+      },
+      {
+        "argText": "card.id",
+        "fingerprint": "6b6cca2dad4e48f9dd6aab48cae89159c96ea03389170229c7569a1955b6e9cf"
+      },
+      {
+        "argText": "agentId",
+        "fingerprint": "7866459a0e697a181193b94471d3fadc6e9989fdfcd47051a001821433f1b5df"
+      },
+      {
+        "argText": "agentId",
+        "fingerprint": "849382ae783b733946b18b022a17387b31faae57ab082ecc080978cdb1c435d7"
+      },
+      {
+        "argText": "card.name",
+        "fingerprint": "a3f0ebdadc693f8e9a7e67d9bbcea958c2ef709c63505295b17f50658987c181"
+      },
+      {
+        "argText": "`[heartbeat-monitor] Started (interval=${this.checkIntervalMs}ms, ` +\n      `suspicious>=${this.suspiciousThreshold}, rogue>=${this.rogueThreshold})`",
+        "fingerprint": "f2820e702d3ccc23f192a88153478ebbf8c81e8ab90add43284d93306b2e9b07"
+      },
+      {
+        "argText": "agentId",
+        "fingerprint": "f870d6a291a8d89b6826dd02cc21b42ed5720440455dbf16c8829560a5e8ee85"
+      },
+      {
+        "argText": "count",
+        "fingerprint": "fe8d94751f93d20c193921660b0df0c8a4a3d1c9ec9652919cf267a34dd186f2"
+      }
+    ],
+    "console.warn": [
+      {
+        "argText": "agentId",
+        "fingerprint": "2cb612f4d50b6d5fea05a8e44be07840bb316a755cb91945314d4f1e947f373e"
+      },
+      {
+        "argText": "missed",
+        "fingerprint": "44c40503f8ad44ca1d00129892a7abdcca0e21e9beb15a738b83648328a153be"
+      },
+      {
+        "argText": "agentId",
+        "fingerprint": "44de9a08aa0bf349166f705988790b13c4ea218592ce9d140310f91d0c28a180"
+      },
+      {
+        "argText": "missed",
+        "fingerprint": "8372f2155c842e5e64f3ad6f42cd4bba0999c076c5b2665d5bef555d90519fdd"
+      }
+    ]
+  },
+  "services/cid-blob-storage.ts": {
+    "console.warn": [
+      {
+        "argText": "(err as Error).message",
+        "fingerprint": "0e548ef53acbc9bd69c3620094084781192d7c9c4f3a398716d519dd0e2e8680"
+      },
+      {
+        "argText": "backend",
+        "fingerprint": "f32ce7dcdac22aee867100ad9543f2df5a8daae6bbfc4eea4f9bff75020fd8a7"
+      }
+    ],
+    "<unresolved-callee>": [
+      {
+        "argText": "this.fs.cat(cidParsed)",
+        "fingerprint": "0151048158a8971a2e340ddbe1749b5cf93d9e8f25352c50f06fdbbff528687a"
+      },
+      {
+        "argText": "this.helia.stop()",
+        "fingerprint": "03b6b3634853624032a7995395d7c7bb189b8cbbf9bed7a62ad832d37905a1d9"
+      },
+      {
+        "argText": "this.fs.cat(cidParsed, { offset: start, length: end - start + 1 })",
+        "fingerprint": "6062a00d032642254cd06028a5622a78c9335621cb99360bdfdb655ccfec2a94"
+      },
+      {
+        "argText": "this.fs.addBytes(bytes)",
+        "fingerprint": "ac0b795dc5b9cb422e22539c2e227a4f0034d306211c245d1278e3f5d0c0b374"
+      },
+      {
+        "argText": "heliaCid.toString()",
+        "fingerprint": "aeca21112e50b2878d76fa41e61516770946b238a015400aa722fb262b4e4329"
+      }
+    ]
+  },
+  "services/erc8004-identity-sweeper.ts": {
+    "console.log": [
+      {
+        "argText": "m",
+        "fingerprint": "0493d1df85f3cf1bcad63343990d88b88359dfb9c3e0bf11eafb5eb8c5bacbc4"
+      }
+    ],
+    "console.warn": [
+      {
+        "argText": "message",
+        "fingerprint": "c750be1fa3dcf937c9edaefef606b0072a4721275499a3b91430af5bab376cfd"
+      },
+      {
+        "argText": "fields.code",
+        "fingerprint": "fd53bec87d86111bf9c7e3abffa7d1f169305c30e997f485d0b43bc39d9aac39"
+      }
+    ]
+  },
+  "services/event-bus-otel-bridge.ts": {
+    "otel.startSpan": [
+      {
+        "argText": "e.level",
+        "fingerprint": "0d7922679eb71efaf33079b5070751e52e10e8dd6426baa5dedcf6a858fd54a2"
+      },
+      {
+        "argText": "e.text",
+        "fingerprint": "2219ef78dcbd1a6fbd677bb51d8d930f06748b8e70686a0b1eb3dd16b81fdd90"
+      },
+      {
+        "argText": "e.kind",
+        "fingerprint": "45fc4eb6d691bbc9b1969139e241997a015390f754ca3a6e0c98488b84d9deb1"
+      },
+      {
+        "argText": "e.duration_ms",
+        "fingerprint": "6e38f41c567b03f46f8e8b2f6913d1e9cbb2c291c4d4b6779ef18874b1942924"
+      },
+      {
+        "argText": "e.sponsor",
+        "fingerprint": "8f526615cfd9ddc4f569a71f85c9c069956742d83545ddb6406400a8d0fbdb85"
+      },
+      {
+        "argText": "e.text.slice(0, 1021)",
+        "fingerprint": "984c03aa88e4595d47ef4f138ab5451fa9dde2521714f32ddc7e49bb6f51c0a5"
+      },
+      {
+        "argText": "e.t",
+        "fingerprint": "b0d2793e32e4f59523eeb4795f2d24df29248028295b057ee87b11540292478a"
+      },
+      {
+        "argText": "e.kind",
+        "fingerprint": "d5ca982ea15df1f180cbf775751c605404b8699e610650bb7e01bfec713c4ca1"
+      },
+      {
+        "argText": "e.session_id",
+        "fingerprint": "e110538a51ae6c5c32589a10bafc99b432d35b314854bbcf08ede0ef65024e64"
+      },
+      {
+        "argText": "e.sponsor",
+        "fingerprint": "ef8b6c427e1f32e9379fe5a0b1c084548a6c9f895d4b3e395046423fcf3497fc"
+      }
+    ],
+    "otel.recordException": [
+      {
+        "argText": "e.kind",
+        "fingerprint": "1d44a1e31b2f30ac3afed7200e5dd9f948356ca515a8ba71f265ef305a051951"
+      },
+      {
+        "argText": "e.text",
+        "fingerprint": "4a9d1a8ccac0ff9bebffffdfb3a75856b8cea804ac25f14981b5b48f068bdead"
+      },
+      {
+        "argText": "e.sponsor",
+        "fingerprint": "b10001e8dd950679908239e816e028b5dca4c4aa5aa68143a7bc534370edb0cb"
+      }
+    ],
+    "otel.setStatus": [
+      {
+        "argText": "e.text",
+        "fingerprint": "bad37fb74cda944ca24da77dd74680c54f82b83373bfdbd4863718c7c50bb9d5"
+      }
+    ],
+    "otel.end": [
+      {
+        "argText": "e.t",
+        "fingerprint": "40ffc6ae22584cbe570d00aa08d63c52740567fd262c086130ca7d4f15991b4b"
+      },
+      {
+        "argText": "e.t + e.duration_ms",
+        "fingerprint": "fecbc1d894509d1c19b638e80bac623445b0ae584252efc68933c10105f591e8"
+      }
+    ]
+  },
+  "services/funnel-tracker.ts": {
+    "trackServerEvent": [
+      {
+        "argText": "capabilityId",
+        "fingerprint": "007c2d57d44784bc72033f4c37ca97804964dfae7d66415edf80abdb8ecefd7e"
+      },
+      {
+        "argText": "kernelId",
+        "fingerprint": "0e47bd2f3a84fc6882b781540791f15960cbe28801e053e17805d2f78704652b"
+      },
+      {
+        "argText": "kernelId",
+        "fingerprint": "315254693057586f1eb82eabcb4d66eaec4e9f14e831ebd6254235b034e87dc5"
+      },
+      {
+        "argText": "route",
+        "fingerprint": "64f47963838b8117baaf92228c29073f76545e1217d49df79a08f3f654b0e24f"
+      },
+      {
+        "argText": "traceId",
+        "fingerprint": "a0015e16368771153f8cec43106c75a0a4f41e52efe95ead1372cf08dedc7e34"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "debe0c6fc02e24424c9fdba143ac5d36bdc9bf4d67f51308233a10ec729234fe"
+      },
+      {
+        "argText": "deviceId",
+        "fingerprint": "df29424e77922b63b4bd7bee51a7a4a0dd6683a362587d6e82dd087adf131dae"
+      },
+      {
+        "argText": "status",
+        "fingerprint": "ed7d45042f6ffc6263677ee23c85745101a90d2dc867e03e27f137e53c719471"
+      },
+      {
+        "argText": "stage",
+        "fingerprint": "ef106bf0e1368c792e40ef42254b4428937174fe1c827ccc5d3393be912a86a5"
+      },
+      {
+        "argText": "traceId",
+        "fingerprint": "f55070959b65797cc7f9204b067fd017dde09845f6218528fa8dc208ab6e5703"
+      }
+    ]
+  },
+  "services/kernel-ttl-sweeper.ts": {
+    "console.warn": [
+      {
+        "argText": "raw",
+        "fingerprint": "645bd24df23c456dcd1f56e84518877c0a751af06d33cb85ebb947f6b85913e8"
+      }
+    ],
+    "console.log": [
+      {
+        "argText": "result.kernelsExpired",
+        "fingerprint": "14fd38a6269523379b7fece4f6838711948a4ce61ec6ce4090c5d223112bf307"
+      },
+      {
+        "argText": "result.scannedKernels",
+        "fingerprint": "7ffd94ce43c1eaeb40cfa6a05b6ef7b0798e3f4054552dc2d66c67c57c23c720"
+      },
+      {
+        "argText": "result.capabilitiesExpired",
+        "fingerprint": "84d3572622b4b363954c0d70fe18153be1c0e0ee39b8971eee2eb11d9019758e"
+      },
+      {
+        "argText": "result.scannedCapabilities",
+        "fingerprint": "b8b41de67b5396deb47a7fde1f29440932af741941e3ce3bf1733798e1fe49db"
+      }
+    ],
+    "console.error": [
+      {
+        "argText": "err",
+        "fingerprint": "dcff0738a3a9b9957670d04c56ef41cdb7a12ad0c777c02b8e9807b2a0bbe416"
+      }
+    ]
+  },
+  "services/oracle-client.ts": {
+    "console.warn": [
+      {
+        "argText": "`[oracle] Mock verification REFUSED for paid tier ${request.assuranceTier} ` +\n        `(job ${request.jobId}) — no real oracle configured. Failing closed (verified:false).`",
+        "fingerprint": "576441fb4d66765c2ec25d8264d38870681f047749b482066adfee058d058f91"
+      }
+    ]
+  },
+  "services/settlement-keeper.ts": {
+    "console.warn": [
+      {
+        "argText": "`[settlement-keeper] SETTLEMENT_KEEPER_INTERVAL_SEC=\"${raw}\" out of band ` +\n        `[${KEEPER_INTERVAL_LOWER_BOUND_SEC},${KEEPER_INTERVAL_UPPER_BOUND_SEC}]; using ${KEEPER_INTERVAL_DEFAULT_SEC}`",
+        "fingerprint": "1f264e3535847887afdd0895b6e7d13b9d77cf42f9990ccdc1cac1f9deb8001b"
+      },
+      {
+        "argText": "m",
+        "fingerprint": "ad72b4a87a6329ef96dfa7cf85b30a1756422440bf69dd7cc4daace214ddf8af"
+      }
+    ],
+    "console.log": [
+      {
+        "argText": "m",
+        "fingerprint": "ed7876546a291d911dadfdf09f39fe93febff3ff8a8d2f77da87d59a464d3867"
+      }
+    ]
+  },
+  "services/settlement-service.ts": {
+    "console.warn": [
+      {
+        "argText": "storyErr",
+        "fingerprint": "08e8079f5c9c24077669281138a0dce7560ddda4e2042b79afaa618a0d42a5f4"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "233b6f8fc1250fba8c5c3d5734fafe4108527488c417eae132280898ededaea1"
+      },
+      {
+        "argText": "dbErr",
+        "fingerprint": "2c3396e8803d719b10610c1a171908933a45e9b5d0a9b3f2360981f712b7fc01"
+      },
+      {
+        "argText": "storyErr.message",
+        "fingerprint": "544fd41144b1dbe024f63aa7460e58ec7ee97a7fecdd0e1fa4c8aa41d3b0322c"
+      },
+      {
+        "argText": "storyErr.message",
+        "fingerprint": "59723473709323d0a97bfcc9ecf76f69b7b6ae61eee0e2e488b01de220d85556"
+      },
+      {
+        "argText": "`[settlement] Refusing to settle job ${jobId}: bundle ${bundle.id} contains ` +\n          `fabricated (simulated/mock) events at paid tier ${bundle.assuranceTier}. ` +\n          `Evidence archived + persisted but NOT settled as real.`",
+        "fingerprint": "5b0eb62ade48e770342e6673b4472366b31b2a6fbb00ce024d8b83f3f45e6cd1"
+      },
+      {
+        "argText": "err.message",
+        "fingerprint": "5cfa35edab32ca9cfea49653ce3ba275ce814238c49670d191d9e1b8148b980f"
+      },
+      {
+        "argText": "err.message",
+        "fingerprint": "5fe60a30cc58bd65a4bb345e5b5b06322a2ffb94c1622c49eeba83c218960bb6"
+      },
+      {
+        "argText": "dbErr.message",
+        "fingerprint": "69b9e79d571a7fb5f7ffa402ab1a25b65b8cac310a1a61dda78710cabfd76164"
+      },
+      {
+        "argText": "err.message",
+        "fingerprint": "842355f63b012c9a304e105236879b89d04fa0bc00796cd88d5ce5bc66a23a8f"
+      },
+      {
+        "argText": "storyErr",
+        "fingerprint": "afcd6df1e442931a993d27d940af1ba16cf48e76dfbb7df779c66ce26fd4da1d"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "bce2ce813f8bdaf645eb14a30e57c07bf91c03d67559ea9a52644de8a0d14b44"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "c23682643fc25c5466cd6009098c0e5377fe2b42b82fb0f5665996c834eb5c4d"
+      },
+      {
+        "argText": "err",
+        "fingerprint": "d78935b0d3ff49769849f8bab5a65bf7ad43550e7112f083d69aee72fdc2ff78"
+      },
+      {
+        "argText": "err.message",
+        "fingerprint": "ee11a17338c008afdee5bb9d8a951dba784d7392ab98cbdcb5676dff04dbe175"
+      }
+    ],
+    "Sentry.startSpan": [
+      {
+        "argText": "contractAddress",
+        "fingerprint": "00c5a025216b5121c0eada14901a8ad2d2a114360108ef8ec89843c610105409"
+      },
+      {
+        "argText": "bundle.events.length",
+        "fingerprint": "072f744b4941102a7e38ca17214ce431e8a933f1c74beaf51ccdbb3d5fb62c22"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "0765c291b8bfe63eb9440f6ce0595a4f28b8a2026051b1d146e2ec5b8362e0f3"
+      },
+      {
+        "argText": "bundle.id",
+        "fingerprint": "0b353146c61f90116200d614e35ae34d14a74fd9aba4637ae7c84dfae5f8c8aa"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "338e27b648b4708012f32531c8d3cbdf42cd02a564492830133b86236a7584df"
+      },
+      {
+        "argText": "contractAddress",
+        "fingerprint": "62cdf4b91c0cbaef7e91e3d6d4e83fc5f6d0926b63c707bf4a0dc69b10b9fc23"
+      },
+      {
+        "argText": "bundle.id",
+        "fingerprint": "776ca3b937dacb029c5ecc2a56fb7b5d81de687fb0bc22221ed62e7d0aafd5c8"
+      },
+      {
+        "argText": "isWriteEnabled()",
+        "fingerprint": "8b11f2a3f04e0d62a621a364b55f2ea0de5b75d3e5afb61f204a846d873e9be3"
+      },
+      {
+        "argText": "autoRelease",
+        "fingerprint": "ace1d2761ce94efe5f68cb493feaa98c01323762faa0f689a91698a56cbf2ccb"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "b704f9f144cbee3df586a34fc358d988d7e64c9609da8dd6d8ec23dd7a9c395f"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "ee373fe07e6862e35b4321f86bb501608fcbc15861754435dd920665b81e760b"
+      }
+    ],
+    "pipelineTelemetry.emit": [
+      {
+        "argText": "bundle.id",
+        "fingerprint": "00d14bf0341aa119d9c7a3aed850ad99c7bea0769ec3d8a19bf52d26bdd74740"
+      },
+      {
+        "argText": "contractAddress",
+        "fingerprint": "0f5d246a8e270335829b8cb96eba6a004e61059e390cf8faf3fa215c83c00c48"
+      },
+      {
+        "argText": "err.message",
+        "fingerprint": "1319fd784acc4b91dec66fdd3e88e6f054808c2c92d7d3830b78fdddf0fd442d"
+      },
+      {
+        "argText": "result.releaseTxHash",
+        "fingerprint": "21c10f4e20cd339d8c1a5f61b36093bfa745d00bd1be97d9e4f1191f6666cc44"
+      },
+      {
+        "argText": "link.parentIpId",
+        "fingerprint": "3f045d82be54f70cecd7e65bddc571a4f6c5a5ab8aa9f314b81f1fedacd4c4df"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "425cc4573263582880fee5c6182d926a6f17faa80c9becbb008dffe1c5ecad40"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "462ab1e46a74d26ca463fdb897686d091d35987605aa67b8392f3b913b59043e"
+      },
+      {
+        "argText": "storyErr.message",
+        "fingerprint": "578fc4d8ac71faa8bd25dbdd13b934f562eb9d885ad25618ff97006df0029866"
+      },
+      {
+        "argText": "err.message",
+        "fingerprint": "58d193f19aa5132e96c17f197ceafaca8b1925039df427662e6e81facbb29ecd"
+      },
+      {
+        "argText": "String(storyErr)",
+        "fingerprint": "5c6b720b744a2424c3a7d1bb29dc3abe92ebcdf3be2cd837028f42299d26a6d8"
+      },
+      {
+        "argText": "job?.capabilityId",
+        "fingerprint": "6d7c768b9e260ce836c952532873bef164f271336979cb097fb095541c217873"
+      },
+      {
+        "argText": "String(err)",
+        "fingerprint": "72f0adcf3632d69b3120ba4cf11842b1e3c96514daf03cd7b4bed03b57f65a67"
+      },
+      {
+        "argText": "result.evidenceTxHash",
+        "fingerprint": "73f2dc98b9d4586924f0536f3cafca3a28040cee8fa393cb8201de8c459acb9b"
+      },
+      {
+        "argText": "link.childIpId",
+        "fingerprint": "7accd2f9d91d1db396d799e44a911233c8acb58181985e798f2e731c93d819b4"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "83e63b1f0741d698d154f9c1b8aef97f8a5982370277d72f82b66ce3f4bc8da1"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "8e48f8463f41c06f735d965ec9cff3a125a7455b5c2a5ff9bcbb267be1e76a16"
+      },
+      {
+        "argText": "contractAddress",
+        "fingerprint": "a3bad9e6addd6bdc269163456489e37c4fa286f67b43bfae192cdfc993158605"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "ae8d22bc5db5e02d1c16e7cfc98032b471f06ebcc3481c9b6b56ecf195d376d7"
+      },
+      {
+        "argText": "String(err)",
+        "fingerprint": "c284ef31b3f38431c8484da545af9ef5195117cd4116e8cca6d9ba0ada1367ac"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "cf16177aaed75eaeeaf3791aa52fd4e68bca96582766c270e4c1d920e1115ca4"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "d1515f2377c26d71bfa6d76df43754f63966eb34c5b0001f875a8f1e3ca72b79"
+      },
+      {
+        "argText": "result.cid",
+        "fingerprint": "e6190dcdea403ed8969899d641eb5dffa8188187e2e486a0f6141beedf745da4"
+      },
+      {
+        "argText": "jobId",
+        "fingerprint": "f3fe7ea26518070ce710bc8ff3e8d1747d4481f3470c6f6ba16435632d4dbd28"
+      }
+    ],
+    "console.log": [
+      {
+        "argText": "royaltyPercent",
+        "fingerprint": "22f59653380d158983a905ecf4f741a21c0b8784f7461f67f84e6490fc3a3803"
+      },
+      {
+        "argText": "royaltyAmount",
+        "fingerprint": "8d24fcb64b09b934da0ab6ce77337f8060f780f6a63265593d1c4cb5e630e490"
+      },
+      {
+        "argText": "childIpId",
+        "fingerprint": "c78586ad1d3d9caf5439f8415c264900fab95d3925a59bfb3caa48e1ace4f0b3"
+      }
     ]
   },
   "services/wildcard-key-migration.ts": {
     "console.log": [
-      "counts.alreadyRevoked",
-      "counts.kept",
-      "counts.keptInactive",
-      "counts.narrowed",
-      "counts.revoked"
+      {
+        "argText": "counts.alreadyRevoked",
+        "fingerprint": "0c75b06891125752d676f6d5635448ee5fdfdfa705be2687d72690bbdfb7c22a"
+      },
+      {
+        "argText": "counts.kept",
+        "fingerprint": "4bed482f62abdebc903b192e87d1658a657a0e4bcad3d43269f0e3f7b88e9585"
+      },
+      {
+        "argText": "counts.narrowed",
+        "fingerprint": "55861df5fbf8a94a48aa3eb5fe10b5e711dc77af23d54dde85c36ff1945c7c31"
+      },
+      {
+        "argText": "counts.revoked",
+        "fingerprint": "7a56a9a126ad2945b3ab753fd0d971f5f9c9524ad222ab86c77595400a9038eb"
+      },
+      {
+        "argText": "counts.keptInactive",
+        "fingerprint": "aaf32425cf0f84c7eb3114f26f4a5eace1c933e5c6b570ba6ebeec8801fb3918"
+      }
+    ]
+  },
+  "sse/producers.ts": {
+    "console.log": [
+      {
+        "argText": "this.producers.map((p) => p.name).join(\", \")",
+        "fingerprint": "1c7a7306ffba9bb1b8a560db7b38abbd74c2892f6cd1545365a28732b0322098"
+      },
+      {
+        "argText": "this.producers.length",
+        "fingerprint": "6bc17fa22e64645b1ab408b854aa30435d3d82afc3c2d38aee11f79d1a2f85e7"
+      }
+    ]
+  },
+  "readmodels/job-execution.ts": {
+    "<unresolved-callee>": [
+      {
+        "argText": "db\n    .select()\n    .from(negotiationSessions)",
+        "fingerprint": "03c5d892c176435b835346a6b059271021e32351fd6c7ce8463cb29028afee62"
+      },
+      {
+        "argText": "db\n    .select({ jobId: negotiationSessions.jobId, userAgentId: negotiationSessions.userAgentId })\n    .from(negotiationSessions)",
+        "fingerprint": "04b36b4ed86de36918cdc1394230e47ccb8334d9ed5167d4e6473c23591a28a1"
+      },
+      {
+        "argText": "db\n      .select()\n      .from(jobs)\n      .where(and(eq(jobs.cwmId, cwm), eq(jobs.stepId, job.stepId)))",
+        "fingerprint": "19f9daecdff0b25dd458ac7983f2b23a5343b1ac53b0f8bee1aea49ba88987eb"
+      },
+      {
+        "argText": "db\n      .select({ jobId: negotiationSessions.jobId, sessions: sql<number>`count(*)` })\n      .from(negotiationSessions)\n      .where(or(...candidates.map((jobId) => eq(negotiationSessions.jobId, jobId))))",
+        "fingerprint": "1acc11cb200974df2e3e3f3c44cf0c8d19f49a059a0f627599752fda79550d57"
+      },
+      {
+        "argText": "db\n    .select()\n    .from(negotiationSessions)\n    .where(\n      cwm\n        ? or(eq(negotiationSessions.escrowAddress, escrow.contractAddress), eq(negotiationSessions.cwmId, cwm))\n        : eq(negotiationSessions.escrowAddress, escrow.contractAddress),\n    )\n    .all()",
+        "fingerprint": "248b67a42cf6ae9dcb5612d0cf3a3a04725db196cc89eee77383eb00fc109369"
+      },
+      {
+        "argText": "db.select().from(escrows)",
+        "fingerprint": "2f9b0004328027efcb6889717fbed5fc30e4ab3f5d17cd242ee77a8aa32e8b41"
+      },
+      {
+        "argText": "db.select().from(escrows).where(eq(escrows.contractAddress, address)).all()",
+        "fingerprint": "43dd225f113e468ede01d15b64b18f44c3201ce8911e76a25aea41429c948fd9"
+      },
+      {
+        "argText": "db\n    .select()\n    .from(negotiationSessions)\n    .where(eq(negotiationSessions.jobId, job.id))\n    .all()",
+        "fingerprint": "47682488477f08198845b07d01ac256ebdfdb51272b51a7734113f9419c4983c"
+      },
+      {
+        "argText": "db\n    .select({ jobId: negotiationSessions.jobId, userAgentId: negotiationSessions.userAgentId })\n    .from(negotiationSessions)\n    .where(sql`lower(trim(${negotiationSessions.userAgentId})) = ${wallet}`)",
+        "fingerprint": "5312050f9f4773f132ee5686b8350f9bab3b3a4a4532bab26f37e9313281b8db"
+      },
+      {
+        "argText": "db\n    .select()\n    .from(negotiationSessions)\n    .where(\n      cwm\n        ? or(eq(negotiationSessions.escrowAddress, escrow.contractAddress), eq(negotiationSessions.cwmId, cwm))\n        : eq(negotiationSessions.escrowAddress, escrow.contractAddress),\n    )",
+        "fingerprint": "66043095371085cc29f4635eac5df9c9a19562f091061cdf5846901def9aa20b"
+      },
+      {
+        "argText": "db\n      .select()\n      .from(jobs)\n      .where(and(eq(jobs.cwmId, cwm), eq(jobs.stepId, job.stepId)))\n      .all()",
+        "fingerprint": "6666eb38adb736cae20bf18d99a129536b3f5cc98f2388108eb6ef696c021ed8"
+      },
+      {
+        "argText": "db\n      .select()\n      .from(jobs)",
+        "fingerprint": "88e3798a3cd531dd3c14f8b05ba6ae4afcaa5e59b6142e76e470beb5ed704a20"
+      },
+      {
+        "argText": "db\n      .select({ jobId: negotiationSessions.jobId, sessions: sql<number>`count(*)` })\n      .from(negotiationSessions)\n      .where(or(...candidates.map((jobId) => eq(negotiationSessions.jobId, jobId))))\n      .groupBy(negotiationSessions.jobId)",
+        "fingerprint": "8c72126163e9459e9a3f4cf11a8ac909710107dc6db81d111aa17415793869f8"
+      },
+      {
+        "argText": "db.select().from(escrows).where(eq(escrows.cwmId, cwmId)).all()",
+        "fingerprint": "8e22c222b4a0924a1e57a61cd63bfad2b11250003df3418e2ded6f42c9814e29"
+      },
+      {
+        "argText": "db\n      .select({ jobId: negotiationSessions.jobId, sessions: sql<number>`count(*)` })\n      .from(negotiationSessions)",
+        "fingerprint": "a569484e1ddd0b1803efe0bc1edc0577a81bc6c3286a61956435cb3a178f9de0"
+      },
+      {
+        "argText": "db\n      .select({ jobId: negotiationSessions.jobId, sessions: sql<number>`count(*)` })\n      .from(negotiationSessions)\n      .where(or(...candidates.map((jobId) => eq(negotiationSessions.jobId, jobId))))\n      .groupBy(negotiationSessions.jobId)\n      .all()",
+        "fingerprint": "a8b5d284f6dbb40fed466857729f30afc6f9e9e1539653a36b3fc47f1001c6b7"
+      },
+      {
+        "argText": "db.select().from(escrows)",
+        "fingerprint": "af614fa340762277d1307d3b8d98c93459d9e42ef9c50ded3a620f4d053013c8"
+      },
+      {
+        "argText": "db.select().from(escrows).where(eq(escrows.contractAddress, address))",
+        "fingerprint": "bb973830b1af4a95f9d05a6377c7486c5f184167cd11fb5db650e278f1fb4bf1"
+      },
+      {
+        "argText": "db\n    .select()\n    .from(negotiationSessions)",
+        "fingerprint": "c1f92553494e0dbc7e4bf77056805421d9b1879c390715b8fac271f53a151d06"
+      },
+      {
+        "argText": "db\n    .select({ jobId: negotiationSessions.jobId, userAgentId: negotiationSessions.userAgentId })\n    .from(negotiationSessions)\n    .where(sql`lower(trim(${negotiationSessions.userAgentId})) = ${wallet}`)\n    .all()",
+        "fingerprint": "c2a4229f210a34d0be7259e5af48f95141071ea88cb8f996e5664cdefb2d5a18"
+      },
+      {
+        "argText": "db\n    .select()\n    .from(negotiationSessions)\n    .where(eq(negotiationSessions.jobId, job.id))",
+        "fingerprint": "d0675ea3a43678167bcf6532cd2f6ac1d0d1a980365a1f55a3a637d3aa9e40aa"
+      },
+      {
+        "argText": "db.select().from(escrows).where(eq(escrows.cwmId, cwmId))",
+        "fingerprint": "e559f1ae0b4dbcfaee4f6466d5a9cb2e52ae614b49cf38bcde6837140b15acb1"
+      }
+    ]
+  },
+  "readmodels/operator-work.ts": {
+    "<unresolved-callee>": [
+      {
+        "argText": "db\n          .select()\n          .from(schema.pendingApprovals)",
+        "fingerprint": "0de1b61a4debd42b5ef0796648cfa4e899ca018d7ff39e8ee3b0e266f7c3a1d0"
+      },
+      {
+        "argText": "db.select().from(schema.shopKernels).all()",
+        "fingerprint": "1ececc76d27d2002837ebc3ff395acac46ee9f6301f0b1477721f4737da3228e"
+      },
+      {
+        "argText": "db\n          .select()\n          .from(schema.pendingApprovals)\n          .where(and(eq(schema.pendingApprovals.kernelId, id), eq(schema.pendingApprovals.status, \"pending\")))\n          .all()",
+        "fingerprint": "441d4fc16cd96cdcbbf266bdde9c575eeb13c15bcadb552e860cf5752bca3e43"
+      },
+      {
+        "argText": "db.select().from(schema.disputes).where(eq(schema.disputes.escrowId, escrowId)).all()",
+        "fingerprint": "45f8f5cb04a65e7b9d585ae29f5bb7af6305f6f4bab2a20c546bc9bc10767f17"
+      },
+      {
+        "argText": "db.select().from(schema.disputes).where(eq(schema.disputes.escrowId, escrowId))",
+        "fingerprint": "48adc130a9dea0957ac3f10936715c66edfd8689f8fe8832c0a9a30db73723d0"
+      },
+      {
+        "argText": "db\n          .select()\n          .from(schema.pendingApprovals)\n          .where(and(eq(schema.pendingApprovals.kernelId, id), eq(schema.pendingApprovals.status, \"pending\")))",
+        "fingerprint": "57ec137ed0d9f1ff1f7084c3cc217cba531d2f0a54d5c0d7c5b6ae92e6811fff"
+      },
+      {
+        "argText": "db.select().from(schema.disputes)",
+        "fingerprint": "c159947a1e8a062c10027f089331f0c38a1feed3b4ee1827ef184cb385e00564"
+      },
+      {
+        "argText": "db.select().from(schema.shopKernels)",
+        "fingerprint": "c36e0e2fbda05f47c0a2f8a1aaf3c6043f4a035dc252ecb320f5b2af21be1fc0"
+      }
+    ]
+  },
+  "services/posthog-service.ts": {
+    "<unresolved-callee>": [
+      {
+        "argText": "posthog?.shutdown?.()",
+        "fingerprint": "535c6f18cf5826a5ceb516a9bdb305e65d7971753375677543857431d66aca59"
+      },
+      {
+        "argText": "posthog.capture({\n      distinctId: safeServerEventDistinctId(distinctId),\n      event: logSafeId(event),\n      properties: {\n        ...safeServerEventProperties(properties),\n        source: \"gateway\",\n        environment: analyticsEnvironment(),\n      },\n    })",
+        "fingerprint": "548a325db63ab8ce7c9b14b2658deb7ab1e42f36023b4f2ae475fae8c0f3e308"
+      },
+      {
+        "argText": "posthog.identify({\n      distinctId: safeServerEventDistinctId(distinctId),\n      properties: {\n        ...safeServerEventProperties(properties),\n        kind: \"agent_journey\",\n        source: \"gateway\",\n        environment: analyticsEnvironment(),\n      },\n    })",
+        "fingerprint": "5eaa7dc14642b32753f67adaf85643e403e0972d6eda4f90789ae5d8edb7e6f5"
+      }
     ]
   },
   "services/wallet-links/guards.ts": {
     "<unresolved-callee>": [
-      "word.padStart(4, \"0\")"
+      {
+        "argText": "word.padStart(4, \"0\")",
+        "fingerprint": "51389fbd8c66f8b48e6149fb6c9543a44fe60cda09a9d8a089c2c100403bc7d4"
+      }
     ]
   }
 }

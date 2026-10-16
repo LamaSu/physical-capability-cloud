@@ -39,7 +39,7 @@
  */
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
-import { failureText } from "./failure-text.js";
+import { knownErrorClassName, observationId } from "./observability.js";
 
 /** An event as an adapter emits it, before the emitter ids and hashes it. */
 export type EmittedEvidence = Omit<EvidenceEvent, "id" | "hash">;
@@ -155,7 +155,7 @@ function tapOf(adapter: EvidenceAdapter, device: Device): Tap {
       session.deliver(event);
     } else {
       // Not the payload: it is device evidence, not a log line.
-      console.warn(`[evidence-session] dropped a ${event.type} event from adapter ${adapter.id}: no job is recording it`);
+      console.warn("evidence_event_without_job", observationId(adapter.id), observationId(event.type));
     }
   });
   // Stored only once registered, so an onEvidence that throws leaves no dead tap behind.
@@ -188,7 +188,7 @@ function ask(adapter: EvidenceAdapter, tap: Tap): Promise<void> {
 }
 
 const logUnanswered = (adapterId: string) => (err: unknown) => {
-  console.error(`[evidence-session] adapter ${adapterId} could not confirm its evidence is complete: ${failureText(err)}`);
+  console.error("evidence_quiesce_failed", knownErrorClassName(err), observationId(adapterId));
 };
 
 /**

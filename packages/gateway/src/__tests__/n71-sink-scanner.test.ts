@@ -99,6 +99,13 @@ describe("N71 round 7: sink scanner mechanics (probes, against real typed fixtur
     expect(probeScan("probeControlAllLiteral").violations).toHaveLength(0);
   });
 
+  it("[neg] recognizes the real server-event sink and checks properties and distinct identity", () => {
+    const result = probeScan("probeRealTrackServerEvent");
+    expect(result.violations, formatViolations(result.violations)).toHaveLength(2);
+    expect(result.violations.every((violation) => violation.sink === "trackServerEvent" && violation.argText === "raw")).toBe(true);
+    expect(result.unresolvedCallees).toHaveLength(0);
+  });
+
   it("[neg] startTrace is a sink (round-6's shape list never recognized it; CRITICAL #2)", () => {
     const r = probeScan("probeStartTraceFlags");
     expect(r.violations.length, formatViolations(r.violations)).toBeGreaterThanOrEqual(1);
@@ -151,6 +158,55 @@ describe("N71 round 7: sink scanner mechanics (probes, against real typed fixtur
   });
 });
 
+describe("N71 round 8: sink provenance and immutable value proofs", () => {
+  it.each([
+    ["probeConsoleElementAccess", "console.warn"],
+    ["probeConsoleLocalAlias", "console.warn"],
+    ["probeProcessReceiverAlias", "process.stderr.write"],
+    ["probeConsoleTaggedTemplate", "console.warn"],
+    ["probeConsoleDestructuredAlias", "console.warn"],
+    ["probeConsoleObjectAlias", "console.warn"],
+    ["probeProcessDestructuredReceiver", "process.stderr.write"],
+    ["probeConsoleTypedReceiver", "console.warn"],
+    ["probeArrayHeldSink", "console.warn"],
+    ["probeAssignedObjectSink", "console.warn"],
+    ["probeNullishAssignedSink", "console.warn"],
+  ])("[neg] recognizes %s by its sink provenance", (name, sink) => {
+    const result = probeScan(name);
+    expect(result.violations, formatViolations(result.violations)).toHaveLength(1);
+    expect(result.violations[0]).toMatchObject({ sink, argText: "raw" });
+  });
+
+  it.each(["probeConsoleDynamicElement", "probeConsoleIndirectCall", "probeConsoleConditionalAlias", "probeReflectAppliedSink", "probeReflectAppliedAnyConsoleAlias"])("[neg] fails closed for unsupported sink invocation %s", (name) => {
+    const result = probeScan(name);
+    expect(result.unresolvedCallees.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it.each([
+    ["probeCompoundAssignment", "text"],
+    ["probeLogicalAssignment", "text"],
+    ["probePropertyMutation", "payload"],
+    ["probeAliasedPropertyMutation", "payload"],
+    ["probeComputedPropertyName", "raw"],
+    ["probeParameterReassignment", "value"],
+    ["probeIndirectParameterInvocation", "value"],
+    ["probeEscapedAggregate", "payload"],
+    ["probeLiteralMemberMutation", "payload.value"],
+    ["probeDestructuringAssignment", "text"],
+    ["probeForOfAssignment", "text"],
+    ["probeForInAssignment", "text"],
+    ["probeLiteralMemberRawInitializer", "payload.value"],
+    ["probeLiteralMemberEscapedMutation", "payload.value"],
+    ["probeLiteralScalarRawInitializer", "value"],
+    ["probeLiteralParameterRawArgument", "value"],
+    ["probeLiteralDestructuredRawInitializer", "value"],
+    ["probeLiteralClassPropertyMutation", "this.value"],
+  ])("[neg] rejects %s rather than trusting the initializer", (name, argText) => {
+    const result = probeScan(name);
+    expect(result.violations.some((violation) => violation.argText === argText), formatViolations(result.violations)).toBe(true);
+  });
+});
+
 describe("N71 round 7: the sink scanner over the whole gateway package (ruling (3))", () => {
   it("N71's own 12 files are at ZERO violations and ZERO unresolved callees", () => {
     const scanner = getScanner();
@@ -167,7 +223,7 @@ describe("N71 round 7: the sink scanner over the whole gateway package (ruling (
     const otherViolations = result.violations.filter((v) => !N71_SCOPE_FILES.includes(v.file));
     const otherUnresolved = result.unresolvedCallees
       .filter((v) => !N71_SCOPE_FILES.includes(v.file))
-      .map((v) => ({ file: v.file, sink: "<unresolved-callee>", argText: v.argText }));
+      .map((v) => ({ ...v, sink: "<unresolved-callee>" }));
     const combined = [...otherViolations, ...otherUnresolved];
 
     const baseline = loadBaseline();

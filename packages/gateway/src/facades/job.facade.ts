@@ -32,6 +32,7 @@ import { localJobDispatchDecision } from "../services/local-job-dispatch.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { safeServerEventProperties, safeServerEventDistinctId } from "../services/posthog-policy.js";
 import { logSafeId } from "../redaction.js";
 import { writeJobStatusGuarded, SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
 import { recordOperatorStage } from "../services/funnel-tracker.js";
@@ -335,9 +336,9 @@ export class JobFacade extends BaseFacade {
         // The shared dispatch decision supplies a closed reason; caller-supplied
         // ids still pass through N71's formatters at the telemetry boundary.
         pipelineTelemetry.emit(logSafeId(jobId), "job_submit", "completed", {
-          metadata: { kernelId: logSafeId(kernelId), stepId: logSafeId(stepId), external: true, reason },
+          metadata: { kernelId: logSafeId(kernelId), stepId: logSafeId(stepId), external: true, reason: logSafeId(reason) },
         });
-        trackServerEvent("job_submitted", { kernelId, capabilityType: body.capabilityId, external: true, reason }, actorId);
+        trackServerEvent("job_submitted", safeServerEventProperties({ kernelId, capabilityType: body.capabilityId, external: true, reason }), safeServerEventDistinctId(actorId));
         auditService.log({
           eventType: "job.submitted",
           actor: actorId,
@@ -363,7 +364,7 @@ export class JobFacade extends BaseFacade {
         pipelineTelemetry.emit(logSafeId(result.jobId), "job_submit", "completed", {
           metadata: { kernelId: logSafeId(kernelId), stepId: logSafeId(stepId), deviceId: logSafeId(result.deviceId) },
         });
-        trackServerEvent("job_submitted", { kernelId, capabilityType: body.capabilityId }, actorId);
+        trackServerEvent("job_submitted", safeServerEventProperties({ kernelId, capabilityType: body.capabilityId }), safeServerEventDistinctId(actorId));
         auditService.log({
           eventType: "job.submitted",
           actor: actorId,

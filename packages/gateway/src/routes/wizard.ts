@@ -24,6 +24,7 @@ import type {
 } from "@pcc/spec";
 import type { IRepositories } from "@pcc/store";
 import { getRepos } from "../db.js";
+import { logSafeInt } from "../redaction.js";
 
 /**
  * Z3 — returns repos when the store is initialised, null otherwise (tests /
@@ -749,7 +750,7 @@ async function orchestrateDeviceBuilder(
   }
 
   if (failures.length > 0) {
-    console.error("[wizard] device registration failures:", failures);
+    console.error("wizard_device_registration_failed", { count: logSafeInt(failures.length) });
     executedSteps.push({
       name: "register-devices",
       status: "failed",

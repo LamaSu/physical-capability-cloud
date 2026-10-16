@@ -664,7 +664,7 @@
         "type": "object",
         "properties": {
           "jobId": { "type": "string", "description": "Job ID" },
-          "phase": { "type": "string", "description": "Pipeline phase name (e.g. intake, binding, execution, evidence, settlement)" },
+          "phase": { "type": "string", "enum": ["discovery", "quote_request", "quote_response", "negotiation", "contract_build", "escrow_fund", "job_submit", "job_accepted", "job_started", "evidence_capture", "evidence_encrypt", "evidence_archive", "verification_request", "verification_result", "settlement_claim", "settlement_complete", "delivery_dispatch", "delivery_pickup", "delivery_complete", "operator_register", "operator_verify", "dht_query"], "description": "Pipeline phase name (e.g. discovery, job_started, evidence_capture, settlement_complete)" },
           "status": { "type": "string", "enum": ["started", "completed", "failed", "skipped"], "description": "Phase status" },
           "duration_ms": { "type": "number", "description": "Phase duration in milliseconds" },
           "level": { "type": "string", "enum": ["info", "warn", "error", "debug"], "description": "Log level for this event" },

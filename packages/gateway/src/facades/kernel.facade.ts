@@ -31,6 +31,7 @@ import {
 import { locationVisibilityOf, storedLocation } from "./populators/public-location.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { safeServerEventProperties, safeServerEventDistinctId } from "../services/posthog-policy.js";
 import { logSafeId, logSafeInt, logSafeIsoTimestamp } from "../redaction.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
@@ -539,8 +540,8 @@ export class KernelFacade extends BaseFacade {
 
       trackServerEvent(
         "kernel_registered",
-        { kernelId: id, name: kernelData.name, operatorAddress: kernelData.operatorAddress },
-        actorId,
+        safeServerEventProperties({ kernelId: id, operatorAddress: kernelData.operatorAddress }),
+        safeServerEventDistinctId(actorId),
       );
       auditService.log({
         eventType: "kernel.created",
@@ -949,7 +950,7 @@ export function emitKernelLifecycleEvent(evt: KernelLifecycleEvent): void {
   process.stderr.write(
     `[kernel-lifecycle] ${JSON.stringify({
       ts: new Date().toISOString(),
-      event: KNOWN_LIFECYCLE_EVENTS.has(evt.event) ? evt.event : UNKNOWN_LIFECYCLE_EVENT,
+      event: KNOWN_LIFECYCLE_EVENTS.has(evt.event) ? logSafeId(evt.event) : UNKNOWN_LIFECYCLE_EVENT,
       kernelId: logSafeId(evt.kernelId),
       sinceLastHeartbeatSec: logSafeInt(evt.sinceLastHeartbeatSec),
       wasExpiredForMinutes: evt.wasExpiredForMinutes === undefined ? undefined : logSafeInt(evt.wasExpiredForMinutes),

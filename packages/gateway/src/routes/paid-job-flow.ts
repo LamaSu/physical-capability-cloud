@@ -1581,7 +1581,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           settlementStatus,
           mockSettlement: isMockSettlement(),
           toolCallCount: auditTrail.length,
-          oracleVerified: oracleResponse.result.verified,
+          oracleVerified: oracleResponse.result.verified === true,
           oracleReason: oracleResponse.result.reason,
         },
       });
@@ -1950,7 +1950,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           settlementStatus,
           assuranceTier: jobAssuranceTier,
           mockSettlement: isMockSettlement(),
-          oracleVerified: oracleResponse.result.verified,
+          oracleVerified: oracleResponse.result.verified === true,
           chainOutcome: chainOutcome ?? null,
           chainSettled,
         },

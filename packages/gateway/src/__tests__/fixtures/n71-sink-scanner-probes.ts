@@ -34,6 +34,7 @@ import { facadeErrorTelemetryCode } from "../../facades/facade-errors.js";
 import { startTrace } from "../../tracing.js";
 import { pipelineTelemetry } from "../../telemetry.js";
 import { Sentry } from "../../sentry.js";
+import { trackServerEvent } from "../../services/posthog-service.js";
 
 const probeTracer = trace.getTracer("n71-probe", "1.0.0");
 
@@ -51,6 +52,7 @@ export function probeOptionalChainedLoggerCall(req: FastifyRequest, err: Error, 
 export function probeNonSinkCallNeverScanned(freeText: string, actorId: string): void {
   trackServerEventLike("x", { raw: freeText }, actorId);
   auditServiceLikeLog({ metadata: { raw: freeText } });
+  auditServiceLikeLog(pipelineTelemetry);
 }
 function trackServerEventLike(_a: string, _b: unknown, _c: string): void {}
 function auditServiceLikeLog(_a: unknown): void {}
@@ -175,4 +177,171 @@ export function probeOtelSpanFlagsRaw(rawId: string): void {
     span.setAttribute("id", rawId);
     span.end();
   });
+}
+
+// Round-8 provenance and mutation probes.
+export function probeConsoleElementAccess(raw: string): void {
+  console["warn"](raw);
+}
+export function probeConsoleLocalAlias(raw: string): void {
+  const warn = console.warn;
+  warn(raw);
+}
+export function probeProcessReceiverAlias(raw: string): void {
+  const out = process.stderr;
+  out.write(raw);
+}
+export function probeConsoleTaggedTemplate(raw: string): void {
+  console.warn`value ${raw}`;
+}
+export function probeConsoleDynamicElement(raw: string, method: "warn" | "error"): void {
+  console[method](raw);
+}
+export function probeConsoleIndirectCall(raw: string): void {
+  console.warn.call(console, raw);
+}
+export function probeCompoundAssignment(raw: string): void {
+  let text = "fixed";
+  text += raw;
+  console.warn(text);
+}
+export function probeLogicalAssignment(raw: string): void {
+  let text = "fixed";
+  text &&= raw;
+  console.warn(text);
+}
+export function probePropertyMutation(raw: string): void {
+  const payload = { value: "fixed" };
+  payload.value = raw;
+  console.warn(payload);
+}
+export function probeAliasedPropertyMutation(raw: string): void {
+  const payload = { value: "fixed" };
+  const alias = payload;
+  alias.value = raw;
+  console.warn(payload);
+}
+export function probeComputedPropertyName(raw: string): void {
+  console.warn({ [raw]: "fixed" });
+}
+export function probeParameterReassignment(raw: string): void {
+  function emit(value: string): void {
+    value = raw;
+    console.warn(value);
+  }
+  emit("fixed");
+}
+export function probeIndirectParameterInvocation(raw: string): void {
+  function emit(value: string): void {
+    console.warn(value);
+  }
+  emit("fixed");
+  const indirect = emit;
+  indirect(raw);
+}
+export function probeEscapedAggregate(raw: string): void {
+  const payload = { value: "fixed" };
+  function modify(value: { value: string }): void { value.value = raw; }
+  modify(payload);
+  console.warn(payload);
+}
+
+export function probeConsoleDestructuredAlias(raw: string): void {
+  const { warn } = console;
+  warn(raw);
+}
+export function probeConsoleConditionalAlias(raw: string, choose: boolean): void {
+  const warn = choose ? console.warn : console.error;
+  warn(raw);
+}
+export function probeConsoleObjectAlias(raw: string): void {
+  const logger = { warn: console.warn };
+  logger.warn(raw);
+}
+export function probeProcessDestructuredReceiver(raw: string): void {
+  const { stderr: out } = process;
+  out.write(raw);
+}
+
+export function probeConsoleTypedReceiver(out: Console, raw: unknown): void {
+  out.warn(raw);
+}
+export function probeArrayHeldSink(raw: string): void {
+  const sinks = [console.warn];
+  sinks[0](raw);
+}
+export function probeAssignedObjectSink(raw: string): void {
+  const sinks = { write: (..._args: unknown[]): void => {} };
+  sinks.write = console.warn;
+  sinks.write(raw);
+}
+export function probeNullishAssignedSink(raw: string): void {
+  let write: typeof console.warn | undefined;
+  write ??= console.warn;
+  write(raw);
+}
+export function probeLiteralMemberMutation(raw: string): void {
+  const payload = { value: "fixed" as const };
+  payload.value = raw as "fixed";
+  console.warn(payload.value);
+}
+export function probeDestructuringAssignment(raw: string): void {
+  let text = "fixed";
+  ({ text } = { text: raw });
+  console.warn(text);
+}
+export function probeForOfAssignment(raw: string[]): void {
+  let text = "fixed";
+  for (text of raw) break;
+  console.warn(text);
+}
+export function probeForInAssignment(raw: Record<string, string>): void {
+  let text = "fixed";
+  for (text in raw) break;
+  console.warn(text);
+}
+export function probeLiteralMemberRawInitializer(raw: string): void {
+  const payload = { value: raw as "fixed" };
+  console.warn(payload.value);
+}
+export function probeLiteralMemberEscapedMutation(raw: string): void {
+  const payload = { value: "fixed" as const };
+  function modify(value: typeof payload): void { value.value = raw as "fixed"; }
+  modify(payload);
+  console.warn(payload.value);
+}
+
+export function probeLiteralScalarRawInitializer(raw: string): void {
+  const value = raw as "fixed";
+  console.warn(value);
+}
+
+export function probeLiteralParameterRawArgument(raw: string): void {
+  function emit(value: "fixed"): void { console.warn(value); }
+  emit(raw as "fixed");
+}
+export function probeLiteralDestructuredRawInitializer(raw: { value: string }): void {
+  const { value } = raw as { value: "fixed" };
+  console.warn(value);
+}
+export function probeLiteralClassPropertyMutation(raw: string): void {
+  class Payload {
+    readonly value: "fixed";
+    constructor() { this.value = raw as "fixed"; }
+    emit(): void { console.warn(this.value); }
+  }
+  new Payload().emit();
+}
+
+export function probeReflectAppliedSink(raw: string): void {
+  Reflect.apply(console.warn, console, [raw]);
+}
+
+export function probeRealTrackServerEvent(raw: string): void {
+  trackServerEvent("job_submitted", { kernelId: raw }, raw);
+}
+
+export function probeReflectAppliedAnyConsoleAlias(raw: string): void {
+  const out: any = console;
+  Reflect.apply(out.warn, out, [raw]);
 }

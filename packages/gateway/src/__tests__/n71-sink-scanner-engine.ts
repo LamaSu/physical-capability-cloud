@@ -39,6 +39,7 @@
  */
 
 import * as ts from "typescript";
+import { createHash } from "node:crypto";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,12 +82,12 @@ export const N71_SCOPE_FILES: readonly string[] = [
 const TELEMETRY_FILE_SUFFIX = "/src/telemetry.ts";
 const TRACING_FILE_SUFFIX = "/src/tracing.ts";
 const SENTRY_FILE_SUFFIX = "/src/sentry.ts";
+const POSTHOG_FILE_SUFFIX = "/src/services/posthog-service.ts";
 const SENTRY_PKG = "/node_modules/@sentry/";
 const OTEL_PKG = "/node_modules/@opentelemetry/";
 const FASTIFY_PKG = "/node_modules/fastify/";
 const PINO_PKG = "/node_modules/pino/";
 
-const CONSOLE_METHODS = new Set(["log", "info", "warn", "error", "debug"]);
 const LOGGER_METHODS = new Set(["trace", "debug", "info", "warn", "error", "fatal", "child"]);
 
 /** Formatters recognized BY DECLARATION (file + exported name), never by bare name
@@ -100,6 +101,8 @@ const SAFE_FORMATTERS: ReadonlyArray<{ name: string; fileSuffix: string }> = [
   { name: "logSafeIsoTimestamp", fileSuffix: "/src/redaction.ts" },
   { name: "logSafeAddress", fileSuffix: "/src/redaction.ts" },
   { name: "facadeErrorTelemetryCode", fileSuffix: "/src/facades/facade-errors.ts" },
+  { name: "safeServerEventProperties", fileSuffix: "/src/services/posthog-policy.ts" },
+  { name: "safeServerEventDistinctId", fileSuffix: "/src/services/posthog-policy.ts" },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -172,6 +175,7 @@ export interface ScannerContext {
    *  parameter is always passed a literal across the WHOLE program (e.g.
    *  BaseFacade.execute()'s `operation`, called from every facade subclass). */
   callSitesByDecl: Map<ts.Node, ts.CallExpression[]>;
+  escapedFunctions: Set<ts.Node>;
 }
 
 let cached: ScannerContext | null = null;
@@ -188,8 +192,8 @@ export function getScanner(): ScannerContext {
   const program = ts.createProgram({ rootNames, options: parsed.options });
   const checker = program.getTypeChecker();
   const buildMs = performance.now() - t0;
-  const callSitesByDecl = buildCallSiteIndex(program, checker, parsed.fileNames);
-  cached = { program, checker, scopeFileNames: parsed.fileNames, buildMs, callSitesByDecl };
+  const { callSitesByDecl, escapedFunctions } = buildCallSiteIndex(program, checker, rootNames);
+  cached = { program, checker, scopeFileNames: parsed.fileNames, buildMs, callSitesByDecl, escapedFunctions };
   return cached;
 }
 
@@ -201,12 +205,25 @@ function buildCallSiteIndex(
   program: ts.Program,
   checker: ts.TypeChecker,
   scopeFileNames: string[],
-): Map<ts.Node, ts.CallExpression[]> {
+): { callSitesByDecl: Map<ts.Node, ts.CallExpression[]>; escapedFunctions: Set<ts.Node> } {
   const index = new Map<ts.Node, ts.CallExpression[]>();
+  const escapedFunctions = new Set<ts.Node>();
   for (const fileName of scopeFileNames) {
     const sf = program.getSourceFile(fileName);
     if (!sf) continue;
     const visit = (node: ts.Node): void => {
+      if (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+        const sym = resolveSymbol(node, checker);
+        const decl = sym?.valueDeclaration;
+        if (decl && (ts.isMethodDeclaration(decl) || ts.isFunctionDeclaration(decl))) {
+          const parent = node.parent;
+          const directCall = ts.isCallExpression(parent) && parent.expression === node;
+          const declarationName = (decl as ts.NamedDeclaration).name === node;
+          const memberName = ts.isPropertyAccessExpression(parent) && parent.name === node;
+          const importName = ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent) || ts.isImportClause(parent);
+          if (!directCall && !declarationName && !memberName && !importName) escapedFunctions.add(decl);
+        }
+      }
       if (ts.isCallExpression(node)) {
         const sym = resolveSymbol(node.expression, checker);
         const decl = sym?.valueDeclaration;
@@ -227,115 +244,251 @@ function buildCallSiteIndex(
     };
     visit(sf);
   }
-  return index;
+  return { callSitesByDecl: index, escapedFunctions };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sink resolution — ruling (1): by declaration, default-deny
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** `process.stdout.write` / `process.stderr.write` — resolves the RECEIVER
- *  property (`.stdout`/`.stderr`) to the `Process` interface, so another
- *  Writable's `.write` (an HTTP response, `reply.raw`, ...) is never swept in. */
-function matchProcessWriteSink(call: ts.CallExpression, checker: ts.TypeChecker): string | null {
-  const callee = unwrap(call.expression);
-  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== "write") return null;
-  const receiver = unwrap(callee.expression);
-  if (!ts.isPropertyAccessExpression(receiver)) return null;
-  const streamName = receiver.name.text;
-  if (streamName !== "stdout" && streamName !== "stderr") return null;
-  const base = unwrap(receiver.expression);
-  if (!isIdentifierNamed(base, "process")) return null;
-  const baseSym = checker.getSymbolAtLocation(base);
-  // A locally-shadowed `process` (declared somewhere in gateway src) is not the
-  // ambient Node global — refuse to match rather than false-sink it.
-  if (anyDeclFileMatches(baseSym, (f) => f.startsWith(GATEWAY_SRC))) return null;
-  const propSym = checker.getSymbolAtLocation(receiver.name);
-  const decl = propSym?.declarations?.[0];
-  const parent = decl?.parent;
-  if (decl && parent && ts.isInterfaceDeclaration(parent) && parent.name.text === "Process") {
-    return `process.${streamName}.write`;
+type SinkCall = ts.CallExpression | ts.TaggedTemplateExpression;
+const UNSUPPORTED_SINK = "<unsupported-sink>";
+
+function memberAccess(expr: ts.Expression): { receiver: ts.Expression; name: string | null } | null {
+  const n = unwrap(expr);
+  if (ts.isPropertyAccessExpression(n)) return { receiver: n.expression, name: n.name.text };
+  if (ts.isElementAccessExpression(n)) {
+    const key = n.argumentExpression && unwrap(n.argumentExpression);
+    return { receiver: n.expression, name: key && (ts.isStringLiteral(key) || ts.isNoSubstitutionTemplateLiteral(key) || ts.isNumericLiteral(key)) ? key.text : null };
   }
   return null;
 }
 
-function isConsoleReceiver(expr: ts.Expression, checker: ts.TypeChecker): boolean {
-  const n = unwrap(expr);
-  if (!ts.isIdentifier(n)) return false;
-  const type = checker.getTypeAtLocation(n);
-  if (type.symbol?.getName() !== "Console") return false;
-  const varSym = checker.getSymbolAtLocation(n);
-  // Refuse a locally-declared `console` shadow — must be the ambient global.
-  return !anyDeclFileMatches(varSym, (f) => f.startsWith(GATEWAY_SRC));
+/** Follow local value provenance as well as TypeScript's import aliases. Every
+ * possible assignment participates, so a reassigned alias cannot hide a sink. */
+const originCache = new WeakMap<ts.TypeChecker, WeakMap<ts.Expression, ts.Expression[]>>();
+function localOrigins(expr: ts.Expression, checker: ts.TypeChecker, seen = new Set<ts.Symbol>()): ts.Expression[] {
+  if (seen.size) return localOriginsUncached(expr, checker, seen);
+  let cache = originCache.get(checker);
+  if (!cache) originCache.set(checker, cache = new WeakMap());
+  const previous = cache.get(expr);
+  if (previous) return previous;
+  const result = localOriginsUncached(expr, checker, seen);
+  cache.set(expr, result);
+  return result;
 }
 
-/** Does this call's RECEIVER (for a property-access callee) or CALLEE (for a bare
- *  identifier callee) resolve — by its own symbol declaration, OR by its static
- *  TYPE's declaring symbol — to a file matching `pred`? Covers both module-scoped
- *  singletons (`Sentry`, `pipelineTelemetry`, declared where they're imported from)
- *  and interface-typed locals (`span: Span`, `req.log: FastifyBaseLogger`). */
-function calleeOrReceiverDeclaredUnder(
-  call: ts.CallExpression,
-  checker: ts.TypeChecker,
-  pred: (file: string) => boolean,
-): boolean {
-  const callee = unwrap(call.expression);
-  if (ts.isIdentifier(callee)) {
-    const sym = resolveSymbol(callee, checker);
-    return anyDeclFileMatches(sym, pred);
+function localOriginsUncached(expr: ts.Expression, checker: ts.TypeChecker, seen: Set<ts.Symbol>): ts.Expression[] {
+  const n = unwrap(expr);
+  const access = memberAccess(n);
+  if (access) {
+    const values = storedMemberValues(n, access, checker, seen);
+    return values.length ? values.flatMap((value) => localOrigins(value, checker, seen)) : [n];
   }
-  if (ts.isPropertyAccessExpression(callee)) {
-    const receiver = unwrap(callee.expression);
-    const receiverSym = resolveSymbol(receiver, checker);
-    if (receiverSym && anyDeclFileMatches(receiverSym, pred)) return true;
-    const type = checker.getTypeAtLocation(receiver);
-    const typeSym = type.symbol;
-    if (typeSym?.declarations?.some((d) => pred(d.getSourceFile().fileName))) return true;
+  if (!ts.isIdentifier(n)) return [n];
+  const sym = resolveSymbol(n, checker);
+  if (!sym || seen.has(sym)) return [n];
+  const decl = sym.valueDeclaration;
+  if (!decl || !ts.isVariableDeclaration(decl)) return [n];
+  const nextSeen = new Set(seen).add(sym);
+  const values = decl.initializer ? [decl.initializer] : [];
+  const scope = enclosingFunctionOrSourceFile(decl);
+  const visit = (node: ts.Node): void => {
+    if (ts.isBinaryExpression(node) && (node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) &&
+        ts.isIdentifier(unwrap(node.left)) && resolveSymbol(unwrap(node.left), checker) === sym) values.push(node.right);
+    ts.forEachChild(node, visit);
+  };
+  visit(scope);
+  return values.length ? values.flatMap((value) => localOrigins(value, checker, nextSeen)) : [n];
+}
+
+const scopeAssignmentsCache = new WeakMap<ts.Node, ts.BinaryExpression[]>();
+function scopeAssignments(scope: ts.Node): ts.BinaryExpression[] {
+  const cached = scopeAssignmentsCache.get(scope);
+  if (cached) return cached;
+  const assignments: ts.BinaryExpression[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) assignments.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(scope);
+  scopeAssignmentsCache.set(scope, assignments);
+  return assignments;
+}
+
+function memberPath(expr: ts.Expression): { root: ts.Expression; keys: Array<string | null> } {
+  let root = unwrap(expr);
+  const keys: Array<string | null> = [];
+  for (;;) {
+    const member = memberAccess(root);
+    if (!member) return { root, keys: keys.reverse() };
+    keys.push(member.name);
+    root = unwrap(member.receiver);
+  }
+}
+
+function storedMemberValues(
+  expr: ts.Expression,
+  access: { receiver: ts.Expression; name: string | null },
+  checker: ts.TypeChecker,
+  seen: Set<ts.Symbol>,
+): ts.Expression[] {
+  const values: ts.Expression[] = [];
+  for (const receiver of localOrigins(access.receiver, checker, seen)) {
+    if (ts.isArrayLiteralExpression(receiver)) {
+      if (access.name !== null && /^\d+$/.test(access.name)) {
+        const value = receiver.elements[Number(access.name)];
+        if (value) values.push(value);
+      } else if (access.name === null) values.push(...receiver.elements);
+    }
+    if (ts.isObjectLiteralExpression(receiver)) {
+      for (const prop of receiver.properties) {
+        if (!ts.isPropertyAssignment(prop) && !ts.isShorthandPropertyAssignment(prop)) continue;
+        const key = prop.name;
+        const name = ts.isIdentifier(key) || ts.isStringLiteral(key) || ts.isNumericLiteral(key) ? key.text : null;
+        if (access.name === null || name === null || access.name === name) values.push(ts.isPropertyAssignment(prop) ? prop.initializer : prop.name);
+      }
+    }
+  }
+  const target = memberPath(expr);
+  const rootSym = ts.isIdentifier(target.root) ? resolveSymbol(target.root, checker) : undefined;
+  const decl = rootSym?.valueDeclaration;
+  if (!decl || !ts.isVariableDeclaration(decl)) return values;
+  const targetOrigins = localOrigins(target.root, checker, seen);
+  for (const assignment of scopeAssignments(enclosingFunctionOrSourceFile(decl))) {
+    const candidate = memberPath(assignment.left);
+    if (candidate.keys.length !== target.keys.length || candidate.keys.some((key, index) => key !== null && target.keys[index] !== null && key !== target.keys[index])) continue;
+    const candidateSym = ts.isIdentifier(candidate.root) ? resolveSymbol(candidate.root, checker) : undefined;
+    const sameRoot = candidateSym === rootSym || localOrigins(candidate.root, checker, seen).some((origin) => targetOrigins.includes(origin));
+    if (sameRoot) values.push(assignment.right);
+  }
+  return values;
+}
+
+function isConsoleReceiver(expr: ts.Expression, checker: ts.TypeChecker): boolean {
+  return localOrigins(expr, checker).some((n) => {
+    if (!ts.isIdentifier(n)) return false;
+    const type = checker.getTypeAtLocation(n);
+    return type.symbol?.getName() === "Console" && anyDeclFileMatches(type.symbol, (f) => !f.startsWith(GATEWAY_SRC));
+  });
+}
+
+function processStreamName(expr: ts.Expression, checker: ts.TypeChecker): string | null {
+  for (const origin of localOrigins(expr, checker)) {
+    const access = memberAccess(origin) ?? (ts.isIdentifier(origin) ? bindingSource(origin, checker) : null);
+    if (!access || (access.name !== "stdout" && access.name !== "stderr")) continue;
+    for (const base of localOrigins(access.receiver, checker)) {
+      if (!isIdentifierNamed(base, "process") || anyDeclFileMatches(resolveSymbol(base, checker), (f) => f.startsWith(GATEWAY_SRC))) continue;
+      const type = checker.getTypeAtLocation(base);
+      const propSym = checker.getPropertyOfType(type, access.name);
+      if (propSym?.declarations?.some((decl) => ts.isInterfaceDeclaration(decl.parent) && decl.parent.name.text === "Process")) return access.name;
+    }
+  }
+  return null;
+}
+
+function declaredUnder(expr: ts.Expression, checker: ts.TypeChecker, pred: (file: string) => boolean): boolean {
+  for (const origin of localOrigins(expr, checker)) {
+    if (anyDeclFileMatches(resolveSymbol(origin, checker), pred)) return true;
+    const type = checker.getTypeAtLocation(origin);
+    if (type.symbol?.declarations?.some((decl) => pred(decl.getSourceFile().fileName))) return true;
   }
   return false;
 }
 
-function calleeOrMethodName(call: ts.CallExpression): string {
-  const callee = unwrap(call.expression);
-  if (ts.isPropertyAccessExpression(callee)) return callee.name.text;
-  if (ts.isIdentifier(callee)) return callee.text;
-  return "<call>";
+/** Classify the actual callable and its receiver. Unsupported invocations of a
+ * known sink fail closed instead of being accepted merely for having a type. */
+const sinkCache = new WeakMap<ts.TypeChecker, WeakMap<ts.Expression, string | null>>();
+function sinkExpression(expr: ts.Expression, checker: ts.TypeChecker, seen = new Set<ts.Expression>()): string | null {
+  if (seen.size) return sinkExpressionUncached(expr, checker, seen);
+  let cache = sinkCache.get(checker);
+  if (!cache) sinkCache.set(checker, cache = new WeakMap());
+  if (cache.has(expr)) return cache.get(expr)!;
+  const result = sinkExpressionUncached(expr, checker, seen);
+  cache.set(expr, result);
+  return result;
 }
 
-/**
- * Returns a human-readable sink name, or null if `call` is not a sink by
- * declaration. Ruling (3) (F4): emitKernelLifecycleEvent sanitizes INSIDE itself,
- * so it is deliberately NOT matched here at its call sites — only its own internal
- * `process.stderr.write` (matched generically above) is scanned.
- */
-export function matchSink(call: ts.CallExpression, checker: ts.TypeChecker): string | null {
-  const procWrite = matchProcessWriteSink(call, checker);
-  if (procWrite) return procWrite;
+function bindingSource(expr: ts.Expression, checker: ts.TypeChecker): { receiver: ts.Expression; name: string | null } | null {
+  const decl = resolveSymbol(expr, checker)?.valueDeclaration;
+  if (!decl || !ts.isBindingElement(decl) || !ts.isObjectBindingPattern(decl.parent)) return null;
+  const variable = decl.parent.parent;
+  if (!ts.isVariableDeclaration(variable) || !variable.initializer) return null;
+  const key = decl.propertyName ?? decl.name;
+  const name = ts.isIdentifier(key) || ts.isStringLiteral(key) ? key.text : null;
+  return { receiver: variable.initializer, name };
+}
 
-  const callee = unwrap(call.expression);
-  if (ts.isPropertyAccessExpression(callee)) {
-    const method = callee.name.text;
-    if (CONSOLE_METHODS.has(method) && isConsoleReceiver(callee.expression, checker)) {
-      return `console.${method}`;
-    }
+function sinkExpressionUncached(expr: ts.Expression, checker: ts.TypeChecker, seen: Set<ts.Expression>): string | null {
+  const n = unwrap(expr);
+  if (seen.has(n)) return null;
+  const nextSeen = new Set(seen).add(n);
+  const origins = localOrigins(n, checker);
+  if (origins.length !== 1 || origins[0] !== n) {
+    const matches = origins.map((origin) => sinkExpression(origin, checker, nextSeen)).filter((sink): sink is string => sink !== null);
+    if (!matches.length) return null;
+    return matches.every((sink) => sink === matches[0]) ? matches[0] : UNSUPPORTED_SINK;
   }
+  if (ts.isConditionalExpression(n)) {
+    return sinkExpression(n.whenTrue, checker, nextSeen) || sinkExpression(n.whenFalse, checker, nextSeen) ? UNSUPPORTED_SINK : null;
+  }
+  if (ts.isBinaryExpression(n) && (n.operatorToken.kind === ts.SyntaxKind.BarBarToken || n.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken || n.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken)) {
+    return sinkExpression(n.left, checker, nextSeen) || sinkExpression(n.right, checker, nextSeen) ? UNSUPPORTED_SINK : null;
+  }
+  const access = memberAccess(n) ?? (ts.isIdentifier(n) ? bindingSource(n, checker) : null);
+  const method = access?.name ?? (ts.isIdentifier(n) ? n.text : null);
+  if (access) {
+    if (isConsoleReceiver(access.receiver, checker)) return method ? `console.${method}` : UNSUPPORTED_SINK;
+    for (const receiver of localOrigins(access.receiver, checker)) {
+      if (!ts.isObjectLiteralExpression(receiver)) continue;
+      for (const property of receiver.properties) {
+        if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) continue;
+        const name = property.name;
+        const propertyName = ts.isIdentifier(name) || ts.isStringLiteral(name) ? name.text : null;
+        if (method !== null && method !== propertyName) continue;
+        const value = ts.isPropertyAssignment(property) ? property.initializer : property.name;
+        const nested = sinkExpression(value, checker, nextSeen);
+        if (nested) return method && propertyName ? nested : UNSUPPORTED_SINK;
+      }
+    }
+    const stream = processStreamName(access.receiver, checker);
+    if (stream && (method === "write" || method === null)) return method ? `process.${stream}.write` : UNSUPPORTED_SINK;
+    if (checker.getTypeAtLocation(access.receiver).getCallSignatures().length && sinkExpression(access.receiver, checker, nextSeen)) return UNSUPPORTED_SINK;
+  }
+  if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.CommaToken) {
+    return sinkExpression(n.right, checker, nextSeen) ? UNSUPPORTED_SINK : null;
+  }
+  if (ts.isCallExpression(n) && sinkExpression(n.expression, checker, nextSeen)) return UNSUPPORTED_SINK;
+  const target = access?.receiver ?? n;
+  if (declaredUnder(target, checker, (f) => f.endsWith(TELEMETRY_FILE_SUFFIX))) return method ? `pipelineTelemetry.${method}` : UNSUPPORTED_SINK;
+  if (declaredUnder(target, checker, (f) => f.endsWith(TRACING_FILE_SUFFIX))) return method ?? UNSUPPORTED_SINK;
+  if (declaredUnder(target, checker, (f) => f.endsWith(SENTRY_FILE_SUFFIX) || f.includes(SENTRY_PKG))) return method ? `Sentry.${method}` : UNSUPPORTED_SINK;
+  if (declaredUnder(target, checker, (f) => f.includes(OTEL_PKG))) return method ? `otel.${method}` : UNSUPPORTED_SINK;
+  if (access && (method === null || LOGGER_METHODS.has(method)) && declaredUnder(target, checker, (f) => f.includes(FASTIFY_PKG) || f.includes(PINO_PKG))) return method ? `log.${method}` : UNSUPPORTED_SINK;
+  const sym = resolveSymbol(n, checker);
+  if (sym?.getName() === "trackServerEvent" && anyDeclFileMatches(sym, (f) => f.endsWith(POSTHOG_FILE_SUFFIX))) return "trackServerEvent";
+  return null;
+}
 
-  if (calleeOrReceiverDeclaredUnder(call, checker, (f) => f.endsWith(TELEMETRY_FILE_SUFFIX))) {
-    return `pipelineTelemetry.${calleeOrMethodName(call)}`;
-  }
-  if (calleeOrReceiverDeclaredUnder(call, checker, (f) => f.endsWith(TRACING_FILE_SUFFIX))) {
-    return calleeOrMethodName(call); // startTrace / endTrace / withSpan / withSpanSync
-  }
-  if (calleeOrReceiverDeclaredUnder(call, checker, (f) => f.endsWith(SENTRY_FILE_SUFFIX) || f.includes(SENTRY_PKG))) {
-    return `Sentry.${calleeOrMethodName(call)}`;
-  }
-  if (calleeOrReceiverDeclaredUnder(call, checker, (f) => f.includes(OTEL_PKG))) {
-    return `otel.${calleeOrMethodName(call)}`;
-  }
-  if (ts.isPropertyAccessExpression(callee) && LOGGER_METHODS.has(callee.name.text)) {
-    if (calleeOrReceiverDeclaredUnder(call, checker, (f) => f.includes(FASTIFY_PKG) || f.includes(PINO_PKG))) {
-      return `log.${callee.name.text}`;
-    }
+/** Self-sanitizing emitKernelLifecycleEvent is scanned at its internal write. */
+export function matchSink(call: SinkCall, checker: ts.TypeChecker): string | null {
+  const sink = sinkExpression(ts.isTaggedTemplateExpression(call) ? call.tag : call.expression, checker);
+  if (sink) return sink;
+  // A known sink passed to another callable can be invoked indirectly there.
+  // Its invocation cannot be classified at this boundary, so reject the escape.
+  if (ts.isCallExpression(call) && call.arguments.some((arg) =>
+    localOrigins(arg, checker).some((origin) => {
+      const escapedSink = sinkExpression(origin, checker);
+      if (!escapedSink) return false;
+      return checker.getTypeAtLocation(origin).getCallSignatures().length > 0 ||
+        escapedSink.startsWith("console.") || escapedSink.startsWith("process.") || escapedSink.startsWith("log.");
+    }),
+  )) return UNSUPPORTED_SINK;
+  const decl = checker.getResolvedSignature(call)?.declaration;
+  if (decl && ts.isMethodSignature(decl) && ts.isInterfaceDeclaration(decl.parent) &&
+      decl.parent.name.text === "Console" && !decl.getSourceFile().fileName.startsWith(GATEWAY_SRC)) {
+    const name = decl.name;
+    return ts.isIdentifier(name) || ts.isStringLiteral(name) ? `console.${name.text}` : UNSUPPORTED_SINK;
   }
   return null;
 }
@@ -348,8 +501,8 @@ export function matchSink(call: ts.CallExpression, checker: ts.TypeChecker): str
  * true if the callee resolves to SOME symbol (safe to classify, even as "not a
  * sink"); false if it cannot be resolved at all.
  */
-function calleeResolves(call: ts.CallExpression, checker: ts.TypeChecker): boolean {
-  const callee = unwrap(call.expression);
+function calleeResolves(call: SinkCall, checker: ts.TypeChecker): boolean {
+  const callee = unwrap(ts.isTaggedTemplateExpression(call) ? call.tag : call.expression);
   // A dynamic `import("...")` is a language construct (the module loader), not a
   // disguised sink — there is no symbol to resolve for the `import` keyword
   // itself, and none is needed: it cannot secretly be a console.log in disguise.
@@ -384,6 +537,7 @@ export interface Violation {
   file: string;
   sink: string;
   argText: string;
+  fingerprint: string;
 }
 
 interface ScanCtx {
@@ -391,8 +545,10 @@ interface ScanCtx {
   checker: ts.TypeChecker;
   sourceFile: ts.SourceFile;
   sink: string;
+  sinkNode: ts.Node;
   out: Violation[];
   callSitesByDecl: Map<ts.Node, ts.CallExpression[]>;
+  escapedFunctions: Set<ts.Node>;
   /** Recursion guard for isSafeParameterReference's transitive argument-safety
    *  proof (e.g. BaseFacade.emitTelemetry's `operation` is itself always passed
    *  execute()'s own `operation` parameter, which is in turn always literal at
@@ -401,11 +557,71 @@ interface ScanCtx {
 }
 
 function normalizeArgText(node: ts.Node, sourceFile: ts.SourceFile): string {
-  return node.getText(sourceFile).replace(/\s+/g, " ").trim().slice(0, 200);
+  return node.getText(sourceFile).trim();
+}
+
+function enclosingDeclarationName(node: ts.Node, sourceFile: ts.SourceFile): string | undefined {
+  if (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node) || ts.isModuleDeclaration(node)) {
+    return node.name ? `${ts.SyntaxKind[node.kind]}:${node.name.getText(sourceFile)}` : undefined;
+  }
+  if (ts.isMethodDeclaration(node) || ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node)) {
+    return `${ts.SyntaxKind[node.kind]}:${node.name.getText(sourceFile)}`;
+  }
+  if (ts.isConstructorDeclaration(node)) return "constructor";
+  if ((ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node)) && node.initializer
+    && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
+    return `${ts.SyntaxKind[node.kind]}:${node.name.getText(sourceFile)}`;
+  }
+  return undefined;
+}
+
+function sinkExpressionIdentity(node: ts.Node, sourceFile: ts.SourceFile): string {
+  if (ts.isCallExpression(node)) return normalizeArgText(node.expression, sourceFile);
+  if (ts.isTaggedTemplateExpression(node)) return normalizeArgText(node.tag, sourceFile);
+  return normalizeArgText(node, sourceFile);
+}
+
+/** Identify each call position within its declaration and each complete unsafe
+ *  expression. Formatting a safe sibling does not change an existing identity. */
+export function createViolation(
+  file: string,
+  sink: string,
+  node: ts.Node,
+  sourceFile: ts.SourceFile,
+  sinkNode: ts.Node = node,
+): Violation {
+  const declarations: string[] = [];
+  let owner: ts.Node = sourceFile;
+  for (let parent = sinkNode.parent; parent; parent = parent.parent) {
+    const name = enclosingDeclarationName(parent, sourceFile);
+    if (name) {
+      if (declarations.length === 0) owner = parent;
+      declarations.unshift(name);
+    }
+  }
+  const expression = sinkExpressionIdentity(sinkNode, sourceFile);
+  let ordinal = 0;
+  const visit = (candidate: ts.Node): void => {
+    if (candidate === sinkNode) return;
+    if (candidate.pos >= sinkNode.pos) return;
+    if (candidate.kind === sinkNode.kind && sinkExpressionIdentity(candidate, sourceFile) === expression) ordinal++;
+    ts.forEachChild(candidate, visit);
+  };
+  visit(owner);
+  const childPath: number[] = [];
+  for (let child = node; child !== sinkNode && child.parent; child = child.parent) {
+    const siblings: ts.Node[] = [];
+    ts.forEachChild(child.parent, (sibling) => { siblings.push(sibling); });
+    childPath.unshift(siblings.indexOf(child));
+  }
+  const fingerprint = createHash("sha256")
+    .update(JSON.stringify([declarations, sinkNode.kind, expression, ordinal, childPath, normalizeArgText(node, sourceFile)]))
+    .digest("hex");
+  return { file, sink, argText: normalizeArgText(node, sourceFile), fingerprint };
 }
 
 function pushViolation(ctx: ScanCtx, node: ts.Node): void {
-  ctx.out.push({ file: ctx.file, sink: ctx.sink, argText: normalizeArgText(node, ctx.sourceFile) });
+  ctx.out.push(createViolation(ctx.file, ctx.sink, node, ctx.sourceFile, ctx.sinkNode));
 }
 
 const DATE_INSTANT_METHODS = new Set(["toISOString", "getTime", "valueOf", "toJSON"]);
@@ -470,19 +686,91 @@ function enclosingFunctionOrSourceFile(node: ts.Node): ts.Node {
   return n;
 }
 
-function findAssignmentsTo(symbol: ts.Symbol, scope: ts.Node, checker: ts.TypeChecker): ts.Expression[] {
-  const out: ts.Expression[] = [];
+interface ValueWrites {
+  values: ts.Expression[];
+  mutated: boolean;
+}
+
+function referenceRoot(expr: ts.Expression): ts.Expression {
+  let n = unwrap(expr);
+  for (;;) {
+    const access = memberAccess(n);
+    if (!access) return n;
+    n = unwrap(access.receiver);
+  }
+}
+
+/** Track every assignment operator and member write, not only bare `=`. */
+const writesCache = new WeakMap<ts.TypeChecker, WeakMap<ts.Symbol, WeakMap<ts.Node, ValueWrites>>>();
+function findAssignmentsTo(symbol: ts.Symbol, scope: ts.Node, checker: ts.TypeChecker): ValueWrites {
+  let symbols = writesCache.get(checker);
+  if (!symbols) writesCache.set(checker, symbols = new WeakMap());
+  let scopes = symbols.get(symbol);
+  if (!scopes) symbols.set(symbol, scopes = new WeakMap());
+  const previous = scopes.get(scope);
+  if (previous) return previous;
+  const writes: ValueWrites = { values: [], mutated: false };
+  const targetsSymbol = (expr: ts.Expression): boolean => {
+    if (resolveSymbol(unwrap(expr), checker) === symbol) return true;
+    const root = referenceRoot(expr);
+    return ts.isIdentifier(root) && checker.getSymbolAtLocation(root) === symbol;
+  };
   const visit = (node: ts.Node): void => {
-    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+    if (ts.isBinaryExpression(node) && (node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) && targetsSymbol(node.left)) {
       const left = unwrap(node.left);
-      if (ts.isIdentifier(left) && checker.getSymbolAtLocation(left) === symbol) {
-        out.push(node.right);
+      if (ts.isIdentifier(left)) {
+        writes.values.push(node.right);
+      } else {
+        writes.mutated = true;
       }
+    }
+    if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+        (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) && targetsSymbol(node.operand)) writes.mutated = true;
+    if (ts.isDeleteExpression(node) && targetsSymbol(node.expression)) writes.mutated = true;
+    const patternTargetsSymbol = (pattern: ts.Node): boolean => {
+      if (ts.isIdentifier(pattern)) return checker.getSymbolAtLocation(pattern) === symbol;
+      if (ts.isPropertyAssignment(pattern)) return patternTargetsSymbol(pattern.initializer);
+      if (ts.isShorthandPropertyAssignment(pattern)) return checker.getShorthandAssignmentValueSymbol(pattern) === symbol;
+      if (ts.isSpreadAssignment(pattern) || ts.isSpreadElement(pattern)) return patternTargetsSymbol(pattern.expression);
+      if (ts.isObjectLiteralExpression(pattern)) return pattern.properties.some(patternTargetsSymbol);
+      if (ts.isArrayLiteralExpression(pattern)) return pattern.elements.some(patternTargetsSymbol);
+      if (ts.isBinaryExpression(pattern) && pattern.operatorToken.kind === ts.SyntaxKind.EqualsToken) return patternTargetsSymbol(pattern.left);
+      return false;
+    };
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+        (ts.isObjectLiteralExpression(unwrap(node.left)) || ts.isArrayLiteralExpression(unwrap(node.left))) && patternTargetsSymbol(unwrap(node.left))) writes.mutated = true;
+    if ((ts.isForOfStatement(node) || ts.isForInStatement(node)) && !ts.isVariableDeclarationList(node.initializer) &&
+        (targetsSymbol(node.initializer) || patternTargetsSymbol(node.initializer))) writes.mutated = true;
+    ts.forEachChild(node, visit);
+  };
+  visit(scope);
+  scopes.set(scope, writes);
+  return writes;
+}
+
+/** Objects are only proved when every use is a read at an inspected sink or a
+ * transparent serialization. Passing, returning or aliasing a mutable object
+ * prevents the proof, because another reference could change it. */
+function aggregateEscapes(symbol: ts.Symbol, scope: ts.Node, checker: ts.TypeChecker): boolean {
+  let escapes = false;
+  const visit = (node: ts.Node): void => {
+    if (escapes) return;
+    if (ts.isIdentifier(node) && (checker.getSymbolAtLocation(node) === symbol ||
+        (ts.isShorthandPropertyAssignment(node.parent) && checker.getShorthandAssignmentValueSymbol(node.parent) === symbol))) {
+      if (ts.isVariableDeclaration(node.parent) && node.parent.name === node) return;
+      let value: ts.Node = node;
+      while (ts.isParenthesizedExpression(value.parent) || ts.isAsExpression(value.parent) || ts.isNonNullExpression(value.parent)) value = value.parent;
+      while ((ts.isPropertyAccessExpression(value.parent) || ts.isElementAccessExpression(value.parent)) && value.parent.expression === value) value = value.parent;
+      const parent = value.parent;
+      if (ts.isCallExpression(parent) && parent.arguments.some((arg) => arg === value) &&
+          (matchSink(parent, checker) || isJsonStringifyCall(parent, checker) || isSafeFormatterCall(parent, checker))) return;
+      escapes = true;
+      return;
     }
     ts.forEachChild(node, visit);
   };
   visit(scope);
-  return out;
+  return escapes;
 }
 
 const MAX_TRANSITIVE_DEPTH = 6;
@@ -513,7 +801,15 @@ function isSafeVariableReference(symbol: ts.Symbol, ctx: ScanCtx): boolean {
   const scope = enclosingFunctionOrSourceFile(decl);
   const values: ts.Expression[] = [];
   if (decl.initializer) values.push(decl.initializer);
-  values.push(...findAssignmentsTo(symbol, scope, ctx.checker));
+  const writes = findAssignmentsTo(symbol, scope, ctx.checker);
+  if (writes.mutated) return false;
+  values.push(...writes.values);
+  const isAggregate = values.some((value) => {
+    const n = unwrap(value);
+    const type = ctx.checker.getTypeAtLocation(n);
+    return ts.isObjectLiteralExpression(n) || ts.isArrayLiteralExpression(n) || Boolean(type.flags & ts.TypeFlags.Object);
+  });
+  if (isAggregate && aggregateEscapes(symbol, scope, ctx.checker)) return false;
   return values.length > 0 && values.every((v) => isExprSafeSilently(v, ctx));
 }
 
@@ -552,6 +848,9 @@ function isSafeParameterReference(symbol: ts.Symbol, ctx: ScanCtx): boolean {
   const paramDecl = decl as ts.ParameterDeclaration;
   const fn = paramDecl.parent;
   if (!ts.isFunctionLike(fn) || !("parameters" in fn)) return false;
+  if (ctx.escapedFunctions.has(fn)) return false;
+  const writes = findAssignmentsTo(symbol, fn, ctx.checker);
+  if (writes.mutated || writes.values.length) return false;
   const index = fn.parameters.indexOf(paramDecl);
   if (index < 0) return false;
   const sites = ctx.callSitesByDecl.get(fn as unknown as ts.Node) ?? [];
@@ -582,6 +881,31 @@ function isSafeSymbolReference(sym: ts.Symbol | undefined, ctx: ScanCtx): boolea
   if (isSafeParameterReference(sym, ctx)) return true;
   if (isSafeStartTraceDestructuring(sym, ctx.checker)) return true;
   return false;
+}
+
+function hasUnsafeReferenceWrites(expr: ts.Expression, ctx: ScanCtx): boolean {
+  const root = referenceRoot(expr);
+  if (root !== unwrap(expr) && ts.isIdentifier(root)) {
+    const rootSymbol = ctx.checker.getSymbolAtLocation(root);
+    if (hasUnsafeWrites(rootSymbol, ctx)) return true;
+    const decl = rootSymbol?.valueDeclaration;
+    if (rootSymbol && decl && ts.isVariableDeclaration(decl) && decl.initializer &&
+        (ts.isObjectLiteralExpression(unwrap(decl.initializer)) || ts.isArrayLiteralExpression(unwrap(decl.initializer))) &&
+        (!isExprSafeSilently(decl.initializer, ctx) || aggregateEscapes(rootSymbol, enclosingFunctionOrSourceFile(decl), ctx.checker))) return true;
+  }
+  return hasUnsafeWrites(ctx.checker.getSymbolAtLocation(expr), ctx);
+}
+
+function hasUnsafeWrites(symbol: ts.Symbol | undefined, ctx: ScanCtx): boolean {
+  const decl = symbol?.valueDeclaration;
+  if (!symbol || !decl) return false;
+  if (ts.isParameter(decl) && !isSafeParameterReference(symbol, ctx)) return true;
+  if (ts.isBindingElement(decl) && !isSafeStartTraceDestructuring(symbol, ctx.checker)) return true;
+  if ((ts.isVariableDeclaration(decl) || ts.isPropertyDeclaration(decl) || ts.isPropertyAssignment(decl)) && decl.initializer &&
+      !isExprSafeSilently(decl.initializer, ctx)) return true;
+  const writes = findAssignmentsTo(symbol, enclosingFunctionOrSourceFile(decl), ctx.checker);
+  if (writes.mutated || writes.values.some((value) => !isExprSafeSilently(value, ctx))) return true;
+  return ts.isParameter(decl) && (writes.values.length > 0 || ctx.escapedFunctions.has(decl.parent));
 }
 
 function isSafeIdentifierReference(expr: ts.Expression, ctx: ScanCtx): boolean {
@@ -634,6 +958,7 @@ export function checkArg(expr: ts.Expression, ctx: ScanCtx): boolean {
   if (ts.isObjectLiteralExpression(n)) {
     let ok = true;
     for (const prop of n.properties) {
+      if (prop.name && ts.isComputedPropertyName(prop.name)) ok = checkArg(prop.name.expression, ctx) && ok;
       if (ts.isPropertyAssignment(prop)) {
         ok = checkArg(prop.initializer, ctx) && ok;
       } else if (ts.isShorthandPropertyAssignment(prop)) {
@@ -642,7 +967,7 @@ export function checkArg(expr: ts.Expression, ctx: ScanCtx): boolean {
         // itself), not the local variable/parameter it references — the
         // dedicated API below resolves to the actual referenced value symbol.
         const valueSym = ctx.checker.getShorthandAssignmentValueSymbol(prop);
-        const safe = hasLiteralUnionType(prop.name, ctx.checker) || isSafeSymbolReference(valueSym, ctx);
+        const safe = isSafeSymbolReference(valueSym, ctx) || (hasLiteralUnionType(prop.name, ctx.checker) && !hasUnsafeWrites(valueSym, ctx));
         if (!safe) pushViolation(ctx, prop.name);
         ok = safe && ok;
       } else if (ts.isSpreadAssignment(prop)) {
@@ -684,7 +1009,7 @@ export function checkArg(expr: ts.Expression, ctx: ScanCtx): boolean {
   // "completed"|"failed"`, or BaseFacade's own `FacadeName`), OR a local/parameter
   // the checker can prove is always literal — NEVER a name allowlist.
   if (ts.isIdentifier(n) || ts.isPropertyAccessExpression(n)) {
-    if (hasLiteralUnionType(n, ctx.checker)) return true;
+    if (hasLiteralUnionType(n, ctx.checker) && !hasUnsafeReferenceWrites(n, ctx)) return true;
     if (isSafeIdentifierReference(n, ctx)) return true;
     pushViolation(ctx, n);
     return false;
@@ -713,9 +1038,9 @@ export function scanNode(node: ts.Node, file: string, sourceFile: ts.SourceFile,
   const violations: Violation[] = [];
   const unresolvedCallees: Violation[] = [];
   const visit = (n: ts.Node): void => {
-    if (ts.isCallExpression(n)) {
+    if (ts.isCallExpression(n) || ts.isTaggedTemplateExpression(n)) {
       const sink = matchSink(n, scanner.checker);
-      if (sink) {
+      if (sink && sink !== UNSUPPORTED_SINK) {
         const ctx: ScanCtx = {
           file,
           checker: scanner.checker,
@@ -723,12 +1048,18 @@ export function scanNode(node: ts.Node, file: string, sourceFile: ts.SourceFile,
           sink,
           out: violations,
           callSitesByDecl: scanner.callSitesByDecl,
+          escapedFunctions: scanner.escapedFunctions,
+          sinkNode: n,
           depth: 0,
         };
-        for (const arg of n.arguments) checkArg(arg, ctx);
-      } else if (!calleeResolves(n, scanner.checker)) {
+        if (ts.isTaggedTemplateExpression(n)) {
+          checkArg(n.template, ctx);
+        } else {
+          for (const arg of n.arguments) checkArg(arg, ctx);
+        }
+      } else if (sink === UNSUPPORTED_SINK || !calleeResolves(n, scanner.checker)) {
         // Ruling (1): "A callee that cannot be resolved in a scanned file FAILS."
-        unresolvedCallees.push({ file, sink: "<unresolved-callee>", argText: normalizeArgText(n, sourceFile) });
+        unresolvedCallees.push(createViolation(file, "<unresolved-callee>", n, sourceFile));
       }
     }
     ts.forEachChild(n, visit);
@@ -771,19 +1102,21 @@ export function findNamedFunction(sourceFile: ts.SourceFile, name: string): ts.F
 // Baseline (ruling (3)): shrink-only
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** file -> sink -> sorted, de-duplicated normalized argText list. Never keyed by
- *  line number, so an unrelated edit elsewhere in a file never perturbs it. */
-export type Baseline = Record<string, Record<string, string[]>>;
+/** Each occurrence retains its complete expression and declaration fingerprint.
+ *  Arrays preserve multiplicity even if a caller supplies identical rows. */
+export type Baseline = Record<string, Record<string, Pick<Violation, "argText" | "fingerprint">[]>>;
 
-function toBaseline(entries: Violation[]): Baseline {
+export function baselineFromViolations(entries: Violation[]): Baseline {
   const out: Baseline = {};
   for (const v of entries) {
     (out[v.file] ??= {})[v.sink] ??= [];
     const list = out[v.file][v.sink];
-    if (!list.includes(v.argText)) list.push(v.argText);
+    list.push({ argText: v.argText, fingerprint: v.fingerprint });
   }
   for (const file of Object.keys(out)) {
-    for (const sink of Object.keys(out[file])) out[file][sink].sort();
+    for (const sink of Object.keys(out[file])) {
+      out[file][sink].sort((a, b) => a.fingerprint.localeCompare(b.fingerprint) || a.argText.localeCompare(b.argText));
+    }
   }
   return out;
 }
@@ -791,33 +1124,74 @@ function toBaseline(entries: Violation[]): Baseline {
 function fromBaseline(baseline: Baseline): Violation[] {
   const out: Violation[] = [];
   for (const [file, sinks] of Object.entries(baseline)) {
-    for (const [sink, argTexts] of Object.entries(sinks)) {
-      for (const argText of argTexts) out.push({ file, sink, argText });
+    for (const [sink, occurrences] of Object.entries(sinks)) {
+      for (const occurrence of occurrences) {
+        if (!occurrence || typeof occurrence.argText !== "string" || typeof occurrence.fingerprint !== "string") {
+          throw new Error("Baseline rows require complete expressions and occurrence fingerprints");
+        }
+        out.push({ file, sink, ...occurrence });
+      }
     }
   }
   return out;
 }
 
-export function loadBaseline(): Baseline {
-  if (!existsSync(BASELINE_PATH)) return {};
-  return JSON.parse(readFileSync(BASELINE_PATH, "utf8")) as Baseline;
+export function loadBaseline(path: string = BASELINE_PATH): Baseline {
+  if (!existsSync(path)) return {};
+  const baseline = JSON.parse(readFileSync(path, "utf8")) as Baseline;
+  fromBaseline(baseline);
+  return baseline;
 }
 
-function violationKey(v: Violation): string {
-  return `${v.file}\u0000${v.sink}\u0000${v.argText}`;
+export function violationKey(v: Violation): string {
+  return JSON.stringify([v.file, v.sink, v.fingerprint, v.argText]);
+}
+
+/** Multiset subtraction consumes each admitted occurrence only once. */
+function subtractOccurrences(current: Violation[], admitted: Violation[]): Violation[] {
+  const counts = new Map<string, number>();
+  for (const row of admitted) counts.set(violationKey(row), (counts.get(violationKey(row)) ?? 0) + 1);
+  return current.filter((row) => {
+    const key = violationKey(row);
+    const count = counts.get(key) ?? 0;
+    if (count === 0) return true;
+    counts.set(key, count - 1);
+    return false;
+  });
 }
 
 /** Entries present in `current` but not `baseline` — a NEW, unexplained violation. */
 export function newViolations(current: Violation[], baseline: Baseline): Violation[] {
-  const baseKeys = new Set(fromBaseline(baseline).map(violationKey));
-  return current.filter((v) => !baseKeys.has(violationKey(v)));
+  return subtractOccurrences(current, fromBaseline(baseline));
 }
 
 /** Entries present in `baseline` but no longer in `current` — a STALE baseline row
  *  (the violation was fixed); the baseline must be regenerated to shrink. */
 export function staleBaselineEntries(current: Violation[], baseline: Baseline): Violation[] {
-  const curKeys = new Set(current.map(violationKey));
-  return fromBaseline(baseline).filter((v) => !curKeys.has(violationKey(v)));
+  return subtractOccurrences(fromBaseline(baseline), current);
+}
+
+/** Explicit review additions must identify distinct, currently new occurrences. */
+export function validateReviewedAdditions(entries: unknown, current: Violation[], baseline: Baseline): Violation[] {
+  if (!Array.isArray(entries)) throw new Error("Reviewed additions must be an array");
+  const available = new Set(newViolations(current, baseline).map(violationKey));
+  const seen = new Set<string>();
+  return entries.map((entry: unknown) => {
+    if (!entry || typeof entry !== "object") throw new Error("Invalid reviewed addition");
+    const row = entry as Record<string, unknown>;
+    if (typeof row.file !== "string" || typeof row.sink !== "string" || typeof row.argText !== "string"
+      || typeof row.fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(row.fingerprint)
+      || row.classification !== "not_a_leak" || typeof row.reason !== "string" || !row.reason.trim()) {
+      throw new Error("Each reviewed addition needs file, sink, complete argText, fingerprint, not_a_leak classification and reason");
+    }
+    const violation: Violation = { file: row.file, sink: row.sink, argText: row.argText, fingerprint: row.fingerprint };
+    const key = violationKey(violation);
+    if (N71_SCOPE_FILES.includes(row.file) || !available.has(key) || seen.has(key)) {
+      throw new Error("Reviewed additions must be distinct, currently new occurrences outside N71's scope");
+    }
+    seen.add(key);
+    return violation;
+  });
 }
 
 /**
@@ -831,13 +1205,13 @@ export function staleBaselineEntries(current: Violation[], baseline: Baseline): 
  *
  * Usage: `pnpm --dir packages/gateway exec tsx scripts/generate-n71-sink-baseline.ts`
  */
-export function regenerateBaseline(current: Violation[]): { baseline: Baseline; removed: number; bootstrapped: boolean } {
-  const bootstrapped = !existsSync(BASELINE_PATH);
-  const existing = loadBaseline();
-  const currentKeys = new Set(current.map(violationKey));
-  const kept = bootstrapped ? current : fromBaseline(existing).filter((v) => currentKeys.has(violationKey(v)));
+export function regenerateBaseline(current: Violation[], path: string = BASELINE_PATH): { baseline: Baseline; removed: number; bootstrapped: boolean } {
+  const bootstrapped = !existsSync(path);
+  const existing = loadBaseline(path);
+  const existingOccurrences = fromBaseline(existing);
+  const kept = bootstrapped ? current : subtractOccurrences(existingOccurrences, staleBaselineEntries(current, existing));
   const removed = bootstrapped ? 0 : fromBaseline(existing).length - kept.length;
-  const baseline = toBaseline(kept);
-  writeFileSync(BASELINE_PATH, JSON.stringify(baseline, null, 2) + "\n", "utf8");
+  const baseline = baselineFromViolations(kept);
+  writeFileSync(path, JSON.stringify(baseline, null, 2) + "\n", "utf8");
   return { baseline, removed, bootstrapped };
 }

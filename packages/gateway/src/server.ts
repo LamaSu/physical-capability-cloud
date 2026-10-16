@@ -1,4 +1,5 @@
 import { initSentry, Sentry } from "./sentry.js";
+import { knownErrorClassName } from "./redaction.js";
 import { buildReportHint, decorateWithReportHint } from "./report-hint.js";
 // Must be called before any other imports so Sentry patches HTTP/fetch/Fastify
 initSentry();
@@ -605,15 +606,14 @@ export async function createGateway(port = 3200) {
       }).$client;
       initCarrierShipmentStore(rawSqlite ? { sqlite: rawSqlite, strictHydration: strict } : {});
       if (!rawSqlite) {
-        app.log[strict ? "error" : "warn"](
-          "[carrier] no SQLite handle; shipment commitments are in-memory only — in production classification the carrier capability will 503 as unconfigured (durable store missing)",
-        );
+        const message = "[carrier] no SQLite handle; shipment commitments are in-memory only — in production classification the carrier capability will 503 as unconfigured (durable store missing)";
+        if (strict) app.log.error(message);
+        else app.log.warn(message);
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      app.log[strict ? "error" : "warn"](
-        `[carrier] could not attach SQLite (${msg}); falling back to in-memory. In production classification the carrier capability will 503 as unconfigured rather than serve from a store that failed strict hydration.`,
-      );
+      const message = "[carrier] could not attach SQLite; falling back to in-memory. In production classification the carrier capability will 503 as unconfigured rather than serve from a store that failed strict hydration.";
+      if (strict) app.log.error({ err: knownErrorClassName(err) }, message);
+      else app.log.warn({ err: knownErrorClassName(err) }, message);
       initCarrierShipmentStore({});
     }
   }

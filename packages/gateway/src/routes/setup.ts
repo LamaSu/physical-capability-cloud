@@ -17,6 +17,7 @@ import { getKernelService } from "../services/kernel-service.js";
 import { jobSubmitQueueOnly, localJobDispatchDecision, type LocalJobDispatchReason } from "../services/local-job-dispatch.js";
 import { emergencyStopState } from "./device-relay.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { safeServerEventProperties, safeServerEventDistinctId } from "../services/posthog-policy.js";
 import { auditService } from "../services/audit-service.js";
 import {
   isKnownNodeEnv,
@@ -498,8 +499,7 @@ export async function setupRoutes(app: FastifyInstance) {
         }
       }
 
-      const resolvedKernelId =
-        kernelId ?? `kernel_${slugify(process.env.KERNEL_ID ?? "shop")}_${Date.now()}`;
+      const resolvedKernelId = kernelId ?? `kernel_${uuidv4()}`;
 
       const deviceConfigs: DeviceConfig[] = devices.map((desc, i) =>
         buildDeviceConfig(desc, resolvedKernelId, i),
@@ -818,15 +818,14 @@ export async function setupRoutes(app: FastifyInstance) {
           }
         }
 
-        trackServerEvent("device_registered", {
+        trackServerEvent("device_registered", safeServerEventProperties({
           deviceId,
           kernelId,
           type,
           adapterType,
-          model,
           action,
           capabilitiesRegistered: capabilities?.length ?? 0,
-        }, (req as any).operatorId ?? (req as any).apiKeyId);
+        }), safeServerEventDistinctId((req as any).operatorId ?? (req as any).apiKeyId));
         auditService.log({
           eventType: action === "created" ? "device.registered" : "device.updated",
           actor: (req as any).operatorId ?? (req as any).apiKeyId,
@@ -1194,12 +1193,14 @@ export async function setupRoutes(app: FastifyInstance) {
       duration: Date.now() - startTime,
     };
    } catch (err) {
-     // N59 F4: every reply from this route carries ran/passed, even an
-     // unexpected internal error, so no caller reads a bare Fastify 500 as
-     // an ambiguous result.
+     // Dependency failures disclose only a fixed code and a closed error class.
+     req.log.error(
+       { code: "setup_test_job_failed", errorClass: knownErrorClassName(err) },
+       "setup/test-job failed",
+     );
      return reply.code(500).send({
        error: "test_job_error",
-       message: err instanceof Error ? err.message : String(err),
+       message: "Test job failed",
        ran: false,
        passed: false,
      });

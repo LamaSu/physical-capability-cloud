@@ -19,7 +19,7 @@
  */
 
 import type { FastifyInstance, FastifyReply } from "fastify";
-import { pipelineTelemetry, PIPELINE_PHASES } from "../telemetry.js";
+import { pipelineTelemetry, PIPELINE_PHASES, TELEMETRY_STATUSES } from "../telemetry.js";
 import { logger, type LogLevel } from "../structured-logger.js";
 import { streamHub } from "../sse/stream-hub.js";
 import { auditService } from "../services/audit-service.js";
@@ -312,6 +312,9 @@ export async function telemetryRoutes(app: FastifyInstance) {
 
     if (!jobId || !phase || !status) {
       return reply.code(400).send({ error: "jobId, phase, status are required" });
+    }
+    if (!PIPELINE_PHASES.includes(phase) || !TELEMETRY_STATUSES.includes(status)) {
+      return reply.code(400).send({ error: "invalid_telemetry_phase_or_status" });
     }
 
     // Sanitize metadata to prevent prompt injection in telemetry (AI-02 fix)

@@ -494,7 +494,12 @@ export class KernelService {
               // file's boundary to audit; THE SINK IS THE BOUNDARY means it is dropped
               // here rather than forwarded unexamined.
               onPhase: (jid, phase, status) => {
-                pipelineTelemetry.emit(logSafeId(jid), phase, status);
+                if (!["job_accepted", "job_started", "evidence_capture"].includes(phase) || !["completed", "failed"].includes(status)) return;
+                pipelineTelemetry.emit(
+                  logSafeId(jid),
+                  phase === "job_accepted" ? "job_accepted" : phase === "job_started" ? "job_started" : "evidence_capture",
+                  status === "completed" ? "completed" : "failed",
+                );
               },
             })
             .then(async (result) => {
@@ -618,7 +623,12 @@ export class KernelService {
           // validated, phase/status are closed enums, meta dropped (not this file's
           // boundary to audit @pcc/kernel's own call sites).
           onPhase: (jid, phase, status) => {
-            pipelineTelemetry.emit(logSafeId(jid), phase, status);
+            if (!["job_accepted", "job_started", "evidence_capture"].includes(phase) || !["completed", "failed"].includes(status)) return;
+            pipelineTelemetry.emit(
+              logSafeId(jid),
+              phase === "job_accepted" ? "job_accepted" : phase === "job_started" ? "job_started" : "evidence_capture",
+              status === "completed" ? "completed" : "failed",
+            );
           },
         })
         .then(async (result) => {

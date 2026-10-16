@@ -25,6 +25,7 @@ import { Sentry } from "../sentry.js";
 import { traceCollector, TraceCollector } from "../trace-collector.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { auditService } from "./audit-service.js";
+import { logSafeSmallInt } from "../redaction.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -124,7 +125,7 @@ export class SettlementService {
       attributes: {
         "job.id": jobId,
         "bundle.id": bundle.id,
-        "bundle.assurance_tier": bundle.assuranceTier,
+        "bundle.assurance_tier": logSafeSmallInt(bundle.assuranceTier, 0, 3) ?? -1,
       },
     });
 
@@ -137,7 +138,7 @@ export class SettlementService {
           attributes: {
             "job.id": jobId,
             "bundle.id": bundle.id,
-            "bundle.assurance_tier": bundle.assuranceTier,
+            "bundle.assurance_tier": logSafeSmallInt(bundle.assuranceTier, 0, 3) ?? -1,
           },
         },
         async () => {

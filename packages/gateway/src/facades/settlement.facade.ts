@@ -39,6 +39,7 @@ import { getSettlementService } from "../services/settlement-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { safeServerEventProperties, safeServerEventDistinctId } from "../services/posthog-policy.js";
 import {
   readEscrow,
   getEscrowEvents,
@@ -330,7 +331,7 @@ export class SettlementFacade extends BaseFacade {
       // by a prose "checked earlier in this function" claim — logSafeAddress
       // re-asserts the same 0x+40hex shape at the sink itself.
       pipelineTelemetry.emit(logSafeAddress(address), "escrow_fund", "completed", { metadata: { escrow: logSafeAddress(address) } });
-      trackServerEvent("escrow_funded", { amount: result?.toString?.() ?? address }, actorId);
+      trackServerEvent("escrow_funded", safeServerEventProperties({}), safeServerEventDistinctId(actorId));
       auditService.log({
         eventType: "escrow.funded",
         actor: actorId,

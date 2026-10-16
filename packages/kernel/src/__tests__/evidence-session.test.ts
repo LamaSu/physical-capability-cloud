@@ -13,6 +13,7 @@ import { EvidenceEmitter } from "../evidence-emitter.js";
 import { openEvidenceSession } from "../evidence-session.js";
 import type { EmittedEvidence } from "../evidence-session.js";
 import { JobRunner } from "../job-runner.js";
+import { observationId } from "../observability.js";
 import { lose1Capture } from "./lose1-capture-fixture.js";
 
 vi.mock("@sentry/node", () => ({
@@ -145,7 +146,7 @@ describe("openEvidenceSession", () => {
     expect(openEvidenceSession([a], owner("job-3"), vi.fn())).toEqual({ ok: false, busy: { reason: "adapter", adapterId: "adapter-a", jobId: "job-2" } });
   });
 
-  it("drops an event emitted after close, warning with the adapter id and the event type, never the payload", () => {
+  it("drops an event emitted after close, warning with hashed adapter and event identities, never the payload", () => {
     const a = fakeAdapter("adapter-a");
     const deliver = vi.fn();
     mustOpen([a], owner("job-1"), deliver).close();
@@ -155,8 +156,8 @@ describe("openEvidenceSession", () => {
     expect(deliver).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledTimes(1);
     const message = String(warn.mock.calls[0]![0]);
-    expect(message).toContain("adapter-a");
-    expect(message).toContain("cv_inspection_result");
+    expect(message).toBe("evidence_event_without_job");
+    expect(warn.mock.calls[0]!.slice(1)).toEqual([observationId("adapter-a"), observationId("cv_inspection_result")]);
     expect(JSON.stringify(warn.mock.calls)).not.toContain("payload-must-not-be-logged");
   });
 
@@ -334,7 +335,7 @@ describe("quiesce and the handoff guard: the adapter's word, never a clock (#502
     expect(await quiesced, "the run's quiesce timed out").toBe(false);
     session.close();
     a.emit(evidence("execution_completed", "adapter-a")); // dropped: no job is recording it
-    expect(warn).toHaveBeenCalledWith("[evidence-session] dropped a execution_completed event from adapter adapter-a: no job is recording it");
+    expect(warn).toHaveBeenCalledWith("evidence_event_without_job", observationId("adapter-a"), observationId("execution_completed"));
 
     expect(openEvidenceSession([sameDevice], owner("job-2"), vi.fn())).toEqual({ ok: false, busy: { reason: "quiescing", adapterId: "adapter-a2", jobId: "job-1" } });
     await vi.advanceTimersByTimeAsync(3_600_000);

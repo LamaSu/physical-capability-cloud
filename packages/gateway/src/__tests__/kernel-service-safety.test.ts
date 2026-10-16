@@ -545,12 +545,7 @@ const FAIL_LOAD_SENTINEL_TYPE = "test-fail-load-sentinel-ks-n71r5-fu";
 // earlier version of this file's InstantSuccessAdapter did exactly that).
 const MOCK_JOB_DURATION_MS = 50;
 
-/**
- * The original N71 fixture threw from onEvidence() before JobRunner's catch.
- * Master now catches that registration failure. Keep the adapter adversarial,
- * and explicitly reject JobRunner.run() in the test to exercise the service's
- * rejected-promise catch rather than its resolved-failure branch.
- */
+/** Evidence registration fails before the runner's execution catch. */
 class RejectingOnEvidenceAdapter implements MachineAdapter {
   readonly id: string;
   readonly type = "fdm" as const;
@@ -571,14 +566,13 @@ class RejectingOnEvidenceAdapter implements MachineAdapter {
   onEvidence(_cb: Parameters<MachineAdapter["onEvidence"]>[0]): void {
     throw new Error(`password=${FOLLOWUP_SENTINEL}`);
   }
+  async quiesceEvidence(): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
 /**
- * execute() always resolves `{success:false, message: <sentinel>}` — JobRunner's
- * step 1 wraps this as `Failed to load G-code: ${loadResult.message}` into a
- * RESOLVED JobResult.error (runner.run() never rejects here), exercising
- * kernel-service.ts:373's `.then((result) => ...)` branch specifically.
+ * A failed load resolves with dependency text, reaching the service's resolved
+ * failure branch through JobRunner's own execution path.
  */
 class FailLoadSentinelAdapter implements MachineAdapter {
   readonly id: string;
@@ -598,6 +592,7 @@ class FailLoadSentinelAdapter implements MachineAdapter {
     return 0;
   }
   onEvidence(_cb: Parameters<MachineAdapter["onEvidence"]>[0]): void {}
+  async quiesceEvidence(): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -627,13 +622,12 @@ describe("KernelService.submitJob — N71 round 5 follow-up: job.lifecycle span 
       devices: [{ id: "dev-reject-a", type: "machine", adapterType: REJECT_ONEVIDENCE_TYPE, config: {} }],
     });
 
-    // JobRunner now catches adapter onEvidence errors itself. Reject the runner
-    // boundary explicitly so this test still exercises KernelService's catch.
-    const run = vi.spyOn(JobRunner.prototype, "run")
-      .mockRejectedValueOnce(new Error(`password=${FOLLOWUP_SENTINEL}`));
+    const registration = vi.spyOn(RejectingOnEvidenceAdapter.prototype, "onEvidence");
+    const run = vi.spyOn(JobRunner.prototype, "run");
     await svc.submitJob({ kernelId: svc.kernelId, jobId: "ks-n71r5-fu-a", stepId: "s", assuranceTier: 0, deviceId: "dev-reject-a" });
     await waitFor(() => setStatusSpy.mock.calls.length > 0);
     expect(run).toHaveBeenCalledTimes(1);
+    expect(registration).toHaveBeenCalledTimes(1);
 
     for (const call of setStatusSpy.mock.calls) {
       const status = call[0] as { code: number; message?: string };
@@ -732,6 +726,7 @@ describe("KernelService.submitJob — N71 round 5 follow-up: job.lifecycle span 
       cb({ end: vi.fn(), setStatus: setStatusSpy });
     });
 
+    const execute = vi.spyOn(FailLoadSentinelAdapter.prototype, "execute");
     const svc = new KernelService({
       kernelId: "kernel-ks-n71r5-fu-d",
       mockMode: false,
@@ -740,6 +735,8 @@ describe("KernelService.submitJob — N71 round 5 follow-up: job.lifecycle span 
 
     await svc.submitJob({ kernelId: svc.kernelId, jobId: "ks-n71r5-fu-d", stepId: "s", assuranceTier: 0, deviceId: "dev-failload-d" });
     await waitFor(() => setStatusSpy.mock.calls.length > 0);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ type: "load_gcode" }));
 
     for (const call of setStatusSpy.mock.calls) {
       const status = call[0] as { code: number; message?: string };

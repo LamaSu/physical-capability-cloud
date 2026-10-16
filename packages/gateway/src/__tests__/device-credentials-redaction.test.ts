@@ -43,6 +43,17 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import { createRequire } from "node:module";
 
+const analyticsCapture = vi.hoisted(() => vi.fn());
+const analyticsConstruct = vi.hoisted(() => vi.fn());
+vi.mock("posthog-node", () => ({
+  PostHog: class {
+    capture = analyticsCapture;
+    identify = vi.fn();
+    shutdown = vi.fn().mockResolvedValue(undefined);
+    constructor() { analyticsConstruct(); }
+  },
+}));
+
 process.env.PCC_DB_PATH = ":memory:";
 process.env.NODE_ENV = "test";
 process.env.PCC_SEED_DATA = "false";
@@ -645,6 +656,21 @@ describe("N71: POST /api/setup/register-device returns a credential-free device 
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("N71: POST /api/setup/generate-config is unchanged (it returns the caller's own input)", () => {
+  it("[neg] an omitted kernelId is generated independently of the server environment", async () => {
+    const serverOnly = SENTINEL.toLowerCase().replace(/[^a-z0-9]/g, "");
+    await withEnv({ KERNEL_ID: serverOnly }, async () => {
+      const res = await inj("POST", "/api/setup/generate-config", keyB, {
+        devices: [{ name: "Printer", type: "machine", adapterType: "mock" }],
+      });
+      expect(res.statusCode).toBe(200);
+      const body = bodyOf(res);
+      expect(body.config.kernelId).toMatch(/^kernel_[0-9a-f-]{36}$/);
+      expect(res.body).not.toContain(serverOnly);
+      expect(body.configJson).not.toContain(serverOnly);
+      expect(body.envLine).not.toContain(serverOnly);
+    });
+  });
+
   it("control: a credential the caller sends comes back in what it generated, and nothing stored does", async () => {
     const mine = `${SENTINEL}-caller-supplied`;
     const res = await inj("POST", "/api/setup/generate-config", keyB, {
@@ -1129,6 +1155,111 @@ describe("N71 round 3 (astra pack 83b): the setup catch blocks answer with fixed
     } finally {
       spy.mockRestore();
     }
+  });
+
+  it("[neg] the outer test-job catch contains a repository read failure", async () => {
+    const spy = vi.spyOn(getRepos().kernels, "findById").mockImplementation(() => { throw new TypeError(THROWN); });
+    try {
+      const { result: res, lines } = await captureAppLog(() =>
+        inj("POST", "/api/setup/test-job", keyA, { kernelId, deviceId }),
+      );
+      expect(spy).toHaveBeenCalled();
+      expect(res.statusCode).toBe(500);
+      expect(bodyOf(res)).toEqual({ error: "test_job_error", message: "Test job failed", ran: false, passed: false, report_hint: expect.any(Object) });
+      expect(res.body).not.toContain(THROWN);
+      expect(res.body).not.toContain(SENTINEL);
+      const logs = lines.map((line) => JSON.parse(line)).filter((line) => line.code === "setup_test_job_failed");
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toMatchObject({ errorClass: "TypeError", msg: "setup/test-job failed" });
+      expect(lines.join("\n")).not.toContain(THROWN);
+      expect(lines.join("\n")).not.toContain(SENTINEL);
+    } finally { spy.mockRestore(); }
+  });
+
+  it("[neg] the outer test-job catch contains a completion-processing failure", async () => {
+    const svc = getKernelService();
+    const localKernelId = svc.kernelId;
+    const submit = vi.spyOn(svc, "submitJob").mockResolvedValue({ jobId: "completion-job", deviceId: "dev_fdm_001", status: "running" });
+    const status = vi.spyOn(svc, "getJobStatus").mockResolvedValue({ jobId: "completion-job", status: "completed" });
+    const completion = vi.spyOn(svc, "jobRanSimulated").mockImplementation(() => { throw new RangeError(THROWN); });
+    const findDevice = vi.spyOn(getRepos().kernels, "findDeviceById");
+    findDevice.mockReturnValue({ id: "dev_fdm_001", kernelId: localKernelId, type: "machine", adapterType: "generic-http" } as never);
+    try {
+      const { result: res, lines } = await captureAppLog(() =>
+        inj("POST", "/api/setup/test-job", keyA, { kernelId: localKernelId, deviceId: "dev_fdm_001" }),
+      );
+      expect(submit).toHaveBeenCalledOnce();
+      expect(status).toHaveBeenCalled();
+      expect(completion).toHaveBeenCalledOnce();
+      expect(res.statusCode).toBe(500);
+      expect(bodyOf(res)).toEqual({ error: "test_job_error", message: "Test job failed", ran: false, passed: false, report_hint: expect.any(Object) });
+      expect(res.body).not.toContain(THROWN);
+      expect(res.body).not.toContain(SENTINEL);
+      expect(lines.map((line) => JSON.parse(line))).toContainEqual(expect.objectContaining({ code: "setup_test_job_failed", errorClass: "RangeError" }));
+      expect(lines.join("\n")).not.toContain(THROWN);
+      expect(lines.join("\n")).not.toContain(SENTINEL);
+    } finally {
+      submit.mockRestore(); status.mockRestore(); completion.mockRestore(); findDevice.mockRestore();
+    }
+  });
+});
+
+describe("N71 round 8: analytics capture policy", () => {
+  async function enableAnalytics() {
+    const service = await import("../services/posthog-service.js");
+    analyticsConstruct.mockClear();
+    await withEnv({ POSTHOG_API_KEY: SENTINEL }, async () => {
+      service.initPostHog();
+      await vi.waitFor(() => expect(analyticsConstruct).toHaveBeenCalledOnce());
+    });
+    analyticsCapture.mockClear();
+    return service;
+  }
+
+  it("[neg] the remote boundary formats declared fields and omits undeclared properties", async () => {
+    const service = await enableAnalytics();
+    service.trackServerEvent("job_submitted", {
+      kernelId: `pcc_live_${SENTINEL}`, model: SENTINEL, unexpected: SENTINEL,
+      operatorAddress: `pcc_live_${SENTINEL}`,
+      external: true, reason: "not_local", capabilitiesRegistered: 2, assuranceTier: SENTINEL,
+    }, `pcc_live_${SENTINEL}`);
+    expect(analyticsCapture).toHaveBeenCalledOnce();
+    expect(analyticsCapture).toHaveBeenCalledWith({
+      event: "job_submitted", distinctId: "[invalid id]",
+      properties: { kernelId: "[invalid id]", operatorAddress: "[invalid id]", external: true, reason: "not_local", capabilitiesRegistered: 2, assuranceTier: null, source: "gateway", environment: "test" },
+    });
+    expect(JSON.stringify(analyticsCapture.mock.calls)).not.toContain(SENTINEL);
+  });
+
+  it("[neg] job.facade submission reaches capture with formatted properties", async () => {
+    await enableAnalytics();
+    const result = await getJobFacade().submit({
+      jobId: `analytics-job-${++seq}`, stepId: "analytics-step", kernelId,
+      capabilityId: `pcc_live_${SENTINEL}`, queueOnly: true,
+    }, `pcc_live_${SENTINEL}`);
+    expect(result.success).toBe(true);
+    const captured = analyticsCapture.mock.calls.map(([event]) => event).filter((event) => event.event === "job_submitted");
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toEqual({
+      event: "job_submitted", distinctId: "[invalid id]",
+      properties: { kernelId, capabilityType: "[invalid id]", external: true, reason: "queue_only", source: "gateway", environment: "test" },
+    });
+    expect(JSON.stringify(captured)).not.toContain(SENTINEL);
+  });
+
+  it("[neg] device registration reaches capture without model text or raw identifiers", async () => {
+    await enableAnalytics();
+    const res = await inj("POST", "/api/setup/register-device", keyA, {
+      kernelId, deviceId: `pcc_live_${SENTINEL}`, type: "sensor", adapterType: "mock", model: SENTINEL,
+    });
+    expect(res.statusCode).toBe(201);
+    const captured = analyticsCapture.mock.calls.map(([event]) => event).filter((event) => event.event === "device_registered");
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toEqual({
+      event: "device_registered", distinctId: "[invalid id]",
+      properties: { kernelId, deviceId: "[invalid id]", type: "sensor", adapterType: "mock", action: "created", capabilitiesRegistered: 0, source: "gateway", environment: "test" },
+    });
+    expect(JSON.stringify(captured)).not.toContain(SENTINEL);
   });
 });
 
