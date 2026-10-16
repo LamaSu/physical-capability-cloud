@@ -164,4 +164,18 @@ describe("validate", () => {
     expect(result.valid).toBe(true);
     expect(result.warnings.filter(w => w.name.endsWith("tier1.sensors") || w.name.endsWith("tier2.camera"))).toEqual([]);
   });
+
+  it("V4: each of two machine adapters has its own capability class", () => {
+    const config = makeValidConfig();
+    config.adapters.push({ ...config.adapters[0]!, adapterId: "dev-liquid-02", className: "LiquidAdapter" });
+    config.capabilities.push({ ...config.capabilities[0]!, adapterId: "dev-liquid-02", type: "liquid-handler" });
+    const result = validate({ config });
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+    for (const [id, type] of [["dev-machine-01", "fdm"], ["dev-liquid-02", "liquid-handler"]]) {
+      expect(result.checks.find(check => check.name === `adapter[${id}].capabilityClass`)).toEqual(expect.objectContaining({
+        passed: true, severity: "error", message: `Adapter "${id}" has capability class ${type}`,
+      }));
+    }
+  });
 });

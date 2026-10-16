@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scaffold } from "../scaffolder.js";
@@ -21,6 +23,7 @@ function machineConfig(type: "liquid-handler" | "fdm" = "liquid-handler"): Onboa
         { method: "GET", path: "/status", purpose: "status", description: "Status" },
         { method: "POST", path: "/stage", purpose: "load_program", description: "Stage input without actuation" },
         { method: "POST", path: "/run", purpose: "start", description: "Run staged input" },
+        { method: "POST", path: "/halt", purpose: "stop", description: "Stop" },
       ],
     }],
     capabilities: [{
@@ -52,6 +55,7 @@ interface AdapterLike {
     message?: string;
   }>;
   getStatus(): Promise<string>;
+  getProgress(): Promise<number>;
   onEvidence(callback: (event: Event) => void): void;
   dispose(): Promise<void>;
 }
@@ -72,6 +76,31 @@ async function neutralAdapter(mockMode = true): Promise<{ adapter: AdapterLike; 
   adapters.push(adapter);
   const events: Event[] = [];
   adapter.onEvidence((event) => events.push(event));
+  return { adapter, events };
+}
+
+/** Execute the guide's actual example; PR-1a's new types are erased at runtime. */
+async function guideAdapter(resolveInput: (hash: string) => Promise<Uint8Array>, mockMode = false) {
+  const guide = readFileSync(new URL("../../AGENT_INSTRUCTIONS.md", import.meta.url), "utf8");
+  const code = guide.match(/^### 2\.1\b[\s\S]*?(?=^### 2\.2\b)/m)?.[0]
+    .match(/```typescript\n([\s\S]*?)```/)?.[1];
+  if (!code) throw new Error("Expected the guide's machine example");
+  const dir = mkdtempSync(join(tmpdir(), "g1b-guide-neutral-"));
+  scratchDirs.push(dir);
+  symlinkSync(fileURLToPath(new URL("../../node_modules", import.meta.url)), join(dir, "node_modules"), "dir");
+  const path = join(dir, "your-machine-adapter.ts");
+  writeFileSync(path, code);
+  const { YourMachineAdapter } = await import(path) as {
+    YourMachineAdapter: new (id: string, kernelId: string, config: {
+      apiUrl: string; mockMode: boolean; resolveInput: typeof resolveInput;
+    }) => AdapterLike;
+  };
+  const adapter = new YourMachineAdapter("guide-device", "guide-kernel", {
+    apiUrl: "http://device.test", mockMode, resolveInput,
+  });
+  adapters.push(adapter);
+  const events: Event[] = [];
+  adapter.onEvidence(event => events.push(event));
   return { adapter, events };
 }
 
@@ -175,6 +204,125 @@ describe("capability-class scaffolding", () => {
     expect(fetchStub).toHaveBeenCalledTimes(2);
     expect(fetchStub.mock.calls[1]?.[0]).toBe("http://device.test/run");
     expect(fetchStub.mock.calls[1]?.[1]?.method).toBe("POST");
+  });
+
+  it("S6: real prepare stages the exact input bytes as base64", async () => {
+    const { adapter, events } = await neutralAdapter(false);
+    const inputData = new Uint8Array([0, 255, 128, 13, 10, 239, 187, 191, 65]);
+    const ack = await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } });
+    expect(ack.success).toBe(true);
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+    const [url, request] = fetchStub.mock.calls[0]!;
+    expect(url).toBe("http://device.test/stage");
+    expect(request?.method).toBe("POST");
+    const body = JSON.parse(request?.body as string);
+    expect(body).toEqual({ jobId, inputHash, inputBase64: Buffer.from(inputData).toString("base64") });
+    expect(new Uint8Array(Buffer.from(body.inputBase64, "base64"))).toEqual(inputData);
+    expect(fetchStub.mock.calls.some(([url]) => String(url).endsWith("/run"))).toBe(false);
+    expect(events).toEqual([]);
+  });
+
+  it.each([true, false])("S3: prepare validates jobId and anchored hash in mockMode=%s", async mockMode => {
+    const { adapter, events } = await neutralAdapter(mockMode);
+    for (const payload of [
+      { inputHash }, { jobId: "", inputHash }, { jobId: 7, inputHash },
+      { jobId, inputHash: `sha256:${"ab".repeat(32)}a` },
+      { jobId, inputHash: ` ${inputHash}` },
+    ]) {
+      expect((await adapter.execute({ type: "prepare", payload })).success).toBe(false);
+      expect(events).toEqual([]);
+      expect(fetchStub).toHaveBeenCalledTimes(0);
+      expect(fetchStub.mock.calls.some(([url]) => String(url).endsWith("/run"))).toBe(false);
+    }
+  });
+
+  it.each(["unstaged", "foreign"])("S4: real start refuses %s job with zero requests and no run", async state => {
+    const { adapter, events } = await neutralAdapter(false);
+    if (state === "foreign") {
+      expect((await adapter.execute({ type: "prepare", payload: { jobId, inputHash } })).success).toBe(true);
+      fetchStub.mockClear();
+    }
+    expect((await adapter.execute({ type: "start", payload: { jobId: state === "foreign" ? "other" : jobId } })).success).toBe(false);
+    expect(events).toEqual([]);
+    expect(fetchStub).toHaveBeenCalledTimes(0);
+    expect(fetchStub.mock.calls.some(([url]) => String(url).endsWith("/run"))).toBe(false);
+  });
+
+  it("S4: polling binds progress and completion to the acknowledged deviceJobId", async () => {
+    const { adapter, events } = await neutralAdapter();
+    const ack = await adapter.execute({ type: "prepare", payload: { jobId, inputHash } });
+    vi.spyOn(adapter, "getProgress").mockResolvedValueOnce(25).mockResolvedValue(100);
+    expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(true);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(events.filter(event => event.type === "execution_progress").map(event => event.payload)).toEqual([
+      { deviceJobId: ack.data?.deviceJobId, progress: 25 },
+      { deviceJobId: ack.data?.deviceJobId, progress: 100 },
+    ]);
+    expect(events.filter(event => event.type === "execution_completed").map(event => event.payload)).toEqual([
+      { deviceJobId: ack.data?.deviceJobId, progress: 100 },
+    ]);
+  });
+
+  it("S5: mock stop with a real endpoint makes no fetch", async () => {
+    const { adapter, events } = await neutralAdapter();
+    await adapter.execute({ type: "prepare", payload: { jobId, inputHash } });
+    await adapter.execute({ type: "start", payload: { jobId } });
+    expect((await adapter.execute({ type: "stop" })).success).toBe(true);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(events.map(event => event.type)).toEqual(["execution_started"]);
+    expect(fetchStub).toHaveBeenCalledTimes(0);
+  });
+
+  it("S8: each machine gets its own capability class and command path", () => {
+    const config = machineConfig();
+    config.adapters.push({ ...config.adapters[0]!, adapterId: "dev-printer-02", className: "PrinterAdapter" });
+    config.capabilities.push({ ...config.capabilities[0]!, adapterId: "dev-printer-02", type: "fdm" });
+    const { files } = scaffold({ config });
+    expect(files.find(file => file.path.endsWith("liquid-adapter.ts"))?.content).toContain('readonly type = "liquid-handler" as const');
+    expect(files.find(file => file.path.endsWith("printer-adapter.ts"))?.content).toContain('readonly type = "fdm" as const');
+  });
+
+  it("S10: neutral kernel entry comment teaches prepare input and a compiled ladder", () => {
+    const entry = scaffold({ config: machineConfig() }).files.find(file => file.path === "src/kernel.ts")!.content;
+    const comment = entry.split("\n").find(line => line.startsWith("// dev-liquid-01: run("));
+    expect(comment).toContain("run({ jobId, stepId, inputHash, inputData, assuranceTier, tierLadder })");
+    expect(comment).toContain("compileTierLadder");
+    expect(comment).not.toContain("gcodeHash");
+  });
+
+  it.each([true, false])("S9: guide refuses resolved bytes with a mismatched hash before ack in mockMode=%s", async mockMode => {
+    const resolveInput = vi.fn(async () => new Uint8Array([0, 255, 13, 10]));
+    const { adapter, events } = await guideAdapter(resolveInput, mockMode);
+    const result = await adapter.execute({ type: "prepare", payload: { jobId, inputHash } });
+    expect(result.success).toBe(false);
+    expect(result.data).toBeUndefined();
+    expect(resolveInput).toHaveBeenCalledWith(inputHash);
+    expect(fetchStub).toHaveBeenCalledTimes(0);
+    expect(events).toEqual([]);
+    expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(false);
+  });
+
+  it("S9: guide hash-only prepare verifies exact bytes and uploads them before acknowledging", async () => {
+    const bytes = new Uint8Array([0, 255, 13, 10, 239, 187, 191]);
+    const hash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    const { adapter, events } = await guideAdapter(async () => bytes);
+    fetchStub.mockResolvedValueOnce({ ok: true, json: async () => ({ deviceJobId: "device-staged" }) } as Response);
+    const result = await adapter.execute({ type: "prepare", payload: { jobId, inputHash: hash } });
+    expect(result).toEqual({ success: true, data: { jobId, inputHash: hash, deviceJobId: "device-staged" } });
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+    expect(new Uint8Array(fetchStub.mock.calls[0]![1]!.body as Uint8Array)).toEqual(bytes);
+    expect(events).toEqual([]);
+  });
+
+  it("S9: guide start refuses unstaged and foreign jobs before any request or evidence", async () => {
+    const { adapter, events } = await guideAdapter(async () => new Uint8Array(), true);
+    expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(false);
+    expect(events).toEqual([]);
+    expect(fetchStub).toHaveBeenCalledTimes(0);
+    await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData: new Uint8Array() } });
+    expect((await adapter.execute({ type: "start", payload: { jobId: "foreign" } })).success).toBe(false);
+    expect(events).toEqual([]);
+    expect(fetchStub).toHaveBeenCalledTimes(0);
   });
 
   it("S7: preserves the explicit FDM class, commands, event, and starter assertion", () => {
