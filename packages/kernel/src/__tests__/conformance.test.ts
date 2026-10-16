@@ -547,7 +547,10 @@ describe("adapter conformance", () => {
     const fixture = fakeConformanceFixture();
     const makeAdapter = vi.fn(fixture.makeAdapter);
     const profile = { ...fixture.profile, [field]: value };
-    await expect(runAdapterConformance(makeAdapter, profile as typeof fixture.profile)).rejects.toThrow();
+    const result = runAdapterConformance(makeAdapter, profile as typeof fixture.profile);
+    const message = `Invalid conformance profile: ${field === "timing" ? "timing.jobTimeoutMs" : field}`;
+    await expect(result).rejects.toThrow(new TypeError(message));
+    await expect(result).rejects.toMatchObject({ name: "TypeError", message });
     expect(makeAdapter).not.toHaveBeenCalled();
   });
 });
