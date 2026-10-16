@@ -1,11 +1,21 @@
 /**
  * The v1 bridge between an exact input's SHA-256 and its funded commitment
- * (#8812/#8815). The commitment is the FUNDED subject block's `recipeRef`,
- * inside acceptedPolicyDigest. Read it only from the authenticated subjects
- * object; a package echo or another request field is not its authority.
+ * (#8812/#8815). The commitment is the FUNDED SubjectBlockFields.recipeRef
+ * (accepted-policy.ts:494), inside acceptedPolicyDigest, never a CSD binding's
+ * params.recipeRef (process.batch_record's paramsSchema). Read it only from
+ * the authenticated subjects object; a package echo or another request field
+ * is not its authority.
+ *
+ * recipeRef must be in spec-canonical lowercase, the only form
+ * computeSubjectBlockHash admits. A consumer whose subject-block authentication
+ * accepts other spellings (the oracle's ethers ABI coder does) lowercases the
+ * AUTHENTICATED value once, then calls these functions. The inputHash side is
+ * never normalized.
  *
  * There is one committed input per job in v1. A zero recipeRef means there is
  * no commitment. Neither input bytes nor digest spellings are normalized.
+ * An older spec verifier ignores subject.inputHash, so the oracle's
+ * input.hash_bound verifier remains the authoritative check.
  */
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex } from "@noble/hashes/utils";
@@ -14,8 +24,18 @@ import type { SHA256 } from "../types/common.js";
 import { isHex256Digest, isTaggedSha256, uncurryThis } from "../util/primordials.js";
 import type { Bytes32Hex } from "./accepted-policy.js";
 
-/** The only inputHash spelling: `sha256:` + exactly 64 lowercase hex digits. */
+/**
+ * Documents the inputHash spelling only: `sha256:` + exactly 64 lowercase hex
+ * digits. RegExp.prototype.compile can replace its matcher at runtime even
+ * when frozen (primordials.ts:143-147). Validate with isInputHash or
+ * inputHashToRecipeRef.
+ */
 export const INPUT_HASH_RE = /^sha256:[0-9a-f]{64}$/;
+
+/** Validate the canonical inputHash spelling without a mutable RegExp. */
+export function isInputHash(value: unknown): value is SHA256 {
+  return isTaggedSha256(value);
+}
 
 export type InputCommitmentErrorCode =
   | "invalid-input-hash"
@@ -37,6 +57,7 @@ const stringSlice = uncurryThis(String.prototype.slice);
 
 /** SHA-256 of precisely these bytes, with no text, newline or BOM normalization. */
 export function inputHashOfBytes(bytes: Uint8Array): SHA256 {
+  if (typeof bytes === "string") throw new TypeError("input bytes must be a Uint8Array, not a string");
   return `sha256:${bytesToHex(sha256(bytes))}`;
 }
 
@@ -56,10 +77,19 @@ export function inputHashToRecipeRef(inputHash: unknown): Bytes32Hex {
 }
 
 /**
- * Read the FUNDED subject block's recipeRef only from the authenticated
- * subjects object (#8812/#8815), then fill EvidenceSubject.inputHash through
- * this function. The existing spec bytes32 convention is `0x` + exactly 64
- * lowercase hex digits (`isHex256Digest`); zero means no input commitment.
+ * Read the FUNDED SubjectBlockFields.recipeRef (accepted-policy.ts:494) only
+ * from the authenticated subjects object (#8812/#8815), never a CSD binding's
+ * params.recipeRef (process.batch_record's paramsSchema), then fill
+ * EvidenceSubject.inputHash through this function. recipeRef must be in
+ * spec-canonical lowercase (`0x` + exactly 64 lowercase hex digits), the only
+ * form computeSubjectBlockHash admits. A consumer whose subject-block
+ * authentication accepts other spellings (the oracle's ethers ABI coder does)
+ * lowercases the AUTHENTICATED value once before calling this function. The
+ * inputHash side is never normalized.
+ *
+ * Zero means no input commitment: missing-input-commitment means input.hash_bound
+ * is NOT met. Omitting subject.inputHash is no substitute: LO-EV-9 then checks
+ * no input.
  */
 export function recipeRefToInputHash(recipeRef: unknown): SHA256 {
   if (!isHex256Digest(recipeRef)) {
@@ -78,6 +108,13 @@ export function recipeRefToInputHash(recipeRef: unknown): SHA256 {
  * Whether the canonical inputHash equals the nonzero funded recipeRef's 32
  * bytes. Noncanonical values, missing commitments and mismatches return false;
  * this predicate never throws or coerces caller values.
+ * recipeRef must be in spec-canonical lowercase, the only form
+ * computeSubjectBlockHash admits. A consumer whose subject-block authentication
+ * accepts other spellings (the oracle's ethers ABI coder does) lowercases the
+ * AUTHENTICATED value once before calling this predicate. The inputHash side
+ * is never normalized. Use only the authenticated FUNDED
+ * SubjectBlockFields.recipeRef (accepted-policy.ts:494), never a CSD binding's
+ * params.recipeRef (process.batch_record's paramsSchema).
  */
 export function inputCommitmentMet(recipeRef: unknown, inputHash: unknown): boolean {
   return (

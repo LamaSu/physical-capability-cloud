@@ -9,6 +9,7 @@ import {
   inputCommitmentMet,
   inputHashOfBytes,
   inputHashToRecipeRef,
+  isInputHash,
   recipeRefToInputHash,
   type InputCommitmentErrorCode,
 } from "../evidence/input-commitment.js";
@@ -32,6 +33,12 @@ interface CommitmentPair {
   inputHash: unknown;
   met: boolean;
 }
+interface InputHashMapping {
+  id: string;
+  description: string;
+  inputHash: string;
+  recipeRef: string;
+}
 
 const vectors = JSON.parse(
   readFileSync(new URL("../evidence/vectors/input-commitment.v1.json", import.meta.url), "utf8"),
@@ -41,6 +48,7 @@ const vectors = JSON.parse(
   inputHashToRecipeRefRefusals: RefusalVector[];
   recipeRefToInputHashRefusals: RefusalVector[];
   commitmentPairs: CommitmentPair[];
+  inputHashToRecipeRefMappings: InputHashMapping[];
 };
 
 function expectRefusal(f: () => unknown, expectedCode: InputCommitmentErrorCode): void {
@@ -110,6 +118,42 @@ describe("input commitment — exact input bytes and the funded recipeRef", () =
     expect(inputHashOfBytes(enclosing.subarray(1, 4))).toBe(vectors.inputs[1]!.inputHash);
   });
 
+  it("refuses strings instead of hashing their UTF-8 encoding", () => {
+    expect(() => inputHashOfBytes("abc" as unknown as Uint8Array)).toThrow(TypeError);
+  });
+
+  it("continues to refuse an ArrayBuffer", () => {
+    expect(() => inputHashOfBytes(new ArrayBuffer(3) as unknown as Uint8Array)).toThrow();
+  });
+
+  it("hashes a Node Buffer like a Uint8Array containing the same bytes", () => {
+    const bytes = Uint8Array.from([0, 97, 98, 99, 255]);
+    expect(inputHashOfBytes(Buffer.from(bytes))).toBe(inputHashOfBytes(bytes));
+  });
+
+  function expectInputHashVectorAgreement(): void {
+    for (const vector of vectors.inputs) expect(isInputHash(vector.inputHash), vector.id).toBe(true);
+    for (const vector of vectors.inputHashToRecipeRefRefusals) {
+      expect(isInputHash(vector.value), vector.id).toBe(false);
+    }
+  }
+
+  it("validates every inputHash and refusal vector with isInputHash", () => {
+    expectInputHashVectorAgreement();
+  });
+
+  it("keeps isInputHash correct after the documentation RegExp is recompiled", () => {
+    const source = INPUT_HASH_RE.source;
+    const flags = INPUT_HASH_RE.flags;
+    try {
+      INPUT_HASH_RE.compile(".*");
+      expect(INPUT_HASH_RE.test("not-a-hash")).toBe(true);
+      expectInputHashVectorAgreement();
+    } finally {
+      INPUT_HASH_RE.compile(source, flags);
+    }
+  });
+
   it("preserves the BOM, whitespace, CRLF and bare line endings", () => {
     const vector = vectors.inputs.find(({ id }) => id === "bom-cr-lf-whitespace")!;
     const bytes = Buffer.from(vector.bytesHex, "hex");
@@ -147,13 +191,15 @@ describe("input commitment — exact input bytes and the funded recipeRef", () =
     });
   }
 
-  it("represents an all-zero inputHash but never treats zero recipeRef as a commitment", () => {
-    const inputHash = `sha256:${"0".repeat(64)}`;
-    const zero = `0x${"0".repeat(64)}`;
-    expect(inputHashToRecipeRef(inputHash)).toBe(zero);
-    expectRefusal(() => recipeRefToInputHash(zero), "missing-input-commitment");
-    expect(inputCommitmentMet(zero, inputHash)).toBe(false);
-  });
+  for (const vector of vectors.inputHashToRecipeRefMappings) {
+    it(`maps inputHash ${vector.id} without treating zero recipeRef as a commitment`, () => {
+      expect(inputHashToRecipeRef(vector.inputHash)).toBe(vector.recipeRef);
+      expect(`0x${Buffer.from(vector.inputHash.slice(7), "hex").toString("hex")}`).toBe(vector.recipeRef);
+      expectRefusal(() => recipeRefToInputHash(vector.recipeRef), "missing-input-commitment");
+      expect(inputCommitmentMet(vector.recipeRef, vector.inputHash)).toBe(false);
+      expect(nodeCommitmentMet(vector.recipeRef, vector.inputHash)).toBe(false);
+    });
+  }
 
   it("refuses non-JSON runtime values without invoking caller code", () => {
     let reads = 0;
@@ -180,6 +226,7 @@ describe("input commitment — exact input bytes and the funded recipeRef", () =
     expect(evidence.InputCommitmentError).toBe(InputCommitmentError);
     expect(evidence.inputHashOfBytes).toBe(inputHashOfBytes);
     expect(evidence.inputHashToRecipeRef).toBe(inputHashToRecipeRef);
+    expect(evidence.isInputHash).toBe(isInputHash);
     expect(evidence.recipeRefToInputHash).toBe(recipeRefToInputHash);
     expect(evidence.inputCommitmentMet).toBe(inputCommitmentMet);
   });

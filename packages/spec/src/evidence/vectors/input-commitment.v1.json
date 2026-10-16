@@ -1,6 +1,6 @@
 {
   "contract": "pcc.evidence.input-commitment.v1",
-  "description": "Per-job v1: exact raw SHA-256 bytes bridge method_loaded.payload.inputHash to the authenticated funded subject block recipeRef (#8812/#8815). Canonical spec bytes32 is lowercase. Zero recipeRef means no commitment.",
+  "description": "Per-job v1: exact raw SHA-256 bytes bridge method_loaded.payload.inputHash to the authenticated FUNDED SubjectBlockFields.recipeRef (accepted-policy.ts:494), never a CSD binding's params.recipeRef (process.batch_record's paramsSchema) (#8812/#8815). recipeRef must be in spec-canonical lowercase, the only form computeSubjectBlockHash admits. A consumer whose subject-block authentication accepts other spellings (the oracle's ethers ABI coder does) lowercases the AUTHENTICATED value once, then calls these functions. The inputHash side is never normalized. Zero recipeRef means no commitment.",
   "inputs": [
     {
       "id": "empty",
@@ -116,6 +116,36 @@
       "id": "array",
       "value": [],
       "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "one-uppercase-hex",
+      "description": "Refuse exactly one uppercase hex digit: mirrors must not case-fold or accept mixed-case hexadecimal.",
+      "value": "sha256:Ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "arabic-indic-zero",
+      "description": "Refuse U+0660 ARABIC-INDIC DIGIT ZERO: Python str.isdigit and \\d accept non-ASCII digits.",
+      "value": "sha256:ba7816bf8f٠1cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "fullwidth-zero",
+      "description": "Refuse U+FF10 FULLWIDTH DIGIT ZERO: Python str.isdigit and \\d accept non-ASCII digits.",
+      "value": "sha256:ba7816bf8f０1cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "internal-byte-space",
+      "description": "Refuse 64 hex digits plus a space between bytes: Python bytes.fromhex accepts whitespace.",
+      "value": "sha256:ba 7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "internal-underscore",
+      "description": "Refuse 64 hex digits plus an underscore between digits: Python int(x, 16) accepts underscores.",
+      "value": "sha256:ba7_816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-input-hash"
     }
   ],
   "recipeRefToInputHashRefusals": [
@@ -208,6 +238,36 @@
       "id": "zero",
       "value": "0x0000000000000000000000000000000000000000000000000000000000000000",
       "errorCode": "missing-input-commitment"
+    },
+    {
+      "id": "one-uppercase-hex",
+      "description": "Refuse exactly one uppercase hex digit: mirrors must not case-fold or accept mixed-case hexadecimal.",
+      "value": "0xBa7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "arabic-indic-zero",
+      "description": "Refuse U+0660 ARABIC-INDIC DIGIT ZERO: Python str.isdigit and \\d accept non-ASCII digits.",
+      "value": "0xba7816bf8f٠1cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "fullwidth-zero",
+      "description": "Refuse U+FF10 FULLWIDTH DIGIT ZERO: Python str.isdigit and \\d accept non-ASCII digits.",
+      "value": "0xba7816bf8f０1cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "internal-byte-space",
+      "description": "Refuse 64 hex digits plus a space between bytes: Python bytes.fromhex accepts whitespace.",
+      "value": "0xba 7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "internal-underscore",
+      "description": "Refuse 64 hex digits plus an underscore between digits: Python int(x, 16) accepts underscores.",
+      "value": "0xba7_816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-recipe-ref"
     }
   ],
   "commitmentPairs": [
@@ -298,6 +358,14 @@
       ],
       "inputHash": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
       "met": false
+    }
+  ],
+  "inputHashToRecipeRefMappings": [
+    {
+      "id": "zero",
+      "description": "The zero inputHash maps to zero recipeRef, which means no commitment and is NOT met.",
+      "inputHash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "recipeRef": "0x0000000000000000000000000000000000000000000000000000000000000000"
     }
   ]
 }

@@ -29,6 +29,7 @@ const NODE = "kernel-realm";
 const OUTPUT = "sha256:" + "5e".repeat(32);
 const INPUT = "sha256:" + "ab".repeat(32);
 const OTHER_INPUT = "sha256:" + "cd".repeat(32);
+const ZERO_INPUT = "sha256:" + "00".repeat(32);
 const U3 = "0x" + "03".repeat(32);
 const U4 = "0x" + "04".repeat(32);
 const N3 = "0x" + "a3".repeat(32);
@@ -80,6 +81,7 @@ beforeAll(async () => {
   const B = await bundleFor(JOB_B);
   const M3 = await bundleFor(JOB_A, { settlementUnitId: U3, challengeNonce: N3 });
   const matchingInput = await inputBundleFor(INPUT);
+  const zeroInput = await inputBundleFor(ZERO_INPUT);
   const missingInput = await inputBundleFor();
   const mismatchingInput = await inputBundleFor(OTHER_INPUT);
   const mismatchingOtherInput = await inputBundleFor(INPUT, OTHER_INPUT);
@@ -98,6 +100,7 @@ beforeAll(async () => {
     ["honest, output named", { ...A, subject: { ...subjectA, outputHash: OUTPUT } }],
     ["honest, input named", { ...matchingInput, subject: { ...subjectA, inputHash: INPUT } }],
     ["uppercase input subject", { ...matchingInput, subject: { ...subjectA, inputHash: INPUT.toUpperCase() } }],
+    ["zero input subject with a matching kernel-written load", { ...zeroInput, subject: { ...subjectA, inputHash: ZERO_INPUT } }],
     ["method_loaded omits inputHash", { ...missingInput, subject: { ...subjectA, inputHash: INPUT } }],
     ["method_loaded commits a different input", { ...mismatchingInput, subject: { ...subjectA, inputHash: INPUT } }],
     ["another event commits a different input", { ...mismatchingOtherInput, subject: { ...subjectA, inputHash: INPUT } }],
@@ -107,7 +110,7 @@ beforeAll(async () => {
     ["U3/N3 evidence at the legacy subject (E11 F1)", { ...M3, subject: subjectA }],
     ["U3/N3 evidence for unit U4/N4", { ...M3, subject: { ...subjectA, settlementUnitId: U4, challengeNonce: N4 } }],
     ["U3/N3 evidence for its own unit", { ...M3, subject: { ...subjectA, settlementUnitId: U3, challengeNonce: N3 } }],
-    // #438's step 10: the events are at 2026-09-24T10:00:00Z (1790244000) .. +5 s.
+    // #438's step 10 (step 11 since Q-E5b): the events are at 2026-09-24T10:00:00Z (1790244000) .. +5 s.
     ["a window that covers the events", { ...A, subject: { ...subjectA, eventTimeWindow: { notBefore: 1790244000, notAfter: 1790244005 } } }],
     ["a window that ends before them", { ...A, subject: { ...subjectA, eventTimeWindow: { notBefore: 1790200000, notAfter: 1790240000 } } }],
   ];
@@ -124,6 +127,7 @@ it("the baseline is what LO-EV-9 says", () => {
     "ok",
     "ok",
     "ok",
+    "malformed-subject@-",
     "malformed-subject@-",
     "input-not-committed@0",
     "input-mismatch@0",

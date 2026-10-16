@@ -93,6 +93,28 @@ describe("input.hash_bound — the non-printer input commitment contract", () =>
     expect(getPrimitive("input.hash_bound")).not.toHaveProperty("allowedBindTypes");
   });
 
+  it.each(["constructor", "__proto__", "toString", "hasOwnProperty"])(
+    "compiles prototype property id %s exactly like an unknown primitive id",
+    async (id) => {
+      const csd = liquidHandlerCsd();
+      csd.evidence!.tier1!.primitives = [{ id: "unregistered.input", bind: "method_loaded" }];
+      const unknown = await compileTierLadder(csd);
+
+      csd.evidence!.tier1!.primitives![0]!.id = id;
+      const compiled = await compileTierLadder(csd);
+
+      // The id remains caller-supplied; every other compiled tier field has
+      // the same semantics as an unknown id. Inherited table keys must never
+      // become bind rules or throw a raw TypeError during compilation.
+      expect(compiled.tiers).toEqual(unknown.tiers.map((tier) => ({
+        ...tier,
+        primitives: tier.primitives.map((primitive) => primitive.id === "unregistered.input"
+          ? { ...primitive, id }
+          : primitive),
+      })));
+    },
+  );
+
   it("refuses non-empty input.hash_bound params under its closed-empty schema", async () => {
     const csd = liquidHandlerCsd();
     csd.evidence!.tier1!.primitives![1]!.params = { field: "otherField" };

@@ -49,6 +49,16 @@ describe("LO-EV-9 funded input subject binding (#8812/#8815)", () => {
     ])).toMatchObject({ ok: true });
   });
 
+  it("refuses a zero subject inputHash even when a kernel-written method_loaded commits the same zero", async () => {
+    const zeroInputHash = `sha256:${"00".repeat(32)}`;
+    expect(await verify([
+      { type: "method_loaded", kernelWritten: true, payload: { inputHash: zeroInputHash } },
+      { type: "execution_completed" },
+    ], { ...SUBJECT, inputHash: zeroInputHash })).toEqual({
+      ok: false, reason: "malformed-subject",
+    });
+  });
+
   it("requires at least one method_loaded, even when another event commits the input", async () => {
     expect(await verify([
       { type: "execution_completed", payload: { inputHash: INPUT } },

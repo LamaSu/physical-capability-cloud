@@ -73,16 +73,19 @@ export const EVIDENCE_EVENT_TYPES = [
    * `^sha256:[0-9a-f]{64}$`: SHA-256 of the exact input bytes, with no text,
    * newline or BOM normalization. The SHA256 type is only a brand.
    *
-   * PR-1a's contract: only the kernel writes a method_loaded carrying
-   * inputHash, after the device's prepare ack echoes jobId and inputHash,
-   * and marks it source.writer "kernel" (event hash v2). On the prepare path
-   * it computes the hash from inputData when supplied. A run in which an
-   * adapter or device emits method_loaded carrying inputHash fails, on the
-   * prepare and legacy paths alike. On the prepare path EVERY adapter
-   * method_loaded is refused, with or without inputHash. A legacy adapter's
-   * method_loaded without inputHash may appear, and makes input.hash_bound
-   * NOT met. At this revision the kernel has no prepare command and writes
-   * no method_loaded; adapter-pylabrobot emits one.
+   * PR-1a's contract: on JobRunner's prepare and legacy load_gcode paths
+   * only, a run in which an adapter or device emits method_loaded carrying
+   * inputHash fails. PR-1a does not cover runPrintJob. The kernel writes its
+   * method_loaded carrying inputHash after the device's prepare ack echoes
+   * jobId and inputHash. The prepare path ALWAYS carries inputData; the
+   * kernel computes inputHash itself from those bytes, and a hash-only
+   * prepare is refused. The every-path refusal, runPrintJob included, and
+   * the source.writer "kernel" marker (event hash v2) both arrive with ADK
+   * PR-1d. On the prepare path EVERY adapter method_loaded is refused, with
+   * or without inputHash. A legacy adapter's method_loaded without inputHash
+   * may appear, and makes input.hash_bound NOT met. At this revision the
+   * kernel has no prepare command and writes no method_loaded;
+   * adapter-pylabrobot emits one.
    *
    * input.hash_bound requires at least one method_loaded. EVERY one must be
    * kernel-written and carry payload.inputHash equal to the funded subject
@@ -99,9 +102,10 @@ export const EVIDENCE_EVENT_TYPES = [
    * it must read inputHash before a template lists both primitives.
    *
    * Go-live precondition: input.hash_bound joins no verifiedPrimitives set
-   * and never flips to live until (i) ADK PR-1a r2 and PR-1d (the emitter's
-   * every-path refusal plus the marker) are merged, (ii) this marker and v2
-   * hash are merged, and (iii) the oracle's verifier SHIPs with the marker
+   * and never flips to live until (i) ADK PR-1a and PR-1d are merged (PR-1d
+   * brings the every-path refusal, runPrintJob included, and the marker),
+   * (ii) this marker and v2 hash are merged, and (iii) the oracle's verifier
+   * SHIPs with the marker
    * requirement. It remains a stub until all three hold.
    */
   "method_loaded",

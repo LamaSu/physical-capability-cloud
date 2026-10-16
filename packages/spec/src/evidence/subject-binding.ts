@@ -13,7 +13,8 @@
  * its events and reads the subject out of their hashed content. That is what
  * `verifyEvidenceSubjectBinding` does. It fails closed, in this order:
  *
- *   1. the subject names a job and a kernel;
+ *   1. the subject names a job and a kernel; a named inputHash is canonical
+ *      and nonzero (zero means no input commitment);
  *   2. `bundleHash` is a canonical tagged digest (LO-EV-1);
  *   3. there is at least one event, and every event is well-formed and
  *      reproduces its own `hash` (v1 when unmarked; event hash v2 for an own
@@ -28,8 +29,8 @@
  *      equals the kernel that accepted the job;
  *   7. output, only when the subject names one: at least one event commits
  *      `payload.outputHash`, and every `payload.outputHash` equals it;
- *   8. input, only when the subject names one: it is a canonical `sha256:` +
- *      64 lowercase hex digest (checked with the subject in step 1); at least
+ *   8. input, only when the subject names one: it is a canonical, nonzero
+ *      `sha256:` + 64 lowercase hex digest (checked in step 1); at least
  *      one `method_loaded` event exists, EVERY `method_loaded` is kernel-written
  *      (`source.writer: "kernel"`, event hash v2) and commits `payload.inputHash`
  *      equal to it, and every other event that commits `payload.inputHash` also
@@ -189,12 +190,14 @@ export interface EvidenceSubject {
   /** Digest of the delivered output, when the consumer holds one. */
   outputHash?: string;
   /** Digest of the input, when the consumer holds the funded commitment:
-   *  canonical `sha256:` + 64 lowercase hex. Fill only via
+   *  canonical, nonzero `sha256:` + 64 lowercase hex. Fill only via
    *  `recipeRefToInputHash` from the FUNDED subject block's `recipeRef`, read
    *  only from the authenticated subjects object (bus #8812/#8815). Every
    *  `method_loaded` must be kernel-written, commit it and share one non-empty
    *  `payload.deviceJobId` with every `execution_completed`; at least one load
-   *  and one completion must exist. Older spec
+   *  and one completion must exist. `missing-input-commitment` means
+   *  `input.hash_bound` is NOT met. Omitting `subject.inputHash` is no
+   *  substitute: LO-EV-9 then checks no input. Older spec
    *  verifiers ignore this field; the oracle's `input.hash_bound` verifier is
    *  the authoritative check. */
   inputHash?: string;
@@ -291,6 +294,7 @@ const taggedSha256: ((text: string) => string) | null = (() => {
 // ── Reading input: own data descriptors only ─────────────────────────────────
 
 const SHA256_TAG = "sha256:";
+const ZERO_INPUT_HASH = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 /** LO-EV-1's tagged digest, `sha256:` + exactly 64 lowercase hex digits, checked code unit by code unit (no RegExp). */
 function isTaggedSha256(value: unknown): value is string {
@@ -437,7 +441,7 @@ export async function verifyEvidenceSubjectBinding(
     const proxyCheck = isProxy;
     if (sha256Text === null || proxyCheck === null) return refuse("unsupported-runtime");
 
-    // ── 1. The subject: the input's field, then its own six fields, each read once.
+    // ── 1. The subject: its own fields read once; a named inputHash must be canonical and nonzero.
     const wrapper: unknown = input;
     if (!isReadableObject(wrapper, proxyCheck)) return refuse("malformed-subject");
     const subjectField = ownField(wrapper, "subject");
@@ -463,6 +467,7 @@ export async function verifyEvidenceSubjectBinding(
       !isNonEmptyString(kernelId) ||
       (outputHash !== undefined && !isNonEmptyString(outputHash)) ||
       (inputHash !== undefined && !isTaggedSha256(inputHash)) ||
+      inputHash === ZERO_INPUT_HASH ||
       (settlementUnitId !== undefined && !isHex256Digest(settlementUnitId)) ||
       (challengeNonce !== undefined && !isHex256Digest(challengeNonce))
     ) {
