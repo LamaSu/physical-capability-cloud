@@ -36,7 +36,7 @@ describe("FakeDevice construction", () => {
     expect(await device.execute({ type: "status" })).toEqual({ success: true, data: { status: "idle", progress: 0 } });
   });
 
-  it.each(["jobId", "mock", "origin", ""])("rejects reserved or empty bindingKey %j", (bindingKey) => {
+  it.each(["jobId", "mock", "origin", "", "progress", "state", "reason", "jobStateReasons"])("rejects reserved or empty bindingKey %j", (bindingKey) => {
     expect(() => fixture({ bindingKey })).toThrow();
   });
   it.each([
