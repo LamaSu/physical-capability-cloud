@@ -8,7 +8,7 @@ import { SHIPPED_DEVICE_FAULTS, withDeviceFault, type ShippedDeviceFault } from 
 export interface NegativeControlOptions {
   preset?: "ipp";
   bindingKey?: string;
-  /** Includes the started/progress/completed/failed event vocabulary. */
+  /** Only outcome-neutral metadata, event vocabulary, clock and cancel timing/order; checked at generation. */
   deviceOptions?: FakeDeviceOptions;
   timing?: Partial<ConformanceTiming>;
 }
@@ -37,6 +37,41 @@ const defaultTiming: ConformanceTiming = {
   quiesceTimeoutMs: 500,
   settleMs: 25,
 };
+
+// Metadata and timestamps do not affect clauses. Event roles are shared with the
+// profile; cancellation keeps report behavior and stays inside C4's window.
+const neutralDeviceKeys = new Set([
+  "type", "deviceType", "startedType", "progressType", "completedType", "failedType",
+  "clock", "cancelEventOrder", "cancelConfirmMs",
+]);
+
+function validateDeviceOptions(options: NegativeControlOptions): void {
+  const device = options.deviceOptions;
+  if (device === undefined) return;
+  if (device === null || typeof device !== "object" || Array.isArray(device)) {
+    throw new TypeError("Invalid negative control deviceOptions");
+  }
+  for (const key of Reflect.ownKeys(device)) {
+    if (typeof key !== "string" || !neutralDeviceKeys.has(key)) {
+      throw new TypeError(`Unsupported negative control deviceOptions key: ${String(key)}`);
+    }
+  }
+  for (const [key, opposite] of [
+    ["completedType", "execution_failed"], ["failedType", "execution_completed"],
+  ] as const) {
+    if (device[key] === opposite) throw new TypeError(`Invalid negative control deviceOptions.${key}`);
+  }
+  if (device.cancelConfirmMs !== undefined) {
+    const timing = { ...defaultTiming, ...options.timing };
+    const window = timing.cancelConfirmMs + timing.pollMs + timing.settleMs;
+    const ms = device.cancelConfirmMs;
+    // The runner installs its timeout before cancellation: leave room before it.
+    if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0 ||
+        ms > 2_147_483_647 || !(ms < window)) {
+      throw new TypeError("Invalid negative control deviceOptions.cancelConfirmMs: must fit inside the profile cancel window");
+    }
+  }
+}
 
 const faultClauses: Record<ShippedDeviceFault, ClauseId> = {
   emitAfterQuiesce: "C1",
@@ -117,6 +152,7 @@ export function fakeDeviceConformanceFixture(
  * No control removes either fabrication signal or certifies physical equipment.
  */
 export function generateNegativeControls(options: NegativeControlOptions = {}): NegativeControls {
+  validateDeviceOptions(options);
   const baseline = fakeDeviceConformanceFixture(options);
   const honest: NegativeControl = {
     id: "honest", clauseId: undefined, fault: undefined,

@@ -102,6 +102,74 @@ async function captureWholeRun(entry: NegativeControl) {
 }
 
 describe("generated adapter conformance negative controls", () => {
+  it.each([
+    ["preset", "ipp"],
+    ["bindingKey", "runId"],
+    ["declaredCommands", ["load_gcode", "start", "pause", "resume", "stop", "status"]],
+    ["startedEvent", "none"],
+    ["cancelBehavior", "refuse"],
+    ["unknownOption", true],
+  ])("refuses deviceOptions key %s at generation", (key, value) => {
+    const generate = () => generateNegativeControls({ deviceOptions: { [key]: value } });
+    expect(generate).toThrow(TypeError);
+    expect(generate).toThrow(key);
+  });
+
+  it.each(["cancelBehavior", "declaredCommands", "unknownOption"])(
+    "refuses even an undefined deviceOptions key %s", (key) => {
+      expect(() => generateNegativeControls({ deviceOptions: { [key]: undefined } }))
+        .toThrow(new TypeError(`Unsupported negative control deviceOptions key: ${key}`));
+    },
+  );
+
+  it.each([Symbol("unknownOption"), "hiddenOption"])("refuses unknown own key %s", (key) => {
+    const deviceOptions = Object.defineProperty({}, key, { value: true, enumerable: false });
+    expect(() => generateNegativeControls({ deviceOptions }))
+      .toThrow(new TypeError(`Unsupported negative control deviceOptions key: ${String(key)}`));
+  });
+
+  it.each([
+    ["completedType", "execution_failed"], ["failedType", "execution_completed"],
+  ] as const)("refuses opposite native terminal role for %s", (key, value) => {
+    expect(() => generateNegativeControls({ deviceOptions: { [key]: value } }))
+      .toThrow(new TypeError(`Invalid negative control deviceOptions.${key}`));
+  });
+
+  it.each([55, 56, -1, NaN, Infinity, 2_147_483_648])(
+    "refuses cancelConfirmMs %s outside the overridden profile cancel window", (cancelConfirmMs) => {
+      expect(() => generateNegativeControls({
+        timing: { cancelConfirmMs: 40, pollMs: 5, settleMs: 10 },
+        deviceOptions: { cancelConfirmMs },
+      })).toThrow(new TypeError(
+        "Invalid negative control deviceOptions.cancelConfirmMs: must fit inside the profile cancel window",
+      ));
+    },
+  );
+
+  // One complete run per knob value, shared by all vector assertions. Controls
+  // run concurrently to bound runtime without shortening observation windows.
+  it.each([
+    ["type", { type: "custom-machine" }],
+    ["deviceType", { deviceType: "camera" }],
+    ["startedType", { startedType: "sequence_started" }],
+    ["progressType", { progressType: "batch_sample_result" }],
+    ["completedType", { completedType: "batch_session_completed" }],
+    ["failedType", { failedType: "sensor_anomaly_detected" }],
+    ["clock", { clock: () => new Date("2025-01-02T03:04:05.000Z") }],
+    ["cancelEventOrder", { cancelEventOrder: "after-resolve" }],
+    ["cancelConfirmMs", { cancelConfirmMs: 120 }],
+  ] satisfies Array<[string, NonNullable<NegativeControlOptions["deviceOptions"]>]>) (
+    "deviceOptions %s preserves the whole control set including honest", async (_key, deviceOptions) => {
+      const { honest, controls } = generateNegativeControls({ deviceOptions });
+      await Promise.all([honest, ...controls].map(async (entry) => {
+        const report = await runAdapterConformance(entry.makeAdapter, entry.profile);
+        expect(Object.fromEntries(report.clauses.map(({ id, status }) => [id, status])), entry.id)
+          .toEqual(entry.expected);
+        expect(entry.expected, entry.id).toEqual(contractVector(entry.fault));
+      }));
+    },
+  );
+
   it("ships exactly one control per shipped fault plus the honestly tagged mode flip", () => {
     const { honest, controls } = generateNegativeControls();
     expect(controls.map(({ fault }) => fault)).toEqual([...SHIPPED_DEVICE_FAULTS, "modeFlip"]);
