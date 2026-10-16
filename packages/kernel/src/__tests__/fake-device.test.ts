@@ -267,6 +267,44 @@ describe("FakeDevice evidence honesty", () => {
 describe("FakeDevice quiescence and cancellation", () => {
   it("is immediately quiescent while idle", async () => { await fixture().quiesceEvidence(); });
 
+  it.each(["complete", "fail", "stop", "report", "silent"] as const)("refuses re-entry during %s terminal delivery", async (terminal) => {
+    const device = await accepted({ cancelBehavior: terminal === "silent" ? "silent" : "report", cancelConfirmMs: 1 });
+    const first: Emitted[] = [];
+    const second: Emitted[] = [];
+    const errors: Array<[string, unknown]> = [];
+    let reentrantStop: Promise<unknown> | undefined;
+    device.onEvidence((event) => {
+      first.push(event);
+      // Bound a faulty re-entrant emitter so every attempted API can be checked.
+      if (first.length > 1) return;
+      for (const [api, attempt] of [
+        ["emit", () => device.emit("execution_progress")],
+        ["progress", () => device.progress(50)],
+        ["complete", () => device.complete()],
+        ["fail", () => device.fail()],
+      ] as const) {
+        try { attempt(); errors.push([api, undefined]); }
+        catch (error) { errors.push([api, error]); }
+      }
+      reentrantStop = device.execute({ type: "stop" }).catch((error: unknown) => error);
+    });
+    device.onEvidence((event) => second.push(event));
+    if (terminal === "complete" || terminal === "fail") device[terminal]();
+    else if (terminal === "stop") await device.execute({ type: "stop" });
+    else await device.cancelJob("device-42");
+    await expect(device.quiesceEvidence()).resolves.toBeUndefined();
+    expect(errors.map(([api]) => api)).toEqual(["emit", "progress", "complete", "fail"]);
+    for (const [api, error] of errors) {
+      expect(error, api).toBeInstanceOf(Error);
+      expect(error, api).toMatchObject({ message: expect.stringContaining("no active job") });
+    }
+    await expect(reentrantStop).resolves.toEqual({ success: true });
+    const expectedType = terminal === "complete" ? "execution_completed" : "execution_failed";
+    expect(first.map((event) => event.type)).toEqual([expectedType]);
+    expect(second.map((event) => event.type)).toEqual([expectedType]);
+    expect(await device.getStatus()).toBe("idle");
+  });
+
   it.each(["complete", "fail"] as const)("refuses every emit API after %s without invoking listeners", async (terminal) => {
     const device = await accepted();
     const events: Emitted[] = [];
