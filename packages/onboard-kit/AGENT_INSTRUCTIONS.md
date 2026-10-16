@@ -778,6 +778,8 @@ If running standalone (not embedded in a kernel agent), expose an HTTP API. Keep
 - `inputHash` is `"sha256:"` followed by 64 lowercase hex digits: SHA-256 of the exact input bytes, with no text normalization. `gcodeHash` is its legacy alias; give exactly one.
 - `inputData` is a string (its UTF-8 bytes) or a `Uint8Array`; `gcodeData` is its alias. The kernel hashes the bytes and refuses a mismatch. On prepare, it supplies those exact bytes as a fresh `Uint8Array` in `{ jobId, inputHash, inputData }`. With only a hash, prepare receives `{ jobId, inputHash }` and the adapter resolves the input by hash.
 
+The handler below uses the prepare path. A legacy `load_gcode` adapter passes no `tierLadder`, so the FDM default applies. Omit the `compileTierLadder` call and `tierLadder` argument for that path: the compiler refuses every current built-in CSD, including `fdm`, except `document-print-leg` and `document-print-and-mail`. See §8.4 before authoring a custom ladder.
+
 ```typescript
 import Fastify from "fastify";
 import { compileTierLadder } from "@pcc/spec";
@@ -1222,7 +1224,7 @@ import { compileTierLadder } from "@pcc/spec";
 const tierLadder = await compileTierLadder(csd);
 ```
 
-Legacy CSDs (`fdm`, `sla`, `cnc-3axis`, `laser-cut`) are refused with `TierLadderError` code `"tier-adds-no-event-type"`: their tiers do not add the event types needed to distinguish the tiers. Update the CSD's evidence tiers to name event types before compiling.
+Legacy CSDs (for example, `fdm`, `sla`, `cnc-3axis`, and `laser-cut`) are refused with `TierLadderError` code `"tier-adds-no-event-type"`: their tiers do not add the event types needed to distinguish the tiers. This currently includes every built-in CSD except `document-print-leg` and `document-print-and-mail`. Update the CSD's evidence tiers to name event types before compiling.
 
 On the prepare path, the kernel refuses a missing or malformed ladder, or one that lacks the job's tier, **before any command at every tier, 0 to 3**. After the run, unmet ladder requirements fail the job at tier >= 2 and warn at tiers 0–1. The oracle recomputes the tier from the signed bundle under the funded capability's pinned ladder.
 
