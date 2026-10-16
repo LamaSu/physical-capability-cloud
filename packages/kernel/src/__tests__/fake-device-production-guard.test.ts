@@ -73,6 +73,40 @@ function testingSources(directory: string = testingRoot): string[] {
   });
 }
 
+/** Include declaration exports as well as barrel exports, so private helpers stay private. */
+function exportedNames(source: string, filename: string): string[] {
+  const parsed = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
+  const found: string[] = [];
+  const bindingNames = (name: ts.BindingName): void => {
+    if (ts.isIdentifier(name)) found.push(name.text);
+    else for (const element of name.elements) if (ts.isBindingElement(element)) bindingNames(element.name);
+  };
+  for (const statement of parsed.statements) {
+    if (ts.isExportDeclaration(statement)) {
+      if (!statement.exportClause) found.push("*");
+      else if (ts.isNamedExports(statement.exportClause)) {
+        found.push(...statement.exportClause.elements.map((element) => element.name.text));
+      } else found.push(statement.exportClause.name.text);
+      continue;
+    }
+    if (ts.isExportAssignment(statement)) {
+      found.push(statement.isExportEquals ? "export=" : "default");
+      continue;
+    }
+    const modifiers = ts.canHaveModifiers(statement) ? ts.getModifiers(statement) : undefined;
+    if (!modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) continue;
+    if (modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword)) found.push("default");
+    else if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) bindingNames(declaration.name);
+    } else if (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement) ||
+      ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement) ||
+      ts.isEnumDeclaration(statement) || ts.isModuleDeclaration(statement) ||
+      ts.isImportEqualsDeclaration(statement)) found.push(statement.name?.text ?? "<unnamed export>");
+    else found.push("<unknown export>");
+  }
+  return found.sort();
+}
+
 type FabricationTag = "simulated" | "mock";
 interface TagViolation { property: FabricationTag; operation: "delete" | "assign"; line: number }
 
@@ -261,6 +295,22 @@ describe("FakeDevice production isolation", () => {
     expect(scanned.map((filename) => path.relative(testingRoot, filename))).toEqual([
       "fake-device.ts", "faults.ts", "index.ts", "negative-controls.ts",
     ]);
+  });
+
+  it("each testing module exports exactly its audited public names", () => {
+    const actual = Object.fromEntries(testingSources().map((filename) => [
+      path.relative(testingRoot, filename), exportedNames(readFileSync(filename, "utf8"), filename),
+    ]));
+    expect(actual).toEqual({
+      "fake-device.ts": ["FakeDevice", "FakeDeviceOptions", "FakeDeviceStartOutcome"],
+      "faults.ts": ["SHIPPED_DEVICE_FAULTS", "ShippedDeviceFault", "withDeviceFault"],
+      "index.ts": [
+        "FakeDevice", "FakeDeviceOptions", "FakeDeviceStartOutcome", "NegativeControl",
+        "NegativeControlOptions", "NegativeControls", "SHIPPED_DEVICE_FAULTS", "ShippedDeviceFault",
+        "generateNegativeControls", "withDeviceFault",
+      ],
+      "negative-controls.ts": ["NegativeControl", "NegativeControlOptions", "NegativeControls", "generateNegativeControls"],
+    });
   });
 
   it("shipped testing sources never remove or falsify fabrication tags", () => {
