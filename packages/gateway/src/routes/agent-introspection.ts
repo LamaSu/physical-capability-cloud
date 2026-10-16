@@ -30,9 +30,12 @@
  */
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { schema, sql } from "@pcc/store";
 
 import { resolveApiKey } from "../auth/api-key-auth.js";
-import { getRepos } from "../db.js";
+import { authorityOf } from "../auth/kernel-authority.js";
+import { getRepos, getStore } from "../db.js";
+import { provenOwnerAddress } from "./provision.js";
 
 // ── Scope registry ──────────────────────────────────────────────────
 //
@@ -199,15 +202,27 @@ export async function agentIntrospectionRoutes(app: FastifyInstance) {
   // ── GET /api/agent/me ──────────────────────────────────────────────
   app.get("/api/agent/me", async (req: FastifyRequest, reply) => {
     const key = resolveApiKey(req);
-    if (!key) return unauthenticated(reply);
+    const authority = authorityOf(req);
+    // A provisioned key's operatorId is a claim. Only these proof sources
+    // authorize operator reads; unknown future provenance labels grant nothing.
+    const proven = provenOwnerAddress(req) ?? (
+      authority.provenWallet !== null &&
+      (authority.provenWalletVia === "siwe-session" || authority.provenWalletVia === "self-link:agent")
+        ? authority.provenWallet.toLowerCase()
+        : null
+    );
+    const claimed = key?.operatorId ?? authority.claimed;
+    const operatorId = proven ?? (authority.admin ? claimed?.toLowerCase() ?? null : null);
+    if (!key && !operatorId) return unauthenticated(reply);
 
     const repos = getRepos();
-    const operatorId = key.operatorId;
+    const ownerProofRequired = "requires owner proof (SIWE sign-in, a session key, or a linked wallet)";
 
     // Each block degrades to null with a stated reason rather than 500-ing the
     // whole answer. An agent asking "where do I stand" during a partial outage
     // still gets the knowable parts, and is told which parts are not.
     const section = <T>(fn: () => T): { value: T | null; error?: string } => {
+      if (!operatorId) return { value: null, error: ownerProofRequired };
       try {
         return { value: fn() };
       } catch (e) {
@@ -222,7 +237,7 @@ export async function agentIntrospectionRoutes(app: FastifyInstance) {
     const kernels = section(() =>
       repos.kernels
         .findAll()
-        .filter((k: KernelRow) => k.operatorAddress === operatorId),
+        .filter((k: KernelRow) => k.operatorAddress?.toLowerCase() === operatorId),
     );
 
     const kernelIds = (kernels.value ?? []).map((k: KernelRow) => k.id);
@@ -231,7 +246,11 @@ export async function agentIntrospectionRoutes(app: FastifyInstance) {
       kernelIds.flatMap((id: string) => repos.jobs.findByKernel(id)),
     );
 
-    const keys = section(() => repos.apiKeys.findByOperator(operatorId));
+    const keys = section(() =>
+      getStore().db.select().from(schema.apiKeys)
+        .where(sql`lower(${schema.apiKeys.operatorId}) = ${operatorId}`).all()
+        .filter((k) => !k.revokedAt && (k.expiresAt === null || Date.parse(k.expiresAt) > Date.now())),
+    );
 
     const LIVE = ["pending", "queued", "in_progress", "paused"];
     const inFlight = (jobs.value ?? []).filter((j: JobRow) =>
@@ -246,10 +265,10 @@ export async function agentIntrospectionRoutes(app: FastifyInstance) {
       ok: true,
       as_of: new Date().toISOString(),
       identity: {
-        operator: operatorId,
-        key_id: key.id,
-        key_name: key.name ?? null,
-        scopes: heldScopes(key),
+        operator: operatorId ?? claimed,
+        key_id: key?.id ?? null,
+        key_name: key?.name ?? null,
+        scopes: key ? heldScopes(key) : [],
       },
       kernels: {
         count: kernels.value?.length ?? null,
@@ -266,7 +285,7 @@ export async function agentIntrospectionRoutes(app: FastifyInstance) {
         unavailable: devices.error,
       },
       work: {
-        in_flight: inFlight.length,
+        in_flight: jobs.value === null ? null : inFlight.length,
         items: inFlight.map((j: JobRow) => ({
           id: j.id,
           kernel_id: j.kernelId,
@@ -279,14 +298,14 @@ export async function agentIntrospectionRoutes(app: FastifyInstance) {
         // A stale or over-scoped key is something an operator should be able to
         // notice without opening a dashboard.
         active: keys.value?.length ?? null,
-        wildcard_keys: (keys.value ?? []).filter((k: KeyRow) =>
+        wildcard_keys: keys.value === null ? null : keys.value.filter((k: KeyRow) =>
           heldScopes(k).includes("*"),
         ).length,
         unavailable: keys.error,
       },
       // The point of a "where do I stand" call is that it tells you what to do
       // next, not just what is true.
-      next: [
+      next: !operatorId ? [ownerProofRequired] : [
         (kernels.value?.length ?? 0) === 0
           ? "No kernels registered. POST /api/kernels to register a site, then /api/setup/register-device."
           : null,
