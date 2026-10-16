@@ -931,6 +931,7 @@ class TestA02cTheLastCheckAndTheWalksEnd:
         assert (left[0].name == "keys.json") == (refused_name == "final")
         assert left[0].stat().st_size == 0, "a written secret was left inside the checkout"
         assert "could not be removed" in str(refused.value)
+        assert "the new key file %s could not be removed" % left[0] in str(refused.value)
 
 
 @needs_nacl
@@ -1037,6 +1038,9 @@ class TestA02dMountsAndScrubbing:
         if pwrite_fails:
             assert "SECRET MAY REMAIN" in str(refused.value)
             assert "it was emptied first: no secret" not in str(refused.value)
+            assert str(left[0]) in str(refused.value), "the advice does not name the file that keeps the secret"
+            if refused_name == "temp":
+                assert "the name %s was removed" % (keys / "keys.json") in str(refused.value)
         else:
             # Observe only write offsets/lengths and file metadata, never read a key.
             assert writes and all(offset == 0 and written == size for offset, written, size in writes)

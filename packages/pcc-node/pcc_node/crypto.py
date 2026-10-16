@@ -921,13 +921,24 @@ def _create_key_file(dir_fd, name, key_path, public_hex, secret_hex):
         _fsync_dir(dir_fd)
     except BaseException as err:
         try:
-            # Attempt both cleanups even when the first reports a failure.
+            # Attempt both cleanups even when the first reports a failure, and
+            # report both: they are two names of the same file.
+            first = None
             try:
                 if temp_exists:
                     _scrub_and_remove(dir_fd, tmp, fd, key_path, os.path.join(os.path.dirname(key_path), tmp), err)
+            except KeyFileError as cleanup_error:
+                first = cleanup_error
             finally:
                 if installed:
-                    _scrub_and_remove(dir_fd, name, fd, key_path, os.path.join(os.path.dirname(key_path), name), err)
+                    try:
+                        _scrub_and_remove(dir_fd, name, fd, key_path, os.path.join(os.path.dirname(key_path), name), err)
+                    except KeyFileError as second:
+                        if first is None:
+                            raise
+                        raise KeyFileError("%s Also: %s" % (second, first)) from err
+            if first is not None:
+                raise first
         finally:
             os.close(fd)
         raise
