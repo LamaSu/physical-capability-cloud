@@ -81,6 +81,13 @@ async function start(operation: Operation) {
   Object.defineProperty(input, "files", { configurable: true, value: [new File(["photo"], "print.png")] });
   await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
   await settle();
+  if (operation === "compare") {
+    const jobInput = host.querySelector<HTMLInputElement>('input[placeholder^="Job ID"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(jobInput, "operator-chosen-job");
+      jobInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
   if (operation === "issue") {
     const textarea = host.querySelector("textarea")!;
     await act(async () => {
