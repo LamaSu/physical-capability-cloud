@@ -45,14 +45,14 @@ function bodyOptions(schema: z.ZodTypeAny, properties: Record<string, unknown>, 
   };
 }
 
-function accountPrincipal(req: FastifyRequest): string {
+export function accountPrincipal(req: FastifyRequest): string {
   const accountId = req.operatorId ?? req.userId;
   if (!accountId) throw new WalletLinkError(401, "api_key_required");
   return accountId;
 }
 
 /** Only the SIWE login flow can mint this metadata marker; public keys claim accounts. */
-function siweProvenAddress(req: FastifyRequest): string | null {
+export function siweProvenAddress(req: FastifyRequest): string | null {
   if (!req.apiKeyId) return resolveSession(req)?.address ?? null;
   const key = getRepos().apiKeys.findById(req.apiKeyId);
   if (!key) return null;
@@ -74,7 +74,7 @@ function credentialPrincipal(req: FastifyRequest): string {
   return `session:${createHash("sha256").update(session.token).digest("hex")}`;
 }
 
-function checkApprovalOrigin(req: FastifyRequest, origin: string) {
+export function checkApprovalOrigin(req: FastifyRequest, origin: string) {
   if (req.apiKeyId || !req.cookies?.pcc_session) return;
   const cookieRequest = Object.create(req) as FastifyRequest;
   cookieRequest.headers = { ...req.headers, authorization: undefined };

@@ -59,6 +59,7 @@ const WALLET_ROUTE_TEMPLATES = new Set([
   "/api/wallets", "/api/wallets/link-requests", "/api/wallets/link-requests/lookup",
   "/api/wallets/link-requests/:id", "/api/wallets/link-requests/:id/proof",
   "/api/wallets/link-requests/:id/approve", "/api/wallets/:linkId/revoke",
+  "/api/wallets/link-requests/:id/fund", "/api/wallets/:linkId/fund",
 ]);
 
 const SENTRY_DSN =
