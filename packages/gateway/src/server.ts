@@ -7,6 +7,7 @@ import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
 import { writeAuditHook } from "./services/write-audit-hook.js";
 import { GATEWAY_LOGGER_OPTIONS, telemetryLookalikeHook, isWalletRequest } from "./services/telemetry-privacy.js";
 import { walletsRoutes } from "./routes/wallets.js";
+import { walletFaucetRoutes } from "./routes/wallet-faucet.js";
 initPostHog();
 import { randomBytes } from "node:crypto";
 
@@ -693,6 +694,7 @@ export async function createGateway(port = 3200) {
   await app.register(spaceRoutes);
   await app.register(operatorRoutes);
   await app.register(walletsRoutes);
+  await app.register(walletFaucetRoutes);
   await app.register(operatorWorkRoutes);
   await app.register(productHomeRoutes);
   await app.register(operatorsPublicRoutes);

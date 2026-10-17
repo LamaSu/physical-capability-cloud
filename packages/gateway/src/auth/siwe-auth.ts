@@ -15,7 +15,7 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { randomBytes, randomUUID } from "node:crypto";
-import { verifyMessage } from "viem";
+import { verifyEvmMessageSignature } from "./evm-signature.js";
 import { eq, schema } from "@pcc/store";
 import { getRepos, getStore } from "../db.js";
 import { classifyProvisionError, provisionApiKey } from "./api-key-auth.js";
@@ -322,6 +322,8 @@ export async function siweAuthPlugin(app: FastifyInstance) {
     if (!nonceExpiry || nonceExpiry < Date.now()) {
       return reply.status(401).send({ error: "Nonce expired or invalid" });
     }
+    // Claim synchronously before signature verification can yield to another request.
+    nonces.delete(parsed.nonce);
 
     // Validate expiration time if present
     if (parsed.expirationTime) {
@@ -331,15 +333,32 @@ export async function siweAuthPlugin(app: FastifyInstance) {
       }
     }
 
-    // Verify signature using viem
+    // Verify EOA, deployed smart-account and counterfactual smart-account signatures.
     try {
-      const valid = await verifyMessage({
-        address: parsed.address as `0x${string}`,
+      const check = await verifyEvmMessageSignature({
+        address: parsed.address,
         message: body.message,
-        signature: body.signature as `0x${string}`,
+        signature: body.signature,
+        chainId: parsed.chainId,
       });
 
-      if (!valid) {
+      if (!check.ok) {
+        switch (check.reason) {
+          case "malformed":
+            return reply.status(400).send({ error: "Invalid signature format" });
+          case "invalid":
+            return reply.status(401).send({ error: "Invalid signature" });
+          case "wrong_chain":
+            return reply.status(401).send({ error: "wrong_chain" });
+          case "unconfigured":
+            return reply.status(503).send({ error: "smart_account_signin_unavailable" });
+          case "unavailable":
+            return reply.header("Retry-After", "5").status(503).send({ error: "signature_verifier_unavailable" });
+          default: {
+            const _exhaustiveReason: never = check.reason;
+            break;
+          }
+        }
         return reply.status(401).send({ error: "Invalid signature" });
       }
     } catch {
@@ -347,9 +366,6 @@ export async function siweAuthPlugin(app: FastifyInstance) {
         .status(401)
         .send({ error: "Signature verification failed" });
     }
-
-    // Consume nonce (one-time use)
-    nonces.delete(parsed.nonce);
 
     // Create session
     const token = randomUUID();

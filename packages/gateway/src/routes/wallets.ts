@@ -10,6 +10,7 @@ import { resolveSession } from "../auth/siwe-auth.js";
 import { walletLinkConfig } from "../services/wallet-links/config.js";
 import { CONSENT_SHA256, CONSENT_VERSION, NETWORK_NAME, renderConsent } from "../services/wallet-links/consent.js";
 import { verifyProofMessage } from "../services/wallet-links/message.js";
+import { SignatureVerifierUnavailableError } from "../auth/evm-signature.js";
 import {
   WalletLinkError, claimLinkProof, createLinkRequest, decideLinkRequest, displayUserCode, finishLinkProof,
   getLinkRequest, listWalletLinks, lookupLinkRequestByCode, revokeWalletLink,
@@ -26,7 +27,7 @@ const createSchema = z.object({
   clientInfo: z.object({ name: clientName, version: clientVersion }).strict().optional(),
   kernelId: z.string().refine(isValidKernelId).optional(),
 }).strict();
-const proofSchema = z.object({ signature: z.string().min(1).max(256) }).strict();
+const proofSchema = z.object({ signature: z.string().min(1).max(4098) }).strict();
 const lookupSchema = z.object({ userCode: z.string().min(1).max(64) }).strict();
 const approveSchema = z.object({ userCode: z.string().min(1).max(64), decision: z.enum(["approve", "deny"]),
   consentSha256: z.string().regex(/^[a-fA-F0-9]{64}$/).refine(value => value.trim() === value) }).strict();
@@ -44,14 +45,14 @@ function bodyOptions(schema: z.ZodTypeAny, properties: Record<string, unknown>, 
   };
 }
 
-function accountPrincipal(req: FastifyRequest): string {
+export function accountPrincipal(req: FastifyRequest): string {
   const accountId = req.operatorId ?? req.userId;
   if (!accountId) throw new WalletLinkError(401, "api_key_required");
   return accountId;
 }
 
 /** Only the SIWE login flow can mint this metadata marker; public keys claim accounts. */
-function siweProvenAddress(req: FastifyRequest): string | null {
+export function siweProvenAddress(req: FastifyRequest): string | null {
   if (!req.apiKeyId) return resolveSession(req)?.address ?? null;
   const key = getRepos().apiKeys.findById(req.apiKeyId);
   if (!key) return null;
@@ -73,7 +74,7 @@ function credentialPrincipal(req: FastifyRequest): string {
   return `session:${createHash("sha256").update(session.token).digest("hex")}`;
 }
 
-function checkApprovalOrigin(req: FastifyRequest, origin: string) {
+export function checkApprovalOrigin(req: FastifyRequest, origin: string) {
   if (req.apiKeyId || !req.cookies?.pcc_session) return;
   const cookieRequest = Object.create(req) as FastifyRequest;
   cookieRequest.headers = { ...req.headers, authorization: undefined };
@@ -126,7 +127,13 @@ async function walletCeremonyRoutes(app: FastifyInstance) {
     const now = Date.now();
     const row = claimLinkProof(req.params.id, now);
     let valid = false;
-    try { valid = await verifyProofMessage(row, signature, walletLinkConfig(), now); } catch { /* Burn on any verification failure. */ }
+    try { valid = await verifyProofMessage(row, signature, walletLinkConfig(), now); } catch (error) {
+      if (error instanceof SignatureVerifierUnavailableError) {
+        finishLinkProof(row, signature, false);
+        return reply.code(503).send({ error: "verifier_unavailable" });
+      }
+      /* Burn on any verification failure. */
+    }
     finishLinkProof(row, signature, valid);
     if (!valid) return reply.code(401).send({ error: "invalid_proof" });
     return { status: "awaiting_approval" };
