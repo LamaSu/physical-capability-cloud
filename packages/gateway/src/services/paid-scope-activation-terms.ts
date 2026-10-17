@@ -9,18 +9,20 @@
  *                        read from the @pcc/contracts package, so the image carries it. <network>
  *                        comes from explicit config with no default (PCC_VNEXT_RECORD_NETWORK).
  *                        Any PCC_VNEXT_RECORD_LABEL config is refused, including an empty value.
- *                        Never paid-job-flow's
- *                        resolveChainId, @pcc/contracts getDeployment or IDENTITY_REGISTRY_CHAIN_ID
- *                        (ruling 4). The verifier (S1.2) reads the same record.
+ *                        Never paid-job-flow's resolveChainId, @pcc/contracts getDeployment or
+ *                        IDENTITY_REGISTRY_CHAIN_ID (ruling 4). The verifier (S1.2) reads the same record.
  *   postActivationTtlMs  How long a scope stays live once activated: S1.1's prepared funding terms
  *                        for the scope's job, bounded so the work ends before the escrow's primary
  *                        verdict is due (reclaimAt − 9 days; ruling 5 (B)).
  *
- * Today both are null in every process: no deployment record is committed (deployments/vnext holds
- * only its README) and S1.1 does not exist. reconcilePaidScope refuses a null value
- * (expected_chain_unavailable, activation_ttl_unavailable) after funding_record_store_unavailable,
- * so production, which has no record store, answers exactly as before, and a test process with a
- * store but no installed terms fails closed too.
+ * The configured expectedChainId is non-null only when PCC_VNEXT_RECORD_NETWORK names a valid
+ * CANONICAL.json under deployments/vnext/ (base-sepolia is the only committed record since #653,
+ * chain 84532); there is no default. postActivationTtlMs stays null until S1.1 exists.
+ * reconcilePaidScope refuses funding_record_store_unavailable before expected_chain_unavailable
+ * or activation_ttl_unavailable. On the accept path, both inputs are read only with a funding-record
+ * store (test processes only, Q9), so production answers exactly as before and never reads either.
+ * A test process with a store and PCC_VNEXT_RECORD_NETWORK=base-sepolia and no installed test source
+ * resolves the chain but is refused activation_ttl_unavailable.
  *
  * A test process may install its own source (__setPaidScopeActivationTermsForTest); one installed is
  * never consulted outside a test process. Nothing here logs, and nothing it returns carries a request
