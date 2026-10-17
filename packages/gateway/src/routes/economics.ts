@@ -25,10 +25,12 @@ import {
   type CompileOptions,
   type EconomicAgreement,
 } from "@pcc/spec/economics";
-import { assertScheduleIsWellFormed, computeScheduleHash, type RateSchedule } from "@pcc/spec";
-import { getRepos } from "../db.js";
+import type { RateSchedule } from "@pcc/spec";
+import { configuredProtocolFee, namedScheduleHashes, sealedSchedules } from "../services/server-economics-facts.js";
 
-const MAX_SCHEDULE_LOOKUPS = 64;
+// The preview and the accept-time binding read the fee and the sealed schedules through the same functions.
+export { configuredProtocolFee } from "../services/server-economics-facts.js";
+
 const MAX_DEFAULT_FAILURE_SCENARIOS = 4;
 
 interface PreviewBody {
@@ -37,77 +39,11 @@ interface PreviewBody {
   scenarios?: unknown[];
 }
 
-/** The fee PCC charges, from configuration; null when it is not configured (or configured wrong). */
-export function configuredProtocolFee(env: NodeJS.ProcessEnv = process.env): { feeBps: number; feeRecipient: string | null } | null {
-  const raw = env.PCC_PROTOCOL_FEE_BPS;
-  if (raw === undefined || raw.trim() === "") return null;
-  const feeBps = Number(raw);
-  if (!Number.isInteger(feeBps) || feeBps < 0 || feeBps > 1000) return null;
-  const recipient = env.PCC_PROTOCOL_FEE_RECIPIENT?.trim() ?? "";
-  if (feeBps === 0) return { feeBps, feeRecipient: null };
-  return /^0x[0-9a-fA-F]{40}$/.test(recipient) ? { feeBps, feeRecipient: recipient } : null;
-}
-
 function configuredForbiddenRecipients(env: NodeJS.ProcessEnv = process.env): string[] {
   return (env.PCC_FORBIDDEN_RECIPIENTS ?? "")
     .split(",")
     .map((s) => s.trim())
     .filter((s) => /^0x[0-9a-fA-F]{40}$/.test(s));
-}
-
-/** Every schedule hash the (untrusted) agreement names, for lookup only. */
-function namedScheduleHashes(agreement: unknown): string[] {
-  const hashes = new Set<string>();
-  const visit = (rule: unknown) => {
-    if (typeof rule !== "object" || rule === null) return;
-    const r = rule as { kind?: unknown; scheduleHash?: unknown; rateSource?: { scheduleHash?: unknown } | null };
-    if (r.kind === "percent_by_schedule" && typeof r.scheduleHash === "string") hashes.add(r.scheduleHash.toLowerCase());
-    if (r.kind === "percent" && r.rateSource && typeof r.rateSource.scheduleHash === "string") hashes.add(r.rateSource.scheduleHash.toLowerCase());
-  };
-  const ag = agreement as { clauses?: unknown; licenses?: unknown } | null;
-  if (ag && Array.isArray(ag.clauses)) for (const c of ag.clauses) visit((c as { rule?: unknown })?.rule);
-  if (ag && Array.isArray(ag.licenses)) {
-    for (const l of ag.licenses) {
-      const payments = (l as { requires?: { payments?: unknown } })?.requires?.payments;
-      if (Array.isArray(payments)) for (const p of payments) visit((p as { rule?: unknown })?.rule);
-    }
-  }
-  return [...hashes].slice(0, MAX_SCHEDULE_LOOKUPS);
-}
-
-/**
- * The sealed bodies the registry holds for those hashes. A body the compiler could not use (one sealed
- * before the registry checked number ranges, or a stored copy that no longer hashes to its label) is
- * left out, so the pin it would verify is refused at its own clause (RATE_UNVERIFIED), instead of the
- * server's bad record refusing the whole agreement as malformed options. The compiler re-checks both.
- */
-function sealedSchedules(hashes: readonly string[]): RateSchedule[] {
-  const out: RateSchedule[] = [];
-  let repos: ReturnType<typeof getRepos>;
-  try {
-    repos = getRepos();
-  } catch {
-    return out; // no registry: pins stay unverified, and a license that needs one is refused
-  }
-  for (const h of hashes) {
-    const record = repos.contributors.getSchedule(h);
-    if (!record) continue;
-    try {
-      const body = {
-        scheduleHash: record.scheduleHash,
-        version: record.version,
-        segments: JSON.parse(record.segmentsJson),
-        ...(record.notes !== null ? { notes: record.notes } : {}),
-        publishedAt: record.publishedAt,
-      } as RateSchedule;
-      assertScheduleIsWellFormed(body);
-      if (computeScheduleHash(body).toLowerCase() !== record.scheduleHash.toLowerCase()) continue;
-      out.push(body);
-    } catch {
-      // A corrupt or unusable stored body is skipped; the pin it would verify stays unverified.
-    }
-  }
-  return out;
 }
 
 /**
@@ -183,7 +119,8 @@ export async function economicsRoutes(app: FastifyInstance) {
 
     // Where each schedule body came from, so a verified rate says which (astra EC3 M2): only the registry's
     // bodies are published; a template's bundled bodies are examples, even when they hash correctly.
-    const registered = sealedSchedules(namedScheduleHashes(agreement));
+    // Without a registry there are no registered bodies, and every pin stays unverified.
+    const registered = sealedSchedules(namedScheduleHashes(agreement)).schedules;
     const scheduleSources: Record<string, "registry" | "example"> = {};
     for (const x of extraSchedules) scheduleSources[x.scheduleHash.toLowerCase()] = "example";
     for (const x of registered) scheduleSources[x.scheduleHash.toLowerCase()] = "registry";
