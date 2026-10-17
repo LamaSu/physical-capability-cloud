@@ -28,6 +28,9 @@ export * from "./kernel-pull-capture.js";
 // signingPreimage / sessionKeyDelegationPreimage — the ONE LO-EV-1 signing byte
 // contract every Ed25519 producer and consumer of evidence builds its message from.
 export * from "./signing-preimage.js";
+// The exact input bytes' SHA-256 ↔ funded subject-block recipeRef bridge
+// (#8812/#8815), read only from authenticated subjects.
+export * from "./input-commitment.js";
 // verifyEvidenceSubjectBinding — LO-EV-9: a signed bundle digest must open to
 // events that commit the job, the accepting kernel and (when known) the output.
 export * from "./subject-binding.js";
