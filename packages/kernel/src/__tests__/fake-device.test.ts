@@ -231,7 +231,7 @@ describe("FakeDevice evidence honesty", () => {
     const events: Emitted[] = [];
     device.onEvidence((event) => events.push(event));
     device.emit("execution_progress", payload);
-    expect(error).toMatchObject({ message: expect.stringContaining("no active job") });
+    expect(error).toMatchObject({ message: expect.stringContaining("re-entrant emission refused during delivery") });
     await expect(next).resolves.toMatchObject({ success: false, busy: true });
     expect(events.map((event) => [event.type, event.payload.deviceJobId])).toEqual([["execution_progress", "device-42"]]);
     device.complete();
@@ -441,7 +441,7 @@ describe("FakeDevice quiescence and cancellation", () => {
     expect(errors.map(([api]) => api)).toEqual(["emit", "progress", "complete", "fail"]);
     for (const [api, error] of errors) {
       expect(error, api).toBeInstanceOf(Error);
-      expect(error, api).toMatchObject({ message: expect.stringContaining("no active job") });
+      expect(error, api).toMatchObject({ message: expect.stringContaining("re-entrant emission refused during delivery") });
     }
     await expect(reentrantStop).resolves.toEqual({ success: true });
     await expect(reentrantStart).resolves.toEqual({ success: false, busy: true, message: "device is busy", data: { busy: true, code: "busy" } });
@@ -468,7 +468,7 @@ describe("FakeDevice quiescence and cancellation", () => {
     device.onEvidence((event) => events.push(event));
     device.progress(100);
     expect(errors).toHaveLength(1);
-    expect(errors[0]).toMatchObject({ message: expect.stringContaining("no active job") });
+    expect(errors[0]).toMatchObject({ message: expect.stringContaining("re-entrant emission refused during delivery") });
     if (startNext) await expect(next).resolves.toMatchObject({ success: false, busy: true });
     expect(events.map((event) => [event.type, event.payload.deviceJobId])).toEqual([["execution_progress", "device-42"]]);
     expect(await device.getStatus()).toBe("busy");
@@ -495,7 +495,7 @@ describe("FakeDevice quiescence and cancellation", () => {
     device.onEvidence((event) => events.push(event));
     if (emission === "progress") device.progress(100);
     else device.complete();
-    expect(error).toMatchObject({ message: expect.stringContaining("no active job") });
+    expect(error).toMatchObject({ message: expect.stringContaining("re-entrant emission refused during delivery") });
     await expect(next).resolves.toMatchObject({ success: false, busy: true });
     expect(events.map((event) => [event.type, event.payload.deviceJobId])).toEqual([
       [emission === "progress" ? "execution_progress" : "execution_completed", "device-42"],
@@ -519,7 +519,7 @@ describe("FakeDevice quiescence and cancellation", () => {
     });
     device.progress(100);
     expect(errors).toHaveLength(4);
-    for (const error of errors) expect(error).toMatchObject({ message: expect.stringContaining("no active job") });
+    for (const error of errors) expect(error).toMatchObject({ message: expect.stringContaining("re-entrant emission refused during delivery") });
     device.complete();
   });
 

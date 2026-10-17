@@ -320,7 +320,8 @@ export class FakeDevice implements MachineAdapter {
 
   emit(type: EvidenceEventType, payload: Record<string, unknown> = {}): void {
     const job = this.active;
-    if (this.disposed || !job || this.delivering) throw new Error("fake device has no active job");
+    if (this.disposed || !job) throw new Error("fake device has no active job");
+    if (this.delivering) throw new Error("re-entrant emission refused during delivery");
     if (!eventTypes.has(type)) throw new Error("invalid event type");
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("payload must be an object");
     const failed = type === this.failedType || type === "execution_failed";
