@@ -12,6 +12,7 @@
 
 import * as Sentry from "@sentry/node";
 import { isWalletRequest } from "./services/telemetry-privacy.js";
+import { isOutboundSecretSentryEvent, isOutboundSecretUrl } from "./services/outbound-secrets.js";
 
 /** Remove only the wallet header and its Sentry HTTP span attribute. */
 function withoutWalletHeader<T>(value: T, seen = new WeakMap<object, object>()): T {
@@ -45,6 +46,7 @@ export function walletSafeSentryEvent<T extends {
   extra?: Record<string, unknown>;
   transaction?: string;
 }>(event: T): T | null {
+  if (isOutboundSecretSentryEvent(event)) return null;
   const urls = [event.request?.url, event.extra?.url, event.transaction];
   return urls.some((url) => typeof url === "string" && isWalletRequest(url)) ? null : withoutWalletHeader(event);
 }
@@ -87,10 +89,12 @@ export function initSentry(): void {
     beforeSend: walletSafeSentryEvent,
     beforeSendTransaction: walletSafeSentryEvent,
     beforeBreadcrumb(breadcrumb) {
+      if ([breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message].some(isOutboundSecretUrl)) return null;
       const urls = [breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message];
       return urls.some((url) => typeof url === "string" && isWalletRequest(url)) ? null : withoutWalletHeader(breadcrumb);
     },
     beforeSendSpan(span) {
+      if ([span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])].some(isOutboundSecretUrl)) return { ...span, description: "outbound/<redacted>", data: {} };
       const urls = [span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])];
       const route = span.data["http.route"];
       return urls.some((url) => typeof url === "string" && isWalletRequest(url))

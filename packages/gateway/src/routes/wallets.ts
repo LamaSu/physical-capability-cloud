@@ -10,6 +10,7 @@ import { resolveSession } from "../auth/siwe-auth.js";
 import { walletLinkConfig } from "../services/wallet-links/config.js";
 import { CONSENT_SHA256, CONSENT_VERSION, NETWORK_NAME, renderConsent } from "../services/wallet-links/consent.js";
 import { verifyProofMessage } from "../services/wallet-links/message.js";
+import { SignatureVerifierUnavailableError } from "../auth/evm-signature.js";
 import {
   WalletLinkError, claimLinkProof, createLinkRequest, decideLinkRequest, displayUserCode, finishLinkProof,
   getLinkRequest, listWalletLinks, lookupLinkRequestByCode, revokeWalletLink,
@@ -26,7 +27,7 @@ const createSchema = z.object({
   clientInfo: z.object({ name: clientName, version: clientVersion }).strict().optional(),
   kernelId: z.string().refine(isValidKernelId).optional(),
 }).strict();
-const proofSchema = z.object({ signature: z.string().min(1).max(256) }).strict();
+const proofSchema = z.object({ signature: z.string().min(1).max(4098) }).strict();
 const lookupSchema = z.object({ userCode: z.string().min(1).max(64) }).strict();
 const approveSchema = z.object({ userCode: z.string().min(1).max(64), decision: z.enum(["approve", "deny"]),
   consentSha256: z.string().regex(/^[a-fA-F0-9]{64}$/).refine(value => value.trim() === value) }).strict();
@@ -126,7 +127,13 @@ async function walletCeremonyRoutes(app: FastifyInstance) {
     const now = Date.now();
     const row = claimLinkProof(req.params.id, now);
     let valid = false;
-    try { valid = await verifyProofMessage(row, signature, walletLinkConfig(), now); } catch { /* Burn on any verification failure. */ }
+    try { valid = await verifyProofMessage(row, signature, walletLinkConfig(), now); } catch (error) {
+      if (error instanceof SignatureVerifierUnavailableError) {
+        finishLinkProof(row, signature, false);
+        return reply.code(503).send({ error: "verifier_unavailable" });
+      }
+      /* Burn on any verification failure. */
+    }
     finishLinkProof(row, signature, valid);
     if (!valid) return reply.code(401).send({ error: "invalid_proof" });
     return { status: "awaiting_approval" };
