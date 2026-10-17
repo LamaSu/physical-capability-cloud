@@ -21,6 +21,7 @@ const STORAGE_KEY = "pcc-api-key";
  * wallet session keys remain in memory for this page only. Any script on
  * this origin can still read the persisted slot. The ratchet keeps every
  * other module off this slot, and off storage it can't name.
+ * Explicit Sign-out clears the persisted slot; renewal failure and wallet disconnect keep it.
  */
 let storedApiKey: string | null = readStorage();
 let keyVersion = 0;

@@ -76,7 +76,7 @@ export function WalletLinkPage() {
         {error && (
           <div className="flex flex-wrap items-center gap-3">
             <p role="alert" className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-4 text-amber-100">{error}</p>
-            {needsSignOut && <button type="button" onClick={() => useAuthStore.getState().logout()} className={BUTTON}>Sign out</button>}
+            {needsSignOut && <button type="button" onClick={() => void useAuthStore.getState().signOutWallet()} className={BUTTON}>Sign out</button>}
           </div>
         )}
 
