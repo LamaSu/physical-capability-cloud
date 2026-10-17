@@ -16,6 +16,7 @@ import { OpentronsMachineAdapter } from "../opentrons/adapter.js";
 import { EvidenceEmitter } from "../evidence-emitter.js";
 import { JobRunner, type JobConfig } from "../job-runner.js";
 import type { DeviceConfig } from "../kernel-config.js";
+import { FakeDevice } from "../testing/fake-device.js";
 
 vi.mock("@sentry/node", () => ({
   startSpan: vi.fn().mockImplementation((_opts: unknown, fn: () => unknown) => fn()),
@@ -128,11 +129,17 @@ describe("neutral commands: shipped adapters remain legacy", () => {
     expect(scanned).toContain("adapters/mock-fdm.ts");
     expect(scanned).toContain("opentrons/adapter.ts");
     const classes = new Set<string>();
+    const fakeDeviceFiles: string[] = [];
     for (const path of scanned) {
       const source = readFileSync(join(src, path), "utf8");
       const declarations = /^\s*(?:export\s+)?(?:abstract\s+)?class\s+([\w$]+)[^{]*\bimplements\b[^{]*\bMachineAdapter\b/gm;
-      for (const match of source.matchAll(declarations)) classes.add(match[1]!);
+      for (const match of source.matchAll(declarations)) {
+        // The one exemption: FakeDevice ships only through @pcc/kernel/testing, never the factory. H4b holds it to H2 and H3.
+        if (match[1] === FakeDevice.name) fakeDeviceFiles.push(path);
+        else classes.add(match[1]!);
+      }
     }
+    expect(fakeDeviceFiles).toStrictEqual(["testing/fake-device.ts"]);
     expect([...classes].sort()).toStrictEqual(SHIPPED.map(([, constructor]) => constructor.name).sort());
     const adapters = SHIPPED.map(([type]) => build(type));
     try {
@@ -141,6 +148,42 @@ describe("neutral commands: shipped adapters remain legacy", () => {
       expect(adapters.map((adapter) => adapter.constructor)).toStrictEqual(SHIPPED.map(([, constructor]) => constructor));
     } finally {
       await Promise.all(adapters.map((adapter) => adapter.dispose()));
+    }
+  });
+
+  it("H4b FakeDevice declares no accepts, refuses prepare and receives only legacy load_gcode", async () => {
+    expect(() => new FakeDevice("neutral-shipped-fake-prepare", "kernel-neutral-shipped", { declaredCommands: ["prepare"] }))
+      .toThrow("invalid declaredCommands");
+    // Every command FakeDevice can declare, so no configuration reaches the neutral path.
+    const device = new FakeDevice("neutral-shipped-fake-device", "kernel-neutral-shipped", {
+      declaredCommands: ["load_gcode", "start", "pause", "resume", "stop", "status"],
+    });
+    try {
+      expect("accepts" in device).toBe(false);
+      const evidence = vi.fn();
+      device.onEvidence(evidence);
+      // As in H3: a direct prepare emits no evidence and names no staged device job.
+      expect(await device.execute({
+        type: "prepare",
+        payload: { jobId: `job-${device.id}`, inputHash: `sha256:${"ab".repeat(32)}` },
+      })).toStrictEqual({ success: false, message: "undeclared command: prepare" });
+      await device.quiesceEvidence();
+      expect(evidence).not.toHaveBeenCalled();
+      // As in H2: JobRunner sends only the legacy load_gcode.
+      const execute = vi.spyOn(device, "execute").mockResolvedValue({ success: false, message: "stopped by the test" });
+      const inputData = new Uint8Array([1, 3, 5, 7]);
+      const inputHash = `sha256:${createHash("sha256").update(inputData).digest("hex")}`;
+      const jobId = `job-${device.id}`;
+      const config = {
+        jobId, stepId: "step", inputHash, inputData, tierLadder: ladder, assuranceTier: 2,
+      } as unknown as JobConfig;
+      const result = await new JobRunner(device, [], null, new EvidenceEmitter(`kernel-${device.id}`)).run(config);
+      expect(result.success).toBe(false);
+      expect(execute.mock.calls.map(([command]) => command)).toStrictEqual([
+        { type: "load_gcode", payload: { gcodeHash: inputHash, jobId } },
+      ]);
+    } finally {
+      await device.dispose();
     }
   });
 });

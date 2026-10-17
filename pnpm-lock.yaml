@@ -1215,6 +1215,9 @@ importers:
 
   packages/print-host:
     dependencies:
+      '@pcc/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@pcc/kernel':
         specifier: workspace:*
         version: link:../kernel
@@ -1224,6 +1227,12 @@ importers:
       '@pcc/spec':
         specifier: workspace:*
         version: link:../spec
+      viem:
+        specifier: ^2.21.0
+        version: 2.46.3(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)(zod@3.25.76)
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
     devDependencies:
       typescript:
         specifier: ^5.4.0

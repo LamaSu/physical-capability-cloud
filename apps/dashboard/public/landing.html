@@ -268,35 +268,61 @@
       border: 1px solid var(--line); border-radius: var(--r); padding: var(--sp-xl); position: relative; overflow: hidden; box-shadow: 0 40px 90px -50px #000; }
     .glass::before { content:''; position: absolute; top:0; left:0; right:0; height:1px; background: linear-gradient(90deg, transparent, rgba(242,169,14,.5), transparent); }
     .ideas { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-l); list-style: none; }
-    .ideas h3 { font-family: var(--display); font-size: var(--t-head); line-height: 1.1; margin: var(--sp-s) 0; }
+    .ideas h3 { font-family: var(--display); font-size: clamp(1.3rem, 1.1vw + .6rem, 1.75rem); line-height: 1.1; margin: var(--sp-s) 0; }
     .ideas p:not(.label) { color: var(--muted); font-size: var(--t-body); }
     @keyframes blink { 50% { opacity: 0; } }
     .chain { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
 
     /* Composition: the list carries the reading order; the SVG connects its grid cells. */
-    .composition .head h2 { max-width: 26ch; }
+    .composition .head h2 { max-width: 30ch; }
     .composition > p { color: var(--muted); font-size: var(--t-body); }
     .composition-graph { margin-top: var(--sp-l); }
     .composition-map { position: relative; }
     .composition-lines { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; color: var(--muted); }
     .composition-lines path { fill: none; stroke: currentColor; stroke-width: 1.5; }
-    .composition-lines .loop { color: var(--purple-lt); }
-    .composition-nodes { --column-gap: clamp(2rem, 5vw, 5rem); display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(9rem, 1fr)) auto; gap: 2rem var(--column-gap); list-style: none; }
-    .composition-node { position: relative; min-width: 0; padding: var(--sp-m); border: 1px solid var(--line); border-radius: var(--r); background: var(--bg-2); }
-    .composition-node h3 { font-family: var(--display); font-size: clamp(1.15rem, 2vw, 1.5rem); line-height: 1.15; margin: .5rem 0; }
-    .composition-node p:not(.label) { color: var(--muted); font-size: .9rem; line-height: 1.5; }
-    .composition-request { grid-column: 1; grid-row: 2; align-self: center; }
-    .composition-design { grid-column: 2; grid-row: 1; }
-    .composition-fabrication { grid-column: 2; grid-row: 2; }
-    .composition-inspection { grid-column: 2; grid-row: 3; }
-    .composition-result { grid-column: 3; grid-row: 1 / 4; align-self: center; border-color: var(--yellow); }
-    .composition-result .chain { margin-top: var(--sp-m); }
-    .composition-result .tag { margin: 0; border: 1px solid rgba(242,169,14,.55); color: var(--cream); font-size: .65rem; }
-    .composition-published { grid-column: 2 / 4; grid-row: 4; border-color: var(--purple-lt); background: var(--bg-2); }
-    .composition-published h3 { font-family: var(--mono); font-size: var(--t-label); margin-top: 0; }
-    .composition-graph figcaption { margin-top: var(--sp-m); color: var(--muted); }
-    .composition-graph figcaption a { text-underline-offset: .3em; }
-    .composition > p:last-child { margin-top: var(--sp-l); }
+    .composition-lines .published, .composition-lines .replacement { color: var(--purple-lt); }
+    .composition-layer-label { position: relative; width: fit-content; max-width: 100%; margin-bottom: var(--sp-m); background: var(--bg); color: var(--purple-lt); font-size: .65rem; letter-spacing: .16em; }
+    .composition-nodes { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 1.5rem clamp(.75rem, 2.5vw, 2rem); list-style: none; }
+    .composition-node { position: relative; min-width: 0; padding: clamp(.75rem, 1.4vw, 1.25rem); border: 1px solid var(--line); border-radius: var(--r); background: var(--bg-2); }
+    .composition-node .label { font-size: .625rem; letter-spacing: .14em; overflow-wrap: anywhere; }
+    .composition-node h3 { font-family: var(--display); font-size: clamp(1rem, 1.4vw, 1.3rem); line-height: 1.15; margin: .4rem 0; }
+    .composition-node p:not(.label) { color: var(--muted); font-size: .8rem; line-height: 1.5; }
+    .composition-request { grid-column: 1 / 3; grid-row: 1 / 3; align-self: center; }
+    .composition-result { grid-column: 4 / 7; grid-row: 1 / 3; display: flex; flex-direction: column; border-color: var(--yellow); background: #21170f; }
+    .composition-result h3 { font-size: clamp(1.2rem, 1.7vw, 1.5rem); }
+    .composition-result .tag { align-self: flex-start; margin: 1rem 0 0; border: 1px solid var(--purple-lt); color: var(--cream); font-size: .625rem; letter-spacing: .08em; }
+    .composition-electronics { grid-column: 8 / 10; grid-row: 1; }
+    .composition-logistics { grid-column: 8 / 10; grid-row: 2; }
+    .composition-note { position: relative; color: var(--muted); font-family: var(--mono); font-size: .65rem; line-height: 1.6; letter-spacing: .08em; text-transform: uppercase; }
+    .composition-published { margin: 1.5rem 0 1.5rem 54%; max-width: 34ch; }
+    .composition-lower { row-gap: 4rem; }
+    .composition-parts { grid-column: 4 / 7; grid-row: 1; }
+    .composition-design { grid-column: 1 / 3; grid-row: 2; }
+    .composition-machining { grid-column: 3 / 5; grid-row: 2; }
+    .composition-anodizing { grid-column: 5 / 7; grid-row: 2; }
+    .composition-inspection { grid-column: 7 / 9; grid-row: 2; border-style: dashed; background: var(--bg); }
+    .composition-alternate { grid-column: 9 / 11; grid-row: 2; border: 1px dashed var(--purple-lt); background: #23112f; }
+    .composition-alternate .label { color: var(--yellow-lt); }
+    .composition-alternate p:not(.label) { color: var(--cream); }
+    .composition-switch { margin: var(--sp-m) 0 0 60%; max-width: 40ch; }
+    .composition-graph figcaption { margin-top: var(--sp-l); color: var(--muted); font-size: var(--t-body); max-width: 88ch; }
+
+    /* The economic cycle and its consequences use the same cards and type as the graph. */
+    .flywheel .head h2 { max-width: 22ch; }
+    .flywheel .head { margin-bottom: var(--sp-m); }
+    .flywheel-kicker { color: var(--purple-lt); letter-spacing: .1em; }
+    .flywheel-lead { max-width: 78ch; margin-top: var(--sp-m); font-size: var(--t-body); line-height: 1.55; }
+    .flywheel-outcomes { margin-top: var(--sp-m); letter-spacing: .08em; }
+    .flywheel-cycle { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .875rem; list-style: none; margin-top: var(--sp-l); }
+    .flywheel-cycle li { min-width: 0; display: flex; flex-direction: column; gap: .5rem; padding: 1rem; border: 1px solid var(--line); border-radius: var(--r); background: var(--bg-2); }
+    .flywheel-cycle li:last-child { border-color: var(--purple-lt); background: #23112f; }
+    .flywheel-cycle li:last-child .label { color: var(--yellow-lt); }
+    .flywheel-cycle h3 { font-family: var(--display); font-size: 1rem; line-height: 1.15; }
+    .flywheel-columns { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sp-l); margin-top: var(--sp-l); }
+    .flywheel-columns > div { min-width: 0; }
+    .flywheel-columns h3 { font-family: var(--display); font-size: 1.3rem; line-height: 1.1; margin-bottom: .625rem; }
+    .flywheel-columns p { color: var(--muted); font-size: .875rem; line-height: 1.55; }
+    .flywheel-close { font-family: var(--display); font-weight: 700; font-size: clamp(1.6rem, 2.4vw, 2.5rem); line-height: 1.15; letter-spacing: -.01em; max-width: 34ch; margin-top: var(--sp-xl); }
 
     .paths { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-m); }
     .path { position: relative; overflow: hidden; border-radius: var(--r); padding: var(--sp-l); border: 1px solid var(--line);
@@ -323,6 +349,7 @@
     .beta-status h2 { margin-bottom: var(--sp-s); }
     .beta-status p, .beta-status ul { font-size: var(--t-body); color: var(--muted); }
     .beta-status ul { padding-left: 1.2em; }
+    .beta-status .economics-thesis { margin-top: var(--sp-m); }
 
     /* verified — full-bleed Mars shot */
     .verify { min-height: 78vh; display: flex; align-items: center; padding: var(--sp-xl) var(--gutter); }
@@ -351,6 +378,10 @@
 
     .reveal { opacity: 0; transform: translateY(30px); transition: opacity .8s var(--ease), transform .8s var(--ease); }
     .reveal.vis { opacity: 1; transform: none; }
+    @media (max-width: 1100px) {
+      .flywheel-cycle { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .flywheel-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
     @media (max-width: 900px) {
       .paths, .ideas { grid-template-columns: 1fr; } .verify-in { grid-template-columns: 1fr; } .nav .nl { display: none; }
       .shot-veil { background: linear-gradient(0deg, rgba(19,10,29,.95) 20%, rgba(19,10,29,.55)); }
@@ -358,12 +389,23 @@
     @media (max-width: 720px) {
       .composition-nodes { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; gap: 2.5rem; }
       .composition-node { grid-column: auto; grid-row: auto; }
+      .composition-map { padding-left: 1.25rem; }
+      .composition-node { padding: var(--sp-m); }
+      .composition-node h3 { font-size: 1.2rem; }
+      .composition-result h3 { font-size: 1.4rem; }
+      .composition-published { margin: 1.5rem 0; max-width: none; }
+      .composition-layer-label { margin-bottom: var(--sp-m); }
+      .composition-switch { margin: var(--sp-m) 0 0; max-width: none; }
+      .flywheel-cycle { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .beta-status { grid-template-columns: minmax(0, 1fr); }
       .hero h1 { overflow-wrap: anywhere; }
       .btn { max-width: 100%; }
       .topbar { gap: var(--sp-s); align-items: flex-start; }
       .nav { justify-content: flex-end; gap: .75rem; }
       .nav .nav-door { display: inline; font-size: .6rem; letter-spacing: .04em; }
+    }
+    @media (max-width: 480px) {
+      .flywheel-cycle, .flywheel-columns { grid-template-columns: minmax(0, 1fr); }
     }
     @media (prefers-reduced-motion: reduce) {
       *,*::before,*::after { animation:none!important; transition-duration:.01ms!important; }
@@ -460,71 +502,130 @@
     <ol class="ideas reveal">
       <li>
         <p class="label">01</p>
-        <h3>Everything can become a capability.</h3>
+        <h3>Anyone can offer or procure a capability.</h3>
         <p>From a printer or centrifuge to a freelance service, a manufacturing process, or a complete business workflow. Each capability defines what it accepts, what it produces, and the conditions under which it can execute.</p>
       </li>
       <li>
         <p class="label">02</p>
-        <h3>Capabilities build on capabilities.</h3>
+        <h3>Independently owned capabilities compose into complete production systems.</h3>
         <p>Agents assemble independent operators into multi-step production systems. Those compositions can be reused and offered as capabilities of their own.</p>
       </li>
       <li>
         <p class="label">03</p>
-        <h3>Value flows to its contributors.</h3>
-        <p>Contracts specify payment, verification, and applicable downstream rights, so operators and other contributors participate economically without giving up ownership of what they bring.</p>
+        <h3>Agentic coordination and continuous competition can make those systems cheaper to operate, more profitable to contribute to, and easier to participate in than a traditional company.</h3>
+        <p>Take the overhead of the vertically integrated firm out of the price and there is room for the customer to pay less and the operator to earn more, at the same time. Contributors keep ownership and control of what they bring, on the terms they agree to.</p>
       </li>
     </ol>
   </section>
 
-  <!-- RECURSIVE COMPOSITION -->
+  <!-- AN ECONOMIC PRODUCTION NETWORK -->
   <section class="wrap composition" id="composition" aria-labelledby="composition-heading" style="padding-top:0;">
     <div class="head reveal">
-      <div><p class="label">Recursive composition</p><h2 id="composition-heading">One outcome. Many independent contributors.</h2></div>
+      <div><p class="label">An economic production network</p><h2 id="composition-heading">Many independent owners. Competition at every layer.</h2></div>
     </div>
-    <p id="composition-status" class="reveal">Illustrative future-state model. Not every component is live today.</p>
+    <p id="composition-status" class="reveal">Illustrative future-state model. Not every component is live today. Improvements are shown qualitatively, not measured.</p>
     <figure class="composition-graph reveal" aria-labelledby="composition-heading" aria-describedby="composition-status">
       <div class="composition-map">
         <svg class="composition-lines" aria-hidden="true" focusable="false">
           <defs>
             <marker id="compose-arrow" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><polygon points="0,0 8,4 0,8" fill="var(--muted)" /></marker>
-            <marker id="compose-loop-arrow" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 8,4 0,8" fill="var(--purple-lt)" /></marker>
+            <marker id="compose-gain-arrow" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 8,4 0,8" fill="var(--purple-lt)" /></marker>
           </defs>
           <g class="flow">
-            <path /><path /><path /><path /><path /><path /><path /><path />
-            <path marker-end="url(#compose-arrow)" />
+            <path data-edge="request" /><path data-edge="electronics" /><path data-edge="logistics" />
+            <path data-edge="design" /><path data-edge="machining" /><path data-edge="anodizing" />
+            <path data-edge="inputs" />
           </g>
-          <path class="loop" marker-end="url(#compose-loop-arrow)" />
+          <path class="published" marker-end="url(#compose-gain-arrow)" />
+          <path class="replacement" marker-end="url(#compose-gain-arrow)" />
         </svg>
-        <ol class="composition-nodes">
+        <p class="label composition-layer-label" id="composition-layer-two">Layer 2 · assembly capability · owned by an assembly provider</p>
+        <ol class="composition-nodes composition-upper" aria-labelledby="composition-layer-two">
           <li class="composition-node composition-request" id="composition-request">
             <p class="label">Your agent</p>
-            <h3>Receives an outcome request</h3>
-            <p>&ldquo;Produce and deliver finished assemblies.&rdquo;</p>
+            <h3>Requests an outcome</h3>
+            <p>&ldquo;Assembled, tested units, delivered.&rdquo;</p>
+          </li>
+          <li class="composition-node composition-result composition-assembly">
+            <p class="label">Composite capability</p>
+            <h3>Assembled product</h3>
+            <p>Buys finished parts, electronics and logistics from three owners, publishes the whole as one offer.</p>
+            <span class="tag">More competitive offer <span aria-hidden="true">↑</span></span>
+          </li>
+          <li class="composition-node composition-electronics">
+            <p class="label">Electronics</p><h3>Board house</h3>
+          </li>
+          <li class="composition-node composition-logistics">
+            <p class="label">Logistics</p><h3>Carrier</h3>
+          </li>
+        </ol>
+        <p class="composition-note composition-published">Published as a capability, consumed by a different owner. The improvement below propagates up.</p>
+        <p class="label composition-layer-label" id="composition-layer-one">Layer 1 · finished-parts capability · owned by a machine shop</p>
+        <ol class="composition-nodes composition-lower" aria-labelledby="composition-layer-one">
+          <li class="composition-node composition-result composition-parts">
+            <p class="label">Composite capability</p>
+            <h3>Finished parts</h3>
+            <p>The shop procures design, anodizing and inspection itself, then publishes the result.</p>
+            <span class="tag">Lower cost · shorter lead time <span aria-hidden="true">↑</span></span>
           </li>
           <li class="composition-node composition-design">
             <p class="label">Design</p><h3>Engineer</h3><p>Independently owned</p>
           </li>
-          <li class="composition-node composition-fabrication">
-            <p class="label">Fabrication</p><h3>Machine shop</h3><p>Independently owned</p>
+          <li class="composition-node composition-machining">
+            <p class="label">Machining</p><h3>The shop’s own CNC</h3><p>Composition owner</p>
+          </li>
+          <li class="composition-node composition-anodizing">
+            <p class="label">Anodizing</p><h3>Finishing shop</h3><p>Independently owned</p>
           </li>
           <li class="composition-node composition-inspection">
-            <p class="label">Inspection</p><h3>Metrology lab</h3><p>Independently owned</p>
+            <p class="label">Inspection</p><h3>Metrology lab A</h3><p>Replaced</p>
           </li>
-          <li class="composition-node composition-result">
-            <p class="label">Composite capability</p>
-            <h3>Assembled, verified, and delivered</h3>
-            <p>One contract, many contributors. Each step leaves its record.</p>
-            <div class="chain"><span class="tag">Evidence</span><span class="tag">Settlement</span><span class="tag">Attribution</span></div>
-          </li>
-          <li class="composition-node composition-published">
-            <h3 class="label">Published as a new capability</h3>
-            <p>Other agents and businesses can now procure the entire workflow, and compose it into something larger.</p>
+          <li class="composition-node composition-alternate">
+            <p class="label">Inspection · alternate</p><h3>Metrology lab B</h3><p>Better quality, lower price</p>
           </li>
         </ol>
+        <p class="composition-note composition-switch">The shop switches providers. Nothing else restructures; nobody changes owners.</p>
       </div>
-      <figcaption class="label"><a href="#composition-request">The output becomes an input to the next layer <span aria-hidden="true">&#8634;</span></a></figcaption>
+      <figcaption>Independent capabilities don’t just execute together. They can become new capabilities: owned, offered, and composed again. And when one provider is replaced by a better one, the gain travels up through everything built on it.</figcaption>
     </figure>
-    <p class="reveal">The output of one layer is the input to the next. That is what separates a composable network from workflow automation.</p>
+  </section>
+
+  <!-- WHY THIS BEATS THE VERTICALLY INTEGRATED FIRM -->
+  <section class="wrap flywheel" aria-labelledby="flywheel-heading" style="padding-top:0;">
+    <div class="head reveal">
+      <div><p class="label">Why this beats the vertically integrated firm</p><h2 id="flywheel-heading">Build production systems without owning the supply chain.</h2></div>
+    </div>
+    <p class="label flywheel-kicker reveal">Vertical coordination without vertical consolidation of ownership</p>
+    <p class="flywheel-lead reveal">A traditional manufacturer bundles machines, people, management, procurement, scheduling, sales and logistics into one company, and most of what the customer pays goes to coordinating all of that rather than making the thing. PCC is building the market where agents do that coordination instead: they procure, contract, schedule and verify across independent owners. Take the overhead out and there is room for the customer to pay less and the operator to earn more, at the same time. The savings go to the people doing the work and the people buying it, not to a new middleman.</p>
+    <p class="flywheel-lead reveal">A company that owns its whole chain now has a structural problem: it is competing with a network of independent owners that charges customers less and pays producers more.</p>
+    <p class="label flywheel-outcomes reveal">Lower costs for customers · higher earnings for operators · more productive assets · competition at every layer</p>
+    <ol class="flywheel-cycle reveal" aria-label="The economic cycle">
+      <li><p class="label">01</p><h3>Coordination overhead comes out</h3></li>
+      <li><p class="label">02</p><h3>Customers pay less, operators earn more</h3></li>
+      <li><p class="label">03</p><h3>Demand and capacity flow in</h3></li>
+      <li><p class="label">04</p><h3>More capabilities, better compositions</h3></li>
+      <li><p class="label">05</p><h3>Competition replaces the weak link</h3></li>
+      <li><p class="label">06 → 01</p><h3>Utilization draws investment, and it turns again</h3></li>
+    </ol>
+    <div class="flywheel-columns">
+      <div class="reveal">
+        <h3>Hubs, not scattered factories.</h3>
+        <p>Independent ownership is not dispersed factories. Its strongest form is a hub: independently owned CNC machines, robot arms, printers and metrology under one roof, sharing utilities, materials handling, logistics and safety, each owner competing to fulfil the network’s requests. The physical efficiency of vertical integration, without a single owner.</p>
+      </div>
+      <div class="reveal">
+        <h3>Contestable from the inside.</h3>
+        <p>A vertically integrated company can have competitive suppliers while shielding its production decisions from the market. Here every step is a market. A better machine, process, controller or carrier displaces a worse one, and the system does not have to restructure for it to happen.</p>
+      </div>
+      <div class="reveal">
+        <h3>Inventions earn without a factory.</h3>
+        <p>An engineer with a better machining process should not need to own a factory to earn from it. PCC is building toward designs, processes and software that are licensed into workflows and paid when they are used, on agreed terms, across every organization that runs them.</p>
+      </div>
+      <div class="reveal">
+        <h3>No gatekeeper. No platform tax.</h3>
+        <p>Registration, discovery and interoperability stay cheap and open, and one task invoking another does not pay the network twice. The infrastructure exists so independent operators, developers, financiers and coordinators can build businesses on it, not so PCC can take a cut of every nested transaction.</p>
+      </div>
+    </div>
+    <p class="flywheel-close reveal">Make it cheaper to produce, more profitable to contribute, easier to own, and impossible to capture value indefinitely without continuing to create it.</p>
   </section>
 
   <!-- THREE DOORS (image-backed) -->
@@ -561,7 +662,7 @@
       <article class="path path--build reveal" id="build">
         <span class="tag">Builders</span>
         <h3>Compose it. Publish it. Build on it.</h3>
-        <p>Assemble independent capabilities into a workflow, then offer the whole thing as a capability of its own.</p>
+        <p>Combine independently owned capabilities into complete services and publish them to the network as capabilities of their own.</p>
         <a class="btn btn--offer" href="/docs/csd-spec">Build on PCC <span class="arr" aria-hidden="true">&rarr;</span></a>
       </article>
     </div>
@@ -580,6 +681,7 @@
         <li>We aim to support attribution and downstream rights.</li>
         <li>We intend to let composite workflows be offered as their own capability.</li>
       </ul>
+      <p class="economics-thesis">The economics above are the thesis this beta exists to test.</p>
     </div>
   </section>
 
@@ -668,36 +770,49 @@
     function connectComposition() {
       if (!compositionMap) return;
       const origin = compositionMap.getBoundingClientRect();
-      const nodes = [...compositionMap.querySelectorAll('.composition-node')].map(el => {
+      const nodes = {};
+      compositionMap.querySelectorAll('.composition-node').forEach(el => {
         const r = el.getBoundingClientRect();
-        return { left: r.left - origin.left, right: r.right - origin.left, top: r.top - origin.top,
+        const name = [...el.classList].find(name => /^composition-(request|assembly|electronics|logistics|parts|design|machining|anodizing|inspection|alternate)$/.test(name)).slice('composition-'.length);
+        nodes[name] = { left: r.left - origin.left, right: r.right - origin.left, top: r.top - origin.top,
           bottom: r.bottom - origin.top, x: r.left - origin.left + r.width / 2, y: r.top - origin.top + r.height / 2 };
       });
-      const [request, design, fabrication, inspection, result, published] = nodes;
+      const { request, assembly, electronics, logistics, parts, design, machining, anodizing, inspection, alternate } = nodes;
       const svg = compositionMap.querySelector('svg');
       svg.setAttribute('viewBox', `0 0 ${origin.width} ${origin.height}`);
       const stacked = window.matchMedia('(max-width: 720px)').matches;
-      let flow, loop;
+      const down = (from, to) => `M${from.x},${from.bottom} V${to.top}`;
+      const across = (from, to) => `M${from.right},${from.y} H${to.left}`;
+      let flow, published, replacement;
       if (stacked) {
-        flow = nodes.slice(0, -1).map((node, i) => `M${node.x},${node.bottom} V${nodes[i + 1].top}`);
-        loop = `M${published.x},${published.bottom} v14 H${request.left - 12} V${request.top - 14} H${request.x} V${request.top}`;
+        flow = {
+          request: down(request, assembly), electronics: down(assembly, electronics), logistics: down(electronics, logistics),
+          inputs: down(parts, design), design: down(design, machining), machining: down(machining, anodizing), anodizing: down(anodizing, inspection),
+        };
+        // On phones the layers read downward; the left rail preserves the published/consumed relationship.
+        published = `M${parts.x},${parts.top} V${parts.top - 18} H${assembly.left - 12} V${assembly.y} H${assembly.left}`;
+        replacement = down(inspection, alternate);
       } else {
-        const fork = (request.right + design.left) / 2;
-        const join = (design.right + result.left) / 2;
-        flow = [
-          `M${request.right},${request.y} H${fork} M${fork},${design.y} V${inspection.y} M${join},${design.y} V${inspection.y}`,
-          ...[design, fabrication, inspection].flatMap(node => [`M${fork},${node.y} H${node.left}`, `M${node.right},${node.y} H${join}`]),
-          `M${join},${result.y} H${result.left}`,
-          `M${result.x},${result.bottom} V${published.top}`,
-        ];
-        loop = `M${published.left},${published.y} H${request.x} V${request.bottom}`;
+        const busY = (parts.bottom + design.top) / 2;
+        flow = {
+          request: across(request, assembly),
+          electronics: `M${electronics.left},${electronics.y} H${assembly.right}`,
+          logistics: `M${logistics.left},${logistics.y} H${assembly.right}`,
+          design: across(design, machining), machining: across(machining, anodizing), anodizing: across(anodizing, inspection),
+          inputs: [
+            ...[design, machining, anodizing, alternate].map(node => `M${node.x},${node.top} V${busY}`),
+            `M${design.x},${busY} H${alternate.x}`, `M${parts.x},${busY} V${parts.bottom}`,
+          ].join(' '),
+        };
+        published = `M${parts.x},${parts.top} V${assembly.bottom}`;
+        replacement = `M${alternate.left},${alternate.top + (alternate.bottom - alternate.top) * .75} H${inspection.right}`;
       }
-      svg.querySelectorAll('.flow path').forEach((path, i) => {
-        path.setAttribute('d', flow[i] || '');
-        const directed = stacked || i === 1 || i === 3 || i === 5 || i >= 7;
-        path.setAttribute('marker-end', directed ? 'url(#compose-arrow)' : 'none');
+      svg.querySelectorAll('.flow path').forEach(path => {
+        path.setAttribute('d', flow[path.dataset.edge]);
+        path.setAttribute('marker-end', 'url(#compose-arrow)');
       });
-      svg.querySelector('.loop').setAttribute('d', loop);
+      svg.querySelector('.published').setAttribute('d', published);
+      svg.querySelector('.replacement').setAttribute('d', replacement);
     }
     if (compositionMap) {
       connectComposition();

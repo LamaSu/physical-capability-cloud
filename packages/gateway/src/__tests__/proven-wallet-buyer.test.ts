@@ -2,7 +2,8 @@ import Fastify, { type FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { closeStore, initStore } from "../db.js";
+import { eq, schema, sql } from "@pcc/store";
+import { closeStore, getStore, initStore } from "../db.js";
 import { bindBuyer, BUYER_PROOF_REQUIRED } from "../auth/buyer-identity.js";
 import { authorityOf } from "../auth/kernel-authority.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
@@ -76,12 +77,116 @@ const BUYER_ROUTES = [
 const buyerRequest = (url: string) => app.inject({ method: "POST", url, headers: headers(),
   payload: { kernelId: KERNEL, capabilityType: MISSING_CAPABILITY, userAgentId: wallet.address } });
 
+// W1b r4 F-a: seed directly so no money path is needed to obtain settlement_failed.
+// The seeded biolab capability lets the AGENT retry control finish entirely offline.
+function seedBuyerSession(status: "created" | "settlement_failed") {
+  const id = `session-w1bf-${status}`;
+  const now = Date.now();
+  getStore().db.insert(schema.negotiationSessions).values({
+    id, status, userAgentId: wallet.address, kernelId: "kernel-biolab-01", capabilityType: "liquid-handler",
+    selections: {}, operatorConstraints: {}, transitions: [],
+    createdAt: new Date(now).toISOString(), expiresAt: new Date(now + 30 * 60_000).toISOString(),
+  }).run();
+  return id;
+}
+
+function buyerSessionSnapshot(id: string) {
+  const { db } = getStore();
+  return {
+    // SELECT * deliberately compares every persisted column, including future additions.
+    session: db.get(sql`SELECT * FROM negotiation_sessions WHERE id = ${id}`),
+    jobs: db.get(sql`SELECT count(*) AS n FROM jobs`),
+    escrows: db.get(sql`SELECT count(*) AS n FROM escrows`),
+    milestones: db.get(sql`SELECT count(*) AS n FROM escrow_milestones`),
+    scopes: db.get(sql`SELECT count(*) AS n FROM execution_scopes`),
+  };
+}
+
 describe("self-link role limits buyer binding while retaining DECIDE", () => {
   it.each(BUYER_ROUTES)("device self-link cannot bind a buyer on %s", async (_name, url) => {
     await selfLink("device");
     const response = await buyerRequest(url);
     expect(response.statusCode).toBe(403);
     expect(response.json()).toEqual(BUYER_PROOF_REQUIRED);
+  });
+
+  it.each([
+    ["commit", "created"],
+    ["retry-settlement", "settlement_failed"],
+  ] as const)("device self-link cannot bind a buyer on negotiation %s", async (route, status) => {
+    vi.stubEnv("MOCK_SETTLEMENT", "true");
+    await selfLink("device");
+    const id = seedBuyerSession(status);
+    const before = buyerSessionSnapshot(id);
+    const response = await app.inject({ method: "POST", url: `/api/negotiate/session/${id}/${route}`, headers: headers() });
+    const after = buyerSessionSnapshot(id);
+    // Check the persistence guard even if a binding mutant changes the response.
+    expect.soft(after).toEqual(before);
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual(BUYER_PROOF_REQUIRED);
+    expect(getStore().db.select().from(schema.negotiationSessions)
+      .where(eq(schema.negotiationSessions.id, id)).get()?.status).toBe(status);
+  });
+
+  it("agent self-link passes negotiation commit binding and reaches the contract-terms check", async () => {
+    await selfLink("agent");
+    const id = seedBuyerSession("created");
+    const before = buyerSessionSnapshot(id);
+    const response = await app.inject({ method: "POST", url: `/api/negotiate/session/${id}/commit`, headers: headers() });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: "Must review contract terms first" });
+    expect(buyerSessionSnapshot(id)).toEqual(before);
+  });
+
+  it.each(["device", "agent"] as const)("runs buyer binding before retry-settlement's recorded-escrow resume branch for a %s self-link", async role => {
+    vi.stubEnv("MOCK_SETTLEMENT", "true");
+    await selfLink(role);
+    const id = seedBuyerSession("settlement_failed");
+    getStore().db.update(schema.negotiationSessions).set({ escrowAddress: `0x${"12".repeat(20)}` })
+      .where(eq(schema.negotiationSessions.id, id)).run();
+    const before = buyerSessionSnapshot(id);
+    const response = await app.inject({ method: "POST", url: `/api/negotiate/session/${id}/retry-settlement`, headers: headers() });
+    if (role === "device") {
+      expect(buyerSessionSnapshot(id)).toEqual(before);
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toEqual(BUYER_PROOF_REQUIRED);
+    } else {
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ resumed: true, sessionId: id });
+    }
+  });
+
+  it("agent self-link passes retry-settlement binding on the same failed fixture in offline mock settlement", async () => {
+    vi.stubEnv("MOCK_SETTLEMENT", "true");
+    await selfLink("device");
+    const id = seedBuyerSession("settlement_failed");
+    const before = buyerSessionSnapshot(id);
+    const refused = await app.inject({ method: "POST", url: `/api/negotiate/session/${id}/retry-settlement`, headers: headers() });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toEqual(BUYER_PROOF_REQUIRED);
+    expect(buyerSessionSnapshot(id)).toEqual(before);
+
+    // Replace the DEVICE proof through the routes, then retry the very same
+    // failed row with AGENT proof; no session status or other column is edited.
+    const listed = await app.inject({ url: "/api/wallets", headers: bearer() });
+    expect(listed.statusCode).toBe(200);
+    const { links } = listed.json<{ links: Array<{ linkId: string }> }>();
+    expect(links).toHaveLength(1);
+    const revoked = await app.inject({ method: "POST", url: `/api/wallets/${links[0]!.linkId}/revoke`,
+      headers: bearer(), payload: {} });
+    expect(revoked.statusCode).toBe(200);
+    await selfLink("agent");
+    expect(buyerSessionSnapshot(id)).toEqual(before);
+    const response = await app.inject({ method: "POST", url: `/api/negotiate/session/${id}/retry-settlement`, headers: headers() });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      retried: true, sessionId: id, escrowStatus: "funded",
+      jobId: expect.any(String), escrowId: expect.any(String), scopeId: expect.any(String),
+      escrowAddress: expect.stringMatching(/^mock-escrow-/),
+      message: "Settlement retried. Job, escrow, and execution scope created.",
+    });
+    expect(getStore().db.select().from(schema.negotiationSessions)
+      .where(eq(schema.negotiationSessions.id, id)).get()?.status).toBe("committed");
   });
 
   it.each(["header", "query", "body"] as const)("device self-link cannot forge buyer provenance via %s", async source => {
