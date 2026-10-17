@@ -191,6 +191,21 @@ describe("FakeDevice evidence honesty", () => {
     }
   });
 
+  it("RV-INFO-D isolates nested payloads between progress listeners", async () => {
+    const device = await accepted();
+    const second: Emitted[] = [];
+    device.onEvidence((event) => {
+      if (event.type !== "execution_progress") return;
+      (event.payload.detail as { pages: number[] }).pages.push(99);
+      (event.payload.jobStateReasons as string[]).push("tampered");
+    });
+    device.onEvidence((event) => second.push(event));
+    device.progress(10, { detail: { pages: [1] }, jobStateReasons: [] });
+    expect(second[0].payload.detail).toEqual({ pages: [1] });
+    expect(second[0].payload.jobStateReasons).toEqual([]);
+    device.complete();
+  });
+
   it.each(["jobId", "settlementUnitId", "challengeNonce", "mock"])("a getter cannot hide cloned reserved field %s by deleting the caller's copy", async (key) => {
     const device = await accepted();
     const payload: Record<string, unknown> = { [key]: "reserved" };
