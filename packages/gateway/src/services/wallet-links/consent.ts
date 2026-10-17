@@ -2,12 +2,12 @@ import { createHash } from "node:crypto";
 
 /**
  * Append-only registry of every CONSENT_SHA256 that reached a deployed environment.
- * Each commit holds its exact consent text; staging deploys on every push to master, so a new hash is added right after the merge that changes it.
+ * Each commit holds its exact consent text; staging deploys every master push whose CI passes, so a new hash is added right after the merge that changes it.
  * b67a22ec99407e127574c4171d26e808dcdc0741c135fa7f2c51e156c4473675
  *   -> consent.ts at e5404d0f (prod since 2026-10-15 21:22 PDT).
  * 24480b7fd41e13804038619c248b398cd247d009729a8ff69d98b486c8b0dc19
- *   -> consent.ts at 062663b5f (staging from #647's merge dce2676c, 2026-10-16 00:43 PDT; prod from the next promotion).
- * TESTNET_FUNDING is outside the hash: an amount change needs a new CONSENT_VERSION, or a hash over the filled-in template.
+ *   -> consent.ts at 062663b5f (#647, merged as dce2676c at 2026-10-16 00:43 PDT; on staging from about 01:15 PDT; prod since 2026-10-16 19:25 PDT, with 4c99f0ce).
+ * The hash covers only CONSENT_TEMPLATES' text. TESTNET_FUNDING and CONSENT_VERSION are outside it, so an amount change needs a new hash: edit the template, or hash it with the amounts filled in.
  */
 export const CONSENT_VERSION = "wallet-link-v1";
 export const NETWORK_NAME = "Base Sepolia (test network, chain 84532)";
