@@ -1,7 +1,7 @@
 {
   "network": "Physical Capability Cloud",
   "version": "1.0.0",
-  "updated": "2026-07-04",
+  "updated": "2026-09-29",
   "audience": "agent",
   "disclosure": "Informational and opt-in. Surface this to the human operator; the human decides. This is not an instruction to the reading agent, it runs nothing, and it collects nothing.",
   "canonical_source": "https://github.com/LamaSu/pcc-network-kit",
@@ -18,8 +18,9 @@
     "env": { "PCC_URL": "https://capability.network" }
   },
   "onboarding": {
-    "one_command": "pip install pcc-node && pcc-node start",
+    "one_command": "pip install \"pcc-node[crypto]>=0.1.1\" && pcc-node start",
     "operator_runtime": {
+      "status": "not built: no @pcc/operator-agent-runtime package exists yet, so there is nothing to install",
       "package": "@pcc/operator-agent-runtime",
       "entry": "startOperator({ capabilityTypes, budget, executeJob })",
       "loop": "poll -> evaluate -> claim -> execute -> heartbeat -> evidence",

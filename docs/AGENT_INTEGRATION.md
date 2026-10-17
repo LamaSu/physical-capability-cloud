@@ -427,7 +427,7 @@ curl -X POST https://capability.network/api/wizard/sessions/$SESSION_ID/complete
 
 For operators who prefer CLI:
 ```bash
-pip install pcc-node
+pip install "pcc-node[crypto]>=0.1.1"
 pcc-node start
 ```
 
@@ -842,7 +842,7 @@ curl -N -H "Authorization: Bearer $PCC_KEY" \
 ### Install and run
 
 ```bash
-pip install pcc-node
+pip install "pcc-node[crypto]>=0.1.1"
 pcc-node start
 ```
 
@@ -1082,7 +1082,7 @@ For operators with a [Trilobio](https://trilo.bio/) trilobot fleet controller. T
 
 ```bash
 # 1. Install pcc-node (the operator daemon)
-pip install pcc-node
+pip install "pcc-node[crypto]>=0.1.1"
 
 # 2. Make sure tcode-api is installed on your fleet controller
 #    (Trilobio fleet controllers ship with tcode-api pre-installed; verify the version)
