@@ -82,6 +82,17 @@ describe("FakeDevice production isolation", () => {
     assertShippedProgram(parsed);
   }, 30_000);
 
+  it("R-1 compiler control rejects a fixture program that pulls in __tests__", () => {
+    const root = path.join(fixtureRoot, "leaks");
+    const parsed = ts.parseJsonConfigFileContent({
+      include: ["**/*.ts"], exclude: ["__tests__/**"],
+    }, ts.sys, root);
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.fileNames.sort()).toEqual(productionSources(root, root).sort());
+    // The roots match the scan; only the imported test helper can trigger this refusal.
+    expect(() => assertShippedProgram(parsed, root)).toThrow("shipped program must not pull in __tests__ files");
+  }, 30_000);
+
   it("RV-PROGRAM root-set control rejects an otherwise clean unscanned compiler root", () => {
     const root = path.join(fixtureRoot, "compiler-roots");
     const parsed = ts.parseJsonConfigFileContent({ include: ["**/*"] }, ts.sys, root);

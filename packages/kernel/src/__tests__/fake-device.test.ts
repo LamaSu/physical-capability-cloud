@@ -761,6 +761,26 @@ describe("FakeDevice listener cancellation contract", () => {
     work, new Promise<void>((resolve) => setTimeout(resolve, 200)),
   ]);
 
+  it("RV-LOW-A throw-mode cancellation from terminal listeners resolves", async () => {
+    for (const terminal of ["complete", "fail"] as const) {
+      const device = await accepted({ cancelBehavior: "throw" });
+      const events: Emitted[] = [];
+      let cancel: Promise<void> | undefined;
+      device.onEvidence((event) => {
+        events.push(event);
+        cancel = device.cancelJob("device-42");
+      });
+      device[terminal]();
+      await expect(cancel, terminal).resolves.toBeUndefined();
+      expect(device.cancels).toEqual(["device-42"]);
+      expect(events.map((event) => [event.type, event.payload.deviceJobId])).toEqual([
+        [terminal === "complete" ? "execution_completed" : "execution_failed", "device-42"],
+      ]);
+      expect(await device.getStatus()).toBe("idle");
+      await expect(device.quiesceEvidence()).resolves.toBeUndefined();
+    }
+  });
+
   it.each([
     ["report", "before-resolve"], ["report", "after-resolve"], ["silent", "before-resolve"],
   ] as const)("RV-LOW-A a %s/%s cancel from progress still ends the job", async (cancelBehavior, cancelEventOrder) => {
