@@ -142,10 +142,16 @@ When a tool call fails within a scope:
 - **Action**: The kernel's emergency stop is engaged (see Emergency Stop
   Integration). The relay queues no call and mints no scope, and the calls still
   queued are rejected. Scopes are not revoked, and a call the node already
-  claimed is not recalled.
+  claimed is not recalled. The kernel's jobs that no dispatch path has handed to
+  the machine yet are held, and so is every job created while the stop is
+  engaged.
 - **Recovery**: The operator resumes (`POST /api/operator/emergency-resume`).
-  The calls the stop rejected are not replayed; submit them again. A scope still
-  inside its expiry works again after the resume; revoke it to end it sooner.
+  A resume is a reset, not a restart. Held jobs stay held until the operator
+  releases or cancels them (`POST /api/operator/held-jobs`), and the resume's
+  answer lists them (`heldCount`, `heldJobs`, `confirmRequired`). Work that came
+  back to the queue during the stop is held as well. The calls the stop rejected
+  are not replayed; submit them again. A scope still inside its expiry works
+  again after the resume; revoke it to end it sooner.
 
 ## Who may call the relay
 
@@ -551,7 +557,9 @@ kernel's stop as one of three states, and fails closed:
 Not done by the stop (planned; do not rely on it): it does not revoke active
 execution scopes, does not send a "stop" to an in-flight run, and does not
 change the kernel's status. Resume is by clearing the flag
-(`POST /api/operator/emergency-resume`); a scope that was active stays active
+(`POST /api/operator/emergency-resume`). Clearing it restarts no held job: a job
+the stop held stays held until the operator releases or cancels it
+(`POST /api/operator/held-jobs`). A scope that was active stays active
 and works again once the stop clears, until it expires or is revoked. A call the
 node has already STARTED (`executing`) is not recalled by the stop: stopping it
 is the operator node's job (below). A claimed call is not redelivered after a
