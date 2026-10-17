@@ -17,6 +17,8 @@ import type { EconomicAgreement } from "../economics/types.js";
 import { clone, FEE_TREASURY } from "./economics-helpers.js";
 
 const SOL = readFileSync(new URL("../../../contracts/test/VNextEconomicsSeam.t.sol", import.meta.url), "utf8");
+/** The Solidity without its comments: commented-out code is neither a forge example nor a seam test. */
+const SOL_CODE = SOL.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
 const FORGE_EXAMPLES: Readonly<Record<string, string>> = {
   "spare-printer": "_exampleSparePrinter",
   "print-and-mail": "_examplePrintAndMail",
@@ -26,10 +28,10 @@ const FORGE_EXAMPLES: Readonly<Record<string, string>> = {
 };
 
 function body(fn: string): string {
-  const start = SOL.indexOf(`function ${fn}(`);
+  const start = SOL_CODE.indexOf(`function ${fn}(`);
   if (start < 0) throw new Error(`missing ${fn} in the forge test`);
-  const next = SOL.indexOf("\n    function ", start + 1);
-  return SOL.slice(start, next < 0 ? undefined : next);
+  const next = SOL_CODE.indexOf("\n    function ", start + 1);
+  return SOL_CODE.slice(start, next < 0 ? undefined : next);
 }
 
 function parseExample(fn: string) {
@@ -54,19 +56,22 @@ function parseExample(fn: string) {
 describe("forge seam literals == compileEconomics output", () => {
   it("every template has a forge function, and every forge example belongs to a template", () => {
     expect(Object.keys(FORGE_EXAMPLES).sort()).toEqual(AGREEMENT_TEMPLATES.map((t) => t.templateId).sort());
-    const functions = [...SOL.matchAll(/function (_example\w+)\(/g)].map((m) => m[1]!);
+    const functions = [...SOL_CODE.matchAll(/function (_example\w+)\(/g)].map((m) => m[1]!);
     const mapped = AGREEMENT_TEMPLATES.map((t) => FORGE_EXAMPLES[t.templateId]!);
     expect(new Set(mapped).size).toBe(mapped.length);
     expect(functions.sort()).toEqual(mapped.sort());
+    // ...and a seam test funds and releases each one.
+    const funded = [...SOL_CODE.matchAll(/function test_Seam_\w+\(\) public \{\s+VNextSettlementEscrow\.UnitConfig\[\] memory cfgs = (_example\w+)\(\);/g)].map((m) => m[1]!);
+    expect([...new Set(funded)].sort()).toEqual(mapped.sort());
   });
 
   it("the fee constants match the examples' fee terms", () => {
     const treasury = `0x${((0xfeen << 148n) | 0xfeen).toString(16).padStart(40, "0")}`;
-    expect(SOL).toContain("return address(uint160((uint256(0xfee) << 148) | 0xfee));");
+    expect(SOL_CODE).toContain("return address(uint160((uint256(0xfee) << 148) | 0xfee));");
     expect(treasury).toBe(FEE_TREASURY);
     for (const t of AGREEMENT_TEMPLATES) {
       const ag = t.build();
-      expect(SOL).toContain(`uint256 constant FEE_BPS = ${ag.fee.feeBps};`);
+      expect(SOL_CODE).toContain(`uint256 constant FEE_BPS = ${ag.fee.feeBps};`);
       expect(treasury).toBe(ag.fee.feeRecipient);
     }
   });
