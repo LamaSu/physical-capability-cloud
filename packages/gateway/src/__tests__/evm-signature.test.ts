@@ -150,6 +150,14 @@ describe("smart-account signature verifier", () => {
     expect(requests.map(r => r.method)).toEqual(["eth_chainId", "eth_call"]);
     expect(requests[1].params[0]).not.toHaveProperty("to");
   });
+  it.each(["1b", "1f"])("sends a 65-byte signature that is not the address's EOA signature to the validator (v = 0x%s)", async v => {
+    // Local recovery mismatches (v = 0x1b) or throws (v = 0x1f); either way the check must reach the validator.
+    const signed = await privateKeyToAccount(generatePrivateKey()).signMessage({ message });
+    const signature = `${signed.slice(0, -2)}${v}` as Hex;
+    exact(signature);
+    expect(await check(signature)).toEqual({ ok: true, kind: "contract" });
+    expect(requests.map(r => r.method)).toEqual(["eth_chainId", "eth_call"]);
+  });
   it("caps in-flight RPC work and frees every slot after success and transport failure", async () => {
     const signature = await smartSignature();
     const freshMessage = `${message}: fresh check`;
