@@ -28,7 +28,8 @@
  *
  * No route serves this yet (none sits next to an existing readmodels route trivially: a read needs
  * its own object authorization, the buyer, the kernel's operator or the admin), so it is the
- * projection only. A route that serves it passes paidScopeActivationTerms(scope).expectedChainId as
+ * projection only. A route that serves it supplies the same testnet-only flag and buyer allowance
+ * as reconcile (TestnetBuyerAllowance), together with paidScopeActivationTerms(scope).expectedChainId as
  * the expected chain: the input the accept route gives reconcilePaidScope, so the two read the same
  * chain. It reads no clock, database or environment: the same inputs give the same DTO.
  */
@@ -37,6 +38,7 @@ import {
   fundingBindingRefusal,
   type BindingEscrowRow,
   type FundingBindingRefusal,
+  type TestnetBuyerAllowance,
 } from "../services/funding-binding.js";
 import type { FundingVerificationRecord } from "../services/funding-record-port.js";
 import { scopeExpiryMs } from "../services/scope-expiry.js";
@@ -56,6 +58,7 @@ export const FUNDING_STATUS_SCHEMA_ID = "pcc.funding-status/v1" as const;
  *   record_malformed                the record is not a well-formed, finalized verification record.
  *   record_chain_mismatch           it was verified on another chain than the expected one (ruling 4).
  *   record_scope_mismatch           it names another scope.
+ *   testnet_buyer_not_allowed       a testnet-only buyer is absent from a wholly valid allow-list.
  *   record_buyer_not_scope_buyer    its verified payer is not the scope's buyer.
  *   escrow_missing                  the scope's job has no escrow row: never funded_verified.
  *   escrow_payer_not_buyer          the escrow row's payer label is not the scope's buyer.
@@ -76,6 +79,7 @@ export const FUNDING_BINDINGS = [
   "record_malformed",
   "record_chain_mismatch",
   "record_scope_mismatch",
+  "testnet_buyer_not_allowed",
   "record_buyer_not_scope_buyer",
   "escrow_missing",
   "escrow_payer_not_buyer",
@@ -222,9 +226,10 @@ export function fundingBindingOf(
   record: FundingVerificationRecord | null,
   escrow: FundingEscrowRow,
   expectedChainId: number | null,
+  allowance?: TestnetBuyerAllowance,
 ): FundingBinding {
   if (record === null) return "no_record";
-  return fundingBindingRefusal(record, scope, escrow, expectedChainId) ?? "bound";
+  return fundingBindingRefusal(record, scope, escrow, expectedChainId, allowance) ?? "bound";
 }
 
 /**
@@ -250,8 +255,9 @@ function readyToActivate(
   record: FundingVerificationRecord | null,
   escrow: FundingEscrowRow,
   expectedChainId: number | null,
+  allowance?: TestnetBuyerAllowance,
 ): boolean {
-  return record !== null && activationRefusal(record, scope, escrow, expectedChainId) === null;
+  return record !== null && activationRefusal(record, scope, escrow, expectedChainId, allowance) === null;
 }
 
 /**
@@ -264,8 +270,9 @@ export function fundingStateOf(
   escrow: FundingEscrowRow,
   expectedChainId: number | null,
   asOf: string,
+  allowance?: TestnetBuyerAllowance,
 ): FundingState {
-  return stateOf(scope, fundingBindingOf(scope, record, escrow, expectedChainId), readyToActivate(scope, record, escrow, expectedChainId), asOf);
+  return stateOf(scope, fundingBindingOf(scope, record, escrow, expectedChainId, allowance), readyToActivate(scope, record, escrow, expectedChainId, allowance), asOf);
 }
 
 /** The DTO: the state and the binding, with the sources' own values beside them. */
@@ -275,14 +282,15 @@ export function projectFundingStatus(
   escrow: FundingEscrowRow,
   expectedChainId: number | null,
   asOf: string,
+  allowance?: TestnetBuyerAllowance,
 ): FundingStatusDTO {
-  const binding = fundingBindingOf(scope, record, escrow, expectedChainId);
+  const binding = fundingBindingOf(scope, record, escrow, expectedChainId, allowance);
   return {
     schemaId: FUNDING_STATUS_SCHEMA_ID,
     asOf,
     scopeId: scope.id,
     jobId: scope.jobId,
-    state: stateOf(scope, binding, readyToActivate(scope, record, escrow, expectedChainId), asOf),
+    state: stateOf(scope, binding, readyToActivate(scope, record, escrow, expectedChainId, allowance), asOf),
     binding,
     scope: { sourceStatus: scope.status, createdAt: scope.createdAt, expiresAt: scope.expiresAt },
     verification:

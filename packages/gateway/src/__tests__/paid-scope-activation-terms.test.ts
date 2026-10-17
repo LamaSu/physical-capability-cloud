@@ -41,7 +41,9 @@ const recordJson = (over: Record<string, unknown> = {}) =>
     implementation: "0x" + "f2".repeat(20),
     usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
     chainId: 84532,
-    specVersion: 1,
+    specVersion: 2,
+    scheduleId: "vnext-mainnet-v1",
+    scheduleTestnetOnly: false,
     blockNumber: 123,
     ...over,
   });
@@ -237,6 +239,7 @@ describe("the configured sources today", () => {
     expect(paidScopeActivationTerms({ id: "scope_x", jobId: "job_x", kernelId: "kernel-nyc" })).toEqual({
       expectedChainId: null,
       postActivationTtlMs: null,
+      testnetOnly: false,
     });
   });
 });
@@ -248,13 +251,13 @@ describe("a test-installed source", () => {
   });
 
   it("is what a test process gets, per scope", () => {
-    __setPaidScopeActivationTermsForTest((scope) => ({ expectedChainId: 84532, postActivationTtlMs: scope.id === "scope_a" ? 1000 : 2000 }));
-    expect(paidScopeActivationTerms({ id: "scope_a", jobId: null, kernelId: "k" })).toEqual({ expectedChainId: 84532, postActivationTtlMs: 1000 });
-    expect(paidScopeActivationTerms({ id: "scope_b", jobId: null, kernelId: "k" })).toEqual({ expectedChainId: 84532, postActivationTtlMs: 2000 });
+    __setPaidScopeActivationTermsForTest((scope) => ({ expectedChainId: 84532, postActivationTtlMs: scope.id === "scope_a" ? 1000 : 2000, testnetOnly: false }));
+    expect(paidScopeActivationTerms({ id: "scope_a", jobId: null, kernelId: "k" })).toEqual({ expectedChainId: 84532, postActivationTtlMs: 1000, testnetOnly: false });
+    expect(paidScopeActivationTerms({ id: "scope_b", jobId: null, kernelId: "k" })).toEqual({ expectedChainId: 84532, postActivationTtlMs: 2000, testnetOnly: false });
   });
 
   it("(neg-terms-prod) is never consulted outside a test process (production, development, NODE_ENV unset, or no VITEST), and cannot be installed there", () => {
-    __setPaidScopeActivationTermsForTest(() => ({ expectedChainId: 84532, postActivationTtlMs: 1000 }));
+    __setPaidScopeActivationTermsForTest(() => ({ expectedChainId: 84532, postActivationTtlMs: 1000, testnetOnly: false }));
     const saved = { NODE_ENV: process.env.NODE_ENV, VITEST: process.env.VITEST, NET: process.env.PCC_VNEXT_RECORD_NETWORK, LABEL: process.env.PCC_VNEXT_RECORD_LABEL };
     const set = (k: string, v: string | undefined) => (v === undefined ? delete process.env[k] : (process.env[k] = v));
     delete process.env.PCC_VNEXT_RECORD_NETWORK;
@@ -265,7 +268,7 @@ describe("a test-installed source", () => {
         set("NODE_ENV", nodeEnv);
         set("VITEST", vitest);
         const label = `NODE_ENV=${nodeEnv} VITEST=${vitest}`;
-        expect(paidScopeActivationTerms({ id: "scope_a", jobId: null, kernelId: "k" }), label).toEqual({ expectedChainId: null, postActivationTtlMs: null });
+        expect(paidScopeActivationTerms({ id: "scope_a", jobId: null, kernelId: "k" }), label).toEqual({ expectedChainId: null, postActivationTtlMs: null, testnetOnly: false });
         expect(() => __setPaidScopeActivationTermsForTest(null), label).toThrow();
       }
     } finally {
@@ -274,6 +277,6 @@ describe("a test-installed source", () => {
       set("PCC_VNEXT_RECORD_NETWORK", saved.NET);
       set("PCC_VNEXT_RECORD_LABEL", saved.LABEL);
     }
-    expect(paidScopeActivationTerms({ id: "scope_a", jobId: null, kernelId: "k" })).toEqual({ expectedChainId: 84532, postActivationTtlMs: 1000 });
+    expect(paidScopeActivationTerms({ id: "scope_a", jobId: null, kernelId: "k" })).toEqual({ expectedChainId: 84532, postActivationTtlMs: 1000, testnetOnly: false });
   });
 });

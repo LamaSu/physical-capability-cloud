@@ -42,9 +42,13 @@ const record = (over: Partial<FundingVerificationRecord> = {}): FundingVerificat
   scopeId: "scope_dto",
   escrowAddress: ESCROW,
   buyer: BUYER,
+  operator: "0x1111111111111111111111111111111111111111",
   chainId: 84532,
   blockNumber: "31337000",
   blockHash: "0x" + "c3".repeat(32),
+  fundingBlockNumber: "31336999",
+  fundingBlockHash: "0x" + "d4".repeat(32),
+  fundedAt: 1791460800,
   verifierVersion: "verifier-test/1",
   verifiedAt: "2026-10-08T12:20:00.000Z",
   finality: "finalized",
@@ -259,12 +263,13 @@ describe("FundingStatusDTO states", () => {
 
   it("each binding member, by its exact condition, in order", () => {
     // Each case also fails every later check, so a member reads only where the rule puts it.
-    const cases: Array<[FundingVerificationRecord | null, FundingEscrowRow, number | null, string]> = [
+    const cases: Array<[FundingVerificationRecord | null, FundingEscrowRow, number | null, string, { testnetOnly: boolean; buyers: string | undefined }?]> = [
       [null, null, null, "no_record"],
       [record({ finality: "latest" as never }), null, null, "expected_chain_unavailable"],
       [record({ finality: "latest" as never }), null, CHAIN, "record_malformed"],
       [record({ chainId: 545, scopeId: "scope_other" }), null, CHAIN, "record_chain_mismatch"],
       [record({ scopeId: "scope_other" }), null, CHAIN, "record_scope_mismatch"],
+      [record({ buyer: OTHER }), null, CHAIN, "testnet_buyer_not_allowed", { testnetOnly: true, buyers: undefined }],
       [record({ buyer: OTHER }), null, CHAIN, "record_buyer_not_scope_buyer"],
       [record(), null, CHAIN, "escrow_missing"],
       [record(), row({ payer: OTHER, contractAddress: OTHER_ESCROW }), CHAIN, "escrow_payer_not_buyer"],
@@ -272,7 +277,7 @@ describe("FundingStatusDTO states", () => {
       [record(), row({ status: "completed" }), CHAIN, "bound"],
     ];
     expect(cases.map(([, , , b]) => b)).toEqual([...FUNDING_BINDINGS]);
-    for (const [r, e, chain, binding] of cases) expect(fundingBindingOf(scope(), r, e, chain), binding).toBe(binding);
+    for (const [r, e, chain, binding, allowance] of cases) expect(fundingBindingOf(scope(), r, e, chain, allowance), binding).toBe(binding);
   });
 
   it("(neg-dto-members) the states are exactly these: no `confirming` until Q9 gives it a source (ruling 6), and every input gives one of them", () => {

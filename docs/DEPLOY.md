@@ -188,6 +188,14 @@ WORKFLOW_DB_PATH=/app/data/workflow.sqlite
 
 Sit it alongside the existing `PCC_DB_PATH` so both DBs share the same persistent volume.
 
+### Buyer-funding record env vars (gateway)
+
+`PCC_VNEXT_RECORD_NETWORK` — selects the operator-approved canonical V-next deployment record. Must stay unset on prod (#8993).
+
+`PCC_VNEXT_ALLOW_TESTNET_RECORD` — only the exact value `1` permits a testnet-only record; unset on prod. With an operator go, set this and `PCC_VNEXT_TESTNET_BUYERS` for one live window, then unset both.
+
+`PCC_VNEXT_TESTNET_BUYERS` — comma-separated addresses permitted to activate on testnet-only terms; unset on prod. Set together with `PCC_VNEXT_ALLOW_TESTNET_RECORD` for the operator-approved live window, then unset both. Empty entries, whitespace, invalid addresses or bad mixed-case checksums refuse the entire list; an empty or unset list permits nobody.
+
 ### Railway volume mount (REQUIRED before any `@pcc/workflow` consumer ships)
 
 Railway's default filesystem is ephemeral — every redeploy mints a fresh container with an empty disk. If `WORKFLOW_DB_PATH` points anywhere outside a mounted volume:

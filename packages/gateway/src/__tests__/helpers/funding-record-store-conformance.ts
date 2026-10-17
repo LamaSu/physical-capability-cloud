@@ -46,9 +46,13 @@ const record = (scopeId: string, escrowAddress: string, chainId = CHAIN): Fundin
   scopeId,
   escrowAddress,
   buyer: "0x5555555555555555555555555555555555555555",
+  operator: "0x1111111111111111111111111111111111111111",
   chainId,
   blockNumber: "31337000",
   blockHash: "0x" + "c3".repeat(32),
+  fundingBlockNumber: "31336999",
+  fundingBlockHash: "0x" + "d4".repeat(32),
+  fundedAt: 1791460800,
   verifierVersion: "verifier-conformance/1",
   verifiedAt: "2026-10-08T12:00:00.000Z",
   finality: "finalized",
@@ -149,10 +153,10 @@ export const FUNDING_RECORD_STORE_CONTRACT: readonly StoreContractCheck[] = [
     name: "lookups return finalized records only: an unfinalized row is invisible to every lookup",
     run(store) {
       const db = getStore().db;
-      // Rows another writer left for one scope and escrow, none finalized ("FINALIZED" is not the word).
+      // Q9's persisted finality enum is closed: "latest" is its unfinalized observation state.
       store.plant(unfinalized(record("scope_u1", A)));
-      store.plant(unfinalized(record("scope_u1", A_UPPER), "safe"));
-      store.plant(unfinalized(record("scope_u1", A), "FINALIZED"));
+      store.plant(unfinalized(record("scope_u1", A_UPPER)));
+      store.plant(unfinalized(record("scope_u1", A)));
       expect(store.findByScope(db, "scope_u1")).toBeNull();
       for (const lookup of [A, A_UPPER, mixedCase(A)]) expect(store.findByEscrow(db, CHAIN, lookup), lookup).toBeNull();
       db.transaction((tx) => {

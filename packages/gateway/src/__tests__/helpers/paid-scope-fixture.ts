@@ -36,7 +36,7 @@ export const MIN = 60_000;
 export const CHAIN_ID = 84532;
 export const ACTIVATION_TTL = 6 * 60 * MIN;
 /** reconcilePaidScope's required inputs (rulings 4 and 5), as the tests give them explicitly. */
-export const TERMS: PaidScopeActivationTerms = { expectedChainId: CHAIN_ID, postActivationTtlMs: ACTIVATION_TTL };
+export const TERMS: PaidScopeActivationTerms = { expectedChainId: CHAIN_ID, postActivationTtlMs: ACTIVATION_TTL, testnetOnly: false };
 /** Installs the accept route's source of the expected chain and TTL (none by default: both null). */
 export const installActivationTerms = (terms: PaidScopeActivationTerms = TERMS) =>
   __setPaidScopeActivationTermsForTest(() => terms);
@@ -208,9 +208,13 @@ export function verification(scopeId: string, over: Partial<FundingVerificationR
     scopeId,
     escrowAddress: ESCROW_A,
     buyer: BUYER,
+    operator: "0x1111111111111111111111111111111111111111",
     chainId: 84532,
     blockNumber: "31337000",
     blockHash: "0x" + "c3".repeat(32),
+    fundingBlockNumber: "31336999",
+    fundingBlockHash: "0x" + "d4".repeat(32),
+    fundedAt: Math.floor(T0 / 1000),
     verifierVersion: "verifier-test/1",
     verifiedAt: new Date().toISOString(),
     finality: "finalized",
