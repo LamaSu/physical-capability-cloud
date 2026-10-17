@@ -27,6 +27,7 @@
 import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastify";
 import { randomBytes } from "node:crypto";
 import { trace } from "@opentelemetry/api";
+import { isWalletRequest } from "../services/telemetry-privacy.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -79,6 +80,10 @@ const traceIdPluginImpl: FastifyPluginAsync = async (app: FastifyInstance) => {
   app.decorateRequest("traceId", "");
 
   app.addHook("onRequest", async (req) => {
+    if (isWalletRequest(req.url)) {
+      req.traceId = mintTraceId();
+      return;
+    }
     const raw = req.headers[TRACE_ID_HEADER];
     // headers can be string | string[] | undefined
     const candidate = Array.isArray(raw) ? raw[0] : raw;

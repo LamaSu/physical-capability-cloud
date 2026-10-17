@@ -1986,6 +1986,114 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS carrier_unmatched_events_code_idx ON carrier_unmatched_events(tracking_code);
   `);
 
+  // W1 wallet link requests and public-key consent receipts.
+  // Mirrors migrations/0004_wallet_links.sql.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS wallet_link_requests (
+      id TEXT PRIMARY KEY,
+      key_type TEXT NOT NULL CHECK (key_type IN ('secp256k1', 'ed25519')),
+      address_or_pubkey TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('agent', 'device')),
+      label TEXT NOT NULL,
+      client_info TEXT,
+      kernel_id TEXT,
+      chain_id INTEGER NOT NULL,
+      env TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      nonce TEXT NOT NULL UNIQUE,
+      user_code TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending_proof', 'awaiting_approval', 'approved', 'denied', 'failed', 'expired')),
+      message TEXT NOT NULL,
+      consent_version TEXT NOT NULL,
+      consent_sha256 TEXT NOT NULL,
+      proof_signature TEXT,
+      proof_consumed_at TEXT,
+      account_id TEXT,
+      created_by_key_id TEXT,
+      approved_by TEXT,
+      approved_by_key_id TEXT,
+      decided_at TEXT,
+      link_id TEXT,
+      requester_ip_class TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS wallet_link_requests_pending_code_uq
+      ON wallet_link_requests(user_code)
+      WHERE status IN ('pending_proof', 'awaiting_approval');
+    CREATE INDEX IF NOT EXISTS wallet_link_requests_pending_key_idx
+      ON wallet_link_requests(key_type, lower(address_or_pubkey), chain_id, status, expires_at);
+    CREATE INDEX IF NOT EXISTS wallet_link_requests_expires_idx
+      ON wallet_link_requests(expires_at);
+
+    CREATE TABLE IF NOT EXISTS wallet_links (
+      id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL,
+      account_proof TEXT NOT NULL CHECK (account_proof IN ('siwe', 'claimed')),
+      role TEXT NOT NULL CHECK (role IN ('agent', 'device')),
+      subject_type TEXT NOT NULL,
+      subject_id TEXT,
+      key_type TEXT NOT NULL CHECK (key_type IN ('secp256k1', 'ed25519')),
+      address_or_pubkey TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      label TEXT NOT NULL,
+      consent_version TEXT NOT NULL,
+      consent_sha256 TEXT NOT NULL,
+      proof_message TEXT NOT NULL,
+      proof_signature TEXT NOT NULL,
+      approval_signature TEXT,
+      request_id TEXT NOT NULL,
+      created_by_key_id TEXT,
+      approved_by TEXT NOT NULL,
+      approved_by_key_id TEXT,
+      created_at TEXT NOT NULL,
+      expires_at TEXT,
+      revoked_at TEXT,
+      revoked_by TEXT,
+      revoke_reason TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS wallet_links_active_key_uq
+      ON wallet_links(key_type, lower(address_or_pubkey), chain_id)
+      WHERE revoked_at IS NULL;
+    CREATE INDEX IF NOT EXISTS wallet_links_account_idx ON wallet_links(account_id);
+    CREATE INDEX IF NOT EXISTS wallet_links_account_lower_idx ON wallet_links (lower(account_id));
+  `);
+
+  // W2 per-link testnet faucet claims.
+  // Mirrors migrations/0005_faucet_claims.sql.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS faucet_claims (
+      link_id TEXT NOT NULL,
+      token TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      account_id TEXT NOT NULL,
+      account_proof TEXT NOT NULL CHECK (account_proof IN ('siwe', 'claimed')),
+      approved_by_key_id TEXT,
+      address TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      amount TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'succeeded', 'failed')),
+      tx_hash TEXT,
+      error_class TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      lease_until TEXT,
+      last_attempt_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (link_id, token, seq),
+      CHECK ((token = 'eth' AND amount = '0.0001') OR (token = 'usdc' AND amount = '1')),
+      CHECK ((status = 'succeeded') = (tx_hash IS NOT NULL))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS faucet_claims_tx_hash_uq
+      ON faucet_claims(tx_hash) WHERE tx_hash IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS faucet_claims_address_created_idx
+      ON faucet_claims(address, created_at);
+    CREATE INDEX IF NOT EXISTS faucet_claims_account_created_idx
+      ON faucet_claims(account_id, created_at);
+    CREATE INDEX IF NOT EXISTS faucet_claims_created_idx
+      ON faucet_claims(created_at);
+  `);
+
   // ── ALTER TABLE migrations (ERC-8004 onchain tracking) ──────────
   // Use the in-scope 3-arg safeAddColumn (closure captures sqlite).
   // SQLite has no ALTER COLUMN; new columns are appended idempotently.
@@ -1996,7 +2104,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
   safeAddColumn("api_keys", "onchain_chain_id", "INTEGER");
   safeAddColumn("api_keys", "onchain_attempted_at", "TEXT");
   safeAddColumn("api_keys", "onchain_error", "TEXT");
-  // Option A ownership stopgap: per-operator operational wallet.
+  // Wallet metadata columns remain compatible with existing table definitions.
   safeAddColumn("api_keys", "operator_wallet_address", "TEXT");
   safeAddColumn("api_keys", "operator_wallet_private_key", "TEXT");
   safeAddColumn("api_keys", "operator_wallet_custody", "TEXT DEFAULT 'gateway'");
@@ -2005,6 +2113,9 @@ export function migrateDatabase(sqlite: Database.Database): void {
   safeAddColumn("api_keys", "agent_wallet_onchain_error", "TEXT");
   // V3 Mode-B dispatch: version column on escrows.
   safeAddColumn("escrows", "version", "TEXT DEFAULT 'v2'");
+  // N4b-gw r7 F3: the relay's execution lease (claim token, then start).
+  safeAddColumn("tool_call_relay", "claim_token_hash", "TEXT");
+  safeAddColumn("tool_call_relay", "started_at", "TEXT");
   // Option B (ERC-4337 smart wallet + passkey) groundwork.
   safeAddColumn("api_keys", "smart_wallet_address", "TEXT");
   safeAddColumn("api_keys", "passkey_credential_id", "TEXT");
@@ -2023,6 +2134,119 @@ export function migrateDatabase(sqlite: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS passkey_sessions_expires_at ON passkey_sessions(expires_at);
   `);
+
+  // Settlement package receipt and one-use gateway challenge ledger.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS gateway_receipts (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      kernel_id TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      escrow TEXT NOT NULL,
+      settlement_unit_id TEXT NOT NULL,
+      package_digest TEXT NOT NULL,
+      received_at INTEGER NOT NULL,
+      receipt_digest TEXT NOT NULL,
+      signature_hex TEXT NOT NULL,
+      kid TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS gateway_receipts_job_idx
+      ON gateway_receipts(job_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS gateway_receipts_unit_idx
+      ON gateway_receipts(chain_id, escrow, settlement_unit_id);
+
+    CREATE TABLE IF NOT EXISTS settlement_challenges (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      escrow TEXT NOT NULL,
+      settlement_unit_id TEXT NOT NULL,
+      nonce TEXT NOT NULL,
+      t_challenge_ref TEXT NOT NULL,
+      state TEXT NOT NULL CONSTRAINT settlement_challenges_state_check CHECK (state IN ('issued', 'consumed')),
+      issued_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      consumed_at INTEGER
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS settlement_challenges_open_unit_idx
+      ON settlement_challenges(chain_id, escrow, settlement_unit_id) WHERE state = 'issued';
+  `);
+  scrubOperatorWalletPrivateKeys(sqlite);
+}
+
+/**
+ * NULL the legacy key column and zero the bytes this UPDATE frees. Whenever
+ * keys were NULLed, or an unfinished compaction is found, VACUUM rebuilds the
+ * live DB file so earlier copies cannot survive in live or free pages. A
+ * checked TRUNCATE checkpoint then empties the WAL.
+ *
+ * This cannot erase pre-existing backups/volume snapshots or filesystem
+ * blocks belonging to deleted or truncated files. VACUUM holds the boot-time
+ * write lock and needs roughly the DB's size in free volume space for the WAL,
+ * plus temporary space for the rebuild.
+ */
+export function scrubOperatorWalletPrivateKeys(sqlite: Database.Database): void {
+  const columns = sqlite.prepare("PRAGMA table_info(api_keys)").all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === "operator_wallet_private_key")) return;
+
+  const previousSecureDelete = sqlite.pragma("secure_delete", { simple: true }) as number;
+  let changes: number;
+  try {
+    sqlite.pragma("secure_delete = ON");
+    changes = sqlite.transaction(() => {
+      const updated = sqlite.prepare(
+        "UPDATE api_keys SET operator_wallet_private_key = NULL WHERE operator_wallet_private_key IS NOT NULL",
+      ).run().changes;
+      // The flag commits with the UPDATE: a failed/interrupted rebuild must
+      // still be retried on a boot that finds no remaining non-NULL keys.
+      if (updated > 0) {
+        sqlite.exec("CREATE TABLE IF NOT EXISTS operator_wallet_key_vacuum_pending (pending INTEGER)");
+      }
+      return updated;
+    }).immediate();
+  } finally {
+    sqlite.pragma(`secure_delete = ${previousSecureDelete === 2 ? "FAST" : previousSecureDelete}`);
+  }
+
+  const remaining = sqlite.prepare(
+    "SELECT COUNT(*) AS count FROM api_keys WHERE operator_wallet_private_key IS NOT NULL",
+  ).get() as { count: number };
+  if (remaining.count !== 0) {
+    throw new Error(`Wallet private key scrub verification failed: ${remaining.count}`);
+  }
+
+  const pending = sqlite.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'operator_wallet_key_vacuum_pending'",
+  ).get();
+  if (changes === 0 && !pending) return;
+
+  // VACUUM must run after the scrub transaction has committed.
+  sqlite.exec("VACUUM");
+  checkpointWalletKeyScrub(sqlite);
+  sqlite.exec("DROP TABLE operator_wallet_key_vacuum_pending");
+  try {
+    // Dropping the flag writes another WAL frame; empty that WAL as well.
+    checkpointWalletKeyScrub(sqlite);
+  } catch (error) {
+    // Compaction already succeeded, but a failed final checkpoint should
+    // also leave durable retry state and propagate out of store creation.
+    sqlite.exec("CREATE TABLE IF NOT EXISTS operator_wallet_key_vacuum_pending (pending INTEGER)");
+    throw error;
+  }
+}
+
+function checkpointWalletKeyScrub(sqlite: Database.Database): void {
+  const wait = new Int32Array(new SharedArrayBuffer(4));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const [result] = sqlite.pragma("wal_checkpoint(TRUNCATE)") as Array<{
+      busy: number; log: number; checkpointed: number;
+    }>;
+    // Non-WAL databases report log = checkpointed = -1, which is clean.
+    if (result?.busy === 0 && result.log === result.checkpointed) return;
+    if (attempt < 2) Atomics.wait(wait, 0, 0, 10);
+  }
+  throw new Error("Wallet private key scrub checkpoint failed");
 }
 
 /**

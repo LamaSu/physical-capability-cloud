@@ -6,6 +6,7 @@
  */
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
+import { OutstandingWork } from "./outstanding-work.js";
 
 export interface GenericSensorConfig {
   /** URL for reading the sensor value (e.g., "http://192.168.1.101:502/reading") */
@@ -43,7 +44,14 @@ export class GenericSensorAdapter {
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private recording = false;
-  private samples: Array<{ timestamp: string; value: number }> = [];
+  /**
+   * The recording running now: its job and its samples. A read keeps the recording it was
+   * started for, and a read of a recording that was replaced is dropped (astra pack 186).
+   */
+  private current: { jobId: string; samples: Array<{ timestamp: string; value: number }> } | null = null;
+  /** The recording's sampling timer and each read in flight: what can still emit. */
+  private readonly work = new OutstandingWork();
+  private endRecording: (() => void) | null = null;
 
   constructor(id: string, config: GenericSensorConfig) {
     this.id = id;
@@ -58,44 +66,53 @@ export class GenericSensorAdapter {
   }
 
   async startRecording(jobId: string): Promise<void> {
+    // A recording already running is replaced: its timer used to be overwritten and left sampling.
+    this.stopSampling();
     this.recording = true;
-    this.samples = [];
+    const recording = { jobId, samples: [] as Array<{ timestamp: string; value: number }> };
+    this.current = recording;
 
     const interval = this.config.sampleIntervalMs ?? 1000;
-    this.pollTimer = setInterval(async () => {
-      try {
-        const value = this.config.mockMode
-          ? this.generateMockValue()
-          : await this.readValue();
-
-        const sample = { timestamp: new Date().toISOString(), value };
-        this.samples.push(sample);
-
-        this.emit({
-          type: "power_profile_sample",
-          timestamp: sample.timestamp,
-          source: this.source,
-          payload: {
-            channel: this.config.channel,
-            value: sample.value,
-            unit: this.config.unit,
-            jobId,
-          },
-        });
-      } catch {
-        // Silently handle read failures during recording
-      }
+    this.endRecording = this.work.begin();
+    this.pollTimer = setInterval(() => {
+      void this.work.track(this.sample(recording));
     }, interval);
+  }
+
+  private async sample(recording: { jobId: string; samples: Array<{ timestamp: string; value: number }> }): Promise<void> {
+    const { jobId } = recording;
+    try {
+      const value = this.config.mockMode
+        ? this.generateMockValue()
+        : await this.readValue();
+      // The recording was replaced while this read was in flight: neither job gets it.
+      if (this.current !== recording) return;
+
+      const sample = { timestamp: new Date().toISOString(), value };
+      recording.samples.push(sample);
+
+      this.emit({
+        type: "power_profile_sample",
+        timestamp: sample.timestamp,
+        source: this.source,
+        payload: {
+          channel: this.config.channel,
+          value: sample.value,
+          unit: this.config.unit,
+          jobId,
+        },
+      });
+    } catch {
+      // Silently handle read failures during recording
+    }
   }
 
   async stopRecording(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
     this.recording = false;
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
+    this.stopSampling();
 
-    const values = this.samples.map(s => s.value);
+    const samples = this.current?.samples ?? [];
+    const values = samples.map(s => s.value);
     const stats = values.length > 0 ? {
       min: Math.min(...values),
       max: Math.max(...values),
@@ -114,9 +131,9 @@ export class GenericSensorAdapter {
         channel: this.config.channel,
         unit: this.config.unit,
         sampleCount: values.length,
-        durationMs: this.samples.length * (this.config.sampleIntervalMs ?? 1000),
+        durationMs: samples.length * (this.config.sampleIntervalMs ?? 1000),
         statistics: stats,
-        samples: this.samples,
+        samples,
       },
     };
   }
@@ -138,10 +155,27 @@ export class GenericSensorAdapter {
     this.listeners.push(callback);
   }
 
+  /**
+   * Required by the PCC kernel: resolves once every evidence event of the work this adapter
+   * was given has been emitted, and never while that work can still emit. Here: once
+   * stopRecording has stopped the sampling timer and no read is in flight (a read the timer
+   * started before stopRecording can still emit after it returns). The kernel calls it after
+   * stopRecording.
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
+  }
+
   async dispose(): Promise<void> {
+    this.stopSampling();
+    this.listeners = [];
+  }
+
+  private stopSampling(): void {
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
-    this.listeners = [];
+    this.endRecording?.();
+    this.endRecording = null;
   }
 
   // ── Internal ───────────────────────────────────────────────────────

@@ -6,8 +6,12 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { hasSingleValidAdminKey } from "./relay-admin-gate.js";
+import { nonCanonicalTargetReason, NON_CANONICAL_REFUSAL } from "./canonical-request-target.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
+import { containsKeyMaterial } from "../services/wallet-links/guards.js";
+import { isWalletRequest } from "../services/telemetry-privacy.js";
 
 /** Routes that don't require any auth */
 const PUBLIC_PREFIXES = [
@@ -39,13 +43,10 @@ const PUBLIC_PREFIXES = [
 ];
 
 const PUBLIC_EXACT = [
-  "/api/capabilities/types",   // Discovery is public (see what's available)
-  "/api/capabilities",         // Capability listing is public
   "/api/agents/status",        // Network status is public
   "/api/onboard/registrations", // EXACT match only — GET listing is public, but
                                 // sub-paths like /approve, /reject, /activate require auth
   "/api/orchestrator/templates", // Template directory is public for unauth landing-page discovery
-  "/api/capabilities/templates/match", // Heuristic template-matcher is public for landing-page picker
   "/openapi.json",             // OpenAPI 3.x spec is public (APIs.guru, Smithery, mcp.so)
   "/api/courier-jobs/open",       // Open courier-jobs feed — driver agents poll without API key (legacy shim)
   "/api/courier-jobs/jobs/open",  // v0.2 compat alias for the open feed (legacy shim)
@@ -63,7 +64,18 @@ const PUBLIC_EXACT = [
   "/api/auth/verify",             // SIWE signature verify → session; the login endpoint, must be reachable without a key
 ];
 
-// Capability detail routes are public — discovery, widget embedding, etc.
+// N43: capability discovery is public to READ. PUBLIC_EXACT applies to every method, and with the
+// listing in it an anonymous POST /api/capabilities created a capability on any kernel. So the
+// listing and the types are public for GET and HEAD only (as /api/kernels is below), and every
+// write goes through the gate.
+const PUBLIC_CAPABILITY_READS = ["/api/capabilities", "/api/capabilities/types"];
+
+// The landing-page template picker's matcher is public, and it is a POST: a read-only heuristic
+// that stores nothing (routes/orchestrator-templates.ts). Public for POST only.
+const PUBLIC_TEMPLATE_MATCH_PATH = "/api/capabilities/templates/match";
+
+// Capability detail routes are public to read — discovery, widget embedding, etc. (GET and HEAD
+// only, N43: the pattern also matched POST /api/capabilities/graph-search.)
 // Covers: /api/capabilities/:id, /api/capabilities/:id/button, /api/capabilities/:id/td
 const PUBLIC_CAPABILITY_DETAIL_RE = /^\/api\/capabilities\/[^/]+(?:\/button|\/td)?$/;
 
@@ -124,13 +136,22 @@ const PUBLIC_LOB_WEBHOOK_PATH = "/api/lob/webhook";
 
 function isPublicRoute(url: string, method?: string): boolean {
   const path = url.split("?")[0];
+  // Only the device-authorization capability endpoints are public.
+  if (method === "POST" && path === "/api/wallets/link-requests") return true;
+  if (method === "POST" && /^\/api\/wallets\/link-requests\/[^/]+\/fund$/.test(path)) return true;
+  if (method === "POST" && /^\/api\/wallets\/link-requests\/[^/]+\/proof$/.test(path)) return true;
+  if ((method === "GET" || method === "HEAD") && /^\/api\/wallets\/link-requests\/[^/]+$/.test(path)) return true;
   if (PUBLIC_PREFIXES.some((p) => path.startsWith(p))) return true;
   if (PUBLIC_EXACT.includes(path)) return true;
   if (method === "POST" && path === PUBLIC_CARRIER_WEBHOOK_PATH) return true;
   if (method === "POST" && path === PUBLIC_LOB_WEBHOOK_PATH) return true;
   // Kernel discovery is public; identity-bearing creation/upsert is not.
   if (method === "GET" && path === "/api/kernels") return true;
-  if (PUBLIC_CAPABILITY_DETAIL_RE.test(path)) return true;
+  // Capability discovery is public to read; creating or changing a capability is not (N43).
+  const read = method === "GET" || method === "HEAD";
+  if (read && PUBLIC_CAPABILITY_READS.includes(path)) return true;
+  if (read && PUBLIC_CAPABILITY_DETAIL_RE.test(path)) return true;
+  if (method === "POST" && path === PUBLIC_TEMPLATE_MATCH_PATH) return true;
   if (PUBLIC_OPERATOR_RATINGS_RE.test(path)) return true;
   if (PUBLIC_KERNEL_AGENT_CARD_RE.test(path)) return true;
   // Only GET on the offer/job detail routes is public.
@@ -144,12 +165,24 @@ function isPublicRoute(url: string, method?: string): boolean {
 }
 
 async function apiGateImpl(app: FastifyInstance) {
-  app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
+  const authenticate = async (req: FastifyRequest, reply: FastifyReply) => {
     // Only gate /api/* routes
     if (!req.url.startsWith("/api/")) return;
 
-    // Skip public routes
-    if (isPublicRoute(req.url, req.method)) return;
+    const optionalCreate = req.method === "POST" && req.url.split("?")[0] === "/api/wallets/link-requests";
+    if (optionalCreate && req.headers["x-pcc-api-key"] !== undefined) {
+      return reply.status(401).send({ error: "api_key_required",
+        message: "Send the key as Authorization: Bearer <key>; X-PCC-API-Key is not read." });
+    }
+    // A presented credential on create must be validated even though create is public.
+    if (isPublicRoute(req.url, req.method) && !(optionalCreate && req.headers.authorization !== undefined)) return;
+
+    // These private settlement routes also accept the gateway admin secret itself.
+    const path = req.url.split("?")[0];
+    const receiptRoute = /^(?:\/api\/operator\/jobs\/[^/]+\/receipt)$/.test(path)
+      && (req.method === "POST" || req.method === "GET" || req.method === "HEAD");
+    const issueRoute = path === "/api/admin/settlement-challenges" && req.method === "POST";
+    if ((receiptRoute || issueRoute) && hasSingleValidAdminKey(req)) return;
 
     // Try API key first (most common for agents)
     const apiKey = resolveApiKey(req);
@@ -161,7 +194,9 @@ async function apiGateImpl(app: FastifyInstance) {
     }
 
     // Try SIWE session (dashboard users)
-    const session = resolveSession(req);
+    // A cookie must not turn an invalid presented key into anonymous creation.
+    const sessionRequest = optionalCreate ? Object.assign(Object.create(req), { cookies: {} }) as FastifyRequest : req;
+    const session = resolveSession(sessionRequest);
     if (session) {
       req.userId = session.address;
       return;
@@ -174,6 +209,20 @@ async function apiGateImpl(app: FastifyInstance) {
       provision_url: "/api/auth/provision",
       docs: "https://capability.network/whitepaper.md",
     });
+  };
+  app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
+    // A target the router would route differently is never judged (N105).
+    if (nonCanonicalTargetReason(req.url) !== null) return reply.status(400).send(NON_CANONICAL_REFUSAL);
+    if (isWalletRequest(req.url) && (req.method === "GET" || req.method === "HEAD") &&
+      (req.headers["transfer-encoding"] !== undefined || Number(req.headers["content-length"] ?? 0) > 0)) {
+      return reply.status(400).send({ error: "invalid_request" });
+    }
+    return authenticate(req, reply);
+  });
+  app.addHook("preValidation", async (req: FastifyRequest, reply: FastifyReply) => {
+    if (!isWalletRequest(req.url)) return;
+    // Root preValidation: I1 precedes route validation and handler persistence.
+    if (containsKeyMaterial(req.body)) return reply.status(400).send({ error: "key_material_refused" });
   });
 }
 

@@ -44,7 +44,9 @@ describe("Streamable HTTP MCP server", () => {
       expect.objectContaining({
         name: "Physical Capability Cloud",
         title: "Physical Capability Cloud",
-        version: expect.any(String),
+        // The pack version plus the sha256 of the exact pack bytes (SemVer build
+        // metadata): a client that pinned a package verifies it from this alone.
+        version: expect.stringMatching(/^\d+\.\d+\.\d+\+sha256\.[0-9a-f]{64}$/),
         description: expect.any(String),
       }),
     );

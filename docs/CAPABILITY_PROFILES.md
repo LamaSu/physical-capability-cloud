@@ -436,6 +436,10 @@ class IppAdapter implements MachineAdapter {
   // Get progress
   async getProgress(): Promise<number>
   // Maps IPP job-impressions-completed / job-impressions to 0-100
+
+  // Evidence handshake (required of every adapter; the JobRunner refuses one without it)
+  async quiesceEvidence(): Promise<void>
+  // Resolves once the job's poll loop has reported completed / aborted / canceled and stopped
 }
 ```
 

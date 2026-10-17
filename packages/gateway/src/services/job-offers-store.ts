@@ -250,7 +250,7 @@ export const computeValidUntilMs = (
 // Pull a {lat,lng} from common requirements shapes for haversine filtering.
 // Tries pickup.{lat,lng} (courier shape), location.{lat,lng} (lab/site
 // shape), and origin.{lat,lng}.
-function extractRequirementsCoords(
+export function extractRequirementsCoords(
   requirements: Record<string, unknown>,
 ): { lat: number; lng: number } | null {
   const probes: Array<Record<string, unknown> | undefined> = [
@@ -592,6 +592,18 @@ export class JobOffersStore {
     }
     open.sort((a, b) => (b.postedAt || "").localeCompare(a.postedAt || ""));
     return open;
+  }
+
+  /**
+   * Offers claimed by any of the given kernels, in any status after the claim (read-only;
+   * the operator work read model lists them). Newest claim first.
+   */
+  listClaimedBy(kernelIds: ReadonlySet<string>): JobOffer[] {
+    const out = Array.from(this.offers.values()).filter(
+      (o) => o.claimedByKernelId != null && kernelIds.has(o.claimedByKernelId),
+    );
+    out.sort((a, b) => (b.claimedAt || "").localeCompare(a.claimedAt || ""));
+    return out;
   }
 
   /**

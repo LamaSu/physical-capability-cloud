@@ -6,6 +6,7 @@ export { MockChromatograph } from "./mock-chromatograph.js";
 
 // Real camera adapter (uses PhotoCaptureService + GeminiComparisonService)
 export { PhotoCameraAdapter } from "./photo-camera-adapter.js";
+export { PullCameraAdapter, ffmpegFrameGrabber, type CameraDeviceSpec, type FrameGrabber } from "./pull-camera-adapter.js";
 
 // Real device adapters (with built-in mock mode)
 export { OctoPrintAdapter, type OctoPrintConfig } from "./octoprint-adapter.js";
@@ -34,7 +35,7 @@ export type {
 } from "./sila/index.js";
 
 // IPP (Internet Printing Protocol) adapter for standard 2D printers
-export { IppAdapter, type IppAdapterConfig, type IppCapabilities } from "./ipp-adapter.js";
+export { IppAdapter, type IppAdapterConfig, type IppCapabilities, type IppDiagnostic } from "./ipp-adapter.js";
 export { discoverIppPrinters, generatePrinterCsd, type DiscoveredPrinter } from "./ipp-discovery.js";
 
 // PrinterLogAdapter — hash-chained printer log evidence sensor
@@ -43,5 +44,10 @@ export type { PrinterLogAdapterConfig, LogProvider } from "./printer-log-adapter
 
 // Interfaces
 export type { MachineAdapter, SensorAdapter, CameraAdapter, MachineCommand, MachineCommandResult } from "./types.js";
+// What an adapter has outstanding, for its quiesceEvidence()
+export { OutstandingWork } from "./outstanding-work.js";
 export type { UniversalSensorAdapter } from "./universal-sensor-adapter.js";
 export { isUniversalSensor } from "./universal-sensor-adapter.js";
+export type { IppValue, IppAttribute, IppGroup, IppMessage } from "./ipp-codec.js";
+export type { IppTransportRequest, IppTransportResult, IppTransport } from "./ipp-transport.js";
+export type { IppClientConfig, IppClientFailure } from "./ipp-client.js";

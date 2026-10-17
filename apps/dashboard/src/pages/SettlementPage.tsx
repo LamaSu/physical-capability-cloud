@@ -6,7 +6,8 @@ import {
   AddressDisplay,
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { scopeErrorMessage } from "../lib/scope-notice.js";
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -89,6 +90,7 @@ export function SettlementPage() {
   const [status, setStatus] = React.useState<QueueStatus>(MOCK_STATUS);
   const [epochs, setEpochs] = React.useState<EpochSummary[]>(MOCK_EPOCHS);
   const [flushing, setFlushing] = React.useState(false);
+  const [flushNotice, setFlushNotice] = React.useState<string | null>(null);
   const [selectedEpoch, setSelectedEpoch] = React.useState<number | null>(null);
 
   React.useEffect(() => {
@@ -97,14 +99,14 @@ export function SettlementPage() {
 
   // Try to fetch live data, fall back to mock
   React.useEffect(() => {
-    fetch("/api/settlement/status", { headers: { ...getAuthHeaders() } })
+    authorizedFetch("/api/settlement/status")
       .then((r) => r.json())
       .then((data) => {
         if (data.batchEnabled !== undefined) setStatus(data);
       })
       .catch(() => {}); // keep mock
 
-    fetch("/api/settlement/epochs", { headers: { ...getAuthHeaders() } })
+    authorizedFetch("/api/settlement/epochs")
       .then((r) => r.json())
       .then((data) => {
         if (data.epochs?.length) setEpochs(data.epochs);
@@ -114,10 +116,15 @@ export function SettlementPage() {
 
   const handleFlush = async () => {
     setFlushing(true);
+    setFlushNotice(null);
     try {
-      await fetch("/api/settlement/flush", { method: "POST", headers: { ...getAuthHeaders() } });
+      const result = await authorizedFetch("/api/settlement/flush", { method: "POST" });
+      if (!result.ok) {
+        setFlushNotice(await scopeErrorMessage(result, "/api/settlement/flush", "POST"));
+        return;
+      }
       // Refresh status
-      const r = await fetch("/api/settlement/status", { headers: { ...getAuthHeaders() } });
+      const r = await authorizedFetch("/api/settlement/status");
       const data = await r.json();
       if (data.batchEnabled !== undefined) setStatus(data);
     } catch {
@@ -220,6 +227,7 @@ export function SettlementPage() {
             >
               {flushing ? "Flushing..." : `Flush ${status.pending} ops`}
             </button>
+            {flushNotice && <p role="status" className="text-xs text-amber-400/80">{flushNotice}</p>}
             <p className="text-[10px] text-white/40">
               {status.autoFlush
                 ? "Auto-flush triggers on size, value, or age thresholds"

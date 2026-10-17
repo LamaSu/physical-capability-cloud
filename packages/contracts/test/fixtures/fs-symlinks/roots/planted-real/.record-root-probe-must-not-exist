@@ -1,0 +1,1 @@
+Planted at the probe path a symlinked root is checked through: the check must refuse it, not read "exists" as "fine".

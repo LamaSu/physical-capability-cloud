@@ -86,6 +86,16 @@ export type JsonValue =
   | readonly JsonValue[]
   | { readonly [key: string]: JsonValue };
 
+// A descriptor is an ordinary object, so it is read by OWN properties only: an inherited `value`,
+// `get` or `set` (a polluted Object.prototype) never decides whether a property is data. Object.hasOwn
+// is captured at load.
+const hasOwn: (o: object, key: PropertyKey) => boolean = Object.hasOwn;
+
+/** True for a plain data descriptor: an own `value`, and no own `get` or `set`. */
+function isOwnDataDescriptor(desc: PropertyDescriptor | undefined): desc is PropertyDescriptor {
+  return desc !== undefined && hasOwn(desc, "value") && !hasOwn(desc, "get") && !hasOwn(desc, "set");
+}
+
 function isPlainArrayInert(obj: object, seen: ReadonlySet<object>): boolean {
   const arr = obj as unknown[];
   const names = Object.getOwnPropertyNames(arr);
@@ -96,7 +106,7 @@ function isPlainArrayInert(obj: object, seen: ReadonlySet<object>): boolean {
   nextSeen.add(obj);
   for (let i = 0; i < arr.length; i++) {
     const desc = Object.getOwnPropertyDescriptor(arr, i);
-    if (!desc || desc.get || desc.set || !("value" in desc)) return false;
+    if (!isOwnDataDescriptor(desc)) return false;
     if (!isInertJsonValue(desc.value, nextSeen)) return false;
   }
   return true;
@@ -111,7 +121,7 @@ function isPlainObjectInert(obj: object, seen: ReadonlySet<object>): boolean {
   for (const key of Object.getOwnPropertyNames(obj)) {
     const desc = Object.getOwnPropertyDescriptor(obj, key)!;
     if (!desc.enumerable) return false;
-    if (desc.get || desc.set || !("value" in desc)) return false;
+    if (!isOwnDataDescriptor(desc)) return false;
     if (!isInertJsonValue(desc.value, nextSeen)) return false;
   }
   return true;

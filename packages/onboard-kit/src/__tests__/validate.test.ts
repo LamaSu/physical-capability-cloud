@@ -130,4 +130,52 @@ describe("validate", () => {
     expect(result.valid).toBe(false);
     expect(result.errors.some(e => e.name.includes("lat"))).toBe(true);
   });
+
+  it("V1: a machine adapter with no capability class gives a named error", () => {
+    const config = makeValidConfig();
+    config.capabilities = [];
+    const result = validate({ config });
+    expect(result.valid).toBe(false);
+    const error = result.errors.find(e => e.name === "adapter[dev-machine-01].capabilityClass");
+    expect(error).toBeDefined();
+    expect(error?.message).toContain("dev-machine-01");
+    expect(error?.message).toMatch(/add exactly one capability class/i);
+  });
+
+  it("V2: two distinct classes on one machine adapter give a named error", () => {
+    const config = makeValidConfig();
+    config.capabilities[0]!.type = "liquid-handler";
+    config.capabilities.push({ ...config.capabilities[0]!, type: "hplc" });
+    const result = validate({ config });
+    expect(result.valid).toBe(false);
+    const error = result.errors.find(e => e.name === "adapter[dev-machine-01].capabilityClass");
+    expect(error).toBeDefined();
+    expect(error?.message).toContain("dev-machine-01");
+    expect(error?.message).toContain("liquid-handler");
+    expect(error?.message).toContain("hplc");
+  });
+
+  it("V3: a liquid-handler ladder does not inherit FDM sensor or camera hints", () => {
+    const config = makeValidConfig();
+    config.capabilities[0]!.type = "liquid-handler";
+    config.capabilities[0]!.assuranceTiers = [0, 1, 2];
+    config.adapters = config.adapters.filter(adapter => adapter.adapterType === "machine");
+    const result = validate({ config });
+    expect(result.valid).toBe(true);
+    expect(result.warnings.filter(w => w.name.endsWith("tier1.sensors") || w.name.endsWith("tier2.camera"))).toEqual([]);
+  });
+
+  it("V4: each of two machine adapters has its own capability class", () => {
+    const config = makeValidConfig();
+    config.adapters.push({ ...config.adapters[0]!, adapterId: "dev-liquid-02", className: "LiquidAdapter" });
+    config.capabilities.push({ ...config.capabilities[0]!, adapterId: "dev-liquid-02", type: "liquid-handler" });
+    const result = validate({ config });
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+    for (const [id, type] of [["dev-machine-01", "fdm"], ["dev-liquid-02", "liquid-handler"]]) {
+      expect(result.checks.find(check => check.name === `adapter[${id}].capabilityClass`)).toEqual(expect.objectContaining({
+        passed: true, severity: "error", message: `Adapter "${id}" has capability class ${type}`,
+      }));
+    }
+  });
 });

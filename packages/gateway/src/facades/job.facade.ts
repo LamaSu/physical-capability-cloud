@@ -23,9 +23,32 @@ import {
   populateJobList,
 } from "./populators/job.populator.js";
 import { getKernelService } from "../services/kernel-service.js";
+import { localJobDispatchDecision } from "../services/local-job-dispatch.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { writeJobStatusGuarded, SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
+import { recordOperatorStage } from "../services/funnel-tracker.js";
+
+/**
+ * Adapters that never count toward the operator-onboarding funnel's
+ * adapter_ready stage: "mock" is the test/simulator adapter and
+ * "generic-http" is the catch-all placeholder adapter — neither proves a
+ * real machine is reachable. Mirrors the unmerged onboarding-readiness.ts's
+ * NON_EXECUTING_ADAPTERS set (see item4-stage-inventory.md). Exported so it
+ * can be unit-tested independent of KernelService/adapter wiring.
+ */
+export function isRealAdapterHealthy(
+  healthy: boolean,
+  adapterType: string | null | undefined,
+): boolean {
+  return healthy === true && isExecutingAdapter(adapterType);
+}
+
+/** A real adapter: not the "mock" simulator and not the "generic-http" placeholder. */
+export function isExecutingAdapter(adapterType: string | null | undefined): boolean {
+  return !!adapterType && adapterType !== "mock" && adapterType !== "generic-http";
+}
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -36,6 +59,9 @@ export interface JobFilters {
    *  under TENANT_ENFORCE), filters rows to this tenant. Omitted = today's
    *  cross-tenant default. */
   tenantId?: string;
+  /** Only these jobs: the ids the caller may read (jobReadScopeOf). Applied before the
+   *  page is cut, so `total` and `hasMore` count only readable jobs. */
+  jobIds?: ReadonlySet<string>;
 }
 
 export interface SubmitJobInput {
@@ -50,12 +76,15 @@ export interface SubmitJobInput {
   description?: string;
   title?: string;
   parameters?: Record<string, unknown>;
+  /** A strict true can only remove local dispatch. */
+  queueOnly?: unknown;
 }
 
 export interface JobSubmitResult {
   jobId: string;
   deviceId: string | null;
   status: "queued" | "accepted";
+  reason?: Extract<ReturnType<typeof localJobDispatchDecision>, { ok: false }>["reason"];
 }
 
 export interface JobStatusResult {
@@ -98,6 +127,25 @@ const TYPE_ALIASES: Record<string, string[]> = {
   "assay": ["assay", "plate-reader", "absorbance", "fluorescence", "screening"],
 };
 
+// ── Pagination coercion ─────────────────────────────────────────────────────
+
+/**
+ * Coerce an offset/limit value to a safe non-negative integer (N111).
+ *
+ * `list()` is called from several places (routes/jobs.ts, routes/setup.ts,
+ * routes/status.ts, routes/operator-relay.ts) and not all of them validate
+ * their input the way routes/jobs.ts's querystring schema now does — so this
+ * is the last line of defense. Anything that isn't a finite, non-negative
+ * integer (a string, a float, NaN, a negative number) falls back to
+ * `fallback` instead of being used in `offset + limit` arithmetic, which is
+ * exactly how N111 happened: string concatenation standing in for addition.
+ */
+function toSafeOffsetOrLimit(value: unknown, fallback: number): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.trunc(n);
+}
+
 // ── Facade ─────────────────────────────────────────────────────────────────
 
 export class JobFacade extends BaseFacade {
@@ -124,8 +172,13 @@ export class JobFacade extends BaseFacade {
   ): Promise<Result<PaginatedResult<JobDTO>>> {
     return this.execute("list", async () => {
       const context = this.defaultContext(ctx);
-      const offset = pagination?.offset ?? 0;
-      const limit = pagination?.limit ?? 50;
+      // N111 — defensive coercion: the route's querystring schema already
+      // guarantees real numbers, but this facade is called from other
+      // places too (setup.ts, status.ts, operator-relay.ts), so don't trust
+      // the caller. toSafeOffsetOrLimit() forces integer-only arithmetic
+      // regardless of what's passed (string, float, NaN, negative, etc.).
+      const offset = toSafeOffsetOrLimit(pagination?.offset, 0);
+      const limit = toSafeOffsetOrLimit(pagination?.limit, 50);
 
       const opts = filters?.tenantId ? { tenantId: filters.tenantId } : undefined;
       let jobs;
@@ -137,6 +190,10 @@ export class JobFacade extends BaseFacade {
         jobs = this.repos.jobs.findByStatus(filters.status, opts);
       } else {
         jobs = this.repos.jobs.findAll(opts);
+      }
+      if (filters?.jobIds) {
+        const readable = filters.jobIds;
+        jobs = jobs.filter((job) => readable.has(job.id));
       }
 
       const total = jobs.length;
@@ -188,10 +245,15 @@ export class JobFacade extends BaseFacade {
     progress?: number,
   ): Promise<Result<JobDTO>> {
     return this.execute("updateStatus", async () => {
-      const updated = this.repos.jobs.updateStatus(jobId, status, progress);
-      if (!updated) {
+      // N85(a): a generic writer may not finish, fail, cancel or re-open a paid job.
+      const outcome = writeJobStatusGuarded(jobId, status, progress);
+      if (outcome.kind === "not_found") {
         throw new NotFoundError("job", jobId);
       }
+      if (outcome.kind === "refused") {
+        throw new ConflictError(SETTLEMENT_OWNED_MESSAGE, "settlement_owned_status");
+      }
+      const updated = outcome.job;
 
       const kernelMap = this.loadKernelMap([updated.kernelId]);
       const capabilityMap = this.loadCapabilityMap([updated.capabilityId]);
@@ -255,42 +317,40 @@ export class JobFacade extends BaseFacade {
         assuranceTier: typeof assuranceTier === "number" ? assuranceTier : 0,
       });
 
-      // Determine if this is an external kernel (daemon will pick up the job)
+      // Only an explicitly matched, enabled, unstopped local kernel may run.
       let svc;
       try {
         svc = getKernelService();
       } catch {
         // KernelService not initialized — treat as external kernel path
-        pipelineTelemetry.emit(jobId, "job_submit", "completed", {
-          metadata: { kernelId, stepId, external: true },
-        });
-        return { jobId, deviceId: null, status: "queued" as const };
       }
 
-      const localKernelId = (svc as any).config?.kernelId;
-      const isExternalKernel = localKernelId && kernelId !== localKernelId;
-
-      if (isExternalKernel) {
+      const queued = (reason: Extract<ReturnType<typeof localJobDispatchDecision>, { ok: false }>["reason"]) => {
         pipelineTelemetry.emit(jobId, "job_submit", "completed", {
-          metadata: { kernelId, stepId, external: true },
+          metadata: { kernelId, stepId, external: true, reason },
         });
-        trackServerEvent("job_submitted", { kernelId, capabilityType: body.capabilityId, external: true }, actorId);
+        trackServerEvent("job_submitted", { kernelId, capabilityType: body.capabilityId, external: true, reason }, actorId);
         auditService.log({
           eventType: "job.submitted",
           actor: actorId,
           resourceType: "job",
           resourceId: jobId,
           action: "create",
-          metadata: { kernelId, stepId, external: true, assuranceTier },
+          metadata: { kernelId, stepId, external: true, assuranceTier, reason },
           ip,
           userAgent,
         });
-        return { jobId, deviceId: null, status: "queued" as const };
-      }
+        return { jobId, deviceId: null, status: "queued" as const, reason };
+      };
+
+      const decision = localJobDispatchDecision(svc?.kernelId, kernelId, svc?.hasExplicitConfig ?? false, body.queueOnly);
+      if (!decision.ok) return queued(decision.reason);
 
       // Local kernel: fire-and-forget via KernelService
       try {
-        const result = await svc.submitJob({ jobId, stepId, deviceId, gcodeHash, assuranceTier });
+        const result = await svc!.submitJob({ jobId, kernelId, stepId, deviceId, gcodeHash, assuranceTier });
+        // The stop or operator switch may have changed during safety preflight.
+        if (result.status === "queued") return queued(result.reason);
         pipelineTelemetry.emit(result.jobId, "job_submit", "completed", {
           metadata: { kernelId, stepId, deviceId: result.deviceId },
         });
@@ -418,9 +478,18 @@ export class JobFacade extends BaseFacade {
    */
   async checkDeviceHealth(
     deviceId: string,
+    opts: { operatorId?: string | null } = {},
   ): Promise<Result<{ healthy: boolean; details: unknown }>> {
     return this.execute("checkDeviceHealth", async () => {
       const svc = getKernelService();
+      // Snapshot the device row BEFORE the check, so the funnel attributes the
+      // result to the device that was actually checked (#469 round 1).
+      let before: { kernelId?: string | null; adapterType?: string | null } | undefined;
+      try {
+        before = this.repos.kernels.findDeviceById(deviceId);
+      } catch {
+        before = undefined;
+      }
       const result = await svc.checkDeviceHealth(deviceId);
 
       // Update DB health record (best-effort)
@@ -432,6 +501,30 @@ export class JobFacade extends BaseFacade {
         );
       } catch {
         // non-fatal
+      }
+
+      // Operator-onboarding funnel (ADK track item 4): adapter_ready. Only a
+      // REAL adapter (not mock/generic-http) that is actually healthy
+      // counts. kernelId + adapterType are resolved from the device's own
+      // DB row (the health-check route only has deviceId) — if the row
+      // can't be found, there's nothing to attribute the stage to, so we
+      // don't record. Telemetry must never break a health-check response.
+      // Recorded only for an authenticated caller, and only if the device row is
+      // unchanged across the check: a device moved to another kernel (or given
+      // another adapter) mid-check is not attributed to either (#469 round 1).
+      try {
+        const after = this.repos.kernels.findDeviceById(deviceId);
+        if (
+          opts.operatorId &&
+          before?.kernelId &&
+          after?.kernelId === before.kernelId &&
+          after?.adapterType === before.adapterType &&
+          isRealAdapterHealthy(result.healthy, before.adapterType)
+        ) {
+          recordOperatorStage(before.kernelId, "adapter_ready", { deviceId, operatorId: opts.operatorId });
+        }
+      } catch {
+        /* funnel tracking must never break a health-check response */
       }
 
       return { healthy: result.healthy, details: result.details ?? null };
@@ -519,6 +612,16 @@ export class JobFacade extends BaseFacade {
 
     scored.sort((a, b) => b.score - a.score);
     return scored[0].score > 0 ? scored[0].cap.id : caps[0].id;
+  }
+}
+
+/** Internal error for flow control — caught by BaseFacade.execute(), which answers 409 with `code`. */
+class ConflictError extends Error {
+  readonly code: string;
+  constructor(message: string, code: string) {
+    super(message);
+    this.name = "ConflictError";
+    this.code = code;
   }
 }
 

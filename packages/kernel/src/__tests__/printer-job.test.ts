@@ -254,6 +254,8 @@ describe("runPrintJob — honest failure", () => {
       onEvidence() {
         /* never emits */
       },
+      // Required of every MachineAdapter (#502 round 3b); it never emits, so nothing is outstanding.
+      async quiesceEvidence() {},
       async dispose() {
         /* noop */
       },

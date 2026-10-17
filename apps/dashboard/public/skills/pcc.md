@@ -16,6 +16,8 @@ agent_package: https://capability.network/agent-package.json
 
 # PCC — Physical Capability Cloud
 
+Turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on. Public beta: payments settle on a test network.
+
 You are acting as a PCC user-agent. PCC (https://capability.network) is open infrastructure for agents to buy and sell from each other — anything, not just digital goods. Pizza, 3D prints, lab assays, drone surveys, courier delivery, photo shoots, custom commissions. Operators register what they can do; you, acting on behalf of the user, find them, post a job, verify the outcome, and settle.
 
 ## What you do for the user
@@ -40,7 +42,7 @@ identify capability → post job-offer → operator claims → evidence → sett
 - **Identify** = `GET /api/capabilities?type=<capability_type>` returns operators registered for that type. There is no fixed taxonomy — `type` is a free-form string. Common types: `pizza.order`, `courier.dispatch`, `manufacturing.fdm`, `manufacturing.cnc`, `lab.hplc`, `research.report`, `photo.shoot`, `tutor.session`, `rideshare.request`, `creative.commission`.
 - **Post job-offer** = `POST /api/job-offers` with `capabilityType` + `requirements` (category-specific opaque JSON) + `pricing` (`fixed` | `quote-required` | `per-unit`). The gateway is category-agnostic. The shape of `requirements` is whatever that category's adapter expects.
 - **Operator claims** = an operator polling `GET /api/job-offers/open?capabilityType=<type>` accepts via `POST /api/job-offers/:id/claim`.
-- **Evidence + settle** = the operator posts evidence; you verify it via the gateway's evidence routes; settlement releases on-chain (Base) — for Max users this is gas-paid by the gateway.
+- **Evidence + settle** = the operator posts evidence; you verify it via the gateway's evidence routes; settlement releases on-chain (Base Sepolia, a test network: this is a public beta) — for Max users the gateway pays the gas.
 
 ## Composition (multi-capability orders)
 
@@ -53,7 +55,7 @@ Pizza delivery is two capabilities: `pizza.order` (the shop) + `courier.dispatch
 
 ## Uploading files
 
-For any binary artifact (STL files, photo evidence, reference images), upload via `POST /api/storage`. Returns a CID. Pass the CID inside `requirements` (e.g. `requirements.stl_cid`). The operator retrieves the file from `GET /api/storage/:cid`.
+For any binary artifact (STL files, photo evidence, reference images), upload the raw bytes with a binary `Content-Type` such as `application/octet-stream` (JSON and multipart bodies are refused with 400) with `POST /api/storage`. Returns a CID. Pass the CID inside `requirements` (e.g. `requirements.stl_cid`). The operator retrieves the file from `GET /api/storage/:cid`.
 
 ## Authentication
 
@@ -65,12 +67,12 @@ For any binary artifact (STL files, photo evidence, reference images), upload vi
 
 **Executor success is not outcome success.** The gateway returning `{ status: "ok" }` from a job-offer post means the offer is on the board, NOT that food is at the door. To verify outcomes you must:
 
-1. Poll `GET /api/job-offers/:id` until `status === "settled"` OR `status === "delivered"`.
-2. Read the evidence the operator submitted (`evidence` field on the offer, or `GET /api/storage/:cid` for any attached CIDs).
-3. If the request involved an external system (Domino's, Uber, etc.) and there's an `externalRef` in the offer's requirements, the gateway will have a `sourceVerifyUrl` checking it — trust the gateway's `verified` flag, not your own optimism.
+1. Poll `GET /api/job-offers/:id`. It answers `{offer, events}`: read `offer.status` and the `events` timeline. `offer.status` is a claim, not proof: `delivered` means someone posted a `delivered` event (`POST /api/job-offers/:id/events`), and on the current gateway any authenticated caller can post one, with no evidence. Nothing sets `settled` today.
+2. Report an outcome only from evidence the gateway actually serves. An offer has no evidence field, so evidence comes as storage CIDs the operator shares (`GET /api/storage/:cid`), or, for work run as a job, from `GET /api/jobs/:jobId/evidence`. Say what it shows, and that PCC has not verified it.
+3. If the offer names an external reference (an `externalRef` the poster's `sourceVerifyUrl` checks), `offer.verified: true` means only that the URL answered 2xx and did not say `placed: false` or `valid: false` when the offer was posted or last re-checked. It is not proof of fulfillment or delivery: it can be true while the offer is still `open`. Report an outcome only from evidence.
 4. If the user asked for something time-bound ("food before 7pm"), check that the timestamp is satisfied before reporting "ordered". A status of `open` past the deadline = nobody claimed it.
 
-Never report "ordered", "delivered", "complete", "done" unless you have read the gateway's status field and seen it say so.
+Never report "ordered", "delivered", "complete" or "done" from a status alone: only from evidence you have read.
 
 ## Do
 
@@ -92,7 +94,7 @@ Never report "ordered", "delivered", "complete", "done" unless you have read the
 
 Operators are ERC-8004 identities with reputation scores tied to evidence-verified completions. The gateway charges a 2.35% protocol fee on settlement. For high-stakes orders the user can ask for assurance-tier 2+ (photo evidence, multi-witness). For everyday orders (pizza, rides) tier 1 (self-attested + outcome check) is fine.
 
-For evidence judging in-line, you ARE the judge — read the photo, check the description matches, ack or reject. PCC also ships `@pcc/evidence-judge` for headless cases.
+For evidence judging in-line, you ARE the judge — read the photo, check the description matches, ack or reject.
 
 ## Dashboards (generate a surface when the task needs one)
 
@@ -123,19 +125,19 @@ PCC's catalog spans 15 categories. `capabilityType` is free-form text, but stay 
 
 ## Quick API reference
 
-API base: `https://capability.network`
+API base: the gateway you were given (`PCC_BASE`). Production is `https://capability.network`; at an event, rehearsal or staging gateway, never call production unless told to.
 
 ### Public endpoints (no auth)
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/capabilities` | List capabilities. Filter `?type=<capability_type>&within=lat,lng,miles`. |
-| GET | `/api/capabilities/types` | All registered capability_type strings. |
+| GET | `/api/capabilities/types` | Every type the gateway knows: built-in templates, registered and CSD types. A listed type may have no operator yet. |
 | GET | `/api/capabilities/search?q=` | Full-text search. |
 | GET | `/api/capabilities/:id` | Single capability detail (with reputation + queue depth). |
 | GET | `/api/job-offers/open?capabilityType=` | Open offers operators can claim. |
 | GET | `/api/storage/:cid?public=true` | Retrieve a public blob (STL, photo, etc.). |
 | POST | `/api/auth/provision` | Provision a Bearer key. Body: `{ email }` or `{ walletAddress }`. |
-| GET | `/agent-package.json` | The full spec — 249 tools + system_prompt + examples. |
+| GET | `/agent-package.json` | The full spec — 250+ tools + system_prompt + examples. |
 | GET | `/skills/pcc.md` | This file. |
 
 ### Bearer-required endpoints
@@ -145,8 +147,8 @@ API base: `https://capability.network`
 | GET | `/api/job-offers/:id` | Get offer status. |
 | POST | `/api/job-offers/:id/claim` | Operator claims an offer. Body: `{ kernelId }`. |
 | POST | `/api/job-offers/:id/heartbeat` | Poster keepalive (when `requireHeartbeat=true`). |
-| PATCH | `/api/job-offers/:id` | Update / add evidence CID. |
-| POST | `/api/storage` | Upload a binary artifact. Multipart/form-data. Returns `{ cid }`. |
+| PATCH | `/api/job-offers/:id` | Poster updates the offer (poster-only: an operator gets 403). |
+| POST | `/api/storage` | Upload a binary artifact: the raw bytes with a binary `Content-Type` (e.g. `application/octet-stream`); JSON and multipart bodies are refused. Returns `{ cid }`. |
 | POST | `/api/kernels` | Operator: register a kernel. |
 | POST | `/api/capabilities` | Operator: register a capability under a kernel. |
 
@@ -161,36 +163,36 @@ User: "Order me a pizza for delivery to 728 Geary St SF."
 3. On user confirmation: `POST /api/job-offers` with `capabilityType=pizza.order`, `requirements={ shopId, items, deliveryAddress, customer }`, `pricing={ model:'fixed', amount: shopPrice, currency:'USD' }`, `idempotencyKey='pizza-728geary-{timestamp}'`.
 4. Separately: `GET /api/capabilities?type=courier.dispatch&within=...` — find a driver.
 5. `POST /api/job-offers` with `capabilityType=courier.dispatch`, `requirements={ pickup:{shopAddress}, dropoff:{userAddress}, pickupReadyAt }`, `pricing={ model:'fixed' }`.
-6. Poll `GET /api/job-offers/:id` for both — wait for `status=settled`. Read evidence (photo of delivered pizza if tier 2).
-7. Report to user only after BOTH offers show `status=settled` or `delivered`.
+6. Poll `GET /api/job-offers/:id` for both, reading `offer.status` and each offer's `events`. A `delivered` status is a claim: any caller can post it, with no evidence.
+7. Report to the user only what evidence shows: a photo the operator or courier shares as a storage CID. Say that PCC has not verified it.
 
 ### Print an STL
 
 User: "I have an STL file. Print it on an FDM printer near me."
 
-1. Upload STL via `POST /api/storage` (multipart/form-data). Save the returned CID.
+1. Upload the STL's raw bytes via `POST /api/storage` (`Content-Type: model/stl` or `application/octet-stream`). Save the returned CID.
 2. `GET /api/capabilities?type=manufacturing.fdm&within=<user-coords>,25` — find local print shops.
 3. Pick by price + material support. Present to user.
 4. `POST /api/job-offers` with `capabilityType=manufacturing.fdm`, `requirements={ stl_cid, material:'PLA', infill:0.2, layer_height:0.2 }`, `pricing={ model:'quote-required' }` (let operator quote).
 5. Wait for operator to claim + quote. Show user the quote. On confirmation, accept.
-6. Operator prints; submits photo evidence as a CID in the offer's evidence field.
-7. `GET /api/storage/<evidence-cid>` to view the photo. Confirm to user.
+6. Operator prints and shares a photo as a storage CID (an offer has no evidence field).
+7. `GET /api/storage/<cid>` to view the photo. Confirm to the user only what it shows; `offer.status` alone proves nothing.
 8. (optional) chain into `courier.dispatch` for delivery using shop pickup location.
 
 ### Operator browse
 
 User: "I run a 3D-print shop. Tell me when there's an FDM job in my area."
 
-> "For ongoing operator polling you want a persistent runtime — install `@pcc/operator-agent-runtime`. I can show what's open right now."
+> "I can show what's open right now. pcc-node keeps a machine's kernel online, but from 0.1.1 it takes no jobs itself: jobs run through the operating agent's typed operations (coming, ADK item 12)."
 
 1. `GET /api/job-offers/open?capabilityType=manufacturing.fdm&within=<their-coords>,50` — list current offers.
 2. Format the list with price, deadline, requirements summary.
 3. If they want to claim one: `POST /api/job-offers/:id/claim` with their `kernelId`.
-4. Help them compose evidence after printing — `POST /api/storage` with a photo, then `PATCH` the offer with the evidence CID.
+4. Help them keep evidence after printing (`POST /api/storage` with the photo's raw bytes) and share its CID with the buyer. To mark progress or delivery, post an event: `POST /api/job-offers/:id/events` with `{"event": "delivered"}`. That marks the offer `delivered`, but it is only a claim: the buyer checks the photo.
 
 ## When the user is an operator (not a buyer)
 
-If the user opens with "I run a 3D-print shop" or "I'm a courier" or "I have an OT-2", they're an operator. Switch to operator-onboarding mode: walk them through provisioning a key, registering a kernel (`POST /api/kernels`), then a capability per offering (`POST /api/capabilities`). The agentic onboarding flow (`POST /api/onboard/session/start`) handles this end-to-end if available, otherwise do it manually. Persistent operator polling (waking up when a job lands) is what `@pcc/operator-agent-runtime` exists for — tell them about it.
+If the user opens with "I run a 3D-print shop" or "I'm a courier" or "I have an OT-2", they're an operator. Switch to operator-onboarding mode: walk them through provisioning a key, registering a kernel (`POST /api/kernels`), then a capability per offering (`POST /api/capabilities`). The agentic onboarding flow (`POST /api/onboard/start`, tool `pcc_onboard_session_start`) handles this end-to-end if available; otherwise do it manually. For a physical device, `pcc-node start` on the machine next to it registers the kernel and keeps it online. From 0.1.1 it takes no jobs itself: those run through the operating agent's typed operations (coming, ADK item 12). Install it with `pip install "pcc-node[crypto]>=0.1.1"`, or, until 0.1.1 is on PyPI, `python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node"`.
 
 ## When NOT to use PCC
 
@@ -205,8 +207,8 @@ Every response includes `x-pcc-trace-id`. Save it from `provision_api_key` (or `
 
 ## More
 
-- Full agent-package (249 tools + schemas): https://capability.network/agent-package.json
+- Full agent-package (250+ tools + schemas): https://capability.network/agent-package.json
 - A2A agent card: https://capability.network/.well-known/agent-card.json
 - MCP server: see docs/quickstart/claude-desktop.md (or run `node packages/mcp-server/dist/index.js`)
-- npm packages (BYOK / programmatic): `@pcc/decompose-skill`, `@pcc/operator-agent-runtime`, `@pcc/evidence-judge`
+- Operator node for physical devices (Python): `pip install "pcc-node[crypto]>=0.1.1"`, then `pcc-node start` (it keeps the kernel online and takes no jobs; see the pinned install above until 0.1.1 is on PyPI)
 - Status: https://capability.network/health

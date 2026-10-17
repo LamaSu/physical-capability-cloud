@@ -1,0 +1,27 @@
+{
+  "$schema": "https://pcc.network/schemas/csd/v1",
+  "url": "pcc://capabilities/document-print-leg/v1",
+  "version": "1.0.0",
+  "status": "draft",
+  "name": "Document Print Leg",
+  "description": "The PRINT leg of print-and-mail as its own settlement unit (the per-leg model, October MVP runbook v3 section 1.2). A print kernel prints one document, and the unit settles at tier 1 on the kernel-signed completion (execution_completed, bound by receipt.kernel_signed) with no execution_failed and no simulated event, as its committed program requires. Courier, carrier and label evidence belong to their own units, never to this unit's bundle: a TEST-mode carrier event is simulated, and one simulated event refuses the whole bundle. HONEST LIMIT: the record is the print host's own and device-signed; nothing independent of the host corroborates the print at this tier, and the document's content is not bound (evidence Q-E5).",
+  "kind": "base",
+  "baseDefinition": null,
+  "parameters": [],
+  "constraints": [],
+  "evidence": {
+    "tier0": {
+      "description": "The authenticated floor (evidence Q-E1): the operator's committed package declares the job (decl.self_attested), the bundle is signed by the unit's session key under the funded device key with every event bound to the unit and its challenge nonce, and the print started (execution_started). Tier 0 never releases on chain (Tier0NotEvidence); it gives a failed print a signed verdict.",
+      "required": ["execution_started"],
+      "primitives": [{ "id": "decl.self_attested" }]
+    },
+    "tier1": {
+      "description": "The print-leg release tier: tier 0 plus the kernel-signed success receipt (execution_completed, receipt.kernel_signed). The committed program also requires execution_failed to be absent and no simulated event; event absence is a program predicate, never a CSD binding.",
+      "required": ["execution_started", "execution_completed"],
+      "primitives": [
+        { "id": "receipt.kernel_signed", "params": { "capability": "document-printing" }, "bind": "execution_completed" }
+      ]
+    }
+  },
+  "pricing": { "basePrice": "1.00", "currency": "USDC", "unit": "per document", "minimumCharge": "1.00" }
+}
