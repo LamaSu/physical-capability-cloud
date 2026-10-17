@@ -786,6 +786,34 @@ describe("W2 wallet faucet", () => {
     expect(completed.statusCode).toBe(200);
     expect(completed.json().status).toBe("funded");
   });
+  it("RV3-P2 a held retry stays pending in the claim and rollup through its lease's last millisecond", async () => {
+    const result = await linked("device");
+    behavior = async () => { throw {}; };
+    expect((await fund(result)).statusCode).toBe(502);
+    now += 30_000;
+    const leasedAt = now;
+    const held = holdFaucetCalls(1);
+    const first = fund(result).then(response => response);
+    try {
+      await held.allStarted;
+      now = leasedAt + 59_999;
+      held.allowNewCalls();
+      const n = calls.length;
+      const concurrent = await fund(result, "owner");
+      expect(concurrent.statusCode).toBe(200);
+      expect(concurrent.json()).toEqual({
+        status: "pending",
+        claims: [
+          { token: "eth", amount: "0.0001", status: "pending" },
+          ...Array.from({ length: 4 }, () => ({ token: "eth", amount: "0.0001", status: "failed" })),
+        ],
+      });
+      expect(calls).toHaveLength(n);
+    } finally {
+      held.release();
+      await first;
+    }
+  });
   it("T11(a) the SQL own-lease guard refuses a second lease at the same instant", async () => {
     const result = await linked("device");
     expect((await fund(result, "cli", await build({ attemptBudgetMs: 0 }))).json().status).toBe("pending");
@@ -845,6 +873,16 @@ describe("W2 wallet faucet", () => {
     expect(leaseFundingClaim(claim, expiresAt)).toBeUndefined();
     expect(rows()).toEqual(before);
     expect(leaseFundingClaim(claim, expiresAt - 1)).toMatchObject({ status: "pending", attempts: 1 });
+    expect(calls).toHaveLength(0);
+  });
+  it("RV3-T11(f) the SQL link-active guard keeps refusing an expired link after its expiry", async () => {
+    const result = await linked("agent");
+    expect((await fund(result, "cli", await build({ attemptBudgetMs: 0 }))).json().status).toBe("pending");
+    const expiresAt = Date.parse(getStore().db.get<{ expires_at: string }>(sql`SELECT expires_at FROM wallet_links WHERE id = ${result.linkId}`)!.expires_at);
+    const claim = fundingClaims(result.linkId)[0]!;
+    const before = rows();
+    expect(leaseFundingClaim(claim, expiresAt + 1)).toBeUndefined();
+    expect(rows()).toEqual(before);
     expect(calls).toHaveLength(0);
   });
   it("T12 kernelId never grants owner-route access", async () => {

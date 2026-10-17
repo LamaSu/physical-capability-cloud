@@ -155,4 +155,12 @@ describe("wallet faucet repository lease guards", () => {
     expect(attemptableClaim(claim, now + 30_000)).toBe(true);
     expect(leaseFundingClaim(claim, now + 30_000)).toMatchObject({ status: "failed", attempts: 3 });
   });
+  it("RV3-R1 a lapsed lease (its attempt never finished) is re-leased strictly after it ends", async () => {
+    const result = await grant();
+    expect(leaseFundingClaim(result.claim, now)).toMatchObject({ status: "pending", attempts: 1, lease_until: new Date(now + 60_000).toISOString() });
+    const lapsed = fundingClaims(result.linkId)[0]!;
+    expect(leaseFundingClaim(lapsed, now + 59_999)).toBeUndefined();
+    expect(fundingClaims(result.linkId)[0]).toEqual(lapsed);
+    expect(leaseFundingClaim(lapsed, now + 60_001)).toMatchObject({ status: "pending", attempts: 2, last_attempt_at: new Date(now + 60_001).toISOString() });
+  });
 });
