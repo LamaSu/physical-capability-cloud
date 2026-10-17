@@ -3,6 +3,17 @@ import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { migrateDatabase } from "../migrate.js";
 
+const Q9_TRIGGERS = [
+  "escrow_funding_no_update", "escrow_funding_no_delete", "escrow_funding_no_replace",
+  "funding_prepares_frozen", "funding_prepares_signed_once", "funding_prepares_transitions",
+  "funding_prepares_end_once", "funding_prepares_requested", "funding_prepares_no_delete",
+  "funding_prepares_no_replace",
+];
+function withoutRowid(sqlite: Database.Database): [number, number] {
+  const tables = sqlite.prepare("PRAGMA table_list").all() as Array<{ name: string; wr: number }>;
+  return [tables.find((t) => t.name === "escrow_funding")!.wr, tables.find((t) => t.name === "funding_prepares")!.wr];
+}
+
 type MasterRow = { type: string; name: string; tbl_name: string; sql: string | null };
 const q9Tables = ["escrow_funding", "funding_prepares"];
 function master(sqlite: Database.Database, q9Only = false): MasterRow[] {
@@ -46,12 +57,16 @@ describe("buyer funding migration", () => {
     expect(sqlite.prepare("SELECT * FROM settlement_challenges").all()).toEqual(challenge);
   });
 
-  it("has a standalone 0006 mirror with the same Q9 sqlite_master objects as runtime", () => {
+  it("has a standalone 0007 mirror with the same Q9 sqlite_master objects as runtime", () => {
     const fresh = new Database(":memory:");
     try {
-      fresh.exec(readFileSync(new URL("../migrations/0006_buyer_funding.sql", import.meta.url), "utf8"));
+      fresh.exec(readFileSync(new URL("../migrations/0007_buyer_funding.sql", import.meta.url), "utf8"));
       expect(master(fresh, true)).toEqual(master(sqlite, true));
-      expect(master(fresh, true).filter((row) => row.type === "trigger")).toHaveLength(8);
+      expect(master(fresh, true).filter((row) => row.type === "trigger")).toHaveLength(10);
+      expect(master(fresh, true).filter((row) => row.type === "trigger").map((row) => row.name).sort()).toEqual([...Q9_TRIGGERS].sort());
+      expect(master(fresh, true).filter((row) => row.type === "index" && row.sql !== null)).toHaveLength(5);
+      expect(withoutRowid(fresh)).toEqual([0, 1]);
+      expect(withoutRowid(sqlite)).toEqual([0, 1]);
     } finally {
       fresh.close();
     }

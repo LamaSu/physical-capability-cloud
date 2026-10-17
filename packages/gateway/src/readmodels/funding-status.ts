@@ -1,8 +1,9 @@
 /**
  * FundingStatusDTO: where a paid write scope's buyer funding stands, for the UI (buyer funding plan
  * S2.4, research/buyer-funding-plan-20261008.md). A pure projection of three sources the caller read,
- * and the expected chain (the pinned V-next deployment record's, paid-scope-activation-terms.ts;
- * null when none is pinned, and then no record binds):
+ * the expected chain (the pinned V-next deployment record's, paid-scope-activation-terms.ts;
+ * null when none is pinned, and then no record binds), and one required testnet-buyer allowance
+ * derived from the same deployment terms as reconciliation:
  *   - the scope row (execution_scopes): its status and its own createdAt and expiresAt;
  *   - the funding verification record that names the scope (FundingRecordStore.findByScope), or
  *     null when there is none;
@@ -58,7 +59,8 @@ export const FUNDING_STATUS_SCHEMA_ID = "pcc.funding-status/v1" as const;
  *   record_malformed                the record is not a well-formed, finalized verification record.
  *   record_chain_mismatch           it was verified on another chain than the expected one (ruling 4).
  *   record_scope_mismatch           it names another scope.
- *   testnet_buyer_not_allowed       a testnet-only buyer is absent from a wholly valid allow-list.
+ *   testnet_buyer_not_allowed       the testnet-only buyer is absent, or the list is unset, empty
+ *                                   or malformed (the entire list is then refused).
  *   record_buyer_not_scope_buyer    its verified payer is not the scope's buyer.
  *   escrow_missing                  the scope's job has no escrow row: never funded_verified.
  *   escrow_payer_not_buyer          the escrow row's payer label is not the scope's buyer.
@@ -226,7 +228,7 @@ export function fundingBindingOf(
   record: FundingVerificationRecord | null,
   escrow: FundingEscrowRow,
   expectedChainId: number | null,
-  allowance?: TestnetBuyerAllowance,
+  allowance: TestnetBuyerAllowance,
 ): FundingBinding {
   if (record === null) return "no_record";
   return fundingBindingRefusal(record, scope, escrow, expectedChainId, allowance) ?? "bound";
@@ -255,7 +257,7 @@ function readyToActivate(
   record: FundingVerificationRecord | null,
   escrow: FundingEscrowRow,
   expectedChainId: number | null,
-  allowance?: TestnetBuyerAllowance,
+  allowance: TestnetBuyerAllowance,
 ): boolean {
   return record !== null && activationRefusal(record, scope, escrow, expectedChainId, allowance) === null;
 }
@@ -270,7 +272,7 @@ export function fundingStateOf(
   escrow: FundingEscrowRow,
   expectedChainId: number | null,
   asOf: string,
-  allowance?: TestnetBuyerAllowance,
+  allowance: TestnetBuyerAllowance,
 ): FundingState {
   return stateOf(scope, fundingBindingOf(scope, record, escrow, expectedChainId, allowance), readyToActivate(scope, record, escrow, expectedChainId, allowance), asOf);
 }
@@ -282,7 +284,7 @@ export function projectFundingStatus(
   escrow: FundingEscrowRow,
   expectedChainId: number | null,
   asOf: string,
-  allowance?: TestnetBuyerAllowance,
+  allowance: TestnetBuyerAllowance,
 ): FundingStatusDTO {
   const binding = fundingBindingOf(scope, record, escrow, expectedChainId, allowance);
   return {

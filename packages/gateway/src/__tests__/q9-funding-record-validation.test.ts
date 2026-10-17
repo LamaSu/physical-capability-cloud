@@ -39,6 +39,13 @@ describe("Q9 funding record validator", () => {
     });
   }
 
+  it("refuses noncanonical read-block decimal spellings even when the funding block is zero", () => {
+    for (const blockNumber of ["01", "+1", " 1", "1 ", "-1"]) {
+      expect(isWellFormedFundingRecord({ ...valid(), fundingBlockNumber: "0", blockNumber }), blockNumber).toBe(false);
+    }
+    expect(isWellFormedFundingRecord({ ...valid(), fundingBlockNumber: "0", blockNumber: "1" })).toBe(true);
+  });
+
   it("compares funding and read blocks as BigInts, including above the safe integer range", () => {
     for (const [fundingBlockNumber, blockNumber] of [["10", "9"], ["9007199254740993", "9007199254740992"]]) {
       expect(isWellFormedFundingRecord({ ...valid(), fundingBlockNumber, blockNumber })).toBe(false);

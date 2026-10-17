@@ -18,6 +18,7 @@ import {
   type FundingVerificationRecord,
 } from "../../services/funding-record-port.js";
 import { escrowForJob, PAID_SCOPE_TTL_MS } from "../../services/scope-acceptance.js";
+import { testnetBuyerAllowance } from "../../services/funding-binding.js";
 import { projectFundingStatus, type FundingStatusDTO } from "../../readmodels/funding-status.js";
 import {
   __setPaidScopeActivationTermsForTest,
@@ -190,7 +191,12 @@ export async function paidScope(
  * The funding-status DTO a route would build now from the database: the scope row, the record the
  * store keeps for it, the escrow row of its job, the expected chain, and the clock's now.
  */
-export function fundingStatusNow(store: FundingRecordStore, scopeId: string, expectedChainId: number | null = CHAIN_ID): FundingStatusDTO {
+export function fundingStatusNow(
+  store: FundingRecordStore,
+  scopeId: string,
+  expectedChainId: number | null = CHAIN_ID,
+  terms: Pick<PaidScopeActivationTerms, "testnetOnly"> = TERMS,
+): FundingStatusDTO {
   const s = scopeRow(scopeId);
   const escrow = escrowForJob(s.jobId) ?? null;
   return projectFundingStatus(
@@ -199,6 +205,7 @@ export function fundingStatusNow(store: FundingRecordStore, scopeId: string, exp
     escrow ? { contractAddress: escrow.contractAddress, payer: escrow.payer, status: escrow.status } : null,
     expectedChainId,
     new Date().toISOString(),
+    testnetBuyerAllowance(terms),
   );
 }
 

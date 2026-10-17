@@ -28,6 +28,7 @@ const record = (over: Partial<FundingVerificationRecord> = {}): FundingVerificat
 
 /** A raw SQL writer stands in for S1.2's future unfinalized observations. */
 class ConformanceSqliteStore extends SqliteFundingRecordStore implements ConformanceStore {
+  readonly refusesUnknownFinality = true;
   plant(row: object): void {
     const r = row as FundingVerificationRecord;
     getStore().db.run(sql`INSERT INTO escrow_funding (
@@ -45,6 +46,16 @@ const makeStore = () => new ConformanceSqliteStore();
 describeFundingRecordStoreConformance("the Q9 SQLite store", makeStore);
 
 describe("Q9 SQLite funding record storage", () => {
+  it("refuses a malformed record before a permanent append", () => {
+    withFreshFundingRecordStore(makeStore, (store) => {
+      const db = getStore().db;
+      const malformed = record({ fundingBlockNumber: "18446744073709551615", blockNumber: "100" });
+      expect(() => db.transaction((tx) => store.insert(tx, malformed))).toThrow("malformed_funding_record");
+      expect(db.get<{ n: number }>(sql`SELECT count(*) AS n FROM escrow_funding`).n).toBe(0);
+      expect(store.findByScope(db, malformed.scopeId)).toBeNull();
+    });
+  });
+
   it("normalizes every address and hash, preserves lossless blocks and verifiedAt, and writes finalized", () => {
     withFreshFundingRecordStore(makeStore, (store) => {
       const r = record({

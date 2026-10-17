@@ -6,6 +6,7 @@
 import { and, eq, schema } from "@pcc/store";
 import {
   FUNDING_FINALITY,
+  isWellFormedFundingRecord,
   type FundingDbHandle,
   type FundingRecordStore,
   type FundingTx,
@@ -36,6 +37,7 @@ function recordOf(row: typeof table.$inferSelect | undefined): FundingVerificati
 /** Stores only finalized records; unfinalized observations remain invisible to both lookups. */
 export class SqliteFundingRecordStore implements FundingRecordStore {
   insert(tx: FundingTx, record: FundingVerificationRecord): void {
+    if (!isWellFormedFundingRecord(record)) throw new Error("malformed_funding_record");
     tx.insert(table).values({
       scopeId: record.scopeId,
       chainId: record.chainId,

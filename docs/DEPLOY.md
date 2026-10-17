@@ -188,14 +188,6 @@ WORKFLOW_DB_PATH=/app/data/workflow.sqlite
 
 Sit it alongside the existing `PCC_DB_PATH` so both DBs share the same persistent volume.
 
-### Buyer-funding record env vars (gateway)
-
-`PCC_VNEXT_RECORD_NETWORK` — selects the operator-approved canonical V-next deployment record. Must stay unset on prod (#8993).
-
-`PCC_VNEXT_ALLOW_TESTNET_RECORD` — only the exact value `1` permits a testnet-only record; unset on prod. With an operator go, set this and `PCC_VNEXT_TESTNET_BUYERS` for one live window, then unset both.
-
-`PCC_VNEXT_TESTNET_BUYERS` — comma-separated addresses permitted to activate on testnet-only terms; unset on prod. Set together with `PCC_VNEXT_ALLOW_TESTNET_RECORD` for the operator-approved live window, then unset both. Empty entries, whitespace, invalid addresses or bad mixed-case checksums refuse the entire list; an empty or unset list permits nobody.
-
 ### Railway volume mount (REQUIRED before any `@pcc/workflow` consumer ships)
 
 Railway's default filesystem is ephemeral — every redeploy mints a fresh container with an empty disk. If `WORKFLOW_DB_PATH` points anywhere outside a mounted volume:
@@ -228,6 +220,26 @@ Ship to S3/Storacha on a daily cron. Whole-file size stays under 100 MB even wit
 ### Reference
 
 Full rationale, growth math, vacuum guidance, and recovery semantics: [`docs/WORKFLOW_RUNTIME.md`](./WORKFLOW_RUNTIME.md) §5 (Operational notes). Public API: [`packages/workflow/README.md`](../packages/workflow/README.md).
+
+## Buyer-funding V-next record: operator-approved live window
+
+On production, keep all three variables **unset**: `PCC_VNEXT_RECORD_NETWORK`,
+`PCC_VNEXT_ALLOW_TESTNET_RECORD`, and `PCC_VNEXT_TESTNET_BUYERS`. Unset values
+refuse testnet activation; they are not deployment defaults.
+
+For **one operator-approved live window**, with an explicit go, set all three:
+
+- `PCC_VNEXT_RECORD_NETWORK=base-sepolia` selects the pinned canonical deployment record.
+- `PCC_VNEXT_ALLOW_TESTNET_RECORD=1` opts into a testnet-only record; only exact `1` works.
+- `PCC_VNEXT_TESTNET_BUYERS=<list>` supplies the closed comma-separated buyer allow-list.
+
+List entries must be lowercase Ethereum addresses or correctly EIP-55 checksummed addresses.
+An all-uppercase entry, a bad checksum, an empty entry, whitespace, or an invalid address
+invalidates the **entire** list. An empty or unset list permits nobody. After the live
+window, **unset all three variables** again; do not leave the opt-in on production.
+
+Q9 only creates the empty storage tables. **Nothing activates** via this path until both
+S1.1 (prepared TTL terms) and S1.2 (the production funding-store wiring) land.
 
 ## What this does NOT yet include
 

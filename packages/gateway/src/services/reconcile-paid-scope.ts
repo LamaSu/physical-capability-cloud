@@ -15,7 +15,9 @@
  * Before anything is read, in this order (RECONCILE_REFUSALS' order): the record store
  * (funding_record_store_unavailable), then the expected chain (expected_chain_unavailable), then the
  * TTL (activation_ttl_unavailable), then the record's own checks (record_malformed,
- * record_chain_mismatch, record_scope_mismatch). Production has no store, so it answers the first.
+ * record_chain_mismatch, record_scope_mismatch), then testnet_buyer_not_allowed when the testnet
+ * buyer list is unset, empty, malformed or does not name the verified payer.
+ * Production has no store, so it answers the first.
  *
  * One synchronous SQLite transaction (BEGIN IMMEDIATE; better-sqlite3 runs nothing else on the
  * connection until it ends, and holds the write lock against any other connection):
@@ -72,7 +74,7 @@ import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { schema, eq, and } from "@pcc/store";
 import { getStore } from "../db.js";
 import { emergencyStopState } from "../routes/device-relay.js";
-import { activationRefusal, isChainId, recordRefusal, recordScopeRefusal, testnetBuyerRefusal } from "./funding-binding.js";
+import { activationRefusal, isChainId, recordRefusal, recordScopeRefusal, testnetBuyerAllowance, testnetBuyerRefusal } from "./funding-binding.js";
 import { scopeExpiryMs } from "./scope-expiry.js";
 import { acceptanceFor, blockListUnreadable, escrowForJob, SCOPE_AWAITING_FUNDING } from "./scope-acceptance.js";
 import {
@@ -223,7 +225,7 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
   if (own !== null) return refused(own);
   if (record.scopeId !== scopeId) return refused("record_scope_mismatch");
   // Binding check 4a: after record validation and scope identity, before BEGIN IMMEDIATE or reads.
-  const allowance = { testnetOnly: terms.testnetOnly, buyers: process.env.PCC_VNEXT_TESTNET_BUYERS };
+  const allowance = testnetBuyerAllowance(terms);
   const testnet = testnetBuyerRefusal(record, allowance);
   if (testnet !== null) return refused(testnet);
   try {

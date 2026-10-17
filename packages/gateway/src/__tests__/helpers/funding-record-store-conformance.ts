@@ -9,8 +9,8 @@
  *     two chains is two distinct records, and a lookup on one chain never finds the other's;
  *   - an insert takes part in the caller's transaction, a savepoint included (reconcilePaidScope
  *     runs inside the accept's transaction): that transaction's reads see it, and a rollback undoes it;
- *   - lookups return FINALIZED records only: a row in any other state (one another writer left, e.g.
- *     an unfinalized observation in Q9's append-only table) is invisible to every lookup;
+ *   - lookups return FINALIZED records only: a row with "latest", "safe" or "FINALIZED"
+ *     finality is invisible, or is refused at insertion by a store with a closed finality enum;
  *   - uniqueness applies to finalized records only (a partial unique index): an unfinalized row
  *     never blocks a finalized insert, and is never blocked itself (the steward's ruling 3).
  *
@@ -74,6 +74,8 @@ const insert = (store: FundingRecordStore, r: FundingVerificationRecord) =>
 /** A store under test, with the store-native hook that writes a row as another writer left it. */
 export interface ConformanceStore extends FundingRecordStore {
   plant(row: object): void;
+  /** Stores with a CHECK on finality reject unknown values before they can be planted. */
+  refusesUnknownFinality?: boolean;
 }
 
 /** `record` as another writer may leave it: the same fields, but not finalized. */
@@ -153,10 +155,13 @@ export const FUNDING_RECORD_STORE_CONTRACT: readonly StoreContractCheck[] = [
     name: "lookups return finalized records only: an unfinalized row is invisible to every lookup",
     run(store) {
       const db = getStore().db;
-      // Q9's persisted finality enum is closed: "latest" is its unfinalized observation state.
+      // Q9 accepts "latest"; the free-TEXT test store also keeps non-finalized near-misses.
       store.plant(unfinalized(record("scope_u1", A)));
-      store.plant(unfinalized(record("scope_u1", A_UPPER)));
-      store.plant(unfinalized(record("scope_u1", A)));
+      for (const [address, finality] of [[A_UPPER, "safe"], [A, "FINALIZED"]] as const) {
+        const candidate = unfinalized(record("scope_u1", address), finality);
+        if (store.refusesUnknownFinality) expect(() => store.plant(candidate)).toThrow(/CHECK constraint failed/);
+        else store.plant(candidate);
+      }
       expect(store.findByScope(db, "scope_u1")).toBeNull();
       for (const lookup of [A, A_UPPER, mixedCase(A)]) expect(store.findByEscrow(db, CHAIN, lookup), lookup).toBeNull();
       db.transaction((tx) => {

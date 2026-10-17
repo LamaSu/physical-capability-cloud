@@ -24,10 +24,13 @@ interface CanonicalSchema {
   required: string[];
   properties: Record<string, FieldRule>;
   oneOf: Array<{ properties: Record<string, { const: unknown }> }>;
+  allOf: Array<{ then: { properties: { chainId: { enum: number[] } } } }>;
 }
 
 const contractsRoot = fileURLToPath(new URL("../../../contracts/", import.meta.url));
 const schema = JSON.parse(readFileSync(join(contractsRoot, "deployments/vnext/CANONICAL.schema.json"), "utf8")) as CanonicalSchema;
+/** R-b must stay synchronized with the canonical schema, not a hard-coded chain list. */
+const TESTNET_CHAINS = schema.allOf[0].then.properties.chainId.enum;
 const committed = JSON.parse(readFileSync(join(contractsRoot, "deployments/vnext/base-sepolia/CANONICAL.json"), "utf8")) as Record<string, unknown>;
 
 // The gateway reads these fields. Derive each constraint's near-miss from the committed schema,
@@ -134,9 +137,15 @@ describe("configured V-next record guards", () => {
     expect(warnings).toEqual([["vnext_record_refused R-c"]]);
   });
 
-  it("also permits an opted-in testnet-only anvil record", () => {
-    expect(resolve({ ...committed, chainId: 31337 })).toBe(31337);
+  it.each(TESTNET_CHAINS)("R-b accepts opted-in schema-enumerated testnet chain %s", (chainId) => {
+    expect(resolve({ ...committed, chainId }, vnextNetworkSlug(chainId))).toBe(chainId);
     expect(warnings).toEqual([]);
+  });
+
+  it("R-b refuses 11155111, absent from the canonical schema's testnet enum", () => {
+    expect(TESTNET_CHAINS).not.toContain(11155111);
+    expect(resolve({ ...committed, chainId: 11155111 }, vnextNetworkSlug(11155111))).toBeNull();
+    expect(warnings).toEqual([["vnext_record_refused R-b"]]);
   });
 });
 

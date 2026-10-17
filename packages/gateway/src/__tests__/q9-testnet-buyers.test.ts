@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAddress } from "viem";
 import { reconcilePaidScope, RECONCILE_REFUSALS } from "../services/reconcile-paid-scope.js";
 import { paidScopeActivationTerms } from "../services/paid-scope-activation-terms.js";
-import { fundingBindingRefusal, testnetBuyerRefusal } from "../services/funding-binding.js";
+import { fundingBindingRefusal, testnetBuyerAllowance, testnetBuyerRefusal } from "../services/funding-binding.js";
 import { FUNDING_BINDINGS, projectFundingStatus } from "../readmodels/funding-status.js";
 import { escrowForJob } from "../services/scope-acceptance.js";
 import { installTestFundingRecordStore, type TestFundingRecordStore } from "./helpers/test-funding-record-store.js";
@@ -13,6 +13,12 @@ import {
 
 const testnetTerms = { ...TERMS, testnetOnly: true };
 const refused = { kind: "refused", reason: "testnet_buyer_not_allowed" };
+const checksummedEntry = getAddress(ESCROW_A);
+const checksumPosition = [...checksummedEntry].findIndex((c, i) => i > 1 && /[A-Fa-f]/.test(c));
+const badChecksumEntry = checksummedEntry.slice(0, checksumPosition)
+  + (checksummedEntry[checksumPosition] === checksummedEntry[checksumPosition].toUpperCase()
+    ? checksummedEntry[checksumPosition].toLowerCase() : checksummedEntry[checksumPosition].toUpperCase())
+  + checksummedEntry.slice(checksumPosition + 1);
 let f: Fixture;
 let store: TestFundingRecordStore;
 
@@ -129,18 +135,63 @@ describe("Q9 testnet live-window buyer allowance", () => {
     }
   });
 
+  it.each([
+    ["unset list", undefined, BUYER, "testnet_buyer_not_allowed"],
+    ["explicitly listed", BUYER, BUYER, "bound"],
+    ["unlisted", OTHER, BUYER, "testnet_buyer_not_allowed"],
+    ["malformed after a valid buyer", `${BUYER},bad`, BUYER, "testnet_buyer_not_allowed"],
+    ["empty", "", BUYER, "testnet_buyer_not_allowed"],
+    ["all-uppercase", `0x${"AB".repeat(20)}`, BUYER, "testnet_buyer_not_allowed"],
+    ["checksummed", checksummedEntry, ESCROW_A, "bound"],
+    ["bad mixed-case checksum", `${BUYER},${badChecksumEntry}`, BUYER, "testnet_buyer_not_allowed"],
+  ] as const)("DTO and reconcile agree with the shared allowance for %s", async (_case, list, buyer, expected) => {
+    const { scopeId } = await paidScope(f, { buyer });
+    setBuyers(list);
+    const scope = scopeRow(scopeId);
+    const escrow = escrowForJob(scope.jobId)!;
+    const record = verification(scopeId, { buyer });
+    const allowance = testnetBuyerAllowance(testnetTerms);
+    const binding = fundingBindingRefusal(record, scope, escrow, testnetTerms.expectedChainId, allowance) ?? "bound";
+    const dto = projectFundingStatus(scope, record, escrow, testnetTerms.expectedChainId, new Date().toISOString(), allowance);
+    const reconciled = reconcilePaidScope(scopeId, record, testnetTerms);
+    const reason = reconciled.kind === "activated" ? "bound" : reconciled.kind === "refused" ? reconciled.reason : reconciled.kind;
+    expect(binding).toBe(expected);
+    expect(dto.binding).toBe(expected);
+    expect(reason).toBe(expected);
+    expect(dto.state).toBe(expected === "bound" ? "funded_verified" : "unknown");
+    expect(dto.verification === null).toBe(expected !== "bound");
+  });
+
+  it("an omitted testnetOnly field and even a missing runtime allowance fail closed", async () => {
+    const { scopeId } = await paidScope(f);
+    const scope = scopeRow(scopeId);
+    const escrow = escrowForJob(scope.jobId)!;
+    const record = verification(scopeId);
+    const missing = { ...testnetTerms } as Record<string, unknown>;
+    delete missing.testnetOnly;
+    setBuyers(undefined);
+    const allowance = testnetBuyerAllowance(missing as never);
+    expect(allowance.testnetOnly).toBe(true);
+    expect(testnetBuyerRefusal(record, allowance)).toBe("testnet_buyer_not_allowed");
+    expect(testnetBuyerRefusal(record, undefined as never)).toBe("testnet_buyer_not_allowed");
+    expect(projectFundingStatus(scope, record, escrow, TERMS.expectedChainId, new Date().toISOString(), allowance))
+      .toMatchObject({ binding: "testnet_buyer_not_allowed", state: "unknown", verification: null });
+    expect(reconcilePaidScope(scopeId, record, missing as never)).toEqual(refused);
+    expect(store.count()).toBe(0);
+  });
+
   it("the shared binding and DTO return the same refusal and hide verification", async () => {
     const { scopeId } = await paidScope(f);
     const scope = scopeRow(scopeId);
     const escrow = escrowForJob(scope.jobId)!;
     const record = verification(scopeId);
-    const allowance = { testnetOnly: true, buyers: `${BUYER},bad` };
+    setBuyers(`${BUYER},bad`);
+    const allowance = testnetBuyerAllowance(testnetTerms);
     const before = JSON.stringify([scope, escrow, record]);
     expect(fundingBindingRefusal(record, scope, escrow, TERMS.expectedChainId, allowance)).toBe("testnet_buyer_not_allowed");
     const dto = projectFundingStatus(scope, record, escrow, TERMS.expectedChainId, new Date().toISOString(), allowance);
     expect(dto).toMatchObject({ binding: "testnet_buyer_not_allowed", state: "unknown", verification: null });
     expect(JSON.stringify([scope, escrow, record])).toBe(before);
-    setBuyers(allowance.buyers);
     expect(reconcilePaidScope(scopeId, record, testnetTerms)).toEqual(refused);
     expect(testnetBuyerRefusal(record, { ...allowance, buyers: BUYER })).toBeNull();
   });

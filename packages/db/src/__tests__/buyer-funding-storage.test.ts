@@ -70,14 +70,14 @@ describe("buyer funding storage checks, indexes and lifecycle", () => {
   const escrowAddresses = ["escrow", "buyer", "operator"];
   const prepareAddresses = ["escrow", "factory", "implementation", "usdc", "payer", "operator"];
   it("expands NZADDR checks on every assigned column, including the zero clause", () => {
-    const bad = [`0x${"AB".repeat(20)}`, address().slice(0, -1), `${address()}0`, `0x${"0".repeat(39)}g`, address(0)];
+    const bad = [`0x${"AB".repeat(20)}`, address().slice(0, -1), `${address()}0`, `0x${"0".repeat(39)}g`, `00${"a".repeat(40)}`, address(0)];
     for (const c of escrowAddresses) rejected("escrow_funding", observation, c, bad);
     for (const c of prepareAddresses) rejected("funding_prepares", (x) => prepare("pending_signature", x), c, bad);
     insert("escrow_funding", observation());
     insert("funding_prepares", prepare());
   });
   it("expands HASH32 checks on every assigned column and accepts 0x00..01", () => {
-    const bad = [`0x${"AB".repeat(32)}`, hash.slice(0, -1), `${hash}0`, `0x${"a".repeat(63)}g`, hash.slice(2)];
+    const bad = [`0x${"AB".repeat(32)}`, hash.slice(0, -1), `${hash}0`, `0x${"a".repeat(63)}g`, `00${"a".repeat(64)}`, hash.slice(2)];
     for (const c of ["block_hash", "funding_block_hash"]) rejected("escrow_funding", observation, c, bad);
     for (const c of ["job_id_hash", "terms_hash", "pre_policy_root", "accepted_policy_digest", "typed_data_digest"]) {
       rejected("funding_prepares", (x) => prepare("pending_signature", x), c, bad);
@@ -88,17 +88,21 @@ describe("buyer funding storage checks, indexes and lifecycle", () => {
       ["job_id_hash", "terms_hash", "pre_policy_root", "accepted_policy_digest", "typed_data_digest"].map((c) => [c, tinyHash]),
     )));
   });
-  it("checks the two unprefixed SHA-256 pins and the optional 65-byte signature", () => {
+  it("checks the two unprefixed SHA-256 pins and variable-length hex signatures", () => {
     const pinBad = ["AB".repeat(32), "a".repeat(63), "a".repeat(65), `${"a".repeat(63)}g`, hash];
     for (const c of ["s01_record_sha256", "served_payload_sha256"]) {
       rejected("funding_prepares", (x) => prepare("pending_signature", x), c, pinBad);
     }
     rejected("funding_prepares", (x) => prepare("pending_signature", x), "operator_signature", [
-      `0x${"AB".repeat(65)}`, `0x${"a".repeat(129)}`, `0x${"a".repeat(131)}`, `0x${"a".repeat(129)}g`, "ab".repeat(65),
+      "0x", `0x${"AB".repeat(65)}`, `0x${"a".repeat(129)}`, `0x${"a".repeat(131)}`, `0x${"a".repeat(129)}g`, "ab".repeat(65),
     ]);
     insert("funding_prepares", prepare("served", {
       s01_record_sha256: `${"0".repeat(63)}1`, served_payload_sha256: `${"0".repeat(63)}1`,
       operator_signature: `0x${"0".repeat(129)}1`,
+    }));
+    insert("funding_prepares", prepare("served", {
+      id: "longer-erc1271", scope_id: "scope-long", escrow: address(12),
+      operator_signature: `0x${"ab".repeat(96)}`,
     }));
   });
   it("expands canonical UINT64 and UINT256 checks on all assigned columns", () => {
@@ -125,6 +129,24 @@ describe("buyer funding storage checks, indexes and lifecycle", () => {
     insert("escrow_funding", observation({ scope_id: "a", verifier_version: "a" }));
     insert("escrow_funding", observation({ scope_id: "a".repeat(200), verifier_version: "a".repeat(100), escrow: address(9) }));
   });
+  it("refuses a NULL or empty prepare id, and a prepare id over 200 characters", () => {
+    for (const id of [null, "", "p".repeat(201)]) {
+      expect(() => insert("funding_prepares", prepare("pending_signature", { id }))).toThrow(/NOT NULL|CHECK/);
+    }
+    insert("funding_prepares", prepare("pending_signature", { id: "p" }));
+  });
+
+  it("INTEGER affinity cannot smuggle nonnumeric TEXT or fractional REAL into checked columns", () => {
+    const nearMisses = ["abc", "12x", 5.5];
+    for (const c of ["chain_id", "funded_at"]) rejected("escrow_funding", observation, c, nearMisses);
+    for (const c of ["chain_id", "expiry", "s01_schedule_testnet_only", "finality_f_s", "margin_m_s", "reclaim_at_earliest", "reclaim_at_latest", "reconcile_until"]) {
+      rejected("funding_prepares", (overrides) => prepare("pending_signature", overrides), c, nearMisses);
+    }
+    // SQLite affinity stores these as INTEGER, so the typeof() constraints admit them.
+    insert("escrow_funding", observation({ chain_id: "7", funded_at: "7.0" }));
+    insert("funding_prepares", prepare("pending_signature", { id: "integer-affinity", chain_id: "7", expiry: "7.0" }));
+  });
+
   it("checks JSON syntax, requires a unit_ids array, and keeps served bytes as nonempty BLOB", () => {
     for (const c of ["quote_snapshot", "configs", "unit_ids"]) rejected("funding_prepares", (x) => prepare("pending_signature", x), c, ["not-json"]);
     rejected("funding_prepares", (x) => prepare("pending_signature", x), "unit_ids", ["{}", "null", '"array"']);
@@ -145,21 +167,28 @@ describe("buyer funding storage checks, indexes and lifecycle", () => {
     insert("escrow_funding", observation({ finality: "latest" }));
     insert("escrow_funding", observation({ finality: "latest" }));
     insert("escrow_funding", observation());
-    expect(() => insert("escrow_funding", observation({ escrow: address(8) }))).toThrow(/UNIQUE/);
-    expect(() => insert("escrow_funding", observation({ scope_id: "another" }))).toThrow(/UNIQUE/);
+    expect(() => insert("escrow_funding", observation({ escrow: address(8) }))).toThrow(/escrow_funding_no_replace/);
+    expect(() => insert("escrow_funding", observation({ scope_id: "another" }))).toThrow(/escrow_funding_no_replace/);
     insert("escrow_funding", observation({ finality: "latest" }));
     insert("escrow_funding", observation({ scope_id: "other-chain", chain_id: 31337 }));
     expect(sqlite.prepare("SELECT count(*) AS n FROM escrow_funding").get()).toEqual({ n: 5 });
   });
+  it("refuses explicit nonpositive escrow ids without poisoning implicit rowid inserts", () => {
+    for (const id of [-1, 0]) expect(() => insert("escrow_funding", observation({ id }))).toThrow(/CHECK/);
+    insert("escrow_funding", observation({ scope_id: "implicit-one" }));
+    insert("escrow_funding", observation({ scope_id: "implicit-two", escrow: address(8) }));
+    expect(sqlite.prepare("SELECT id FROM escrow_funding ORDER BY id").all()).toEqual([{ id: 1 }, { id: 2 }]);
+  });
+
   it.each(states)("K1 keeps every %s row's chain and escrow reserved", (state) => {
     insert("funding_prepares", prepare(state));
-    expect(() => insert("funding_prepares", prepare("pending_signature", { id: "b", scope_id: "b" }))).toThrow(/UNIQUE/);
+    expect(() => insert("funding_prepares", prepare("pending_signature", { id: "b", scope_id: "b" }))).toThrow(/funding_prepares_no_replace/);
     insert("funding_prepares", prepare("pending_signature", { id: "c", scope_id: "c", chain_id: 31337 }));
   });
   it.each(["pending_signature", "served"])("K2 refuses a second live scope when the first is %s", (state) => {
     insert("funding_prepares", prepare(state));
     for (const next of ["pending_signature", "served"]) {
-      expect(() => insert("funding_prepares", prepare(next, { id: "b", escrow: address(8) }))).toThrow(/UNIQUE/);
+      expect(() => insert("funding_prepares", prepare(next, { id: "b", escrow: address(8) }))).toThrow(/funding_prepares_no_replace/);
     }
     insert("funding_prepares", prepare("expired", { id: "c", escrow: address(9) }));
   });
@@ -184,6 +213,90 @@ describe("buyer funding storage checks, indexes and lifecycle", () => {
       expect(sqlite.prepare("SELECT scope_id, verified_at FROM escrow_funding").all()).toEqual([{ scope_id: "scope-a", verified_at: stamp }]);
     }
   });
+  /** Covers the PRIMARY KEY and every unique index, including partial unique indexes.
+   * A new unique key without a matching BEFORE INSERT guard must fail its REPLACE probe. */
+  function uniqueKeys(table: string): Array<{ columns: string[]; predicate: string }> {
+    const indexList = sqlite.prepare(`PRAGMA index_list(${table})`).all() as Array<{ name: string; unique: number; partial: number }>;
+    const unique = indexList.filter((index) => index.unique === 1).map((index) => {
+      const columns = (sqlite.prepare(`PRAGMA index_info(${JSON.stringify(index.name)})`).all() as Array<{ seqno: number; name: string }>)
+        .sort((a, b) => a.seqno - b.seqno).map((part) => part.name);
+      const row = sqlite.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?").get(index.name) as { sql: string | null };
+      return { columns, predicate: index.partial ? (row.sql?.split(/\bWHERE\b/i)[1]?.trim() ?? "") : "" };
+    });
+    const primary = (sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string; pk: number }>)
+      .filter((column) => column.pk > 0).sort((a, b) => a.pk - b.pk).map((column) => column.name);
+    if (primary.length > 0) unique.push({ columns: primary, predicate: "" });
+    return [...new Map(unique.map((key) => [`${key.columns.join(",")}|${key.predicate}`, key])).values()];
+  }
+
+  function snapshot(table: string) {
+    return sqlite.prepare(`SELECT * FROM ${table} ORDER BY id`).all();
+  }
+
+  function insertUsing(table: string, record: Row, verb: "INSERT OR REPLACE INTO" | "REPLACE INTO" | "INSERT INTO"): void {
+    const columns = Object.keys(record);
+    sqlite.prepare(`${verb} ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`)
+      .run(...columns.map((column) => record[column]));
+  }
+
+  it.each(["escrow_funding", "funding_prepares"])("guard covers every discovered unique key in %s, preserving a full row under REPLACE", (table) => {
+    const keys = uniqueKeys(table);
+    for (const expected of ["id", "scope_id", "chain_id,escrow"]) {
+      expect(keys.some((key) => key.columns.join(",") === expected), `${table} ${expected}`).toBe(true);
+    }
+    const guard = new RegExp(`${table}_no_replace`);
+    for (const { columns, predicate } of keys) {
+      // Each key gets a rollback-only savepoint, so the immutable seed can be re-used.
+      const existing = table === "escrow_funding"
+        ? observation({ id: 100, scope_id: "scope-pin", chain_id: 84532, escrow: address(15) })
+        : prepare("pending_signature", { id: "prepare-pin", scope_id: "scope-pin", chain_id: 84532, escrow: address(15) });
+      const candidate = table === "escrow_funding"
+        ? observation({ id: 101, scope_id: "scope-next", chain_id: 31337, escrow: address(16), buyer: address(17), operator: address(18), block_hash: `0x${"cd".repeat(32)}` })
+        : prepare("pending_signature", { id: "prepare-next", scope_id: "scope-next", job_id: "job-next", chain_id: 31337, escrow: address(16), payer: address(17) });
+      if (table === "escrow_funding" && /finality\s*=\s*'latest'/i.test(predicate)) {
+        existing.finality = "latest";
+        candidate.finality = "latest";
+      }
+      for (const column of columns) candidate[column] = existing[column];
+      expect(() => sqlite.transaction(() => {
+        insert(table, existing);
+        const before = snapshot(table);
+        for (const verb of ["INSERT OR REPLACE INTO", "REPLACE INTO"] as const) {
+          expect(() => insertUsing(table, candidate, verb), `${table} ${columns.join(",")} ${verb}`).toThrow(guard);
+          expect(snapshot(table)).toEqual(before);
+        }
+        expect(() => insertUsing(table, candidate, "INSERT INTO")).toThrow(guard);
+        expect(snapshot(table)).toEqual(before);
+        throw new Error("rollback guard probe");
+      })()).toThrow("rollback guard probe");
+      expect(snapshot(table)).toEqual([]);
+    }
+  });
+
+  it("funding_prepares has no hidden rowid for INSERT OR REPLACE or UPDATE OR REPLACE", () => {
+    insert("funding_prepares", prepare("served"));
+    const before = snapshot("funding_prepares");
+    expect(() => insertUsing("funding_prepares", { ...prepare("pending_signature", { id: "new", scope_id: "new", escrow: address(8) }), rowid: 1 }, "INSERT OR REPLACE INTO"))
+      .toThrow(/no column named rowid|no such column/i);
+    expect(snapshot("funding_prepares")).toEqual(before);
+    expect(() => sqlite.exec("UPDATE OR REPLACE funding_prepares SET rowid = 1 WHERE id = 'prepare-a'"))
+      .toThrow(/no such column/i);
+    expect(snapshot("funding_prepares")).toEqual(before);
+  });
+
+  it("UPDATE OR REPLACE cannot bypass either table's immutability", () => {
+    insert("escrow_funding", observation());
+    insert("funding_prepares", prepare("served"));
+    const escrowBefore = snapshot("escrow_funding");
+    const preparesBefore = snapshot("funding_prepares");
+    expect(() => sqlite.exec("UPDATE OR REPLACE escrow_funding SET scope_id = 'new'"))
+      .toThrow(/escrow_funding is append-only/);
+    expect(() => sqlite.exec("UPDATE OR REPLACE funding_prepares SET escrow = 'new'"))
+      .toThrow(/funding_prepares_frozen/);
+    expect(snapshot("escrow_funding")).toEqual(escrowBefore);
+    expect(snapshot("funding_prepares")).toEqual(preparesBefore);
+  });
+
   for (const oldState of states) for (const newState of states) {
     const allowed = (oldState === "pending_signature" && newState !== "pending_signature") || (oldState === "served" && ["expired", "superseded"].includes(newState));
     it(`T3 ${oldState} -> ${newState} ${allowed ? "passes" : "raises"}`, () => {

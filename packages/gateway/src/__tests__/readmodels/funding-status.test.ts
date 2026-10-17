@@ -19,6 +19,8 @@ import {
 } from "../../readmodels/funding-status.js";
 import type { FundingVerificationRecord } from "../../services/funding-record-port.js";
 
+/** Explicit mainnet terms: no testnet-only buyer gating in these independent DTO cases. */
+const NO_TESTNET = { testnetOnly: false, buyers: undefined };
 const BUYER = "0x5555555555555555555555555555555555555555";
 const OTHER = "0x6666666666666666666666666666666666666666";
 /** The expected chain: the pinned V-next deployment record's (ruling 4). */
@@ -69,31 +71,31 @@ afterEach(() => {
 
 describe("FundingStatusDTO states", () => {
   it("without a record: prepared, awaiting_funding, then expired once the window lapses", () => {
-    expect(fundingStateOf(scope({ status: "awaiting_acceptance" }), null, ROW, CHAIN, BEFORE_END)).toBe("prepared");
-    expect(fundingStateOf(scope(), null, ROW, CHAIN, BEFORE_END)).toBe("awaiting_funding");
-    expect(fundingStateOf(scope({ status: "awaiting_acceptance" }), null, ROW, CHAIN, WINDOW_END)).toBe("expired");
-    expect(fundingStateOf(scope(), null, ROW, CHAIN, WINDOW_END)).toBe("expired");
+    expect(fundingStateOf(scope({ status: "awaiting_acceptance" }), null, ROW, CHAIN, BEFORE_END, NO_TESTNET)).toBe("prepared");
+    expect(fundingStateOf(scope(), null, ROW, CHAIN, BEFORE_END, NO_TESTNET)).toBe("awaiting_funding");
+    expect(fundingStateOf(scope({ status: "awaiting_acceptance" }), null, ROW, CHAIN, WINDOW_END, NO_TESTNET)).toBe("expired");
+    expect(fundingStateOf(scope(), null, ROW, CHAIN, WINDOW_END, NO_TESTNET)).toBe("expired");
   });
 
   it("(neg-dto-window) a window that cannot be read is closed: expired, never awaiting", () => {
-    expect(fundingStateOf(scope({ expiresAt: "not a time" }), null, ROW, CHAIN, BEFORE_END)).toBe("expired");
-    expect(fundingStateOf(scope({ status: "awaiting_acceptance", expiresAt: "" }), null, ROW, CHAIN, BEFORE_END)).toBe("expired");
-    expect(fundingStateOf(scope(), null, ROW, CHAIN, "not a time")).toBe("expired");
+    expect(fundingStateOf(scope({ expiresAt: "not a time" }), null, ROW, CHAIN, BEFORE_END, NO_TESTNET)).toBe("expired");
+    expect(fundingStateOf(scope({ status: "awaiting_acceptance", expiresAt: "" }), null, ROW, CHAIN, BEFORE_END, NO_TESTNET)).toBe("expired");
+    expect(fundingStateOf(scope(), null, ROW, CHAIN, "not a time", NO_TESTNET)).toBe("expired");
   });
 
   it("funded_verified on this scope's finalized record of its buyer, bound to its job's escrow row, before activation or once live", () => {
     for (const status of ["active", "expired", "awaiting_acceptance", "awaiting_funding", "suspended_rogue"]) {
-      expect(fundingStateOf(scope({ status }), record(), ROW, CHAIN, BEFORE_END), status).toBe("funded_verified");
+      expect(fundingStateOf(scope({ status }), record(), ROW, CHAIN, BEFORE_END, NO_TESTNET), status).toBe("funded_verified");
     }
     // Past the scope's own TTL the funding is still verified; the scope's status says it may not write.
-    expect(fundingStateOf(scope({ status: "active" }), record(), ROW, CHAIN, "2027-01-01T00:00:00.000Z")).toBe("funded_verified");
+    expect(fundingStateOf(scope({ status: "active" }), record(), ROW, CHAIN, "2027-01-01T00:00:00.000Z", NO_TESTNET)).toBe("funded_verified");
     // The escrow row in another letter case is the same contract.
-    expect(fundingStateOf(scope(), record(), row({ contractAddress: "0x" + ESCROW.slice(2).toUpperCase() }), CHAIN, BEFORE_END)).toBe("funded_verified");
+    expect(fundingStateOf(scope(), record(), row({ contractAddress: "0x" + ESCROW.slice(2).toUpperCase() }), CHAIN, BEFORE_END, NO_TESTNET)).toBe("funded_verified");
   });
 
   it("(dto-settled) R1-a: once live, a settled (completed) or otherwise moved escrow row is still funded_verified: the row's status gates only before activation", () => {
     for (const status of ["completed", "created", "disputed", "refunded", ""]) {
-      const dto = projectFundingStatus(scope({ status: "active" }), record(), row({ status }), CHAIN, BEFORE_END);
+      const dto = projectFundingStatus(scope({ status: "active" }), record(), row({ status }), CHAIN, BEFORE_END, NO_TESTNET);
       expect(dto, status).toMatchObject({ state: "funded_verified", binding: "bound" });
       expect(dto.verification).not.toBeNull();
     }
@@ -101,41 +103,41 @@ describe("FundingStatusDTO states", () => {
 
   it("(neg-dto-other-escrow) a record of this scope and buyer for another escrow is never funded_verified, and says so (P7)", () => {
     for (const status of ["awaiting_funding", "awaiting_acceptance", "active", "expired", "suspended_rogue"]) {
-      const dto = projectFundingStatus(scope({ status }), record(), row({ contractAddress: OTHER_ESCROW }), CHAIN, BEFORE_END);
+      const dto = projectFundingStatus(scope({ status }), record(), row({ contractAddress: OTHER_ESCROW }), CHAIN, BEFORE_END, NO_TESTNET);
       expect(dto, status).toMatchObject({ state: "unknown", binding: "record_escrow_not_scope_escrow", verification: null });
     }
     // The same with a re-pointed row: the record's escrow, not the row's, is what does not match.
-    expect(fundingBindingOf(scope(), record({ escrowAddress: OTHER_ESCROW }), ROW, CHAIN)).toBe("record_escrow_not_scope_escrow");
+    expect(fundingBindingOf(scope(), record({ escrowAddress: OTHER_ESCROW }), ROW, CHAIN, NO_TESTNET)).toBe("record_escrow_not_scope_escrow");
   });
 
   it("(neg-dto-no-escrow) a job with no escrow row is never funded_verified, and says so", () => {
     for (const status of ["awaiting_funding", "awaiting_acceptance", "active", "expired", "suspended_rogue"]) {
-      const dto = projectFundingStatus(scope({ status }), record(), null, CHAIN, BEFORE_END);
+      const dto = projectFundingStatus(scope({ status }), record(), null, CHAIN, BEFORE_END, NO_TESTNET);
       expect(dto, status).toMatchObject({ state: "unknown", binding: "escrow_missing", verification: null });
     }
   });
 
   it("(neg-dto-chain) with the chain pinned, a record from another chain is never funded_verified, and says record_chain_mismatch (ruling 4)", () => {
     for (const status of ["awaiting_acceptance", "awaiting_funding", "active", "expired", "suspended_rogue"]) {
-      const dto = projectFundingStatus(scope({ status }), record({ chainId: 545 }), ROW, CHAIN, BEFORE_END);
+      const dto = projectFundingStatus(scope({ status }), record({ chainId: 545 }), ROW, CHAIN, BEFORE_END, NO_TESTNET);
       expect(dto, status).toMatchObject({ state: "unknown", binding: "record_chain_mismatch", verification: null });
     }
     // The control: the same record on the expected chain is bound.
-    expect(fundingBindingOf(scope(), record(), ROW, CHAIN)).toBe("bound");
+    expect(fundingBindingOf(scope(), record(), ROW, CHAIN, NO_TESTNET)).toBe("bound");
   });
 
   it("(neg-dto-nochain) with no usable expected chain, no record binds, and the binding says expected_chain_unavailable, reconcile's name for it (r3 review LOW-1)", () => {
     // No pinned deployment record (null), or a value that is not a positive safe integer.
     for (const expected of [null, undefined, Number.NaN, 0, -1, 84532.5, "84532"]) {
       for (const status of ["awaiting_acceptance", "awaiting_funding", "active", "expired", "suspended_rogue"]) {
-        const dto = projectFundingStatus(scope({ status }), record(), ROW, expected as never, BEFORE_END);
+        const dto = projectFundingStatus(scope({ status }), record(), ROW, expected as never, BEFORE_END, NO_TESTNET);
         expect(dto, `${String(expected)} ${status}`).toMatchObject({ state: "unknown", binding: "expected_chain_unavailable", verification: null });
       }
       // Ahead of every check of the record: a malformed record, or one from another chain, says the same.
-      expect(fundingBindingOf(scope(), record({ finality: "latest" as never }), ROW, expected as never), String(expected)).toBe("expected_chain_unavailable");
-      expect(fundingBindingOf(scope(), record({ chainId: 545 }), ROW, expected as never), String(expected)).toBe("expected_chain_unavailable");
+      expect(fundingBindingOf(scope(), record({ finality: "latest" as never }), ROW, expected as never, NO_TESTNET), String(expected)).toBe("expected_chain_unavailable");
+      expect(fundingBindingOf(scope(), record({ chainId: 545 }), ROW, expected as never, NO_TESTNET), String(expected)).toBe("expected_chain_unavailable");
       // Without a record there is nothing to bind, and the state does not change.
-      expect(projectFundingStatus(scope(), null, ROW, expected as never, BEFORE_END), String(expected)).toMatchObject({
+      expect(projectFundingStatus(scope(), null, ROW, expected as never, BEFORE_END, NO_TESTNET), String(expected)).toMatchObject({
         state: "awaiting_funding",
         binding: "no_record",
       });
@@ -143,46 +145,46 @@ describe("FundingStatusDTO states", () => {
   });
 
   it("(neg-dto-escrow-payer) an escrow row whose payer label is another buyer is never funded_verified", () => {
-    const dto = projectFundingStatus(scope({ status: "active" }), record(), row({ payer: OTHER }), CHAIN, BEFORE_END);
+    const dto = projectFundingStatus(scope({ status: "active" }), record(), row({ payer: OTHER }), CHAIN, BEFORE_END, NO_TESTNET);
     expect(dto).toMatchObject({ state: "unknown", binding: "escrow_payer_not_buyer", verification: null });
   });
 
   it("(neg-dto-lapsed-record) a lapsed pre-activation window wins over a bound record: expired, the verification still shown (P8)", () => {
     for (const status of ["awaiting_funding", "awaiting_acceptance"]) {
       for (const asOf of [WINDOW_END, "2026-10-08T13:01:00.000Z"]) {
-        const dto = projectFundingStatus(scope({ status }), record(), ROW, CHAIN, asOf);
+        const dto = projectFundingStatus(scope({ status }), record(), ROW, CHAIN, asOf, NO_TESTNET);
         expect(dto, `${status} ${asOf}`).toMatchObject({ state: "expired", binding: "bound" });
         expect(dto.verification).toMatchObject({ escrowAddress: ESCROW, verifiedAt: "2026-10-08T12:20:00.000Z" });
       }
     }
     // A record that is not bound shows nothing there either.
-    expect(projectFundingStatus(scope(), record(), null, CHAIN, WINDOW_END)).toMatchObject({ state: "expired", binding: "escrow_missing", verification: null });
+    expect(projectFundingStatus(scope(), record(), null, CHAIN, WINDOW_END, NO_TESTNET)).toMatchObject({ state: "expired", binding: "escrow_missing", verification: null });
   });
 
   it("(neg-dto-terminal) a revoked or rejected scope is cancelled whatever the record: the scope row is the source, the verification still shown when bound (ruling 1)", () => {
     for (const status of ["revoked", "rejected"]) {
-      const dto = projectFundingStatus(scope({ status }), record(), ROW, CHAIN, BEFORE_END);
+      const dto = projectFundingStatus(scope({ status }), record(), ROW, CHAIN, BEFORE_END, NO_TESTNET);
       expect(dto, status).toMatchObject({ state: "cancelled", binding: "bound", scope: { sourceStatus: status } });
       expect(dto.verification).not.toBeNull();
       // Not bound, or no record: cancelled, nothing shown.
-      expect(projectFundingStatus(scope({ status }), record({ escrowAddress: OTHER_ESCROW }), ROW, CHAIN, BEFORE_END), status).toMatchObject({
+      expect(projectFundingStatus(scope({ status }), record({ escrowAddress: OTHER_ESCROW }), ROW, CHAIN, BEFORE_END, NO_TESTNET), status).toMatchObject({
         state: "cancelled",
         binding: "record_escrow_not_scope_escrow",
         verification: null,
       });
-      expect(projectFundingStatus(scope({ status }), null, null, CHAIN, BEFORE_END), status).toMatchObject({ state: "cancelled", binding: "no_record", verification: null });
+      expect(projectFundingStatus(scope({ status }), null, null, CHAIN, BEFORE_END, NO_TESTNET), status).toMatchObject({ state: "cancelled", binding: "no_record", verification: null });
     }
   });
 
   it("(neg-dto-row-status) R1-a: before activation, funded_verified also needs the escrow row's status to pass reconcile's precondition (funded or active); otherwise unknown, bound, the verification shown", () => {
     for (const status of ["awaiting_acceptance", "awaiting_funding"]) {
       for (const rowStatus of ["created", "completed", "disputed", "refunded", "", "FUNDED", "pending"]) {
-        const dto = projectFundingStatus(scope({ status }), record(), row({ status: rowStatus }), CHAIN, BEFORE_END);
+        const dto = projectFundingStatus(scope({ status }), record(), row({ status: rowStatus }), CHAIN, BEFORE_END, NO_TESTNET);
         expect(dto, `${status} ${rowStatus}`).toMatchObject({ state: "unknown", binding: "bound" });
         expect(dto.verification, `${status} ${rowStatus}`).not.toBeNull();
       }
       for (const rowStatus of ["funded", "active"]) {
-        expect(fundingStateOf(scope({ status }), record(), row({ status: rowStatus }), CHAIN, BEFORE_END), `${status} ${rowStatus}`).toBe("funded_verified");
+        expect(fundingStateOf(scope({ status }), record(), row({ status: rowStatus }), CHAIN, BEFORE_END, NO_TESTNET), `${status} ${rowStatus}`).toBe("funded_verified");
       }
     }
   });
@@ -224,41 +226,41 @@ describe("FundingStatusDTO states", () => {
       ["unknown status + bound", scope({ status: "ACTIVE" }), record(), ROW, BEFORE_END, "unknown"],
       ["unknown status + lapsed + no record", scope({ status: "garbage" }), null, ROW, LAPSED, "unknown"],
     ];
-    for (const [name, sc, r, e, asOf, state] of cases) expect(fundingStateOf(sc, r, e, CHAIN, asOf), name).toBe(state);
+    for (const [name, sc, r, e, asOf, state] of cases) expect(fundingStateOf(sc, r, e, CHAIN, asOf, NO_TESTNET), name).toBe(state);
   });
 
   it("(neg-dto-unknown-status) a status this projection does not know is unknown, a bound record or not", () => {
     for (const status of ["ACTIVE", "completed", "garbage", ""]) {
-      expect(fundingStateOf(scope({ status }), record(), ROW, CHAIN, BEFORE_END), status).toBe("unknown");
+      expect(fundingStateOf(scope({ status }), record(), ROW, CHAIN, BEFORE_END, NO_TESTNET), status).toBe("unknown");
     }
   });
 
   it("(neg-dto-record-scope) another scope's record is never this scope's funding", () => {
-    expect(fundingStateOf(scope({ status: "active" }), record({ scopeId: "scope_other" }), ROW, CHAIN, BEFORE_END)).toBe("unknown");
-    expect(fundingStateOf(scope(), record({ scopeId: "scope_other" }), ROW, CHAIN, BEFORE_END)).toBe("unknown");
+    expect(fundingStateOf(scope({ status: "active" }), record({ scopeId: "scope_other" }), ROW, CHAIN, BEFORE_END, NO_TESTNET)).toBe("unknown");
+    expect(fundingStateOf(scope(), record({ scopeId: "scope_other" }), ROW, CHAIN, BEFORE_END, NO_TESTNET)).toBe("unknown");
   });
 
   it("(neg-dto-record-buyer) a record whose verified payer is not the scope's buyer is never its funding", () => {
-    expect(fundingStateOf(scope({ status: "active" }), record({ buyer: OTHER }), ROW, CHAIN, BEFORE_END)).toBe("unknown");
-    expect(fundingStateOf(scope(), record({ buyer: OTHER }), ROW, CHAIN, BEFORE_END)).toBe("unknown");
+    expect(fundingStateOf(scope({ status: "active" }), record({ buyer: OTHER }), ROW, CHAIN, BEFORE_END, NO_TESTNET)).toBe("unknown");
+    expect(fundingStateOf(scope(), record({ buyer: OTHER }), ROW, CHAIN, BEFORE_END, NO_TESTNET)).toBe("unknown");
   });
 
   it("(neg-dto-record-shape) a record that is not finalized or not well formed is never funding", () => {
     for (const over of [{ finality: "latest" }, { blockHash: "0x00" }, { verifiedAt: "yesterday" }, { escrowAddress: "mock-escrow-x" }]) {
-      expect(fundingStateOf(scope({ status: "active" }), record(over as never), ROW, CHAIN, BEFORE_END), JSON.stringify(over)).toBe("unknown");
-      expect(fundingBindingOf(scope(), record(over as never), ROW, CHAIN), JSON.stringify(over)).toBe("record_malformed");
+      expect(fundingStateOf(scope({ status: "active" }), record(over as never), ROW, CHAIN, BEFORE_END, NO_TESTNET), JSON.stringify(over)).toBe("unknown");
+      expect(fundingBindingOf(scope(), record(over as never), ROW, CHAIN, NO_TESTNET), JSON.stringify(over)).toBe("record_malformed");
     }
   });
 
   it("(neg-dto-nomock) without a record, a live scope is unknown, never funded (a mock-escrow or pre-N133 activation)", () => {
-    expect(fundingStateOf(scope({ status: "active" }), null, ROW, CHAIN, BEFORE_END)).toBe("unknown");
+    expect(fundingStateOf(scope({ status: "active" }), null, ROW, CHAIN, BEFORE_END, NO_TESTNET)).toBe("unknown");
   });
 
   it("without a record, any other status fails closed to unknown (revoked and rejected are cancelled)", () => {
     for (const status of ["expired", "completed", "suspended_rogue", "ACTIVE", ""]) {
-      expect(fundingStateOf(scope({ status }), null, ROW, CHAIN, BEFORE_END), status).toBe("unknown");
+      expect(fundingStateOf(scope({ status }), null, ROW, CHAIN, BEFORE_END, NO_TESTNET), status).toBe("unknown");
     }
-    for (const status of ["revoked", "rejected"]) expect(fundingStateOf(scope({ status }), null, ROW, CHAIN, BEFORE_END), status).toBe("cancelled");
+    for (const status of ["revoked", "rejected"]) expect(fundingStateOf(scope({ status }), null, ROW, CHAIN, BEFORE_END, NO_TESTNET), status).toBe("cancelled");
   });
 
   it("each binding member, by its exact condition, in order", () => {
@@ -277,7 +279,7 @@ describe("FundingStatusDTO states", () => {
       [record(), row({ status: "completed" }), CHAIN, "bound"],
     ];
     expect(cases.map(([, , , b]) => b)).toEqual([...FUNDING_BINDINGS]);
-    for (const [r, e, chain, binding, allowance] of cases) expect(fundingBindingOf(scope(), r, e, chain, allowance), binding).toBe(binding);
+    for (const [r, e, chain, binding, allowance] of cases) expect(fundingBindingOf(scope(), r, e, chain, allowance ?? NO_TESTNET), binding).toBe(binding);
   });
 
   it("(neg-dto-members) the states are exactly these: no `confirming` until Q9 gives it a source (ruling 6), and every input gives one of them", () => {
@@ -288,7 +290,7 @@ describe("FundingStatusDTO states", () => {
     const escrows: FundingEscrowRow[] = [ROW, null, row({ contractAddress: OTHER_ESCROW }), row({ payer: OTHER })];
     const times = [BEFORE_END, WINDOW_END, "not a time"];
     for (const status of statuses) for (const r of records) for (const e of escrows) for (const t of times) {
-      expect(FUNDING_STATES).toContain(fundingStateOf(scope({ status }), r, e, CHAIN, t));
+      expect(FUNDING_STATES).toContain(fundingStateOf(scope({ status }), r, e, CHAIN, t, NO_TESTNET));
     }
   });
 });
@@ -296,7 +298,7 @@ describe("FundingStatusDTO states", () => {
 describe("FundingStatusDTO projection", () => {
   it("carries the sources' own values, the read time as given, the binding, and the verification only when bound", () => {
     const r = record();
-    expect(projectFundingStatus(scope({ status: "active", expiresAt: "2026-10-08T13:20:00.000Z" }), r, ROW, CHAIN, BEFORE_END)).toEqual({
+    expect(projectFundingStatus(scope({ status: "active", expiresAt: "2026-10-08T13:20:00.000Z" }), r, ROW, CHAIN, BEFORE_END, NO_TESTNET)).toEqual({
       schemaId: FUNDING_STATUS_SCHEMA_ID,
       asOf: BEFORE_END,
       scopeId: "scope_dto",
@@ -316,19 +318,19 @@ describe("FundingStatusDTO projection", () => {
   });
 
   it("(neg-dto-verification) a record that does not fund this scope is not shown", () => {
-    const dto = projectFundingStatus(scope({ status: "active" }), record({ scopeId: "scope_other" }), ROW, CHAIN, BEFORE_END);
+    const dto = projectFundingStatus(scope({ status: "active" }), record({ scopeId: "scope_other" }), ROW, CHAIN, BEFORE_END, NO_TESTNET);
     expect(dto).toMatchObject({ state: "unknown", binding: "record_scope_mismatch", verification: null });
-    expect(projectFundingStatus(scope(), null, ROW, CHAIN, BEFORE_END)).toMatchObject({ state: "awaiting_funding", binding: "no_record", verification: null });
+    expect(projectFundingStatus(scope(), null, ROW, CHAIN, BEFORE_END, NO_TESTNET)).toMatchObject({ state: "awaiting_funding", binding: "no_record", verification: null });
   });
 
   it("is pure: it reads no clock, and the same inputs give the same DTO", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(Date.parse("2030-01-01T00:00:00.000Z"));
-    const a = projectFundingStatus(scope(), null, ROW, CHAIN, BEFORE_END);
+    const a = projectFundingStatus(scope(), null, ROW, CHAIN, BEFORE_END, NO_TESTNET);
     vi.setSystemTime(Date.parse("2020-01-01T00:00:00.000Z"));
-    const b = projectFundingStatus(scope(), null, ROW, CHAIN, BEFORE_END);
+    const b = projectFundingStatus(scope(), null, ROW, CHAIN, BEFORE_END, NO_TESTNET);
     expect(a).toEqual(b);
     expect(a.state).toBe("awaiting_funding");
-    expect(projectFundingStatus(scope(), null, ROW, CHAIN, "garbage").asOf).toBe("garbage"); // never replaced by "now"
+    expect(projectFundingStatus(scope(), null, ROW, CHAIN, "garbage", NO_TESTNET).asOf).toBe("garbage"); // never replaced by "now"
   });
 });

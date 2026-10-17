@@ -28,9 +28,10 @@
  * addresses (sameAddress), so a mock row ("mock-escrow-...") never binds to a record and never passes
  * activationRefusal (gateway's condition (iii), accepted in bulletin 7195).
  *
- * Pure: nothing here reads a clock, a database or the environment.
+ * The refusal predicates are pure: only testnetBuyerAllowance reads the environment to build their required input.
  */
 import { getAddress, isAddress } from "viem";
+import type { PaidScopeActivationTerms } from "./paid-scope-activation-terms.js";
 import { sameIdentity } from "../auth/buyer-identity.js";
 import { isWellFormedFundingRecord, sameAddress, type FundingVerificationRecord } from "./funding-record-port.js";
 
@@ -58,6 +59,15 @@ export interface TestnetBuyerAllowance {
   buyers: string | undefined;
 }
 
+/** The one environment boundary for reconcile and any future funding-status route. */
+export function testnetBuyerAllowance(terms: Pick<PaidScopeActivationTerms, "testnetOnly">): TestnetBuyerAllowance {
+  return {
+    // An omitted or malformed runtime flag is NEVER a mainnet authorization.
+    testnetOnly: terms?.testnetOnly !== false,
+    buyers: process.env.PCC_VNEXT_TESTNET_BUYERS,
+  };
+}
+
 export type TestnetBuyerRefusal = "testnet_buyer_not_allowed";
 export type RecordScopeRefusal = RecordRefusal | "record_scope_mismatch" | TestnetBuyerRefusal | "record_buyer_not_scope_buyer";
 
@@ -67,10 +77,10 @@ export type RecordScopeRefusal = RecordRefusal | "record_scope_mismatch" | Testn
  */
 export function testnetBuyerRefusal(
   record: FundingVerificationRecord,
-  allowance?: TestnetBuyerAllowance,
+  allowance: TestnetBuyerAllowance,
 ): TestnetBuyerRefusal | null {
-  if (!allowance?.testnetOnly) return null;
-  const raw = allowance.buyers;
+  if (allowance?.testnetOnly === false) return null;
+  const raw = allowance?.buyers;
   if (raw === undefined || raw === "") return "testnet_buyer_not_allowed";
   const entries = raw.split(",");
   if (entries.some((entry) => entry === "" || /\s/.test(entry) || !isAddress(entry, { strict: true }))) {
@@ -105,7 +115,7 @@ export function recordScopeRefusal(
   record: unknown,
   scope: BindingScope,
   expectedChainId: number | null,
-  allowance?: TestnetBuyerAllowance,
+  allowance: TestnetBuyerAllowance,
 ): RecordScopeRefusal | null {
   const own = recordRefusal(record, expectedChainId);
   if (own !== null) return own;
@@ -154,7 +164,7 @@ export function fundingBindingRefusal(
   scope: BindingScope,
   escrow: BindingEscrow | null | undefined,
   expectedChainId: number | null,
-  allowance?: TestnetBuyerAllowance,
+  allowance: TestnetBuyerAllowance,
 ): FundingBindingRefusal | null {
   const own = recordScopeRefusal(record, scope, expectedChainId, allowance);
   if (own !== null) return own;
@@ -179,7 +189,7 @@ export function activationRefusal(
   scope: BindingScope,
   escrow: BindingEscrowRow | null | undefined,
   expectedChainId: number | null,
-  allowance?: TestnetBuyerAllowance,
+  allowance: TestnetBuyerAllowance,
 ): ActivationRefusal | null {
   const own = recordScopeRefusal(record, scope, expectedChainId, allowance);
   if (own !== null) return own;

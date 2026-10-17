@@ -21,6 +21,7 @@ import { __setFundingRecordStoreForTest, fundingRecordStore, isWellFormedFunding
 import { isMockSettlement, mockFundsWrites } from "../services/settlement-mode.js";
 import { acceptanceFor, escrowForJob } from "../services/scope-acceptance.js";
 import { projectFundingStatus } from "../readmodels/funding-status.js";
+import { testnetBuyerAllowance } from "../services/funding-binding.js";
 import {
   installCaseExactFundingRecordStore,
   installFinalityBlindFundingRecordStore,
@@ -982,7 +983,7 @@ describe("gateway's condition (iii), accepted in bulletin 7195: mock settlement 
     const s = scopeRow(scopeId);
     const scopeIn = { id: s.id, jobId: s.jobId, createdBy: s.createdBy, status: s.status, createdAt: s.createdAt, expiresAt: s.expiresAt };
     const rowIn = { contractAddress: mockRow.contractAddress, payer: mockRow.payer, status: mockRow.status };
-    expect(projectFundingStatus(scopeIn, verification(scopeId), rowIn, CHAIN_ID, new Date().toISOString())).toMatchObject({
+    expect(projectFundingStatus(scopeIn, verification(scopeId), rowIn, CHAIN_ID, new Date().toISOString(), testnetBuyerAllowance(TERMS))).toMatchObject({
       state: "unknown",
       binding: "record_escrow_not_scope_escrow",
       verification: null,
