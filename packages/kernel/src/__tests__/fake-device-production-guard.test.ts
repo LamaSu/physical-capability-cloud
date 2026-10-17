@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { createMachineAdapter } from "../adapter-factory.js";
 import type { DeviceConfig } from "../kernel-config.js";
 
-const sourceRoot = fileURLToPath(new URL("..", import.meta.url));
+const sourceRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const fixtureRoot = fileURLToPath(new URL("fixtures/fake-device-production-guard/", import.meta.url));
 
 /** Parse module specifiers, so comments and ordinary string literals cannot trip the guard. */
@@ -58,7 +58,49 @@ function productionSources(directory: string, root = sourceRoot): string[] {
   });
 }
 
+/** Compiler edges include references and source extensions the specifier visitor cannot see. */
+function assertShippedProgram(parsed: ts.ParsedCommandLine, root = sourceRoot): void {
+  const program = ts.createProgram({ rootNames: parsed.fileNames, options: { ...parsed.options, noEmit: true } });
+  const pulled = program.getSourceFiles().map((file) => path.resolve(file.fileName))
+    .filter((file) => file.startsWith(root + path.sep) && path.relative(root, file).split(path.sep).includes("__tests__"));
+  expect(pulled, "shipped program must not pull in __tests__ files").toEqual([]);
+  expect(parsed.fileNames.map((file) => path.resolve(file)).sort(), "compiler roots must equal scanned production sources")
+    .toEqual(productionSources(root, root).sort());
+}
+
 describe("FakeDevice production isolation", () => {
+  it("RV-PROGRAM the shipped program pulls in no __tests__ file and equals the scanned set", () => {
+    const configPath = fileURLToPath(new URL("../../tsconfig.json", import.meta.url));
+    const parsed = ts.getParsedCommandLineOfConfigFile(configPath, {}, {
+      ...ts.sys,
+      onUnRecoverableConfigFileDiagnostic: (diagnostic) => {
+        throw new Error(ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"));
+      },
+    });
+    if (!parsed) throw new Error("tsconfig.json did not parse");
+    assertShippedProgram(parsed);
+  }, 30_000);
+
+  it("RV-PROGRAM root-set control rejects an otherwise clean unscanned compiler root", () => {
+    const root = path.join(fixtureRoot, "compiler-roots");
+    const parsed = ts.parseJsonConfigFileContent({ include: ["**/*"] }, ts.sys, root);
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.fileNames.map((file) => path.basename(file))).toEqual(["entry.mts"]);
+    // This file imports no tests: only the root-set comparison can refuse it.
+    expect(() => assertShippedProgram(parsed, root)).toThrow("compiler roots must equal scanned production sources");
+  }, 30_000);
+
+  it.each([
+    "./__tests__x/helper.js", "./my__tests__/helper.js", "./__testsuite__/helper.js", "./tests/helper.js",
+  ])("RV-G-NM12 near-miss %s stays clean", (specifier) => {
+    expect(testingSpecifiers(`import { helper } from "${specifier}";`, path.join(sourceRoot, "index.ts"))).toEqual([]);
+  });
+
+  it("RV-G-NM3 a shipped testing-prefixed sibling is not exempt", () => {
+    expect(testingSpecifiers('import { FakeDevice } from "./testing/index.js";', path.join(sourceRoot, "testing-helpers.ts")))
+      .toEqual(["./testing/index.js"]);
+  });
+
   it("scans exactly the independently enumerated production sources", () => {
     // Only the top-level test tree is excluded; nested __tests__ helpers stay scanned.
     const independent = readdirSync(sourceRoot, { recursive: true, encoding: "utf8" })
