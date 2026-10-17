@@ -867,3 +867,88 @@ describe("FakeDevice terminal clock errors", () => {
     expect(await device.getStatus()).toBe("idle");
   });
 });
+
+
+describe("FakeDevice r3 delta pins", () => {
+  it.each(["throw", "invalid"] as const)("RV3-INFO-A a %s clock on fail leaves the job active for retry", async (fault) => {
+    let calls = 0;
+    const device = await accepted({ clock: () => {
+      if (++calls === 1) {
+        if (fault === "throw") throw new Error("clock broke");
+        return new Date(NaN);
+      }
+      return new Date(Date.UTC(2030, 0, 1));
+    } });
+    const events: Emitted[] = [];
+    device.onEvidence((event) => events.push(event));
+    expect(() => device.fail()).toThrow(fault === "throw" ? "clock broke" : "clock must return a valid Date");
+    expect(events).toEqual([]);
+    expect(await device.getStatus()).toBe("busy");
+    device.fail();
+    await device.quiesceEvidence();
+    expect(events.map((event) => event.type)).toEqual(["execution_failed"]);
+  });
+
+  it("RV3-INFO-A a throwing clock on stop rejects the stop and leaves the job active", async () => {
+    let calls = 0;
+    const device = await accepted({ clock: () => { if (++calls === 1) throw new Error("clock broke"); return new Date(Date.UTC(2030, 0, 1)); } });
+    await expect(device.execute({ type: "stop" })).rejects.toThrow("clock broke");
+    expect(await device.getStatus()).toBe("busy");
+    await device.execute({ type: "stop" });
+    expect(await device.getStatus()).toBe("idle");
+  });
+
+  it("RV3-INFO-A a throwing clock on a before-resolve report rejects the cancel and leaves the job active", async () => {
+    let calls = 0;
+    const device = await accepted({ clock: () => { if (++calls === 1) throw new Error("clock broke"); return new Date(Date.UTC(2030, 0, 1)); } });
+    await expect(device.cancelJob("device-42")).rejects.toThrow("clock broke");
+    expect(await device.getStatus()).toBe("busy");
+    await device.cancelJob("device-42");
+    expect(await device.getStatus()).toBe("idle");
+  });
+
+  it("RV3-LOW-A a refuse-mode cancel from a progress listener leaves the job busy", async () => {
+    const device = await accepted({ cancelBehavior: "refuse" });
+    let cancel: Promise<void> | undefined;
+    device.onEvidence((event) => { if (event.type === "execution_progress") cancel = device.cancelJob("device-42"); });
+    device.progress(10);
+    await expect(cancel).resolves.toBeUndefined();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(device.cancels).toEqual(["device-42"]);
+    expect(await device.getStatus()).toBe("busy");
+    device.complete();
+  });
+
+  it("RV3-LOW-A a cancel from a terminal emission's clock still ends the job when that emission fails", async () => {
+    let calls = 0;
+    let cancel: Promise<void> | undefined;
+    let device: FakeDevice;
+    device = await accepted({ clock: () => {
+      if (++calls === 1) {
+        cancel = device.cancelJob("device-42");
+        throw new Error("clock broke");
+      }
+      return new Date(Date.UTC(2030, 0, 1));
+    } });
+    const events: Emitted[] = [];
+    device.onEvidence((event) => events.push(event));
+    expect(() => device.complete()).toThrow("clock broke");
+    await expect(cancel).resolves.toBeUndefined();
+    await device.quiesceEvidence();
+    expect(events.map((event) => [event.type, event.payload.state])).toEqual([["execution_failed", "canceled"]]);
+    expect(await device.getStatus()).toBe("idle");
+  });
+
+  it("RV3-LOW-A a stop from a terminal payload getter still ends the job when that emission is refused", async () => {
+    const device = await accepted();
+    let stop: Promise<MachineCommandResult> | undefined;
+    const payload = { mock: true, get detail() { stop = device.execute({ type: "stop" }); return "detail"; } };
+    const events: Emitted[] = [];
+    device.onEvidence((event) => events.push(event));
+    expect(() => device.complete(payload)).toThrow("payload.mock is reserved");
+    await expect(stop).resolves.toEqual({ success: true });
+    await device.quiesceEvidence();
+    expect(events.map((event) => [event.type, event.payload.state])).toEqual([["execution_failed", "stopped"]]);
+    expect(await device.getStatus()).toBe("idle");
+  });
+});

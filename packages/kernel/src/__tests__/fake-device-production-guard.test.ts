@@ -61,12 +61,14 @@ function productionSources(directory: string, root = sourceRoot): string[] {
 
 /** Compiler edges include references and source extensions the specifier visitor cannot see. */
 function assertShippedProgram(parsed: ts.ParsedCommandLine, root = sourceRoot): void {
+  // A trailing separator on root would make the prefix filter match nothing.
+  const base = path.resolve(root);
   const program = ts.createProgram({ rootNames: parsed.fileNames, options: { ...parsed.options, noEmit: true } });
   const pulled = program.getSourceFiles().map((file) => path.resolve(file.fileName))
-    .filter((file) => file.startsWith(root + path.sep) && path.relative(root, file).split(path.sep).includes("__tests__"));
+    .filter((file) => file.startsWith(base + path.sep) && path.relative(base, file).split(path.sep).includes("__tests__"));
   expect(pulled, "shipped program must not pull in __tests__ files").toEqual([]);
   expect(parsed.fileNames.map((file) => path.resolve(file)).sort(), "compiler roots must equal scanned production sources")
-    .toEqual(productionSources(root, root).sort());
+    .toEqual(productionSources(base, base).sort());
 }
 
 describe("FakeDevice production isolation", () => {
@@ -91,6 +93,8 @@ describe("FakeDevice production isolation", () => {
     expect(parsed.fileNames.sort()).toEqual(productionSources(root, root).sort());
     // The roots match the scan; only the imported test helper can trigger this refusal.
     expect(() => assertShippedProgram(parsed, root)).toThrow("shipped program must not pull in __tests__ files");
+    // RV3: however the root is spelled.
+    expect(() => assertShippedProgram(parsed, root + path.sep)).toThrow("shipped program must not pull in __tests__ files");
   }, 30_000);
 
   it("RV-PROGRAM root-set control rejects an otherwise clean unscanned compiler root", () => {
