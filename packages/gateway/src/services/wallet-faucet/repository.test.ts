@@ -142,4 +142,17 @@ describe("wallet faucet repository lease guards", () => {
     expect(leaseFundingClaim(claim, now)).toBeUndefined();
     expect(fundingClaims(result.linkId)[0]).toEqual(claim);
   });
+  it("RV2-R1 the JS backoff equals the SQL backoff: keyed on the last attempt, refused at 29 999 ms, allowed at 30 000 ms", async () => {
+    const result = await failedClaim(now - 3_600_000);
+    const leased = leaseFundingClaim(result.claim, now);
+    expect(leased).toMatchObject({ status: "failed", attempts: 2, last_attempt_at: new Date(now).toISOString() });
+    finishFundingClaim(leased!, undefined, "unknown", now);
+    const claim = fundingClaims(result.linkId)[0]!;
+    expect(claim).toMatchObject({ status: "failed", attempts: 2, lease_until: null, last_attempt_at: new Date(now).toISOString() });
+    expect(attemptableClaim(claim, now + 29_999)).toBe(false);
+    expect(leaseFundingClaim(claim, now + 29_999)).toBeUndefined();
+    expect(fundingClaims(result.linkId)[0]).toEqual(claim);
+    expect(attemptableClaim(claim, now + 30_000)).toBe(true);
+    expect(leaseFundingClaim(claim, now + 30_000)).toMatchObject({ status: "failed", attempts: 3 });
+  });
 });

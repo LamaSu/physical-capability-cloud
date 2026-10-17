@@ -398,6 +398,40 @@ describe("W2 wallet faucet", () => {
       ["failed", 2], ...Array.from({ length: 4 }, () => ["succeeded", 1]),
     ]);
   });
+  it("RV2-P1 a failed claim inside its 30 s backoff does not stall the pending claims behind it", async () => {
+    const result = await linked("device");
+    const startedAt = now;
+    behavior = async () => {
+      now += 5000;
+      throw { errorType: "faucet_limit_exceeded" };
+    };
+    const first = await fund(result);
+    expect(first.statusCode).toBe(200);
+    expect(first.json().status).toBe("pending");
+    expect(rows(result.linkId).map(row => [row.status, row.attempts])).toEqual([
+      ["failed", 1], ...Array.from({ length: 4 }, () => ["pending", 0]),
+    ]);
+
+    now = startedAt + 29_999;
+    behavior = async () => ({ transactionHash: hash() });
+    const n = calls.length;
+    const second = await fund(result, "owner");
+    expect(second.statusCode).toBe(200);
+    expect(second.json().status, `new CDP calls: ${calls.length - n}`).toBe("partial");
+    expect(calls).toHaveLength(n + 4);
+    expect(rows(result.linkId).map(row => [row.status, row.attempts])).toEqual([
+      ["failed", 1], ...Array.from({ length: 4 }, () => ["succeeded", 1]),
+    ]);
+
+    now = startedAt + 30_000;
+    const third = await fund(result, "owner");
+    expect(third.statusCode).toBe(200);
+    expect(third.json().status).toBe("funded");
+    expect(calls).toHaveLength(n + 5);
+    expect(rows(result.linkId).map(row => [row.status, row.attempts])).toEqual([
+      ["succeeded", 2], ...Array.from({ length: 4 }, () => ["succeeded", 1]),
+    ]);
+  });
   it("5 retry waits 30 seconds and only retries failed ETH 2 and USDC", async () => {
     const result = await linked();
     behavior = async (_address, token) => {
@@ -800,6 +834,18 @@ describe("W2 wallet faucet", () => {
     const txHash = hash();
     finishFundingClaim(replacement, txHash, undefined, now);
     expect(fundingClaims(result.linkId)[0]).toMatchObject({ status: "succeeded", tx_hash: txHash, lease_until: null, attempts: 2 });
+  });
+  it("RV2-T11(e) the SQL link-active guard refuses an expired link from its exact expiry", async () => {
+    const result = await linked("agent");
+    expect((await fund(result, "cli", await build({ attemptBudgetMs: 0 }))).json().status).toBe("pending");
+    const expiresAt = Date.parse(getStore().db.get<{ expires_at: string }>(sql`SELECT expires_at FROM wallet_links WHERE id = ${result.linkId}`)!.expires_at);
+    expect(expiresAt).toBe(now + 30 * 86_400_000);
+    const claim = fundingClaims(result.linkId)[0]!;
+    const before = rows();
+    expect(leaseFundingClaim(claim, expiresAt)).toBeUndefined();
+    expect(rows()).toEqual(before);
+    expect(leaseFundingClaim(claim, expiresAt - 1)).toMatchObject({ status: "pending", attempts: 1 });
+    expect(calls).toHaveLength(0);
   });
   it("T12 kernelId never grants owner-route access", async () => {
     const result = await approve(await create("device", undefined, "account-b"));
