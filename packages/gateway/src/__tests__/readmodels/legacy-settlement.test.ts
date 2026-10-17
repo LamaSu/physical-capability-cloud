@@ -373,7 +373,10 @@ describe("the legacy settlement routes on a real store", () => {
       const principal = req.headers["x-test-principal"];
       if (typeof principal === "string") (req as any).operatorId = principal;
       const proven = req.headers["x-test-proven-wallet"];
-      if (typeof proven === "string") (req as any).provenWallet = proven;
+      if (typeof proven === "string") {
+        (req as any).provenWallet = proven;
+        (req as any).provenWalletVia = "siwe-session";
+      }
     });
     await app.register(paidJobFlowRoutes);
     await app.register(negotiationRoutes);
@@ -470,10 +473,13 @@ describe("the legacy settlement routes on a real store", () => {
   });
 
   it("NEGATIVE (F1, the reproduced lie): a mock-settled job is simulated on both routes, never settled or paid", async () => {
+    // N133: a paid job's buyer is the caller's proven wallet, naming itself.
+    const BUYER_F1 = `0x${"f1".repeat(20)}`;
     const created = await app.inject({
       method: "POST",
       url: "/api/jobs/submit-from-discovery",
-      payload: { kernelId: "kernel-nyc", capabilityType: "liquid-handler", userAgentId: "user-agent-f1" },
+      headers: { "x-test-principal": BUYER_F1, "x-test-proven-wallet": BUYER_F1 },
+      payload: { kernelId: "kernel-nyc", capabilityType: "liquid-handler", userAgentId: BUYER_F1 },
     });
     expect(created.statusCode).toBe(201);
     const { jobId } = created.json();

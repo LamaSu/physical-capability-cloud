@@ -2,7 +2,7 @@
 
 **Goal:** a working gateway address, pcc-node with signing support, and an API key that never appears in a log.
 
-Run every command from the folder you are onboarding in. State lives in `./.pcc/`, which stays out of git (see `.gitignore`), so it survives shells that forget variables.
+Run every command from the folder you are onboarding in. Onboarding state lives in `./.pcc/` so it survives shells that forget variables. The node's private signing key lives separately at the default `~/.pcc-node/keys.json`, or at `PCC_NODE_KEY_PATH` when set, outside every source checkout; ignoring a key in git does not make its location safe.
 
 ## 1. The gateway: PCC_BASE
 Use the PCC gateway you were given. There is no default. At an event, a rehearsal or a staging gateway, **never call production** (`https://capability.network`) unless you were told to.
@@ -18,7 +18,11 @@ curl -sf "$(cat .pcc/base)/api/health" && echo " gateway OK"
 ```
 **Check:** `/api/health` answers 200 with JSON. If not, stop and report `prerequisites blocked`. Don't guess another address.
 
-**The gateway must enforce ownership.** It must check that each operator call names a kernel or job its caller owns. Master does not do that yet for every operator route: jobs, evidence, job status and the emergency stop. The gateway's WP-C (#445) adds it. Until your gateway carries it, onboard only on a private gateway that no other tenant uses, and tell the human why.
+**The gateway must enforce operator ownership checks.** The kernel-authority `operate` rule (board N85 for job polling, job status and heartbeat; #579 for the kernel heartbeat) permits the kernel's recorded operator identity, its proven operator wallet, or the gateway admin secret. `POST /api/kernels` records the registering caller as `operatorAddress`. Keep using a key for that same identity for these three calls; another identity gets 403 even if its key has `scopes: ["*"]`. The emergency stop uses the shared `stop_or_submit` rule, which also permits the kernel's own identity. Until your gateway carries these checks, onboard only on a private gateway that no other tenant uses, and tell the human why.
+
+**Evidence needs proven authority.** `POST /api/operator/evidence` takes `decide`, so a matching claimed operator key gets 403 `operator_proof_required`. Evidence takes decide, per DECISIONS 2026-10-04 01:25 (N31c). Evidence is posted with the kernel's proven operator wallet authority (`decide`).
+
+Operator identity proof for operate is completed by WP-A (DECISIONS items 136 and 138).
 
 ## 2. pcc-node, with the crypto extra
 pcc-node runs next to the device. It registers the kernel, signs its evidence and runs jobs. The `crypto` extra (pynacl) is **not optional**: without it the node cannot register a signing key or sign evidence, so its work can never verify.
@@ -37,23 +41,33 @@ python3 -c "import nacl.signing" && echo "signing OK"
 ```
 
 ## 3. The node's signing key, made here and never sent
-The node signs its evidence with an Ed25519 key. Make it now, on this machine, and give PCC only its public half. That way the node's signing key never travels: a provisioning request without a public key gets a server-made private key back in the response.
+The node signs its evidence with an Ed25519 key. Make it now, on this machine, and give PCC only its public half so its signatures can be verified. Without `publicKey`, the API key has no signing key on file; the gateway never generates or returns a private signing key.
+
+Key persistence is supported on **Linux only**, where pcc-node can check the filesystem and its aliases. Use the default `~/.pcc-node/keys.json`, or set `PCC_NODE_KEY_PATH` (or the fallback `PCC_NODE_KEYS_FILE`) to an absolute path outside this folder and every source checkout. Use the same location in this phase and phase 5; keep the override set for both if you need one. Your home and the key directory must be outside every source checkout. pcc-node checks the location, creates an owner-only directory and a `0600` key file, and refuses unsafe ownership, permissions or ancestry. Do not work around a refusal with `.gitignore` or by changing the key's permissions.
+
+The pcc-node 0.1.1 that step 2 installs does not run these checks or read `PCC_NODE_KEY_PATH`; the checks arrive with the first release that contains #374.
+
+Passing the path explicitly works across versions and skips #374's legacy-file check; this flow never creates `./pcc-keys.json`. A refused location can leave an empty `0700` directory.
 ```bash
 umask 077
 python3 - <<'EOF' > .pcc/node-public-key
+import os
 import nacl.signing                                 # refuses here if the crypto extra is missing
 from pcc_node.crypto import load_or_create_keys
-public_hex, _ = load_or_create_keys(".pcc/node-keys.json")
+key_path = os.environ.get("PCC_NODE_KEY_PATH") or os.environ.get("PCC_NODE_KEYS_FILE") or os.path.expanduser("~/.pcc-node/keys.json")
+if not os.path.isabs(key_path) or os.path.realpath(key_path).startswith(os.path.realpath(".") + os.sep):
+    raise SystemExit("The node key location must be an absolute path outside this folder and every source checkout")
+os.makedirs(os.path.dirname(key_path), mode=0o700, exist_ok=True)  # 0.1.1 r2 does not create it
+public_hex, _ = load_or_create_keys(key_path)        # explicit: 0.1.1 r2 would otherwise write ./pcc-keys.json
 print(public_hex, end="")
 EOF
-chmod 600 .pcc/node-keys.json
 ```
-**Check:** `.pcc/node-public-key` holds 64 hex characters. `.pcc/node-keys.json` holds the private half; never print it or copy it anywhere.
+**Check:** `.pcc/node-public-key` holds 64 hex characters. The selected key file holds the private half; never print it or copy it anywhere.
 
 ## 4. An operator API key, captured without logging it
 **Ask the human** (class C): "Which email should this operator account be registered under?"
 
-**Payouts: tell, don't ask.** PCC does not yet pay a wallet you name. Today settlement pays a wallet the gateway generates and holds for the account, or the gateway's own signer, and nothing lets you bind or check another destination. So this runbook runs test jobs only: no money moves in phases 6 and 7. Tell the human that, don't ask for a payout wallet, and promise no payouts. Paid operation waits for a gateway that pays a wallet the human confirms (a gateway row).
+**Payouts: tell, don't ask.** PCC does not yet pay a wallet you name. Settlement pays only the gateway's own signer, and nothing lets you bind or check another destination. So this runbook runs test jobs only: no money moves in phases 6 and 7. Tell the human that, don't ask for a payout wallet, and promise no payouts. Paid operation waits for a gateway that pays a wallet the human confirms (a gateway row).
 
 Write the human's answer into `.pcc/operator.json` with your file-writing tool, not with `echo` or `printf`: a command's text can be read by other users of this machine while it runs (`ps`). For example: `{"email": "operator@example.org", "name": "Bench plate reader"}`. The request below is built from that file, sent from a private file, and deleted.
 
@@ -212,7 +226,7 @@ printf '%s\n' 'provision_status: provisioned'
 ```
 The recipe requires owned regular input files and validates them before private staging. In a Git repository it refuses tracked private state and verifies that every credential destination is ignored, including after the response arrives. Outside a repository it prints one fixed note and continues with `.pcc/` at 0700. The request can await on-chain registration and wallet assignment, so curl waits up to 600 seconds. HTTP 201 is required before importing a BYOK response. A rejection prints only `http_status`, an allowlisted fixed `error` code or `unrecognised`, an integer `retry_after_seconds` from the body or an ASCII-digit Retry-After header, and a validated JSON-escaped `trace_id`; its private staging is removed. For 5xx, a key may exist server-side and counts toward the 5-key cap: report once with the printed trace_id and do not loop. For 429, honor retry_after_seconds and do not loop. Correct every other rejected request before retrying. Curl exits 1, 3, 6 and 7 remove staging because the request was not sent and no key was issued. Every other transport failure or an invalid 201 preserves its capture: a key may have been issued and cannot be recovered, and it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. Revoke the orphan key later from an authenticated session. Never print the response or its diagnostics.
 
-Every later call sends the key with `curl -H @.pcc/auth.header`. That keeps it off the command line, where other users of this machine could read it (`ps`). The key can do everything the account can, so treat it like a password. Keep `.pcc/` out of any repository or chat. Delete `.pcc/provision.json` once `.pcc/api-key` is written. Existing credentials are never overwritten. If you need to set them aside, keep the node signing key, public key, operator input and gateway in place; archive only the API credentials and captures inside the same ignored directory with this command, then verify the archive remains ignored when working in Git:
+Node calls that use the operator API key send it with `curl -H @.pcc/auth.header`. That keeps it off the command line, where other users of this machine could read it (`ps`). The key can do everything the account can, so treat it like a password. Keep `.pcc/` out of any repository or chat. Delete `.pcc/provision.json` once `.pcc/api-key` is written. Existing credentials are never overwritten. If you need to set them aside, keep the node signing key, public key, operator input and gateway in place; archive only the API credentials and captures inside the same ignored directory with this command, then verify the archive remains ignored when working in Git:
 
 ```bash
 python3 -c 'exec("import os, shutil, stat, subprocess, uuid\nfrom datetime import datetime, timezone\nfrom pathlib import Path\ndef secure(path):\n    s = path.lstat()\n    if s.st_uid != os.getuid() or not (stat.S_ISDIR(s.st_mode) or stat.S_ISREG(s.st_mode)): raise SystemExit(1)\n    path.chmod(0o700 if stat.S_ISDIR(s.st_mode) else 0o600)\nroot = Path(\".pcc\")\nsecure(root)\nif not root.is_dir(): raise SystemExit(1)\nin_git = bool(shutil.which(\"git\")) and subprocess.run([\"git\", \"rev-parse\", \"--git-dir\"], capture_output=True).returncode == 0\ncwd = Path.cwd()\nif not in_git and (os.environ.get(\"GIT_DIR\") or any((os.path.islink(p / \".git\") or (p / \".git\").is_file() or os.path.lexists(p / \".git\" / \"HEAD\")) for p in (cwd, *cwd.parents))): raise SystemExit(1)\nif in_git and subprocess.run([\"git\", \"ls-files\", \"--\", \".pcc\"], check=True, capture_output=True).stdout: raise SystemExit(1)\narchive = root / \"archive\"\nif not archive.exists(): archive.mkdir(mode=0o700)\nsecure(archive)\nif not archive.is_dir(): raise SystemExit(1)\ndest = archive / (datetime.now(timezone.utc).strftime(\"%Y%m%dT%H%M%SZ-\") + uuid.uuid4().hex)\nin_git and subprocess.run([\"git\", \"check-ignore\", \"-q\", \"--\", str(dest)], check=True, capture_output=True)\ndest.mkdir(mode=0o700)\nfor path in root.iterdir():\n    if path.name not in (\"provision.json\", \"api-key\", \"auth.header\", \"ed25519-private.pem\") and not path.name.startswith((\"capture.\", \"auth.header.\")): continue\n    secure(path)\n    if path.is_dir():\n        for base, dirs, files in os.walk(path):\n            for name in dirs + files: secure(Path(base) / name)\n    target = dest / path.name\n    in_git and subprocess.run([\"git\", \"check-ignore\", \"-q\", \"--\", str(target)], check=True, capture_output=True)\n    if target.exists(): raise SystemExit(1)\n    path.rename(target)\nprint(\"Private state archived inside .pcc/archive; validate recovered keys before provisioning.\")\n")' 2>/dev/null || { printf '%s\n' 'Private archive refused; verify owned private state and Git exclusions.' >&2; exit 1; }

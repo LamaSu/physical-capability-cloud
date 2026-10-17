@@ -2,9 +2,11 @@ import React from "react";
 import { GlassPanel } from "@pcc/ui";
 import { useAuthStore } from "../stores/auth-store.js";
 import { ParticleBackground } from "@pcc/ui";
+import { ConnectWallet } from "../components/ConnectWallet.js";
 
 export function LoginPage() {
   const login = useAuthStore((s) => s.login);
+  const authNotice = useAuthStore((s) => s.authNotice);
   const [key, setKey] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(false);
@@ -101,6 +103,10 @@ export function LoginPage() {
               </p>
             </div>
           </form>
+          <div className="mt-6 space-y-3 text-center">
+            {authNotice && <p role="status" className="text-xs text-white/60">{authNotice}</p>}
+            <ConnectWallet showNotice={false} />
+          </div>
         </GlassPanel>
       </div>
     </div>

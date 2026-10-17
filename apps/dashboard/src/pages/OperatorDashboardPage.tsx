@@ -8,11 +8,13 @@ import {
 import { useUIStore } from "../stores/ui-store.js";
 import { useOperatorStore } from "../stores/operator-store.js";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { InboxPanel } from "../components/inbox/InboxPanel.js";
 import {
   mockOperatorProfile, mockEarningsData, mockMaintenanceEvents, mockCertifications,
 } from "../api/mock-onboarding-data.js";
 
-const tabs = ["overview", "approvals", "earnings", "certifications", "maintenance"] as const;
+const tabs = ["inbox", "overview", "approvals", "earnings", "certifications", "maintenance"] as const;
+const TARGET_KERNEL_ID = "kernel-nanoclaw";
 
 /* ---------- Approval types ---------- */
 interface Approval {
@@ -49,37 +51,65 @@ export function OperatorDashboardPage() {
   /* ---------- Emergency Stop state ---------- */
   const [emergencyStopped, setEmergencyStopped] = React.useState(false);
   const [estopLoading, setEstopLoading] = React.useState(false);
+  const [estopError, setEstopError] = React.useState<string | null>(null);
 
   async function handleEmergencyStop() {
-    if (!window.confirm("EMERGENCY STOP: This will immediately halt all active jobs on kernel-nanoclaw. Continue?")) return;
+    if (!window.confirm(`EMERGENCY STOP for ${TARGET_KERNEL_ID}: PCC stops handing work to this machine and cancels its queued device commands. Queued jobs are held, not cancelled, and can start when you resume. Work already running stops only with the machine's own emergency stop. Continue?`)) return;
     setEstopLoading(true);
+    setEstopError(null);
+    const failureMessage = `The stop didn't go through. ${TARGET_KERNEL_ID} may still be running: use the machine's physical emergency stop, then try again.`;
     try {
-      await authorizedFetch("/api/operator/emergency-stop", {
+      const res = await authorizedFetch("/api/operator/emergency-stop", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kernelId: "kernel-nanoclaw" }),
+        body: JSON.stringify({ kernelId: TARGET_KERNEL_ID }),
       });
-      setEmergencyStopped(true);
+      const body = await res.json().catch(() => null);
+      if (res.ok && body?.stopped === true && body?.kernelId === TARGET_KERNEL_ID) {
+        setEmergencyStopped(true);
+      } else if (res.ok) {
+        setEstopError(`The server didn't confirm the stop for ${TARGET_KERNEL_ID}. The machine may still be running: use its physical emergency stop.`);
+      } else {
+        setEstopError(res.status === 401
+          ? `Sign in to stop ${TARGET_KERNEL_ID}. Until then, use the machine's physical emergency stop.`
+          : res.status === 403
+            ? `The stop was refused for this key. ${TARGET_KERNEL_ID} may still be running: use the machine's physical emergency stop.`
+            : failureMessage);
+      }
     } catch {
-      // best-effort — show stopped state anyway for operator safety
-      setEmergencyStopped(true);
+      setEstopError(failureMessage);
     } finally {
       setEstopLoading(false);
     }
   }
 
   async function handleEmergencyResume() {
-    if (!window.confirm("Resume operations on kernel-nanoclaw?")) return;
+    if (!window.confirm(`Resume operations on ${TARGET_KERNEL_ID}? Jobs PCC held during the stop can start on the machine.`)) return;
     setEstopLoading(true);
+    setEstopError(null);
+    const failureMessage = "Resume didn't go through. The kernel is still stopped; try again.";
+    const unconfirmedMessage = `Resume wasn't confirmed. ${TARGET_KERNEL_ID} may still be stopped, or the resume may have gone through: treat the machine as live, and press Resume Operations again to confirm.`;
     try {
-      await authorizedFetch("/api/operator/emergency-resume", {
+      const res = await authorizedFetch("/api/operator/emergency-resume", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kernelId: "kernel-nanoclaw" }),
+        body: JSON.stringify({ kernelId: TARGET_KERNEL_ID }),
       });
-      setEmergencyStopped(false);
+      if (res.ok) {
+        setEmergencyStopped(false);
+      } else {
+        setEstopError(res.status === 403
+          ? `Resume was refused for this key. Resuming needs a PCC admin, or proof that you control ${TARGET_KERNEL_ID}'s operator wallet; a wallet sign-in isn't that proof yet. Ask a PCC admin to resume it, or, if you operate ${TARGET_KERNEL_ID}, resume through the API with a PCC-issued key and its self-linked operator wallet (X-PCC-Wallet header).`
+          : res.status === 401
+            ? "Sign in to resume this kernel."
+            : res.status === 404
+              ? "This kernel or its policy wasn't found, so it can't be resumed here."
+              : res.status >= 500 && res.status < 600
+                ? unconfirmedMessage
+                : failureMessage);
+      }
     } catch {
-      // no-op
+      setEstopError(unconfirmedMessage);
     } finally {
       setEstopLoading(false);
     }
@@ -142,6 +172,8 @@ export function OperatorDashboardPage() {
         ))}
       </div>
 
+      {activeTab === "inbox" && <InboxPanel />}
+
       {/* Overview Tab */}
       {activeTab === "overview" && (
         <div className="space-y-6">
@@ -154,7 +186,7 @@ export function OperatorDashboardPage() {
               <div className="flex items-center gap-3">
                 <span className="inline-block w-2 h-2 rounded-full bg-red-400 animate-pulse" />
                 <span className="text-sm text-red-400 font-medium">
-                  EMERGENCY STOP ACTIVE — All jobs halted on kernel-nanoclaw
+                  {`EMERGENCY STOP ACTIVE for ${TARGET_KERNEL_ID}: PCC is holding this machine's jobs and has cancelled its queued device commands. Held jobs can start when you resume. Work already running stops only with the machine's own emergency stop.`}
                 </span>
               </div>
               <button
@@ -176,6 +208,7 @@ export function OperatorDashboardPage() {
               {estopLoading ? "Stopping..." : "EMERGENCY STOP"}
             </button>
           )}
+          {estopError && <p role="alert" className="text-sm text-red-400">{estopError}</p>}
 
           {/* KPIs */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

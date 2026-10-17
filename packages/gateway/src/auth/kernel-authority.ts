@@ -13,6 +13,10 @@
  *     operator. WP-A (#326) sets req.provenWallet for a SIWE session or a key minted from one;
  *     nothing sets it before that merges, so until then only the admin decides. A claimed
  *     identity never decides: anyone can provision a key that names any wallet or email.
+ *   - "operate": the kernel's own running, through routes the operator's daemons and agents call
+ *     with the operator's key: its heartbeat and capability announce, and every device-relay route
+ *     (execution scopes, tool calls, the pending queue, tool results, camera, chat). Same rule as
+ *     "stop or submit" below. Bus #6505: these routes had no ownership check at all.
  *   - "stop or submit": emergency-stop, and an approval submitted as PENDING. Also the kernel's
  *     own principal: the identity its operatorAddress records, which POST /api/kernels takes from
  *     the registering caller. An operator must never lose their own e-stop, and a pending
@@ -24,13 +28,15 @@ import type { FastifyRequest } from "fastify";
 import { schema, eq } from "@pcc/store";
 import { getStore } from "../db.js";
 
-export type KernelAction = "decide" | "stop_or_submit";
+export type KernelAction = "decide" | "stop_or_submit" | "operate";
 
 export interface KernelAuthority {
   /** The request carried a valid X-Admin-Key. */
   admin: boolean;
   /** The wallet the caller proved control of (WP-A); null when none. */
   provenWallet: string | null;
+  /** Server-recorded proof origin; absence grants no buyer binding. */
+  provenWalletVia?: string | null;
   /** The caller's claimed identity: its API key's operator id, or its session's address. */
   claimed: string | null;
 }
@@ -50,11 +56,12 @@ function hasAdminSecret(provided: unknown, expected: string | undefined = proces
 }
 
 export function authorityOf(req: FastifyRequest): KernelAuthority {
-  const r = req as unknown as { provenWallet?: unknown; operatorId?: unknown; userId?: unknown };
+  const r = req as unknown as { provenWallet?: unknown; provenWalletVia?: unknown; operatorId?: unknown; userId?: unknown };
   const text = (v: unknown) => (typeof v === "string" && v.trim().length > 0 ? v.trim() : null);
   return {
     admin: hasAdminSecret(req.headers["x-admin-key"]),
     provenWallet: text(r.provenWallet),
+    provenWalletVia: typeof r.provenWalletVia === "string" ? r.provenWalletVia : null,
     claimed: text(r.operatorId) ?? text(r.userId),
   };
 }
@@ -65,7 +72,7 @@ const WALLET_RE = /^0x[0-9a-fA-F]{40}$/;
 /** operatorAddress values that record no owner: the empty string and the legacy zero placeholder. */
 const UNOWNED = new Set(["", "0x0000000000000000000000000000000000000000"]);
 
-function ownerOf(operatorAddress: unknown): string | null {
+export function ownerOf(operatorAddress: unknown): string | null {
   if (typeof operatorAddress !== "string") return null;
   const owner = operatorAddress.trim().toLowerCase();
   return UNOWNED.has(owner) ? null : owner;
@@ -103,6 +110,11 @@ const REFUSALS: Record<KernelAction, Record<string, string>> = {
     reason: "not_kernel_operator",
     message: "Only this kernel's operator or the gateway admin may do this.",
   },
+  operate: {
+    error: "forbidden",
+    reason: "not_kernel_operator",
+    message: "Only this kernel's operator or the gateway admin may do this.",
+  },
 };
 
 export interface Refusal {
@@ -132,5 +144,7 @@ export function refuseKernelAction(req: FastifyRequest, a: KernelAuthority, kern
   }
   if (!kernel) return { status: 404, body: { error: "kernel_not_found", message: "No kernel with this id is registered." } };
   const allowed = action === "decide" ? mayDecide(a, kernel.operatorAddress) : mayStopOrSubmit(a, kernel.operatorAddress);
+  // "operate" (the kernel's own running: heartbeat, capability announce, the device relay) takes
+  // the same rule as "stop_or_submit": the kernel's own principal, its proven wallet, or the admin.
   return allowed ? null : { status: 403, body: REFUSALS[action] };
 }

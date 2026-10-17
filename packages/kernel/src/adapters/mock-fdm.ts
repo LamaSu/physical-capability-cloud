@@ -123,7 +123,7 @@ export class MockFDMAdapter implements MachineAdapter {
       }
 
       case "stop": {
-        this.cancelJob();
+        this.cancelMockJob();
         return { success: true, message: "Stopped" };
       }
 
@@ -157,7 +157,7 @@ export class MockFDMAdapter implements MachineAdapter {
   }
 
   async dispose(): Promise<void> {
-    this.cancelJob();
+    this.cancelMockJob();
     this.listeners = [];
   }
 
@@ -200,7 +200,7 @@ export class MockFDMAdapter implements MachineAdapter {
     this.stopExecution();
   }
 
-  private cancelJob(): void {
+  private cancelMockJob(): void {
     this.stopExecution();
     this.status = "idle";
     this.progress = 0;

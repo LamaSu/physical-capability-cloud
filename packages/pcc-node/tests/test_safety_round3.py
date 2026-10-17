@@ -131,33 +131,36 @@ def test_on_windows_no_api_key_is_stored_in_a_config(tmp_path, monkeypatch):
 # ── Finding 4 ────────────────────────────────────────────────────────────────
 
 @POSIX_ONLY
+@pytest.mark.skipif(not crypto._HAS_NACL, reason="pynacl not installed")
 def test_a_failed_hard_link_never_replaces_an_identity_created_meanwhile(tmp_path, monkeypatch):
     path = tmp_path / "keys" / "keys.json"
     ours_pub, ours_sec = generate_node_keys()
     theirs_pub, theirs_sec = generate_node_keys()
 
+    published = []
+
     def no_links(src, dst, *args, **kwargs):
+        # The competing process publishes just before our atomic link fails.
+        assert dst == "keys.json" and kwargs.get("dst_dir_fd") is not None
+        assert not published, "the competing identity was already published"
+        _write_pair(str(path), theirs_pub, theirs_sec)
+        st = path.stat()
+        published.append((st.st_ino, st.st_size))
         raise OSError(errno.EPERM, "Operation not permitted")
 
-    real_lexists = os.path.lexists
-
-    def racing_lexists(p):
-        # The competing process installs its identity just after our check.
-        result = real_lexists(p)
-        if os.fspath(p) == str(path) and not result:
-            _write_pair(str(path), theirs_pub, theirs_sec)
-        return result
-
     monkeypatch.setattr(crypto.os, "link", no_links)
-    monkeypatch.setattr(crypto.os.path, "lexists", racing_lexists)
     try:
         installed = crypto._create_exclusive(str(path), ours_pub, ours_sec)
     except KeyFileError:
         installed = None
-    monkeypatch.setattr(crypto.os.path, "lexists", real_lexists)
     assert installed is not True, "a key was installed without an atomic no-replace step"
-    if path.exists():
-        assert json.loads(path.read_text())["public"] == theirs_pub, "the competing identity was overwritten"
+    assert len(published) == 1, "the failed-link publication race was not exercised"
+    assert path.exists(), "the competing identity was removed"
+    st = path.stat()
+    assert (st.st_ino, st.st_size) == published[0], "the competing file changed"
+    loaded_theirs = load_or_create_keys(str(path)) == (theirs_pub, theirs_sec)
+    assert loaded_theirs, "the competing identity was overwritten"
+    assert os.listdir(path.parent) == ["keys.json"], "the failed publisher left a temporary file"
 
 
 @POSIX_ONLY

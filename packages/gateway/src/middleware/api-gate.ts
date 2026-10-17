@@ -6,9 +6,12 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { hasSingleValidAdminKey } from "./relay-admin-gate.js";
 import { nonCanonicalTargetReason, NON_CANONICAL_REFUSAL } from "./canonical-request-target.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
+import { containsKeyMaterial } from "../services/wallet-links/guards.js";
+import { isWalletRequest } from "../services/telemetry-privacy.js";
 
 /** Routes that don't require any auth */
 const PUBLIC_PREFIXES = [
@@ -133,6 +136,11 @@ const PUBLIC_LOB_WEBHOOK_PATH = "/api/lob/webhook";
 
 function isPublicRoute(url: string, method?: string): boolean {
   const path = url.split("?")[0];
+  // Only the device-authorization capability endpoints are public.
+  if (method === "POST" && path === "/api/wallets/link-requests") return true;
+  if (method === "POST" && /^\/api\/wallets\/link-requests\/[^/]+\/fund$/.test(path)) return true;
+  if (method === "POST" && /^\/api\/wallets\/link-requests\/[^/]+\/proof$/.test(path)) return true;
+  if ((method === "GET" || method === "HEAD") && /^\/api\/wallets\/link-requests\/[^/]+$/.test(path)) return true;
   if (PUBLIC_PREFIXES.some((p) => path.startsWith(p))) return true;
   if (PUBLIC_EXACT.includes(path)) return true;
   if (method === "POST" && path === PUBLIC_CARRIER_WEBHOOK_PATH) return true;
@@ -157,15 +165,24 @@ function isPublicRoute(url: string, method?: string): boolean {
 }
 
 async function apiGateImpl(app: FastifyInstance) {
-  app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
-    // A target the router would route differently is never judged (N105; the server-level guard
-    // refuses it first, and this keeps apiGate closed even without that guard).
-    if (nonCanonicalTargetReason(req.url) !== null) return reply.status(400).send(NON_CANONICAL_REFUSAL);
+  const authenticate = async (req: FastifyRequest, reply: FastifyReply) => {
     // Only gate /api/* routes
     if (!req.url.startsWith("/api/")) return;
 
-    // Skip public routes
-    if (isPublicRoute(req.url, req.method)) return;
+    const optionalCreate = req.method === "POST" && req.url.split("?")[0] === "/api/wallets/link-requests";
+    if (optionalCreate && req.headers["x-pcc-api-key"] !== undefined) {
+      return reply.status(401).send({ error: "api_key_required",
+        message: "Send the key as Authorization: Bearer <key>; X-PCC-API-Key is not read." });
+    }
+    // A presented credential on create must be validated even though create is public.
+    if (isPublicRoute(req.url, req.method) && !(optionalCreate && req.headers.authorization !== undefined)) return;
+
+    // These private settlement routes also accept the gateway admin secret itself.
+    const path = req.url.split("?")[0];
+    const receiptRoute = /^(?:\/api\/operator\/jobs\/[^/]+\/receipt)$/.test(path)
+      && (req.method === "POST" || req.method === "GET" || req.method === "HEAD");
+    const issueRoute = path === "/api/admin/settlement-challenges" && req.method === "POST";
+    if ((receiptRoute || issueRoute) && hasSingleValidAdminKey(req)) return;
 
     // Try API key first (most common for agents)
     const apiKey = resolveApiKey(req);
@@ -177,7 +194,9 @@ async function apiGateImpl(app: FastifyInstance) {
     }
 
     // Try SIWE session (dashboard users)
-    const session = resolveSession(req);
+    // A cookie must not turn an invalid presented key into anonymous creation.
+    const sessionRequest = optionalCreate ? Object.assign(Object.create(req), { cookies: {} }) as FastifyRequest : req;
+    const session = resolveSession(sessionRequest);
     if (session) {
       req.userId = session.address;
       return;
@@ -190,6 +209,20 @@ async function apiGateImpl(app: FastifyInstance) {
       provision_url: "/api/auth/provision",
       docs: "https://capability.network/whitepaper.md",
     });
+  };
+  app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
+    // A target the router would route differently is never judged (N105).
+    if (nonCanonicalTargetReason(req.url) !== null) return reply.status(400).send(NON_CANONICAL_REFUSAL);
+    if (isWalletRequest(req.url) && (req.method === "GET" || req.method === "HEAD") &&
+      (req.headers["transfer-encoding"] !== undefined || Number(req.headers["content-length"] ?? 0) > 0)) {
+      return reply.status(400).send({ error: "invalid_request" });
+    }
+    return authenticate(req, reply);
+  });
+  app.addHook("preValidation", async (req: FastifyRequest, reply: FastifyReply) => {
+    if (!isWalletRequest(req.url)) return;
+    // Root preValidation: I1 precedes route validation and handler persistence.
+    if (containsKeyMaterial(req.body)) return reply.status(400).send({ error: "key_material_refused" });
   });
 }
 

@@ -1,0 +1,429 @@
+{
+  "contract": "pcc.evidence.subject-binding.v1",
+  "description": "Step 8's r1 funded-input rules (#8815/#8820), plus the exact deviceJobId comparison (#8973/#8979), for the pcc.evidence.subject-binding.v1 contract. Every bundle satisfies steps 1-7 and 9-11 and isolates one input rule. Only execution_completed counts as completion. All input authority comes from the authenticated funded subject recipeRef. Event and bundle preimages are independently encoded and SHA-256 hashed.",
+  "completionEventTypes": [
+    "execution_completed"
+  ],
+  "vectors": [
+    {
+      "id": "matching-load-and-completion",
+      "ruleSource": "Step 8, #8815/#8820 and #8973/#8979: at least one kernel-written method_loaded commits the funded input; every load and execution_completed commits the same deviceJobId, compared exactly.",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "42",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:36d891ef405ce61dbd85cf4ce843158b28070ec98de23a50428ea9ded4846d57"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "42"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:33bfa566c18dde2919fa6a6fd4493cd981e152600fc7a9025bc2d48a653d967f"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"42\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"42\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:33bfa566c18dde2919fa6a6fd4493cd981e152600fc7a9025bc2d48a653d967f\",\"sha256:36d891ef405ce61dbd85cf4ce843158b28070ec98de23a50428ea9ded4846d57\"]",
+      "bundleHash": "sha256:bf0801f5444e4428c23e72ca810cafbd87c04bc533b59a2fe4fba1218c5f9ece",
+      "expected": {
+        "ok": true
+      }
+    },
+    {
+      "id": "completion-device-job-string-number-coercion",
+      "ruleSource": "Step 8, #8973/#8979: completion deviceJobId is compared exactly to the loads' non-empty string D; the number 42 does not equal the string 42.",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "42",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:36d891ef405ce61dbd85cf4ce843158b28070ec98de23a50428ea9ded4846d57"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": 42
+          },
+          "id": "input-event-1",
+          "hash": "sha256:666acffe996032672d4c6bcda426a9812f0214cd6e321dda79cf7e441640a0ed"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"42\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":42,\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:36d891ef405ce61dbd85cf4ce843158b28070ec98de23a50428ea9ded4846d57\",\"sha256:666acffe996032672d4c6bcda426a9812f0214cd6e321dda79cf7e441640a0ed\"]",
+      "bundleHash": "sha256:d93158b4c37c042a06a84cdcfe6da8cf58de4aff87a75f980646fc2053462b0f",
+      "expected": {
+        "ok": false,
+        "reason": "input-completion-device-job-mismatch",
+        "eventIndex": 1
+      }
+    },
+    {
+      "id": "matching-input-without-method-loaded",
+      "ruleSource": "Step 8 r1, #8815/#8820: at least one method_loaded must exist; a matching inputHash committed by another event does not suffice.",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "42",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:77610cced754ba1fb2901d27211d00a1656f2a3302f128c0a62f0e1d7f05d620"
+        }
+      ],
+      "eventHashVersions": [
+        1
+      ],
+      "eventPreimages": [
+        "{\"payload\":{\"deviceJobId\":\"42\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:77610cced754ba1fb2901d27211d00a1656f2a3302f128c0a62f0e1d7f05d620\"]",
+      "bundleHash": "sha256:6b220a3ece1e48fe4eb362c6b5e27e90e165918d81f2ed440191e36992bc6a1e",
+      "expected": {
+        "ok": false,
+        "reason": "input-not-committed"
+      }
+    },
+    {
+      "id": "kernel-load-without-input-hash",
+      "ruleSource": "Step 8 r1, #8815: EVERY method_loaded must commit payload.inputHash; a kernel-written load without it is refused at that load's index.",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "42"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:d2d0c5a84c083877dc719289bf8fa3185c1ee78f36e77ee6ae43cc5b8c5b77cd"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "42"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:33bfa566c18dde2919fa6a6fd4493cd981e152600fc7a9025bc2d48a653d967f"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"42\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"42\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:33bfa566c18dde2919fa6a6fd4493cd981e152600fc7a9025bc2d48a653d967f\",\"sha256:d2d0c5a84c083877dc719289bf8fa3185c1ee78f36e77ee6ae43cc5b8c5b77cd\"]",
+      "bundleHash": "sha256:dc69245136fe2d0e28325760b14098c0021f7c016a8a8553d30a3dc68ba1ba0f",
+      "expected": {
+        "ok": false,
+        "reason": "input-not-committed",
+        "eventIndex": 0
+      }
+    },
+    {
+      "id": "kernel-load-with-different-input",
+      "ruleSource": "Step 8 r1, #8815/#8820: EVERY method_loaded must commit the funded subject's inputHash exactly; a different commitment is refused at that load's index.",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "42",
+            "inputHash": "sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:d823d07fd093b65e2ab87638ab664b188a90640e20627b6c73838cfb54a35766"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "42"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:33bfa566c18dde2919fa6a6fd4493cd981e152600fc7a9025bc2d48a653d967f"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"42\",\"inputHash\":\"sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"42\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:33bfa566c18dde2919fa6a6fd4493cd981e152600fc7a9025bc2d48a653d967f\",\"sha256:d823d07fd093b65e2ab87638ab664b188a90640e20627b6c73838cfb54a35766\"]",
+      "bundleHash": "sha256:8fc7d5ca93f4eb2b7948a1300e187f61a080f9a42eacfd28eec27045370fcecb",
+      "expected": {
+        "ok": false,
+        "reason": "input-mismatch",
+        "eventIndex": 0
+      }
+    },
+    {
+      "id": "non-load-with-different-input-after-matching-load",
+      "ruleSource": "Step 8 r1, #8815: every other event that commits payload.inputHash must also match the funded subject's inputHash, even alongside a matching method_loaded.",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "42",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:36d891ef405ce61dbd85cf4ce843158b28070ec98de23a50428ea9ded4846d57"
+        },
+        {
+          "type": "execution_progress",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "42",
+            "inputHash": "sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:f52b31c519716d100edd64a878a1da10d1c52dddfac6b5550aa568bdea9628db"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "42"
+          },
+          "id": "input-event-2",
+          "hash": "sha256:33bfa566c18dde2919fa6a6fd4493cd981e152600fc7a9025bc2d48a653d967f"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        1,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"42\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"42\",\"inputHash\":\"sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_progress\"}",
+        "{\"payload\":{\"deviceJobId\":\"42\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:33bfa566c18dde2919fa6a6fd4493cd981e152600fc7a9025bc2d48a653d967f\",\"sha256:36d891ef405ce61dbd85cf4ce843158b28070ec98de23a50428ea9ded4846d57\",\"sha256:f52b31c519716d100edd64a878a1da10d1c52dddfac6b5550aa568bdea9628db\"]",
+      "bundleHash": "sha256:bc79871a3b23cbdb1c0146b0c4f54a78f57c09a65d93bbe24d8e72c7c8f1408f",
+      "expected": {
+        "ok": false,
+        "reason": "input-mismatch",
+        "eventIndex": 1
+      }
+    },
+    {
+      "id": "second-kernel-load-without-input-hash",
+      "ruleSource": "Step 8 r1, #8815: EVERY method_loaded must commit payload.inputHash; a prior matching load does not excuse a later load that omits it.",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "42",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:36d891ef405ce61dbd85cf4ce843158b28070ec98de23a50428ea9ded4846d57"
+        },
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "42"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:d2d0c5a84c083877dc719289bf8fa3185c1ee78f36e77ee6ae43cc5b8c5b77cd"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "42"
+          },
+          "id": "input-event-2",
+          "hash": "sha256:33bfa566c18dde2919fa6a6fd4493cd981e152600fc7a9025bc2d48a653d967f"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        2,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"42\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"42\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"42\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:33bfa566c18dde2919fa6a6fd4493cd981e152600fc7a9025bc2d48a653d967f\",\"sha256:36d891ef405ce61dbd85cf4ce843158b28070ec98de23a50428ea9ded4846d57\",\"sha256:d2d0c5a84c083877dc719289bf8fa3185c1ee78f36e77ee6ae43cc5b8c5b77cd\"]",
+      "bundleHash": "sha256:59a1ce940fce29767234c3efc8f283b429d439b86ab8577d6231a97d8c14a9be",
+      "expected": {
+        "ok": false,
+        "reason": "input-not-committed",
+        "eventIndex": 1
+      }
+    }
+  ]
+}
