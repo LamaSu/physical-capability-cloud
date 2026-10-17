@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { createMachineAdapter } from "../adapter-factory.js";
+import * as testingBarrel from "../testing/index.js";
 import type { DeviceConfig } from "../kernel-config.js";
 
 const sourceRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -128,8 +129,19 @@ describe("FakeDevice production isolation", () => {
     }
   });
 
-  it("testing barrel exports only the audited FakeDevice", async () => {
-    expect(Object.keys(await import("../testing/index.js")).sort()).toEqual(["FakeDevice"]);
+  it("RV-LOW-B imports the barrel before the test timeout budget begins", () => {
+    const source = ts.createSourceFile("guard.ts", readFileSync(new URL("./fake-device-production-guard.test.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
+    const namespaces = source.statements.flatMap((statement) => {
+      if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier) ||
+        statement.moduleSpecifier.text !== "../testing/index.js") return [];
+      const bindings = statement.importClause?.namedBindings;
+      return bindings && ts.isNamespaceImport(bindings) ? [bindings.name.text] : [];
+    });
+    expect(namespaces).toEqual(["testingBarrel"]);
+  });
+
+  it("testing barrel exports only the audited FakeDevice", () => {
+    expect(Object.keys(testingBarrel).sort()).toEqual(["FakeDevice"]);
   });
 
   it("shipped-file fixture importing a sibling outside __tests__ stays clean", () => {
