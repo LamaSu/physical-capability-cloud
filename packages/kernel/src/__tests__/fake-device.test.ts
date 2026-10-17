@@ -761,3 +761,29 @@ describe("FakeDevice listener cancellation contract", () => {
     device.complete();
   });
 });
+
+
+describe("FakeDevice terminal clock errors", () => {
+  it.each(["throw", "invalid"] as const)("RV-INFO-A a %s clock leaves the terminal job active for retry", async (fault) => {
+    let calls = 0;
+    const device = await accepted({ clock: () => {
+      if (++calls === 1) {
+        if (fault === "throw") throw new Error("clock broke");
+        return new Date(NaN);
+      }
+      return new Date(Date.UTC(2030, 0, 1));
+    } });
+    const events: Emitted[] = [];
+    device.onEvidence((event) => events.push(event));
+    let idle = false;
+    const quiescent = device.quiesceEvidence().then(() => { idle = true; });
+    expect(() => device.complete()).toThrow(fault === "throw" ? "clock broke" : "clock must return a valid Date");
+    expect(events).toEqual([]);
+    expect(await device.getStatus()).toBe("busy");
+    expect(idle).toBe(false);
+    device.complete();
+    await quiescent;
+    expect(events.map((event) => event.type)).toEqual(["execution_completed"]);
+    expect(await device.getStatus()).toBe("idle");
+  });
+});

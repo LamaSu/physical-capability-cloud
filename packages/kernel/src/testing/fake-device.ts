@@ -337,7 +337,6 @@ export class FakeDevice implements MachineAdapter {
       if (Object.hasOwn(clonedPayload, this.emissionBindingKey) && clonedPayload[this.emissionBindingKey] !== job.id) {
         throw new Error("payload names a different device job");
       }
-      terminal = failed || type === this.completedType || type === "execution_completed";
       const timestamp = this.clock ? this.clock() : new Date(deterministicBase + this.eventNumber);
       if (!(timestamp instanceof Date) || !Number.isFinite(timestamp.getTime())) throw new Error("clock must return a valid Date");
       const event: DeviceEvent = {
@@ -346,6 +345,7 @@ export class FakeDevice implements MachineAdapter {
         source: { deviceId: this.emissionId, deviceType: this.deviceType, kernelId: this.kernelId, simulated: true },
         payload: { ...clonedPayload, [this.emissionBindingKey]: job.id, mock: true, ...(failed ? { origin: "device" } : {}) },
       };
+      terminal = failed || type === this.completedType || type === "execution_completed";
       this.eventNumber += 1;
       if (typeof event.payload.progress === "number") this.currentProgress = event.payload.progress;
       if (type === this.completedType || type === "execution_completed") this.currentProgress = 100;
