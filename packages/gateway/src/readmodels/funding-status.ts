@@ -17,7 +17,7 @@
  *     escrow row's status to pass reconcile's precondition, by the same function reconcile activates
  *     by (activationRefusal; the steward's ruling 1). Once live the row's status is not read: it
  *     reads completed after settlement, and the funding that activated the scope stays verified
- *     (R1-a, rowStatusGatesFunding, approved by the steward under #7453(a)/(b)).
+ *     (R1-a, rowStatusGatesFunding, approved by the steward under #7453(a)).
  *   - A mock escrow never reads funded_verified, whatever the settlement mode: nothing here reads
  *     the mode, and a mock row's "mock-escrow-..." contract is never a 0x address, so no record binds
  *     to it (the steward's condition (iii), bulletin 7195).
@@ -71,7 +71,7 @@ export const FUNDING_STATUS_SCHEMA_ID = "pcc.funding-status/v1" as const;
  * funded_verified needs `bound` (and, before activation, the escrow row's status: FUNDING_STATES), and
  * only `bound` shows the verification. The members are reconcilePaidScope's refusal names, in the
  * binding rule's order; expected_chain_unavailable and record_chain_mismatch are the steward's ruling
- * 4's (the 9th and 10th members, approved by the steward under #7453(a)/(b)).
+ * 4's (the 9th and 10th members, approved by the steward under #7453(b)).
  */
 export const FUNDING_BINDINGS = [
   "no_record",
@@ -148,10 +148,10 @@ const ONCE_LIVE: ReadonlySet<string> = new Set(["active", "expired", "suspended_
 
 /**
  * R1-a: whether the escrow row's status gates funded_verified for a scope in `scopeStatus`. Approved
- * by the steward under #7453(a)/(b): only before activation, where reconcilePaidScope's activation
- * reads it (precondition (c)). Once live,
- * reconcile's idempotent answer does not read it either, and the row's later status (completed after
- * settlement) does not undo the verified funding that activated the scope.
+ * by the steward under #7453(a): only before activation, where reconcilePaidScope's activation
+ * reads it (precondition (c)). Once live, reconcile's idempotent answer does not read it either, and
+ * the row's later status (completed after settlement) does not undo the verified funding that
+ * activated the scope.
  */
 function rowStatusGatesFunding(scopeStatus: string): boolean {
   return PRE_ACTIVATION.has(scopeStatus);

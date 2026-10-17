@@ -29,6 +29,10 @@ export interface ScaffoldResult {
 
 export function scaffold(options: ScaffoldOptions): ScaffoldResult {
   const { config } = options;
+  // A class chooses the command path; resolve every machine before generating any file.
+  for (const adapter of config.adapters) {
+    if (adapter.adapterType === "machine") machineCapabilityClass(config, adapter);
+  }
   const files: GeneratedFile[] = [];
 
   // 1. Generate package.json
@@ -49,7 +53,7 @@ export function scaffold(options: ScaffoldOptions): ScaffoldResult {
   for (const adapter of config.adapters) {
     files.push({
       path: `src/adapters/${toKebabCase(adapter.className)}.ts`,
-      content: generateAdapter(adapter, config.kernel.kernelId),
+      content: generateAdapter(adapter, config),
       description: `${adapter.adapterType} adapter for ${adapter.adapterId}`,
     });
   }
@@ -165,20 +169,31 @@ function generateTsConfig(): string {
   }, null, 2);
 }
 
-function generateAdapter(adapter: AdapterManifest, kernelId: string): string {
-  if (adapter.protocol === "http" && adapter.adapterType === "machine") {
-    return generateHttpMachineAdapter(adapter, kernelId);
+function machineCapabilityClass(config: OnboardConfig, adapter: AdapterManifest): string {
+  const classes = [...new Set(config.capabilities
+    .filter(cap => cap.adapterId === adapter.adapterId)
+    .map(cap => cap.type))];
+  if (classes.length === 0) {
+    throw new Error(`Adapter "${adapter.adapterId}": add exactly one capability class for it`);
   }
-  if (adapter.adapterType === "sensor") {
-    return generateSensorAdapterCode(adapter, kernelId);
+  if (classes.length > 1) {
+    throw new Error(`Adapter "${adapter.adapterId}" has several capability classes: ${classes.join(", ")}; add exactly one capability class for it`);
   }
-  if (adapter.adapterType === "camera") {
-    return generateCameraAdapterCode(adapter, kernelId);
-  }
-  return generateHttpMachineAdapter(adapter, kernelId);
+  return classes[0];
 }
 
-function generateHttpMachineAdapter(adapter: AdapterManifest, kernelId: string): string {
+function generateAdapter(adapter: AdapterManifest, config: OnboardConfig): string {
+  if (adapter.adapterType === "sensor") {
+    return generateSensorAdapterCode(adapter, config.kernel.kernelId);
+  }
+  if (adapter.adapterType === "camera") {
+    return generateCameraAdapterCode(adapter, config.kernel.kernelId);
+  }
+  return generateHttpMachineAdapter(adapter, config.kernel.kernelId, machineCapabilityClass(config, adapter));
+}
+
+function generateHttpMachineAdapter(adapter: AdapterManifest, kernelId: string, capabilityClass: string): string {
+  const legacy = capabilityClass === "fdm";
   const statusEndpoint = adapter.endpoints?.find(e => e.purpose === "status");
   const startEndpoint = adapter.endpoints?.find(e => e.purpose === "start");
   const stopEndpoint = adapter.endpoints?.find(e => e.purpose === "stop");
@@ -196,7 +211,7 @@ import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 type MachineStatus = "idle" | "busy" | "error" | "offline" | "maintenance";
 
 interface MachineCommand {
-  type: "load_gcode" | "start" | "pause" | "resume" | "stop" | "status";
+  type: "${legacy ? "load_gcode" : "prepare"}" | "start" | "pause" | "resume" | "stop" | "status";
   payload?: Record<string, unknown>;
 }
 
@@ -219,14 +234,18 @@ export interface ${adapter.className}Config {
 
 export class ${adapter.className} {
   readonly id: string;
-  readonly type = "${adapter.adapterType === "machine" ? "fdm" : adapter.adapterType}" as const;
+  readonly type = ${JSON.stringify(capabilityClass)} as const;
+  // The complete list of the commands this adapter implements.
+  readonly accepts = ["${legacy ? "load_gcode" : "prepare"}", "start", "stop", "status"] as const;
   readonly source: EvidenceSource;
 
   private config: ${adapter.className}Config;
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private lastProgress = 0;
-  private endPolling: (() => void) | null = null;
+${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputData: Uint8Array } | null = null;
+  private stagedCount = 0;
+`}  private endPolling: (() => void) | null = null;
 
   constructor(id: string, config: ${adapter.className}Config) {
     this.id = id;
@@ -236,6 +255,7 @@ export class ${adapter.className} {
       deviceType: "${adapter.deviceType}",
       kernelId: "${kernelId}",
       firmwareVersion: "${adapter.firmwareVersion}",
+      ...(config.mockMode ? { simulated: true } : {}),
     };
   }
 
@@ -272,7 +292,7 @@ export class ${adapter.className} {
 
   private async runCommand(command: MachineCommand): Promise<MachineCommandResult> {
     switch (command.type) {
-      case "load_gcode": {
+      ${legacy ? `case "load_gcode": {
         ${loadEndpoint
     ? `await this.apiPost("${loadEndpoint.path}", { filename: command.payload?.filename });`
     : '// TODO: Upload program to your device\n        // await this.apiPost("/api/programs/upload", { file: command.payload?.filename });'}
@@ -284,27 +304,61 @@ export class ${adapter.className} {
           payload: { gcodeHash: command.payload?.gcodeHash },
         });
         return { success: true, message: "Program loaded" };
-      }
+      }` : `case "prepare": {
+        // NON-ACTUATING: stage and validate only; no motion, heat, dispense or other device-state change.
+        const inputData = command.payload?.inputData;
+        if (inputData === undefined) return { success: false, message: "prepare: no input data" };
+        const jobId = command.payload?.jobId;
+        const inputHash = command.payload?.inputHash;
+        if (typeof jobId !== "string" || jobId.length === 0 ||
+            typeof inputHash !== "string" || !/^sha256:[0-9a-f]{64}$/.test(inputHash)) {
+          return { success: false };
+        }
+        if (!(inputData instanceof Uint8Array)) return { success: false };
+        // Forward exactly the bytes the kernel hashed as base64.
+        // Adapt this staging call to your device's real upload API without actuating.
+        let deviceJobId: string;
+        if (this.config.mockMode) {
+          deviceJobId = \`mock-\${++this.stagedCount}\`;
+        } else {
+          ${loadEndpoint
+    ? `const response = await this.apiPost("${loadEndpoint.path}", { jobId, inputHash,
+            inputBase64: Buffer.from(inputData).toString("base64") }); // Staging only.
+          const staged = await response.json();
+          if (typeof staged.deviceJobId !== "string" || staged.deviceJobId.length === 0) return { success: false };
+          deviceJobId = staged.deviceJobId;`
+    : '// TODO: Stage the input through your device API without actuating.\n          return { success: false, message: "prepare: staging is not implemented for this device" };'}
+        }
+        this.staged = { jobId, deviceJobId, inputData: inputData.slice() };
+        // The kernel records method_loaded from this ack; never emit method_loaded.
+        return { success: true, data: { jobId, inputHash, deviceJobId } };
+      }`}
 
       case "start": {
-        ${startEndpoint
-    ? `await this.apiPost("${startEndpoint.path}", {});`
-    : '// TODO: Start your device\n        // await this.apiPost("/api/job/start", {});'}
+        ${legacy ? "" : `if (!this.staged || command.payload?.jobId !== this.staged.jobId) return { success: false };
+        const { deviceJobId } = this.staged;
+        if (!this.config.mockMode) {`}
+        ${legacy ? "" : "  "}${startEndpoint
+    ? `await this.apiPost("${startEndpoint.path}", ${legacy ? "{}" : "{ deviceJobId }"});`
+    : `// TODO: Start your device\n        ${legacy ? "" : "  "}// await this.apiPost("/api/job/start", ${legacy ? "{}" : "{ deviceJobId }"});`}
+        ${legacy ? "" : "}"}
 
         this.emit({
           type: "execution_started",
           timestamp: new Date().toISOString(),
           source: this.source,
-          payload: {},
+          payload: ${legacy ? "{}" : "{ deviceJobId: this.staged.deviceJobId }"},
         });
         this.startPolling();
         return { success: true, message: "Started" };
       }
 
       case "stop": {
-        ${stopEndpoint
+        ${legacy ? "" : "if (!this.config.mockMode) {"}
+        ${legacy ? "" : "  "}${stopEndpoint
     ? `await this.apiPost("${stopEndpoint.path}", {});`
-    : '// TODO: Stop your device\n        // await this.apiPost("/api/job/stop", {});'}
+    : `// TODO: Stop your device\n        ${legacy ? "" : "  "}// await this.apiPost("/api/job/stop", {});`}
+        ${legacy ? "" : "}"}
         this.stopPolling();
         return { success: true, message: "Stopped" };
       }
@@ -371,7 +425,7 @@ export class ${adapter.className} {
     return res.json();
   }
 
-  private async apiPost(path: string, body: Record<string, unknown>): Promise<void> {
+  private async apiPost(path: string, body: Record<string, unknown>): Promise<${legacy ? "void" : "Response"}> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (this.config.apiKey) headers["X-Api-Key"] = this.config.apiKey;
 
@@ -381,11 +435,13 @@ export class ${adapter.className} {
       body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error(\`POST \${path}: \${res.status}\`);
+    ${legacy ? "" : "return res;"}
   }
 
   // ── Polling ─────────────────────────────────────────────────────
 
   // The loop is outstanding work until it reports how the job ended and stops.
+  // This poll loop relies on the kernel serializing jobs per device.
   private startPolling(): void {
     this.stopPolling();
     this.endPolling = this.begin();
@@ -402,7 +458,7 @@ export class ${adapter.className} {
           type: "execution_progress",
           timestamp: new Date().toISOString(),
           source: this.source,
-          payload: { progress },
+          payload: { ${legacy ? "" : "deviceJobId: this.staged!.deviceJobId, "}progress },
         });
       }
       if (this.lastProgress < 100 && progress >= 100) {
@@ -410,11 +466,11 @@ export class ${adapter.className} {
           type: "execution_completed",
           timestamp: new Date().toISOString(),
           source: this.source,
-          payload: { progress: 100 },
+          payload: { ${legacy ? "" : "deviceJobId: this.staged!.deviceJobId, "}progress: 100 },
         });
         this.stopPolling();
       }
-      // TODO: report your device's failure and cancel states too (emit execution_failed,
+      // TODO: report your device's failure and cancel states too (emit execution_failed${legacy ? "" : " with payload.deviceJobId = this.staged!.deviceJobId"},
       // then stopPolling()). A loop that never ends keeps quiesceEvidence() pending, and
       // the kernel keeps the device from every later job.
       this.lastProgress = progress;
@@ -747,6 +803,11 @@ function generateKernelEntryPoint(config: OnboardConfig): string {
 });`;
   }).join("\n\n");
 
+  const jobGuidance = config.adapters.filter(a => a.adapterType === "machine").map(a =>
+    machineCapabilityClass(config, a) === "fdm"
+      ? `// ${a.adapterId}: run({ jobId, stepId, gcodeHash, assuranceTier }).`
+      : `// ${a.adapterId}: run({ jobId, stepId, inputHash, inputData, assuranceTier, tierLadder }), with tierLadder from compileTierLadder(<your capability's CSD>).`
+  ).join("\n");
   const machineAdapter = config.adapters.find(a => a.adapterType === "machine");
   const sensorAdapters = config.adapters.filter(a => a.adapterType === "sensor");
   const cameraAdapter = config.adapters.find(a => a.adapterType === "camera");
@@ -781,6 +842,7 @@ evidenceEmitter.onBundle((bundle) => {
 
 // ── Initialize job runner ─────────────────────────────────────────
 
+${jobGuidance}
 const jobRunner = new JobRunner(
   ${machineAdapter ? toCamelCase(machineAdapter.adapterId) : "null /* TODO: add machine adapter */"},
   [${sensorAdapters.map(a => toCamelCase(a.adapterId)).join(", ")}],
@@ -911,7 +973,7 @@ function generateTests(config: OnboardConfig): string {
       expect(adapter.id).toBe("test-${a.adapterId}");
     });
 
-    ${a.adapterType === "machine" ? `it("should emit evidence on execute", async () => {
+    ${a.adapterType === "machine" ? machineCapabilityClass(config, a) === "fdm" ? `it("should emit evidence on execute", async () => {
       const adapter = new ${a.className}("test-${a.adapterId}", {
         baseUrl: "http://mock:8080",
         mockMode: true,
@@ -921,6 +983,30 @@ function generateTests(config: OnboardConfig): string {
       await adapter.execute({ type: "load_gcode", payload: { filename: "test.nc" } });
       expect(events.length).toBeGreaterThan(0);
       expect(events[0].type).toBe("gcode_received");
+    });` : `it("should stage input without actuating and bind execution to the staged job", async () => {
+      const adapter = new ${a.className}("test-${a.adapterId}", {
+        baseUrl: "http://mock:8080",
+        mockMode: true,
+      });
+      const events: any[] = [];
+      adapter.onEvidence((e) => events.push(e));
+      expect(adapter.accepts).toEqual(["prepare", "start", "stop", "status"]);
+      expect((await adapter.execute({ type: "start", payload: { jobId: "test-job" } })).success).toBe(false);
+      expect(events).toEqual([]);
+      const jobId = "test-job";
+      const inputHash = "sha256:" + "ab".repeat(32);
+      const inputData = new TextEncoder().encode("test method");
+      const ack = await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } });
+      expect(ack.success).toBe(true);
+      expect(ack.data).toEqual({ jobId, inputHash, deviceJobId: expect.any(String) });
+      expect((ack.data?.deviceJobId as string).length).toBeGreaterThan(0);
+      expect(events).toEqual([]);
+      expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(true);
+      expect(events[0]).toMatchObject({ type: "execution_started", payload: { deviceJobId: ack.data?.deviceJobId } });
+      events.length = 0;
+      expect((await adapter.execute({ type: "pause", payload: { jobId } })).success).toBe(false);
+      expect(events).toEqual([]);
+      await adapter.dispose();
     });` : ""}
   });`).join("\n");
 
