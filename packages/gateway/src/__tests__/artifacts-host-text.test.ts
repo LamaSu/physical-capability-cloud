@@ -5,6 +5,9 @@ import { eq, schema } from "@pcc/store";
 import { artifactsRoutes, _clearArtifactsForTests } from "../routes/artifacts.js";
 import { getStore } from "../db.js";
 import { WITHHELD_PROSE } from "../mcp/dashboard-ir.js";
+import { readText } from "../mcp/dashboard-ir.js";
+import { WITHHELD_PROSE as CORE_WITHHELD_PROSE } from "../mcp/dashboard-ir.js";
+import { mergeUpClaimRows, PARTNER_DESCRIPTION, PARTNER_TITLE, plainRtlRows } from "./fixtures/host-text-merge-up-rows.js";
 
 const FIXED_TITLE = "PCC Dashboard — agent text withheld";
 let app: FastifyInstance;
@@ -13,6 +16,34 @@ beforeAll(async () => {
   app = Fastify({ logger: false });
   await app.register(artifactsRoutes);
   await app.ready();
+});
+
+describe("F5 merge-up rows: share host sinks inherit the shared detector", () => {
+  for (const field of ["title", "description", "name"]) {
+    it.each(mergeUpClaimRows)(`withholds share prose and document title for ${field}: $label`, async ({ text }) => {
+      const doc = await sharePage(
+        field === "title" ? text : PARTNER_TITLE,
+        field === "description" ? text : PARTNER_DESCRIPTION,
+        field === "name" ? text : undefined,
+      );
+      expect(doc.querySelector("header h1")?.textContent).toBe(readText(WITHHELD_PROSE).t);
+      expect(doc.querySelector("header p")?.textContent).toBe(readText(WITHHELD_PROSE).t);
+      expect(doc.title).toBe(FIXED_TITLE);
+    });
+  }
+});
+
+describe("F5: plain right-to-left share text remains attributed", () => {
+  it.each(plainRtlRows)("shows a plain RTL share title attributed: $label", async ({ text }) => {
+    const doc = await sharePage(text, PARTNER_DESCRIPTION);
+    expect(doc.querySelector("header h1")?.textContent).toBe(`${text} (agent-authored)`);
+    expect(doc.title).toBe(`${text} (agent-authored) - PCC`);
+  });
+
+  it.each(plainRtlRows)("shows a plain RTL share description attributed: $label", async ({ text }) => {
+    const doc = await sharePage(PARTNER_TITLE, text);
+    expect(doc.querySelector("header p")?.textContent).toBe(`${text} (agent-authored)`);
+  });
 });
 afterAll(async () => { await app.close(); });
 beforeEach(() => { _clearArtifactsForTests(); });
@@ -57,6 +88,8 @@ const bidiCases = [
 ];
 
 describe("artifact host prose claim boundary", () => {
+  // Core text is now opaque; preserve the original cases using its checked display text.
+  const WITHHELD_PROSE = readText(CORE_WITHHELD_PROSE).t;
   it.each(claimedFields)("withholds h1 for $title / $description", async ({ title, description }) => {
     const doc = await sharePage(title, description);
     expect(doc.querySelector("header h1")?.textContent).toBe(WITHHELD_PROSE);

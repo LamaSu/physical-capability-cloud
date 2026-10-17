@@ -3,7 +3,7 @@ import { WITHHELD_PROSE } from "./dashboard-ir.js";
 
 // PCC copy is code-owned, never part of an artifact or gallery entry. The
 // gallery paints its own mirrored constants, parity-checked through its boot.
-export const HOST_WITHHELD_PROSE = WITHHELD_PROSE;
+export const HOST_WITHHELD_PROSE: typeof WITHHELD_PROSE = WITHHELD_PROSE;
 export const HOST_WITHHELD_TITLE = "PCC Dashboard — agent text withheld";
 
 // Unicode Bidi_Control, including marks, embeddings, overrides and isolates.

@@ -69,7 +69,7 @@ import {
   hashLookupKey,
 } from "../routes/artifacts.js";
 import { APP_HOST_OPERATION_IDS } from "./operation-ids.js";
-import { identifierText } from "./dashboard-ir.js";
+import { identifierText, readText } from "./dashboard-ir.js";
 import { classifyHostText, hostDocumentTitle } from "./host-page-text.js";
 
 // ---------------------------------------------------------------------------
@@ -1484,7 +1484,7 @@ function buildMcpAppDashboardHtmlForManifest(
  * (missing, retired, private, or malformed) — a valid resource read, never a
  * thrown error, so the host renders a friendly page. */
 function buildDashboardNotFoundHtml(slug: string, nonce: string = cspNonce()): string {
-  const s = escapeHtmlText(identifierText("slug", slug));
+  const s = escapeHtmlText(readText(identifierText("slug", slug)).t);
   return `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">

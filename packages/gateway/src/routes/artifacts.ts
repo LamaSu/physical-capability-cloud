@@ -47,6 +47,7 @@ import { schema, eq } from "@pcc/store";
 import { getStore, initStore } from "../db.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { classifyHostText, hostDocumentTitle, HOST_WITHHELD_PROSE } from "../mcp/host-page-text.js";
+import { readText } from "../mcp/dashboard-ir.js";
 
 // ---------------------------------------------------------------------------
 // Legacy share-slug rotation + expiring aliases (R4 PR4 / D13)
@@ -488,9 +489,9 @@ function inlineManifestJson(manifest: unknown): string {
  */
 function renderShell(a: UiArtifact): string {
   const fields = classifyHostText(a.manifest.title || a.name, a.manifest.description);
-  const title = fields.titleWithheld ? HOST_WITHHELD_PROSE : `${fields.title} (agent-authored)`;
+  const title = fields.titleWithheld ? readText(HOST_WITHHELD_PROSE).t : `${fields.title} (agent-authored)`;
   const desc = a.manifest.description
-    ? `<p>${escapeHtml(fields.descriptionWithheld ? HOST_WITHHELD_PROSE : `${fields.description} (agent-authored)`)}</p>`
+    ? `<p>${escapeHtml(fields.descriptionWithheld ? readText(HOST_WITHHELD_PROSE).t : `${fields.description} (agent-authored)`)}</p>`
     : "";
   const theme = escapeHtml(a.manifest.theme ?? "auto");
   const slug = escapeHtml(a.slug);

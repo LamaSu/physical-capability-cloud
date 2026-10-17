@@ -4,6 +4,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { DASHBOARD_CSD_URL, type UiArtifact } from "@pcc/spec";
 import { _clearArtifactsForTests, _seedArtifactForTests } from "../routes/artifacts.js";
 import { identifierText, WITHHELD_PROSE } from "../mcp/dashboard-ir.js";
+import { readText } from "../mcp/dashboard-ir.js";
+import { WITHHELD_PROSE as CORE_WITHHELD_PROSE, identifierText as coreIdentifierText } from "../mcp/dashboard-ir.js";
+import { mergeUpClaimRows, PARTNER_TITLE, plainRtlRows } from "./fixtures/host-text-merge-up-rows.js";
 import {
   enrichOnRampToolResult,
   MCP_APP_GALLERY_URI,
@@ -17,6 +20,50 @@ const doms: JSDOM[] = [];
 afterEach(() => {
   for (const dom of doms.splice(0)) dom.window.close();
   _clearArtifactsForTests();
+});
+
+describe("F5 merge-up rows: MCP host sinks inherit the shared detector", () => {
+  for (const field of ["title", "description", "name"]) {
+    it.each(mergeUpClaimRows)(`withholds saved document title for ${field}: $label`, ({ text }) => {
+      const artifact = seed(
+        field === "title" ? text : PARTNER_TITLE,
+        field === "description" ? text : undefined,
+        field === "name" ? text : PARTNER_TITLE,
+      );
+      if (field === "name") {
+        delete artifact.manifest.title;
+        _seedArtifactForTests(artifact);
+      }
+      expect(new JSDOM(renderSavedDashboardHtml(artifact.slug)).window.document.title).toBe(FIXED_TITLE);
+      expect(new JSDOM(resolvePublicShareSlug(artifact.slug, "host-text-test").html).window.document.title).toBe(FIXED_TITLE);
+    });
+
+    it.each(mergeUpClaimRows)(`withholds gallery title through real boot for ${field}: $label`, async ({ text }) => {
+      const entries = projected([{
+        name: field === "name" ? text : PARTNER_TITLE,
+        ...(field === "name" ? {} : { manifest: {
+          title: field === "title" ? text : PARTNER_TITLE,
+          ...(field === "description" ? { description: text } : {}),
+        } }),
+      }]);
+      const document = await gallery(entries);
+      expect(document.querySelector(".pcc-gallery-title")?.textContent).toBe(readText(WITHHELD_PROSE).t);
+      expect(JSON.stringify(entries)).not.toContain(text);
+    });
+  }
+});
+
+describe("F5: plain right-to-left MCP text remains attributed", () => {
+  it.each(plainRtlRows)("shows a plain RTL saved title attributed: $label", ({ text }) => {
+    const artifact = seed(text);
+    expect(new JSDOM(renderSavedDashboardHtml(artifact.slug)).window.document.title)
+      .toBe(`${text} (agent-authored) - PCC`);
+  });
+
+  it.each(plainRtlRows)("shows a plain RTL gallery title attributed: $label", async ({ text }) => {
+    const document = await gallery(projected([{ name: PARTNER_TITLE, manifest: { title: text } }]));
+    expect(document.querySelector(".pcc-gallery-title")?.textContent).toBe(`${text} (agent-authored)`);
+  });
 });
 
 function seed(title: string, description?: string, name = title) {
@@ -73,6 +120,9 @@ const bidiCases = [
 ];
 
 describe("F5 MCP host text", () => {
+  // Core text is now opaque; preserve the original cases using its checked display text.
+  const WITHHELD_PROSE = readText(CORE_WITHHELD_PROSE).t;
+  const identifierText = (field: string, value: string) => readText(coreIdentifierText(field, value)).t;
   it.each([
     ["Payment verified", undefined],
     ["Plate reader run 3", "Paid in full: $5,000"],
