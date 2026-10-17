@@ -507,7 +507,7 @@ function eventHashText(
     payload: event.payload,
     ...(version2 ? { eventHashVersion: 2 } : {}),
   };
-  return canonicalSnapshot(hashInput).text;
+  return canonicalize(hashInput);
 }
 
 /**

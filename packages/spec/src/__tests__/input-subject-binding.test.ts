@@ -190,6 +190,10 @@ const writerVectors = JSON.parse(readFileSync(
   new URL("../evidence/vectors/subject-binding-input-writer.v2.json", import.meta.url), "utf8",
 )) as { completionEventTypes: string[]; vectors: InputBindingVector[] };
 
+const inputRuleVectors = JSON.parse(readFileSync(
+  new URL("../evidence/vectors/subject-binding-input-rules.v2.json", import.meta.url), "utf8",
+)) as { completionEventTypes: string[]; vectors: InputBindingVector[] };
+
 /** Independent fixture encoder: the vectors contain only plain JSON values. */
 function nodeCanonical(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -246,6 +250,27 @@ describe("LO-EV-9 kernel-written input and device-job vectors (#8973)", () => {
     expect(reads).toBe(0);
   });
 
+  it("refuses an accessor writer while Object.prototype.value is kernel, without running its getter", async () => {
+    const b = await bundle([
+      { type: "method_loaded", payload: { inputHash: INPUT } },
+      { type: "execution_completed" },
+    ]);
+    let reads = 0;
+    // Define the accessor before pollution, so its descriptor cannot inherit a value.
+    Object.defineProperty(b.events[0]!.source, "writer", {
+      get() { reads++; return "kernel"; }, enumerable: true,
+    });
+    Object.defineProperty(Object.prototype, "value", { value: "kernel", configurable: true });
+    let result: EvidenceSubjectBindingResult;
+    try {
+      result = await verifyEvidenceSubjectBinding({ ...b, subject: SUBJECT });
+    } finally {
+      delete (Object.prototype as { value?: unknown }).value;
+    }
+    expect(result).toEqual({ ok: false, reason: "event-writer-invalid", eventIndex: 0 });
+    expect(reads).toBe(0);
+  });
+
   it("refuses a source proxy without asking any trap for its marker", async () => {
     const b = await bundle([{ type: "method_loaded", payload: { inputHash: INPUT } }]);
     let traps = 0;
@@ -283,5 +308,29 @@ describe("LO-EV-9 kernel-written input and device-job vectors (#8973)", () => {
       ok: false, reason: "malformed-event", eventIndex: type === "method_loaded" ? 0 : 1,
     });
     expect(reads).toBe(0);
+  });
+});
+
+describe("LO-EV-9 step 8 r1 input rules and exact device-job vectors (#8815/#8820/#8973/#8979)", () => {
+  it("defines execution_completed as the complete completion-event list", () => {
+    expect(inputRuleVectors.completionEventTypes).toEqual(["execution_completed"]);
+  });
+
+  it.each(inputRuleVectors.vectors)("$id", async (vector) => {
+    expect(vector.eventHashVersions).toHaveLength(vector.events.length);
+    expect(vector.eventPreimages).toHaveLength(vector.events.length);
+    for (let i = 0; i < vector.events.length; i++) {
+      const { type, timestamp, source, payload, hash } = vector.events[i]!;
+      const version = vector.eventHashVersions[i];
+      expect(version).toBe(source.writer === "kernel" ? 2 : 1);
+      const preimage = { type, timestamp, source, payload, ...(version === 2 ? { eventHashVersion: 2 } : {}) };
+      expect(nodeCanonical(preimage)).toBe(vector.eventPreimages[i]);
+      expect(nodeSha256(vector.eventPreimages[i]!)).toBe(hash);
+      expect(canonicalize(preimage)).toBe(vector.eventPreimages[i]);
+    }
+    expect(nodeCanonical(vector.events.map(({ hash }) => hash).sort())).toBe(vector.bundlePreimage);
+    expect(nodeSha256(vector.bundlePreimage)).toBe(vector.bundleHash);
+    const result = await verifyEvidenceSubjectBinding(vector);
+    expect(result.ok ? { ok: true } : result).toEqual(vector.expected);
   });
 });

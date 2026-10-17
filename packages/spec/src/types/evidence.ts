@@ -83,9 +83,10 @@ export const EVIDENCE_EVENT_TYPES = [
    * the source.writer "kernel" marker (event hash v2) both arrive with ADK
    * PR-1d. On the prepare path EVERY adapter method_loaded is refused, with
    * or without inputHash. A legacy adapter's method_loaded without inputHash
-   * may appear, and makes input.hash_bound NOT met. At this revision the
-   * kernel has no prepare command and writes no method_loaded;
-   * adapter-pylabrobot emits one.
+   * may appear, and makes input.hash_bound NOT met. Before PR-1a (#665) the
+   * kernel had no prepare command and wrote no method_loaded;
+   * adapter-pylabrobot still emits its own method_loaded, on the legacy
+   * path, until PR-1c.
    *
    * input.hash_bound requires at least one method_loaded. EVERY one must be
    * kernel-written and carry payload.inputHash equal to the funded subject

@@ -102,9 +102,9 @@
  * while it is verified, and nothing outside the hashed fields is read. The
  * copies have null prototypes, so a property the hash never covered cannot
  * bind a subject. That covers an inherited property, and a non-enumerable one,
- * which the copy leaves out as `canonicalize` does. The result returns the
- * copies, deep-frozen. A consumer that evaluates the events further (levels,
- * admission) must evaluate them, not its own objects.
+ * which the copy leaves out and `canonicalize` would refuse outright. The
+ * result returns the copies, deep-frozen. A consumer that evaluates the events
+ * further (levels, admission) must evaluate them, not its own objects.
  *
  * WHAT THE RESULT DOES NOT COMMIT (E11b LOW). The bundle hash commits the
  * sorted MULTISET of event hashes (hashBundle sorts them and keeps duplicates),
