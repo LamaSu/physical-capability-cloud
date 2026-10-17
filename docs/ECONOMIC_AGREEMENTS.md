@@ -556,3 +556,120 @@ On success it returns each unit's payouts in plan order, with `agreementHash` an
 - Any rule an agent writes as code.
 - An exact rate for an `exponential-decay` segment below its starting rate (unverifiable, §2.4).
 - A required scheduled royalty over units in different value bands (§2.4). New rule kinds are added to this document and to the compiler together, with golden vectors, under a new domain version.
+
+## 12. Kit licenses and the lineage split
+
+Section 11 is reserved for agreement templates.
+
+A Kit version (a capability or terms template) carries an ordinary License (§2.5). Its only payment requirement, when it has one, is a percent of the gross of every unit that runs the kit, paid to the kit's fork lineage. The compile pays it as payout legs in the unit's release, like any other required payment. There is no second ledger and no claim step. The functions below are in `economics/kits.ts`, and each is pure.
+
+### 12.1 A License's content address (`licenseHash`)
+
+`licenseHash(license) = H("PCC:license:v1", license)`, with §6's `H`: `"0x"` followed by 64 lowercase hex digits.
+
+- **Read, then checked.** The License is read once, as §3's "Reading the input" reads an agreement. The copy then goes through §3's schema phase on its own: §2.5's License shape, §1's conventions, and every rule marked as a schema rule (for example, `shareAlikeTag` exactly when the class is `share-alike`, and unique `requirementId`s). A License that fails either step is refused, never hashed.
+- **No later phase.** Nothing after the schema phase applies. A requirement whose `min` is above its `max` still hashes (the compile refuses it later, `INVALID_BOUNDS`), and so does a License whose `validFrom` is after its `validUntil`. Its licensor and distribution parties need not be parties of any agreement.
+- **As published.** None of §6's normalization applies:
+  - No array is sorted. `grants.fieldsOfUse`, `grants.regions`, `requires.payments` and every `distribution` are hashed in the order they are written.
+  - No hash is lowercased. A `percent_by_schedule` requirement's `scheduleHash` is hashed in the case it is written.
+  - So reordering one of those arrays, or changing a hash's case, gives a different `licenseHash`. Key order does not matter, because canonical JSON sorts keys.
+- **Where kits use it.** A Kit manifest (`pcc.capability-kit/v1`) pins its License by this hash, in `economics.economicTermsHash` (kits #4102). The field shares its name with an agreement's `economicTermsHash` (§6), but it holds a different value, under a different domain.
+- **Result:** `{ ok: true, hash }`, or `{ ok: false, reason }`. The reason is free text, not a code.
+
+Example: this License's canonical JSON is 788 bytes. Its one requirement is `kitRoyaltyRequirement({ bps: 50, lineage: ["carol", "bob", "ann"] })` (§12.2).
+
+```
+{"authority":"registry-anchored","class":"permissive","grants":{"commercialUse":true,"compose":true,"fieldsOfUse":["*"],"modify":true,"regions":["*"],"resell":true},"label":"Kit license","licenseId":"kit-license","licensor":"carol","requires":{"attribution":true,"payments":[{"payee":{"distribution":[{"party":"ann","role":null,"subject":null,"weight":1},{"party":"bob","role":null,"subject":null,"weight":2},{"party":"carol","role":null,"subject":null,"weight":4}]},"per":"using-unit","requirementId":"kit-royalty","role":"protocol-author","rule":{"bps":50,"kind":"percent","max":null,"min":null,"of":"gross","rateSource":null}}]},"shareAlikeTag":null,"subject":"kit:sha256:abababababababababababababababababababababababababababababababab","validFrom":null,"validUntil":null,"version":1}
+```
+
+Its `licenseHash` is `0x1112bfa7d0da2195b118df02734b16a1d7ba93848157ec7eacd5922974b83686`.
+
+### 12.2 The lineage and its distribution
+
+A kit version's **lineage** lists publishers, nearest first: the kit's own publisher (the forker), then its parent's publisher, then its grandparent's, and so on. It is an array of 1 to 1,024 entries. Every entry must be an Id (§1), although only the first three are paid. Anything else is refused.
+
+`kitLineageDistribution(lineage)` is the distribution the royalty is paid to:
+
+1. Take the first three entries, or all of them if there are fewer. Nearest first, their weights are 1 for one entry, 2 : 1 for two, and 4 : 2 : 1 for three (`KIT_LINEAGE_WEIGHTS = [4, 2, 1]`). Nothing past the grandparent is paid.
+2. A party that appears more than once among them (a self-fork) is one member, with the summed weight.
+3. Divide every weight by the greatest common divisor of all of them.
+4. Sort the members by party id (byte order). Each member is `{ party, weight, role: null, subject: null }`.
+
+A refused lineage throws a `RangeError`.
+
+| Lineage | Distribution (party: weight) |
+|---|---|
+| `["ann"]` | ann: 1 |
+| `["bob", "ann"]` | ann: 1, bob: 2 |
+| `["carol", "bob", "ann"]` | ann: 1, bob: 2, carol: 4 |
+| `["dave", "carol", "bob", "ann"]` | bob: 1, carol: 2, dave: 4 |
+| `["ann", "ann"]` | ann: 1 |
+| `["ann", "bob", "ann"]` | ann: 5, bob: 2 |
+| `["ann", "ann", "bob"]` | ann: 6, bob: 1 |
+| `["ann", "bob", "bob"]` | ann: 4, bob: 3 |
+
+`kitRoyaltyRequirement({ bps, lineage })` is the payment requirement of a kit version's License. `bps` must be an integer from 0 to 10000. The lineage is then checked as above, even at 0 bps. Either failure throws a `RangeError`. A free kit (0 bps) asks for no payment, so the result is `null`. Otherwise it is:
+
+```
+{ requirementId: "kit-royalty", role: "protocol-author", per: "using-unit",
+  payee: { distribution: kitLineageDistribution(lineage) },
+  rule: { kind: "percent", bps, of: "gross", min: null, max: null, rateSource: null } }
+```
+
+### 12.3 What a buyer funds (`computeKitSplit`)
+
+`computeKitSplit({ quoteMinor, currency, feeBps, licenseBps, lineage })` prices one unit that runs one kit: the operator's quote, with the kit's royalty on top. It runs the compile (§4) for every amount, so the amounts are exactly what settlement pays at that gross.
+
+**Input.** Each field is read once.
+- `quoteMinor`: an Amount (§1), or a non-negative bigint. It is at least 5.
+- `currency`: `{ code, decimals }`, a string and an integer. The compile then checks them as §2 does.
+- `feeBps`: PCC's fee, an integer from 0 to 1000.
+- `licenseBps`: the royalty, an integer from 1 to 1000. A free kit pays nobody, so it has no split.
+- `lineage`: as in §12.2. The ids `kit-split:buyer` and `kit-split:operator` are reserved, and a lineage that names one is refused.
+
+A refused input answers `{ ok: false, reason }`, with a free-text reason.
+
+**The one-unit agreement** is `kitSplitAgreement(gross, input)`:
+- One unit, `job`, at the given gross. It uses the kit component `kit:kit-split` once.
+- The kit's License, `kit-license` version 1, whose licensor is `lineage[0]`. It is `permissive` and `registry-anchored`. It grants commercial use, composing, reselling and modifying in any field of use and region, requires attribution, and has one payment requirement: `kitRoyaltyRequirement({ bps: licenseBps, lineage })`.
+- A split, `lineage`, whose members are the distribution's parties at their weights.
+- The clause `kit-royalty`: a `percent` of `gross` at `licenseBps`, paid to the split `lineage` in every unit that uses the kit, under `kit-license` version 1.
+- The clause `operator`: the `residual`, paid to `kit-split:operator`.
+- PCC's fee at `feeBps`. The intended use is plain commercial use: not composite, not resold, in any field of use and region.
+
+Its other fields (labels, placeholder payout addresses and `asOf`) are fixed in the code and mean nothing. This section specifies only the amounts the agreement compiles to. `kitSplitAgreement` takes no quote, and it throws a `RangeError` for any other input that `computeKitSplit` refuses.
+
+**The gross.** Let `floor = quote − floor(quote × feeBps / 10000)`, the least the operator may receive under §9 (`OPERATOR_BELOW_QUOTE`). The gross `G` is the smallest amount, at least `quote`, at which the one-unit agreement pays the operator at least `floor`. At gross `G`, §4 gives:
+- the fee, `F = floor(G × feeBps / 10000)` (§4.2);
+- the royalty, `R`: `G × licenseBps / 10000` rounded to the nearest base unit, with a half rounding up. This is §4.3's largest remainder, for one clause against the rest claimant;
+- each member's share of `R`, by weight, by §4.5's largest remainder (a tie goes to the party whose id sorts first);
+- the operator's amount, `G − F − R`.
+
+One more base unit of gross can raise `F` and `R` together, so the operator's amount does not rise steadily with `G`. `G` is therefore the first amount from `quote` upward that passes, not the solution of an equation. If the compile refuses (a currency that §2 refuses, or a `G` above §2.2's bound), `computeKitSplit` refuses, and its reason lists the compiler's codes.
+
+**Result.**
+
+```
+{ ok: true, grossMinor: G, feeMinor: F, royaltyMinor: R, operatorMinor: G − F − R,
+  shares: { party, weight, amountMinor }[],
+  rounding: <the text below> }
+```
+
+Every amount is an Amount string. `shares` lists the distribution's members in the order they first appear in the lineage. A member whose share rounds to 0 is listed with `"0"`: it is a zero leg (§4.6), so it is not paid. `rounding` is always this text:
+
+> Exact base units. PCC's fee is the gross times its rate, rounded down. The royalty is the license's rate of the gross, rounded to the nearest base unit (a half rounds up). The royalty divides by lineage weight, by largest remainder; a tie goes to the party whose id sorts first. The operator receives the rest.
+
+**Examples** (USDC, 6 decimals):
+
+| Quote | feeBps | licenseBps | Lineage | G | F | R | Operator | Shares |
+|---|---|---|---|---|---|---|---|---|
+| 25000000 | 235 | 50 | carol, bob, ann | 25128666 | 590523 | 125643 | 24412500 | carol 71796, bob 35898, ann 17949 |
+| 2500000000 | 235 | 100 | bob, ann | 2525866528 | 59357863 | 25258665 | 2441250000 | bob 16839110, ann 8419555 |
+| 5 | 0 | 1000 | ann | 6 | 0 | 1 | 5 | ann 1 |
+| 1000 | 1000 | 1000 | ann, bob, ann | 1124 | 112 | 112 | 900 | ann 80, bob 32 |
+
+In the first row, `floor = 25000000 − 587500 = 24412500`, and at `G − 1` the operator would receive 24412499. In the third row, at `G = 5` the royalty of 0.5 rounds up to 1, which would leave the operator 4.
+
+**It assumes the operator is not one of the lineage's payees.** When the operator is also a contributor, §9's check counts the operator's share toward its minimum as well, so a smaller gross can pass. `computeKitSplit` does not look for that smaller gross.
+
+**Not in v1:** folding a share below the smallest leg into the forker's share, and a cap per unit over all kits. Both need a compiler rule, after the operator rules on the rates (operator item 99).
