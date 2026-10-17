@@ -236,13 +236,17 @@ def test_a_renewal_that_comes_back_late_does_not_revive_the_lease():
 
 # ── MEDIUM: cancellation and the deadline ───────────────────────────────────
 
-def test_an_injected_sleep_cannot_overshoot_the_deadline():
+def test_the_pause_between_polls_cannot_overshoot_the_deadline():
+    # 117d: the runtime takes no sleep hook any more (an arbitrary callable could block); its own
+    # pause is sliced and checked against the deadline.
     dev = Device(poll=(200, {}, json.dumps({"id": "run-1", "status": "running"}).encode()))
     try:
-        runtime = AdapterRuntime.from_profile(_profile(dev.url, timeout_s=0.1, interval_s=0.5), *_keys(), sleep=time.sleep)
+        with pytest.raises(TypeError):
+            AdapterRuntime.from_profile(_profile(dev.url), *_keys(), sleep=time.sleep)
+        runtime = AdapterRuntime.from_profile(_profile(dev.url, timeout_s=0.1, interval_s=0.5), *_keys())
         started = time.monotonic()
         result = _run(runtime)
-        assert time.monotonic() - started < 0.35, "the injected sleep outlived the 0.1 s deadline"
+        assert time.monotonic() - started < 0.35, "the pause outlived the 0.1 s deadline"
         assert result.error.startswith("timeout"), result.error
     finally:
         dev.close()
