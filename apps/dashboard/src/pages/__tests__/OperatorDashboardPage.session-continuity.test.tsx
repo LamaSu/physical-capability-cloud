@@ -201,6 +201,64 @@ describe("operator session continuity through real authorization", () => {
     expect(button(`EMERGENCY STOP: ${MACHINE.name}`).disabled).toBe(false);
   });
 
+  it("an address-only wallet change and same-session re-mint clear a confirmed stop", async () => {
+    await renderPage();
+    await stopConfirmed();
+    const before = useAuthStore.getState();
+    await act(async () => useAuthStore.getState().setAddress("0xDef456"));
+    await settle();
+    expect(useAuthStore.getState().sessionEpoch).toBe(before.sessionEpoch);
+    expect(useAuthStore.getState().sessionToken).toBe(before.sessionToken);
+    expect(useAuthStore.getState().keyEpoch).toBe(before.keyEpoch);
+    expect(useAuthStore.getState().sessionKeyId).toBe(before.sessionKeyId);
+    expect(container.textContent).not.toContain(ACTIVE);
+    expect(container.textContent).toContain(`No stop confirmed for ${MACHINE.name}`);
+    expect(button(`EMERGENCY STOP: ${MACHINE.name}`).disabled).toBe(false);
+
+    await renewNow();
+    expect(minted).toBe(2);
+    expect(useAuthStore.getState().sessionEpoch).toBe(before.sessionEpoch);
+    expect(useAuthStore.getState().sessionToken).toBe(before.sessionToken);
+    expect(useAuthStore.getState().address).toBe("0xDef456");
+    expect(useAuthStore.getState().sessionKeyId).toBe("session-key-id-2");
+    expect(container.textContent).not.toContain(ACTIVE);
+    expect(container.textContent).toContain(`No stop confirmed for ${MACHINE.name}`);
+    expect(button(`EMERGENCY STOP: ${MACHINE.name}`).disabled).toBe(false);
+    const reads = actionCalls("/api/agent/me");
+    expect(reads).toHaveLength(3);
+    expect(new Headers(reads[2][1]?.headers).get("Authorization")).toBe("Bearer session-key-2");
+    expect(actionCalls(STOP)).toHaveLength(1);
+  });
+
+  it("a case-only wallet change and same-session re-mint keep a confirmed stop", async () => {
+    await renderPage();
+    await stopConfirmed();
+    const before = useAuthStore.getState();
+    await act(async () => useAuthStore.getState().setAddress(WALLET.toLowerCase()));
+    await settle();
+    expect(useAuthStore.getState().address).toBe(WALLET.toLowerCase());
+    expect(useAuthStore.getState().address).not.toBe(before.address);
+    expect(useAuthStore.getState().sessionEpoch).toBe(before.sessionEpoch);
+    expect(useAuthStore.getState().sessionToken).toBe(before.sessionToken);
+    expect(useAuthStore.getState().keyEpoch).toBe(before.keyEpoch);
+    expect(useAuthStore.getState().sessionKeyId).toBe(before.sessionKeyId);
+    expect(container.textContent).toContain(ACTIVE);
+    expect(button(`Resume Operations: ${MACHINE.name}`).disabled).toBe(false);
+
+    await renewNow();
+    expect(minted).toBe(2);
+    expect(useAuthStore.getState().sessionEpoch).toBe(before.sessionEpoch);
+    expect(useAuthStore.getState().sessionToken).toBe(before.sessionToken);
+    expect(useAuthStore.getState().address).toBe(WALLET.toLowerCase());
+    expect(useAuthStore.getState().sessionKeyId).toBe("session-key-id-2");
+    expect(container.textContent).toContain(ACTIVE);
+    expect(button(`Resume Operations: ${MACHINE.name}`).disabled).toBe(false);
+    const reads = actionCalls("/api/agent/me");
+    expect(reads).toHaveLength(3);
+    expect(new Headers(reads[2][1]?.headers).get("Authorization")).toBe("Bearer session-key-2");
+    expect(actionCalls(STOP)).toHaveLength(1);
+  });
+
   it("pasting a different key clears a confirmed stop after same-session continuity", async () => {
     await renderPage();
     await stopConfirmed();

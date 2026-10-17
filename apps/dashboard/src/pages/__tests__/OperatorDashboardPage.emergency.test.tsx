@@ -126,6 +126,9 @@ describe("OperatorDashboardPage emergency controls", () => {
     [400, RESUME_FAILED],
     [500, RESUME_UNCONFIRMED],
     [502, RESUME_UNCONFIRMED],
+    [503, RESUME_UNCONFIRMED],
+    [504, RESUME_UNCONFIRMED],
+    [599, RESUME_UNCONFIRMED],
     ["network failure", RESUME_UNCONFIRMED],
   ] as const)("resume %s keeps stopped and shows its exact message", async (status, message) => {
     await renderPage(true);
