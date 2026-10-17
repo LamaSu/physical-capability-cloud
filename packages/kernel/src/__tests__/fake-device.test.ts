@@ -504,22 +504,22 @@ describe("FakeDevice quiescence and cancellation", () => {
     device.complete();
   });
 
-  it("ignores stop during nonterminal delivery", async () => {
+  it("ends the job after stop during nonterminal delivery", async () => {
     const device = await accepted();
     let stop: Promise<MachineCommandResult> | undefined;
     device.onEvidence((event) => { if (event.type === "execution_progress") stop = device.execute({ type: "stop" }); });
     device.progress(100);
     await expect(stop).resolves.toEqual({ success: true });
-    expect(await device.getStatus()).toBe("busy");
-    device.complete();
+    expect(await device.getStatus()).toBe("idle");
+    await device.quiesceEvidence();
   });
 
-  it("ignores even a throwing cancellation during nonterminal delivery", async () => {
+  it("reports a throwing cancellation during nonterminal delivery", async () => {
     const device = await accepted({ cancelBehavior: "throw" });
     let cancel: Promise<unknown> | undefined;
     device.onEvidence(() => { cancel = device.cancelJob("device-42").catch((error: unknown) => error); });
     device.progress(100);
-    await expect(cancel).resolves.toBeUndefined();
+    await expect(cancel).resolves.toMatchObject({ message: "fake device cancel rejected" });
     expect(device.cancels).toEqual(["device-42"]);
     expect(await device.getStatus()).toBe("busy");
     await device.dispose();
@@ -692,5 +692,72 @@ describe("FakeDevice quiescence and cancellation", () => {
     expect(() => device.emit("execution_progress")).toThrow();
     await expect(device.started()).rejects.toThrow("disposed");
     await device.dispose();
+  });
+});
+
+
+describe("FakeDevice listener cancellation contract", () => {
+  const settle = (work: Promise<void>) => Promise.race([
+    work, new Promise<void>((resolve) => setTimeout(resolve, 200)),
+  ]);
+
+  it.each([
+    ["report", "before-resolve"], ["report", "after-resolve"], ["silent", "before-resolve"],
+  ] as const)("RV-LOW-A a %s/%s cancel from progress still ends the job", async (cancelBehavior, cancelEventOrder) => {
+    const device = await accepted({ cancelBehavior, cancelEventOrder, cancelConfirmMs: 5 });
+    const events: Emitted[] = [];
+    let cancel: Promise<void> | undefined;
+    device.onEvidence((event) => {
+      events.push(event);
+      if (event.type === "execution_progress") cancel = device.cancelJob("device-42");
+    });
+    device.progress(50);
+    await cancel;
+    await settle(device.quiesceEvidence());
+    expect(events.map((event) => event.type)).toEqual(["execution_progress", "execution_failed"]);
+    expect(events[1].payload.origin).toBe("device");
+    expect(await device.getStatus()).toBe("idle");
+  });
+
+  it("RV-LOW-A a stop from progress defers until every progress listener returns", async () => {
+    const device = await accepted();
+    const events: Emitted[] = [];
+    let stop: Promise<MachineCommandResult> | undefined;
+    device.onEvidence((event) => {
+      if (event.type === "execution_progress") stop = device.execute({ type: "stop" });
+    });
+    device.onEvidence((event) => events.push(event));
+    device.progress(50);
+    expect(events.map((event) => event.type)).toEqual(["execution_progress"]);
+    await expect(stop).resolves.toEqual({ success: true });
+    await settle(device.quiesceEvidence());
+    expect(events.map((event) => [event.type, event.payload.state])).toEqual([
+      ["execution_progress", undefined], ["execution_failed", "stopped"],
+    ]);
+    expect(events[1].payload.origin).toBe("device");
+    expect(await device.getStatus()).toBe("idle");
+  });
+
+  it("RV-LOW-A deferred stop cannot stop a replacement job with the same id", async () => {
+    const device = await accepted();
+    const events: Emitted[] = [];
+    let stop: Promise<unknown> | undefined;
+    device.onEvidence((event) => {
+      events.push(event);
+      if (event.type === "execution_progress") {
+        // The stop contract has its own success pin; isolate identity here.
+        stop = device.execute({ type: "stop" }).catch(() => undefined);
+      }
+    });
+    device.progress(10);
+    device.complete();
+    device.scriptStart({ outcome: "accept", deviceJobId: "device-42" });
+    // execute installs the new job synchronously, before the stop microtask runs.
+    const next = device.execute({ type: "start" });
+    await stop;
+    await expect(next).resolves.toMatchObject({ success: true });
+    expect(await device.getStatus()).toBe("busy");
+    expect(events.map((event) => event.type)).toEqual(["execution_progress", "execution_completed"]);
+    device.complete();
   });
 });

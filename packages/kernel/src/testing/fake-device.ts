@@ -118,6 +118,7 @@ export class FakeDevice implements MachineAdapter {
   private currentProgress = 0;
   private active: { id: DeviceJobId; end: () => void } | undefined;
   private delivering = false;
+  private deliveringTerminal = false;
   private disposed = false;
   private eventNumber = 0;
   private cancelDeadline: ReturnType<typeof setTimeout> | undefined;
@@ -236,7 +237,13 @@ export class FakeDevice implements MachineAdapter {
       return { success: true, data: { status: this.status, progress: this.currentProgress } };
     }
     if (command.type === "stop") {
-      if (this.active && !this.delivering) this.fail({ state: "stopped", origin: "device" });
+      const job = this.active;
+      if (job && !this.delivering) this.fail({ state: "stopped", origin: "device" });
+      else if (job && !this.deliveringTerminal) {
+        void Promise.resolve().then(() => {
+          if (!this.disposed && this.active === job && !this.delivering) this.fail({ state: "stopped", origin: "device" });
+        });
+      }
       return { success: true };
     }
     if (command.type !== "start") return { success: true };
@@ -283,7 +290,7 @@ export class FakeDevice implements MachineAdapter {
     }
     this.cancels.push(normalized);
     const job = this.active;
-    if (this.disposed || !job || job.id !== normalized || this.delivering) return;
+    if (this.disposed || !job || job.id !== normalized || this.deliveringTerminal) return;
     if (this.cancelBehavior === "throw") throw new Error("fake device cancel rejected");
     if (this.cancelBehavior === "refuse") return;
     if (this.cancelBehavior === "silent") {
@@ -342,6 +349,7 @@ export class FakeDevice implements MachineAdapter {
       this.eventNumber += 1;
       if (typeof event.payload.progress === "number") this.currentProgress = event.payload.progress;
       if (type === this.completedType || type === "execution_completed") this.currentProgress = 100;
+      this.deliveringTerminal = terminal;
       for (const callback of [...this.listeners]) {
         if (this.disposed) break;
         callback(structuredClone(event));
@@ -349,6 +357,7 @@ export class FakeDevice implements MachineAdapter {
     } finally {
       if (terminal) this.finishWork(job);
       this.delivering = false;
+      this.deliveringTerminal = false;
     }
   }
 
