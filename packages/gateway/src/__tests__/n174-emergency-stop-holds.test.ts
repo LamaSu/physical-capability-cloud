@@ -14,7 +14,7 @@ import { jobSubmitRoutes } from "../routes/job-submit.js";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { deviceRelayRoutes } from "../routes/device-relay.js";
 import { getKernelService, KernelService } from "../services/kernel-service.js";
-import { HOLDABLE_JOB_STATUSES, jobHoldFieldsById } from "../services/job-holds.js";
+import { HOLDABLE_JOB_STATUSES, jobHoldFields, jobHoldFieldsById } from "../services/job-holds.js";
 import { localJobDispatchDecision } from "../services/local-job-dispatch.js";
 import { applyUnavailablePolicy } from "./helpers/emergency-stop-policy-cases.js";
 
@@ -393,6 +393,56 @@ describe("N174 the undispatched hold set", () => {
     expect(holds.size).toBe(32_768);
     expect(holds.get(id)).toEqual({ held: true, holdReason: "emergency_stop" });
     expect(holds.get("job-n174-absent-0")).toEqual({ held: false });
+  });
+
+  it("reads a hold at every chunk boundary, and for an empty or repeated list, as the single-id read does", async () => {
+    const [a, b, c, d] = ["a", "b", "c", "d"].map((k) => seedJob(`job-n174-edge-${k}`));
+    await stop();
+    expect(jobHoldFieldsById([]).size).toBe(0);
+    const ids = Array.from({ length: 1_001 }, (_, i) => `job-n174-edge-absent-${i}`);
+    [ids[0], ids[499], ids[500], ids[1_000]] = [a, b, c, d];
+    for (const list of [ids, [...ids, a, a]]) {
+      const holds = jobHoldFieldsById(list);
+      expect(holds.size).toBe(1_001);
+      for (const id of new Set(list)) expect(holds.get(id)).toEqual(jobHoldFields(id));
+    }
+  });
+
+  it.each(["PUT", "PATCH"] as const)("a %s that repairs an unreadable policy holds the work it withheld", async (method) => {
+    applyUnavailablePolicy(KERNEL, { label: "null policy", state: "unavailable", policy: null });
+    const id = seedJob(`job-n174-unreadable-${method.toLowerCase()}`);
+    expect((await poll()).json()).toEqual({ emergencyStop: "unavailable", jobs: [] });
+    const repair = await app.inject({
+      method, url: `/api/operator/policy/${KERNEL}`, headers: HEADERS(),
+      payload: { version: 1, emergencyStop: false },
+    });
+    expect(repair.statusCode).toBe(200);
+    expect(await heldIds()).toEqual([id]);
+    expect((await poll()).json()).toEqual({ emergencyStop: "clear", jobs: [] });
+  });
+
+  it.each(["resume", "PUT", "PATCH"] as const)("a %s whose hold cannot be written rolls the reset back", async (kind) => {
+    const id = seedJob(`job-n174-atomic-${kind.toLowerCase()}`, "in_progress");
+    await stop();
+    expect((await app.inject({
+      method: "POST", url: "/api/operator/job-status", headers: CLAIMED(),
+      payload: { jobId: id, kernelId: KERNEL, status: "queued" },
+    })).statusCode).toBe(200);
+    const { db } = getStore();
+    const insert = db.insert.bind(db);
+    const failing = vi.spyOn(db, "insert").mockImplementation(((table: typeof schema.jobHolds) => {
+      if (table === schema.jobHolds) throw new Error("hold write failed");
+      return insert(table);
+    }) as typeof db.insert);
+    const res = kind === "resume"
+      ? await app.inject({ method: "POST", url: "/api/operator/emergency-resume", headers: HEADERS(), payload: { kernelId: KERNEL } })
+      : await app.inject({
+        method: kind, url: `/api/operator/policy/${KERNEL}`, headers: HEADERS(),
+        payload: { version: 1, emergencyStop: false },
+      });
+    failing.mockRestore();
+    expect(res.statusCode).toBe(500);
+    expect((await poll()).json()).toEqual({ emergencyStop: "stopped", jobs: [] });
   });
 });
 
