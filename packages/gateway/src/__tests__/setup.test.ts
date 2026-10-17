@@ -36,6 +36,7 @@ vi.mock("../services/kernel-service.js", async (importOriginal) => {
 
   const mockService = {
     kernelId: "kernel-setup-test",
+    hasExplicitConfig: true,
     submitJob: vi
       .fn()
       .mockResolvedValue({ jobId: "test-job-mock", deviceId: "dev-owned", status: "accepted" }),

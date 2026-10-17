@@ -5,6 +5,7 @@ import type { JobExecutionDTO } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
 import { useJobExecution } from "../api/hooks/use-pcc-data.js";
 import { ApiError } from "../api/gateway.js";
+import { JobFlowCard } from "../components/JobFlowCard.js";
 import {
   PHASE_VIEW,
   SOURCE_LABEL,
@@ -44,9 +45,18 @@ export function JobDetailPage() {
   }, [setPageMeta, data, jobId]);
 
   const back = (
-    <button onClick={() => navigate("/jobs")} className="text-xs text-white/30 hover:text-white/50 mb-2">
-      ← Back to jobs
-    </button>
+    <div className="flex items-center gap-3 mb-2">
+      <button onClick={() => navigate("/jobs")} className="text-xs text-white/30 hover:text-white/50">
+        ← Back to jobs
+      </button>
+      <button
+        onClick={() => refetch()}
+        disabled={isFetching}
+        className="text-xs text-teal-300/80 hover:text-teal-300 disabled:opacity-40"
+      >
+        Refresh
+      </button>
+    </div>
   );
 
   // Re-evaluate the read's age every few seconds, so a read that stops refreshing goes stale
@@ -115,6 +125,8 @@ export function JobDetailPage() {
       </div>
 
       <Freshness asOf={data.asOf} reason={fresh.reason} refreshing={isFetching} />
+
+      <JobFlowCard dto={data} stale={fresh.stale} />
 
       {data.notices.length > 0 && (
         <GlassPanel padding="md">

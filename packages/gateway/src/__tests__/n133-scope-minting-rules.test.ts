@@ -160,8 +160,8 @@ describe("N133 rule 1: a paid job's buyer is the caller's proven identity, or th
 
   it("bindBuyer: the admin names any buyer; a proven wallet only itself, stored as proven; a claim never", () => {
     expect(bindBuyer({ admin: true, provenWallet: null }, OTHER)).toEqual({ ok: true, buyer: OTHER });
-    expect(bindBuyer({ admin: false, provenWallet: LETTERED }, LETTERED_MIXED)).toEqual({ ok: true, buyer: LETTERED });
-    expect(bindBuyer({ admin: false, provenWallet: BUYER }, OTHER)).toMatchObject({ ok: false, status: 403, body: { reason: "buyer_mismatch" } });
+    expect(bindBuyer({ admin: false, provenWallet: LETTERED, provenWalletVia: "siwe-session" }, LETTERED_MIXED)).toEqual({ ok: true, buyer: LETTERED });
+    expect(bindBuyer({ admin: false, provenWallet: BUYER, provenWalletVia: "siwe-session" }, OTHER)).toMatchObject({ ok: false, status: 403, body: { reason: "buyer_mismatch" } });
     expect(bindBuyer({ admin: false, provenWallet: null }, BUYER)).toMatchObject({ ok: false, status: 403, body: { reason: "buyer_proof_required" } });
     expect(bindBuyer({ admin: true, provenWallet: null }, "")).toMatchObject({ ok: false });
   });
@@ -286,6 +286,37 @@ describe("N133 rule 1: a paid job's buyer is the caller's proven identity, or th
 
       const admin = await send({ ...claimed, "x-admin-key": ADMIN }, "pcc-quote", params(12345));
       expect(admin.json<{ error?: unknown }>().error).toMatchObject({ code: -32001, data: { reason: "buyer_proof_required" } });
+
+      expect(db().select().from(schema.negotiationSessions).all()).toHaveLength(0);
+      expect(db().select().from(schema.escrows).all()).toHaveLength(0);
+      expect(db().select().from(schema.jobs).all()).toHaveLength(0);
+      expect(db().select().from(schema.executionScopes).all()).toHaveLength(0);
+    });
+
+    it("a falsy buyer is refused as missing for claimed keys, SIWE sessions and the admin before anything is created", async () => {
+      // A falsy buyer skips the binding, so createPccQuote's own required-field check is what
+      // refuses it (Opus 5.5 r3 LOW-1). Pin that refusal, and that nothing is created, per caller.
+      db().delete(schema.escrows).run();
+      db().delete(schema.jobs).run();
+      const key = provisionApiKey({ operatorId: "n133-claimed-falsy-buyer" }).rawKey;
+      const claimed = { authorization: `Bearer ${key}` };
+      const callers: Array<[string, Record<string, string>]> = [
+        ["claimed key", claimed],
+        ["SIWE session", siweSession(BUYER)],
+        ["admin", { ...claimed, "x-admin-key": ADMIN }],
+      ];
+      const falsyBuyers: unknown[] = [undefined, null, "", 0, false];
+      for (const [label, headers] of callers) {
+        for (const skill of ["pcc-quote", "pcc-submit"]) {
+          for (const buyer of falsyBuyers) {
+            const refused = await send(headers, skill, params(buyer));
+            expect(refused.json<{ error?: unknown }>().error, `${label}, ${skill}, buyer ${String(buyer)}`).toMatchObject({
+              code: -32603,
+              message: "userAgentId, kernelId, and capabilityType are required",
+            });
+          }
+        }
+      }
 
       expect(db().select().from(schema.negotiationSessions).all()).toHaveLength(0);
       expect(db().select().from(schema.escrows).all()).toHaveLength(0);

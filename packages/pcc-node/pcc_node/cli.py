@@ -19,7 +19,7 @@ import click
 
 from . import __version__
 from .config import ConfigFileError, NodeConfig, generate_config, save_config, load_config, load_config_data
-from .crypto import KeyFileError, load_or_create_keys
+from .crypto import CompromisedKeyError, CryptoUnavailableError, KeyFileError, load_or_create_keys
 from .daemon import run_daemon, is_running, read_state
 from .detect import detect_all
 from .discovery import (
@@ -154,7 +154,7 @@ def _load_node_keys():
     """The node's key pair, or a plain message and exit 1 if its key file is unusable."""
     try:
         return load_or_create_keys()
-    except KeyFileError as exc:
+    except (KeyFileError, CompromisedKeyError, CryptoUnavailableError) as exc:
         click.echo(f"Cannot use this node's key file: {exc}", err=True)
         sys.exit(1)
 

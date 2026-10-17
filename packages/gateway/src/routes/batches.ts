@@ -73,6 +73,8 @@ const refuseIdentity = (reply: FastifyReply, reason: keyof typeof JOB_READ_REFUS
 };
 
 const SAMPLE_TYPES: ReadonlySet<string> = new Set(["unknown", "standard", "blank", "system_suitability", "sample", "spike", "duplicate"]);
+// Mirror auth/kernel-authority.ts UNOWNED placeholders.
+const UNOWNED = new Set(["", "0x0000000000000000000000000000000000000000"]);
 
 /**
  * A new slot's typed fields (SampleSlot without id and status), or undefined when one is missing
@@ -397,9 +399,10 @@ export async function batchRoutes(app: FastifyInstance) {
 
       const claimIdx = batch.claimedSlots.findIndex((c) => c.id === req.params.claimId);
       const claimant = claimIdx === -1 ? undefined : batch.claimedSlots[claimIdx]!.agentId;
+      const rc = typeof claimant === "string" ? claimant.trim().toLowerCase() : "";
       const mayRelease =
         sharedClaimsReaderOf(req)(batch.kernelId) ||
-        (pre.as === "proven" && typeof claimant === "string" && claimant.trim().toLowerCase() === pre.wallet);
+        (pre.as === "proven" && !UNOWNED.has(rc) && !UNOWNED.has(pre.wallet) && rc === pre.wallet);
       if (claimIdx === -1 || !mayRelease) return reply.status(404).send({ error: "Claim not found" });
 
       if (batch.status === "running" || batch.status === "completed") {

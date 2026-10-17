@@ -1,5 +1,6 @@
 import React from "react";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { scopeErrorMessage } from "../lib/scope-notice.js";
 
 /**
  * CdpFundedKeyOnramp — zero-friction PCC onboarding.
@@ -38,7 +39,7 @@ async function api(path: string, method: string, body?: unknown): Promise<any> {
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(`${method} ${path} → ${res.status}`);
+  if (!res.ok) throw new Error((await scopeErrorMessage(res, path, method)) ?? `${method} ${path} → ${res.status}`);
   return res.json();
 }
 

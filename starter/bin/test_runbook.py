@@ -3,6 +3,7 @@ and with the truths the agent pack enforces. Standard library only:
 python3 -m unittest discover -s starter/bin -p 'test_*.py'
 """
 
+import ast
 import json
 import pathlib
 import re
@@ -88,6 +89,37 @@ class TestIndex(unittest.TestCase):
                 self.assertEqual(event["report"]["phase"], event["phase"], key)
                 self.assertIn(event["report"]["outcome"], OUTCOMES, key)
 
+    def assert_key_leak_guidance_covers_selected_path(self, guidance):
+        # F3 follow-up: rotation must delete the same key that step 3 selected.
+        signing = between(phase_text("00-prerequisites.md"), "## 3.", "## 4.")
+        examples = re.findall(r"(?ms)^python3 - <<'EOF'[^\n]*\n(.*?)^EOF$", signing)
+        self.assertEqual(len(examples), 1, "step 3 must have one node key example")
+        selections = [
+            node.value for node in ast.parse(examples[0]).body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "key_path" for target in node.targets)
+        ]
+        self.assertEqual(len(selections), 1, "step 3 must select one key path")
+        calls = [node for node in ast.walk(selections[0]) if isinstance(node, ast.Call)]
+        environment_names = [
+            call.args[0].value for call in calls if ast.unparse(call.func) == "os.environ.get"
+        ]
+        default_paths = [
+            call.args[0].value for call in calls if ast.unparse(call.func) == "os.path.expanduser"
+        ]
+        self.assertTrue(environment_names, "step 3 must select key path overrides")
+        self.assertEqual(len(default_paths), 1, "step 3 must select one default key path")
+        for reference in environment_names + default_paths:
+            self.assertIn(reference, guidance, f"prerequisites.key-leaked must mention {reference}")
+
+    def test_key_leak_guidance_covers_step_3_key_path_selection(self):
+        self.assert_key_leak_guidance_covers_selected_path(self.events["prerequisites.key-leaked"]["do"])
+
+    def test_key_leak_guidance_rejects_a_missing_key_path_override(self):
+        guidance = self.events["prerequisites.key-leaked"]["do"].replace("PCC_NODE_KEY_PATH", "")
+        with self.assertRaisesRegex(AssertionError, "prerequisites.key-leaked must mention PCC_NODE_KEY_PATH"):
+            self.assert_key_leak_guidance_covers_selected_path(guidance)
+
 
 class TestTruths(unittest.TestCase):
     def test_no_call_goes_to_production(self):
@@ -134,6 +166,154 @@ class TestTruths(unittest.TestCase):
                 else:
                     self.assertIn('\\"publicKey\\"', after, f"{path.name}: provision without publicKey")
         self.assertEqual(calls, 1)  # the operator's own; phase 6's buyer key went with its submission (115e)
+
+    def assert_no_server_private_key_claims(self, text, name):
+        # E17e NC2: provisioning binds our public key; it never supplies a private one.
+        verbs = r"(?:generat\w*|creat\w*|return\w*|contain\w*|send\w*|provid\w*|receiv\w*|mak\w*|made|issu\w*|includ\w*|hand\w*)"
+        private_key = r"\bprivate(?:[\s_]+signing)?[\s_]+key\b"
+        negated = re.compile(
+            rf"(?i)\b(?:never|does not|doesn't|will not|won't)\s+(?:{verbs}\s+(?:or|and)\s+)*"
+            rf"{verbs}\s+(?:back\s+)?(?:(?:a|the|your|its|any)\s+)?{private_key}"
+        )
+        claim = re.compile(
+            rf"(?i)\b(?:server|gateway|api)[- ](?:made|generated|created|issued)\s+{private_key}|"
+            rf"\b(?:server|gateway|api|response)\b[^!?\n]*\b{verbs}\b[^!?\n]*{private_key}|"
+            rf"\b(?:return\w*|receiv\w*|hand\w*)\b[^!?\n]*{private_key}|"
+            rf"{private_key}[^!?\n]*\b(?:returned|received)\b"
+        )
+        for sentence in re.split(r"(?<=[.!?])\s+|\n", text):
+            self.assertNotRegex(negated.sub("", sentence), claim, f"{name}: {sentence}")
+
+    def test_no_text_claims_a_server_made_or_returned_private_key(self):
+        for path, text in text_files():
+            self.assert_no_server_private_key_claims(text, path.name)
+
+    def test_private_key_claim_check_rejects_near_miss_wording(self):
+        # E17g N5: these three paraphrases escaped the original NC2 regression pin.
+        for text in (
+            "Provisioning gets a gateway-made private key back in the response.",
+            "Provisioning without it hands back a fresh private signing key.",
+            "The response then includes `ed25519.private_key`.",
+            "The gateway makes a private key.",
+            "The API issues a private signing key.",
+        ):
+            with self.subTest(text=text):
+                with self.assertRaises(AssertionError):
+                    self.assert_no_server_private_key_claims(text, "negative control")
+        self.assert_no_server_private_key_claims(
+            "The gateway never generates or returns a private signing key.", "allowed guidance"
+        )
+
+    def test_secrets_are_not_claimed_to_live_only_in_onboarding_state(self):
+        # The node signing key lives outside the onboarding folder, including its .pcc/.
+        for path, text in text_files():
+            self.assertNotRegex(
+                text, r"(?i)\b(?:secrets|keys)\b[*_`]*\s+live\s+only\s+in\s+[*_`]*\.pcc/", path.name
+            )
+
+    def test_every_node_key_call_uses_the_selected_external_path(self):
+        # R2, NC3 and NC5: older releases default to a key inside the onboarding folder.
+        expected = ast.parse(
+            'os.environ.get("PCC_NODE_KEY_PATH") or os.environ.get("PCC_NODE_KEYS_FILE") or os.path.expanduser("~/.pcc-node/keys.json")',
+            mode="eval",
+        ).body
+        sources = list(text_files())
+        sources.extend(
+            (path, path.read_text(encoding="utf-8"))
+            for path in sorted(STARTER.rglob("*"))
+            if path.is_file() and (path.suffix == ".py" or path.name == "pcc-report")
+            and ".pcc" not in path.parts
+        )
+        phase_locations = {}
+        for path, text in sources:
+            if path.suffix in (".md", ".json"):
+                # Check the count too, so an added call outside an example cannot escape the test.
+                documented_calls = len(re.findall(r"\bload_or_create_keys\s*\(", text))
+                examples = []
+                for language, code in re.findall(r"(?ms)^```([^\n]*)\n(.*?)^```", text):
+                    if language.strip() == "python":
+                        examples.append(code)
+                    else:
+                        examples.extend(re.findall(r"(?ms)^python3 - <<'EOF'[^\n]*\n(.*?)^EOF$", code))
+            else:
+                documented_calls = None
+                examples = [text]
+            found = 0
+            for code in examples:
+                tree = ast.parse(code)
+                for call in ast.walk(tree):
+                    if not (isinstance(call, ast.Call) and (
+                        isinstance(call.func, ast.Name) and call.func.id == "load_or_create_keys"
+                        or isinstance(call.func, ast.Attribute) and call.func.attr == "load_or_create_keys"
+                    )):
+                        continue
+                    found += 1
+                    self.assertEqual(len(call.args), 1, f"{path.name}: pass the selected key path explicitly")
+                    self.assertFalse(call.keywords, f"{path.name}: use the same explicit path argument")
+                    location = call.args[0]
+                    if isinstance(location, ast.Name):
+                        bindings = [
+                            node.value for node in tree.body
+                            if isinstance(node, ast.Assign) and node.lineno < call.lineno
+                            and any(isinstance(target, ast.Name) and target.id == location.id for target in node.targets)
+                        ]
+                        self.assertTrue(bindings, f"{path.name}: key path must be built here")
+                        location = bindings[-1]
+                    self.assertEqual(ast.dump(location), ast.dump(expected), f"{path.name}: key path must select PCC_NODE_KEY_PATH, PCC_NODE_KEYS_FILE or ~/.pcc-node/keys.json")
+                    phase_locations.setdefault(path.name, []).append(ast.dump(location))
+            if documented_calls is not None:
+                self.assertEqual(found, documented_calls, f"{path.name}: every key call must be in a checked Python example")
+        # L3: phase 5 must reopen exactly the location chosen in phase 0.
+        self.assertEqual(phase_locations["00-prerequisites.md"], [ast.dump(expected)])
+        self.assertEqual(phase_locations["05-register.md"], phase_locations["00-prerequisites.md"])
+
+    def assert_node_key_location_guard(self, text, name):
+        # r2 has no location checks: both snippets must refuse before creating directories.
+        examples = [
+            code for code in re.findall(r"(?ms)^python3 - <<'EOF'[^\n]*\n(.*?)^EOF$", text)
+            if re.search(r"\bload_or_create_keys\s*\(", code)
+        ]
+        self.assertEqual(len(examples), 1, f"{name}: expected one node key example")
+        code = examples[0]
+        tree = ast.parse(code)
+        selected = [
+            i for i, node in enumerate(tree.body)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "key_path" for target in node.targets)
+        ]
+        self.assertEqual(len(selected), 1, f"{name}: expected one key path selection")
+        guard = tree.body[selected[0] + 1]
+        expected = ast.parse(
+            'if not os.path.isabs(key_path) or os.path.realpath(key_path).startswith(os.path.realpath(".") + os.sep):\n'
+            '    raise SystemExit("The node key location must be an absolute path outside this folder and every source checkout")'
+        ).body[0]
+        self.assertEqual(
+            ast.dump(guard), ast.dump(expected),
+            f"{name}: key path guard must refuse non-absolute and in-folder paths immediately after selection",
+        )
+        return ast.get_source_segment(code, guard)
+
+    def test_both_node_key_snippets_guard_the_selected_location(self):
+        for name in ("00-prerequisites.md", "05-register.md"):
+            with self.subTest(name=name):
+                self.assert_node_key_location_guard(phase_text(name), name)
+
+    def test_removing_either_node_key_guard_is_rejected(self):
+        for name in ("00-prerequisites.md", "05-register.md"):
+            with self.subTest(name=name):
+                text = phase_text(name)
+                guard = self.assert_node_key_location_guard(text, name)
+                without_guard = text.replace(guard, "", 1)
+                with self.assertRaisesRegex(AssertionError, "key path guard must refuse"):
+                    self.assert_node_key_location_guard(without_guard, name)
+
+    def test_node_key_location_guidance_requires_linux_and_an_external_home(self):
+        # E17e NC4: retain the location constraints even when an older release cannot enforce them.
+        signing = between(phase_text("00-prerequisites.md"), "## 3.", "## 4.")
+        self.assertRegex(signing, r"(?i)Linux only")
+        self.assertIn("PCC_NODE_KEY_PATH", signing)
+        self.assertIn("~/.pcc-node/keys.json", signing)
+        self.assertIn("Your home and the key directory must be outside every source checkout", signing)
 
     def test_no_key_is_expanded_onto_a_command_line(self):
         # A key in argv is readable by every user of the machine (ps, /proc/<pid>/cmdline).

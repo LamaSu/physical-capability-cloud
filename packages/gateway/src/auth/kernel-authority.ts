@@ -35,6 +35,8 @@ export interface KernelAuthority {
   admin: boolean;
   /** The wallet the caller proved control of (WP-A); null when none. */
   provenWallet: string | null;
+  /** Server-recorded proof origin; absence grants no buyer binding. */
+  provenWalletVia?: string | null;
   /** The caller's claimed identity: its API key's operator id, or its session's address. */
   claimed: string | null;
 }
@@ -54,11 +56,12 @@ function hasAdminSecret(provided: unknown, expected: string | undefined = proces
 }
 
 export function authorityOf(req: FastifyRequest): KernelAuthority {
-  const r = req as unknown as { provenWallet?: unknown; operatorId?: unknown; userId?: unknown };
+  const r = req as unknown as { provenWallet?: unknown; provenWalletVia?: unknown; operatorId?: unknown; userId?: unknown };
   const text = (v: unknown) => (typeof v === "string" && v.trim().length > 0 ? v.trim() : null);
   return {
     admin: hasAdminSecret(req.headers["x-admin-key"]),
     provenWallet: text(r.provenWallet),
+    provenWalletVia: typeof r.provenWalletVia === "string" ? r.provenWalletVia : null,
     claimed: text(r.operatorId) ?? text(r.userId),
   };
 }
@@ -69,7 +72,7 @@ const WALLET_RE = /^0x[0-9a-fA-F]{40}$/;
 /** operatorAddress values that record no owner: the empty string and the legacy zero placeholder. */
 const UNOWNED = new Set(["", "0x0000000000000000000000000000000000000000"]);
 
-function ownerOf(operatorAddress: unknown): string | null {
+export function ownerOf(operatorAddress: unknown): string | null {
   if (typeof operatorAddress !== "string") return null;
   const owner = operatorAddress.trim().toLowerCase();
   return UNOWNED.has(owner) ? null : owner;

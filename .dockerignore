@@ -9,6 +9,7 @@ packages/contracts/out
 packages/contracts/cache
 packages/contracts/out-testnet
 packages/contracts/cache-testnet
+packages/contracts/tmp
 packages/contracts/lib
 ai
 scripts/.daily-report-state.json

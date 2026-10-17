@@ -141,6 +141,8 @@ export function makeKernelEd25519Signer(seed?: Uint8Array): KernelEd25519Signer 
 // Print job
 // ---------------------------------------------------------------------------
 
+export const DEFAULT_CANCEL_WINDOW_MS = 30_000;
+
 export interface PrintJobOptions {
   /**
    * The device to drive: an IppAdapter, or any MachineAdapter whose start names its device
@@ -328,7 +330,7 @@ async function printOnce(
     assuranceTier = 0,
     timeoutMs = 120_000,
     signal,
-    cancelWindowMs = 30_000,
+    cancelWindowMs = DEFAULT_CANCEL_WINDOW_MS,
     settlementUnitId,
     challengeNonce,
     evidenceQuiesceTimeoutMs = 15_000,
