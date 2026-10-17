@@ -48,6 +48,7 @@
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
+import { knownErrorClassName, logSafeId, logSafeInt, logSafeSmallInt } from "../redaction.js";
 import { canonicalize, hashEvent, type EvidenceEvent, type EvidenceSource } from "@pcc/spec";
 import {
   EasyPostError,
@@ -298,7 +299,7 @@ export async function carrierRoutes(app: FastifyInstance) {
     const missingAtBoot = computeMissingConfig();
     if (missingAtBoot.length) {
       app.log.error(
-        { missing: missingAtBoot },
+        { code: "carrier_configuration_incomplete", missingCount: logSafeInt(missingAtBoot.length) },
         "carrier capability DISABLED: production config incomplete — carrier routes will 503 until the configuration is completed (environment-variable changes require a restart). The rest of the gateway is unaffected.",
       );
     }
@@ -473,7 +474,7 @@ export async function carrierRoutes(app: FastifyInstance) {
       await getCarrierShipmentStore().markReconciliationRequired(jobId, reason);
     } catch (err) {
       const code = err instanceof CarrierStoreError ? err.code : "parking_failed";
-      req.log.error({ code, jobId, reason }, "carrier: FAILED TO PARK a post-charge outcome — state may not reflect the response");
+      req.log.error({ code: "carrier_parking_failed", detailCode: logSafeId(code), jobId: logSafeId(jobId), reason: logSafeId(reason), errorClass: knownErrorClassName(err) }, "carrier: FAILED TO PARK a post-charge outcome — state may not reflect the response");
       return reply.code(500).send({ error: "parking_failed", detailCode: code, originalReason: reason });
     }
     return reply.code(409).send({ error: "reconciliation_required", reason });
@@ -501,12 +502,12 @@ export async function carrierRoutes(app: FastifyInstance) {
     for (const entry of store.peekUnmatched(rec.trackingCode)) {
       const scan = entry.data as LedgeredScan;
       if (typeof scan?.rawBodyB64 !== "string" || typeof scan?.signatureHeader !== "string") {
-        req.log.error({ eventId: entry.eventId }, "carrier: ledgered scan entry malformed — kept for inspection");
+        req.log.error({ eventId: logSafeId(entry.eventId) }, "carrier: ledgered scan entry malformed — kept for inspection");
         continue;
       }
       const rawBody = Buffer.from(scan.rawBodyB64, "base64");
       if (!client.verifyWebhookSignature(rawBody, scan.signatureHeader)) {
-        req.log.error({ eventId: entry.eventId }, "carrier: ledgered scan signature does not re-verify (corrupt row or rotated secret) — removed, cannot become evidence");
+        req.log.error({ eventId: logSafeId(entry.eventId) }, "carrier: ledgered scan signature does not re-verify (corrupt row or rotated secret) — removed, cannot become evidence");
         store.deleteUnmatched(entry.eventId);
         continue;
       }
@@ -517,7 +518,7 @@ export async function carrierRoutes(app: FastifyInstance) {
         verified = null;
       }
       if (!verified || verified.easypostEventId !== entry.eventId || verified.trackingCode !== entry.trackingCode) {
-        req.log.error({ eventId: entry.eventId }, "carrier: ledgered scan bytes disagree with ledger identity — removed, cannot become evidence");
+        req.log.error({ eventId: logSafeId(entry.eventId) }, "carrier: ledgered scan bytes disagree with ledger identity — removed, cannot become evidence");
         store.deleteUnmatched(entry.eventId);
         continue;
       }
@@ -531,14 +532,14 @@ export async function carrierRoutes(app: FastifyInstance) {
           if (res.outcome === "applied") replayed++;
           store.deleteUnmatched(entry.eventId);
         } else if (res.reason === "not_finalized" || res.reason === "unknown_tracking_code") {
-          req.log.warn({ eventId: entry.eventId, reason: res.reason }, "carrier: ledgered scan still unmatchable — kept");
+          req.log.warn({ eventId: logSafeId(entry.eventId), reason: logSafeId(res.reason) }, "carrier: ledgered scan still unmatchable — kept");
         } else {
           // Permanent refusal (predates commitment / identity mismatch): final outcome.
-          req.log.warn({ eventId: entry.eventId, reason: res.reason }, "carrier: ledgered scan permanently non-qualifying");
+          req.log.warn({ eventId: logSafeId(entry.eventId), reason: logSafeId(res.reason) }, "carrier: ledgered scan permanently non-qualifying");
           store.deleteUnmatched(entry.eventId);
         }
       } catch (err) {
-        req.log.error({ err, eventId: entry.eventId }, "carrier: ledgered scan replay failed — row kept; the next identical POST retries it");
+        req.log.error({ code: "carrier_ledger_replay_failed", errorClass: knownErrorClassName(err), eventId: logSafeId(entry.eventId) }, "carrier: ledgered scan replay failed — row kept; the next identical POST retries it");
       }
     }
     return replayed;
@@ -573,7 +574,7 @@ export async function carrierRoutes(app: FastifyInstance) {
       return reply.code(201).send({ ...toShipmentDTO(rec), ...(note ? { note } : {}), replayedScans: replayed });
     } catch (err) {
       const code = err instanceof EasyPostError ? err.code : err instanceof CarrierStoreError ? err.code : "finalize_failed";
-      req.log.error({ code, jobId: params.jobId }, "carrier: purchase recorded, finalize failed — retry same request to finalize");
+      req.log.error({ code: "carrier_finalize_failed", detailCode: logSafeId(code), jobId: logSafeId(params.jobId), errorClass: knownErrorClassName(err) }, "carrier: purchase recorded, finalize failed — retry same request to finalize");
       return reply.code(502).send({ error: "purchase_recorded_finalize_failed", detailCode: code, retry: true });
     }
   }
@@ -657,7 +658,7 @@ export async function carrierRoutes(app: FastifyInstance) {
       // retry. (The caller here already passed current-kernel authz; this
       // guards the stored record's own provenance.)
       if (existing.ownerId.toLowerCase() !== caller.toLowerCase() || existing.kernelId !== kernelId) {
-        req.log.warn({ jobId, recordOwner: existing.ownerId, caller }, "carrier: existing record owned by a different principal/kernel");
+        req.log.warn({ jobId: logSafeId(jobId), recordOwner: logSafeId(existing.ownerId), caller: logSafeId(caller) }, "carrier: existing record owned by a different principal/kernel");
         return reply.code(409).send({ error: "carrier_record_ownership_mismatch" });
       }
       // A `reserved` row is adjudicated by store.reserve() below — BEFORE the
@@ -686,11 +687,11 @@ export async function carrierRoutes(app: FastifyInstance) {
             recovered = (await client.getShipment(existing.createdShipment!)).bought;
           } catch (err) {
             if (err instanceof EasyPostError && POST_CHARGE_ERROR_CODES.has(err.code)) {
-              req.log.error({ code: err.code, detail: err.detail, jobId }, "carrier: recovery hit a post-charge defect — parking for reconciliation");
+              req.log.error({ code: "carrier_recovery_postcharge_failed", detailCode: logSafeId(err.code), errorClass: knownErrorClassName(err), jobId: logSafeId(jobId) }, "carrier: recovery hit a post-charge defect — parking for reconciliation");
               return park(req, reply, jobId, err.code);
             }
             const code = err instanceof EasyPostError ? err.code : "recovery_failed";
-            req.log.error({ code, jobId }, "carrier: buy_in_flight recovery lookup failed; state unchanged, retry later");
+            req.log.error({ code: "carrier_recovery_lookup_failed", detailCode: logSafeId(code), jobId: logSafeId(jobId), errorClass: knownErrorClassName(err) }, "carrier: buy_in_flight recovery lookup failed; state unchanged, retry later");
             return reply.code(502).send({ error: "recovery_failed", detailCode: code, retry: true });
           }
           // Phase B: no purchase on record at EasyPost — safe to buy the SAME
@@ -703,7 +704,7 @@ export async function carrierRoutes(app: FastifyInstance) {
                 return reply.code(502).send({ error: "buy_ambiguous_retry_to_recover", retry: true });
               }
               const code = err instanceof EasyPostError ? err.code : "easypost_buy_failed";
-              req.log.error({ code, jobId }, "carrier: recovery re-buy hit a post-dispatch defect — parking");
+              req.log.error({ code: "carrier_recovery_rebuy_failed", detailCode: logSafeId(code), jobId: logSafeId(jobId), errorClass: knownErrorClassName(err) }, "carrier: recovery re-buy hit a post-dispatch defect — parking");
               return park(req, reply, jobId, code);
             }
           }
@@ -715,7 +716,7 @@ export async function carrierRoutes(app: FastifyInstance) {
             return finalizeAndRespond(req, reply, params, rec, "recovered a dispatched purchase");
           } catch (err) {
             const code = err instanceof CarrierStoreError ? err.code : "persist_failed";
-            req.log.error({ code, jobId }, "carrier: confirmed purchase could not be recorded — parking for reconciliation");
+            req.log.error({ code: "carrier_recovery_persist_failed", detailCode: logSafeId(code), jobId: logSafeId(jobId), errorClass: knownErrorClassName(err) }, "carrier: confirmed purchase could not be recorded — parking for reconciliation");
             return park(req, reply, jobId, `record_failed:${code}`);
           }
         }
@@ -746,7 +747,7 @@ export async function carrierRoutes(app: FastifyInstance) {
     } catch (err) {
       store.release(jobId);
       if (err instanceof EasyPostError) {
-        req.log.warn({ code: err.code, status: err.status, detail: err.detail, jobId }, "carrier: pre-charge failure");
+        req.log.warn({ code: "carrier_precharge_failed", detailCode: logSafeId(err.code), status: logSafeSmallInt(err.status, 100, 599), errorClass: knownErrorClassName(err), jobId: logSafeId(jobId) }, "carrier: pre-charge failure");
         const clientFault =
           err.code === "invalid_parcel" ||
           err.code === "invalid_document_hash" ||
@@ -754,7 +755,7 @@ export async function carrierRoutes(app: FastifyInstance) {
           err.code.endsWith("_ceiling");
         return reply.code(clientFault ? 400 : 502).send({ error: err.code });
       }
-      req.log.error({ err, jobId }, "carrier: unexpected pre-charge failure");
+      req.log.error({ code: "carrier_precharge_unexpected_failure", errorClass: knownErrorClassName(err), jobId: logSafeId(jobId) }, "carrier: unexpected pre-charge failure");
       return reply.code(502).send({ error: "easypost_label_purchase_failed" });
     }
 
@@ -765,7 +766,7 @@ export async function carrierRoutes(app: FastifyInstance) {
       // Nothing dispatched yet — releasing is still safe and correct.
       store.release(jobId);
       const code = err instanceof CarrierStoreError ? err.code : "record_dispatch_failed";
-      req.log.error({ code, jobId }, "carrier: could not record buy_in_flight; purchase NOT dispatched");
+      req.log.error({ code: "carrier_dispatch_record_failed", detailCode: logSafeId(code), jobId: logSafeId(jobId), errorClass: knownErrorClassName(err) }, "carrier: could not record buy_in_flight; purchase NOT dispatched");
       return reply.code(500).send({ error: "record_dispatch_failed", detailCode: code });
     }
 
@@ -775,7 +776,7 @@ export async function carrierRoutes(app: FastifyInstance) {
       bought = await client.buyRate(created);
     } catch (err) {
       const code = err instanceof EasyPostError ? err.code : "easypost_buy_ambiguous";
-      req.log.error({ code, jobId, shipmentId: created.shipmentId }, "carrier: /buy outcome not clean — parking for recovery/reconciliation, NOT releasing");
+      req.log.error({ code: "carrier_purchase_outcome_failed", detailCode: logSafeId(code), jobId: logSafeId(jobId), shipmentId: logSafeId(created.shipmentId), errorClass: knownErrorClassName(err) }, "carrier: /buy outcome not clean — parking for recovery/reconciliation, NOT releasing");
       if (err instanceof EasyPostError && err.code === "easypost_buy_ambiguous") {
         // Outcome unknown: stay buy_in_flight; the identical retry runs getShipment recovery.
         return reply.code(502).send({ error: "buy_ambiguous_retry_to_recover", retry: true });
@@ -790,7 +791,7 @@ export async function carrierRoutes(app: FastifyInstance) {
       record = await store.markPurchased(jobId, bought);
     } catch (err) {
       const code = err instanceof CarrierStoreError ? err.code : "record_purchase_failed";
-      req.log.error({ code, jobId, shipmentId: bought.shipmentId, trackingCode: bought.trackingCode }, "carrier: PURCHASE MADE but could not be recorded — parking for reconciliation");
+      req.log.error({ code: "carrier_purchase_record_failed", detailCode: logSafeId(code), jobId: logSafeId(jobId), shipmentId: logSafeId(bought.shipmentId), trackingCode: logSafeId(bought.trackingCode), errorClass: knownErrorClassName(err) }, "carrier: PURCHASE MADE but could not be recorded — parking for reconciliation");
       return park(req, reply, jobId, `record_failed:${code}`);
     }
     return finalizeAndRespond(req, reply, params, record);
@@ -855,7 +856,7 @@ export async function carrierRoutes(app: FastifyInstance) {
     const headerValue = Array.isArray(header) ? header[0] : header;
     const rawBody = req.rawBody ?? Buffer.alloc(0);
     if (!client.verifyWebhookSignature(rawBody, headerValue)) {
-      req.log.warn({ hasHeader: !!headerValue, bytes: rawBody.length }, "carrier webhook: signature verification failed");
+      req.log.warn({ hasHeader: !!headerValue, bytes: logSafeInt(rawBody.length) }, "carrier webhook: signature verification failed");
       return reply.code(401).send({ error: "invalid_signature" });
     }
     const signatureHeader = headerValue as string;
@@ -867,7 +868,7 @@ export async function carrierRoutes(app: FastifyInstance) {
     }
     if (client.requireProductionMode && trackerEvent.providerMode !== "production") {
       // A sandbox tracker must never become evidence in production.
-      req.log.warn({ trackingCode: trackerEvent.trackingCode, providerMode: trackerEvent.providerMode }, "carrier webhook: non-production tracker refused");
+      req.log.warn({ trackingCode: logSafeId(trackerEvent.trackingCode), providerMode: logSafeId(trackerEvent.providerMode) }, "carrier webhook: non-production tracker refused");
       return reply.code(200).send({ received: true, ignored: true, reason: "provider_mode_not_production" });
     }
 
@@ -886,7 +887,7 @@ export async function carrierRoutes(app: FastifyInstance) {
     } catch (err) {
       // Evidence gate or persistence failed: NOT marked seen, so the
       // provider's retry gets a clean attempt. Non-2xx makes EasyPost retry.
-      req.log.error({ err, trackingCode: trackerEvent.trackingCode }, "carrier webhook: failed to apply event");
+      req.log.error({ code: "carrier_webhook_apply_failed", errorClass: knownErrorClassName(err), trackingCode: logSafeId(trackerEvent.trackingCode) }, "carrier webhook: failed to apply event");
       return reply.code(500).send({ error: "apply_failed" });
     }
 
@@ -896,17 +897,17 @@ export async function carrierRoutes(app: FastifyInstance) {
         case "not_finalized":
           // OURS-maybe but not yet matchable: already durably ledgered by the
           // store (R3-5), under its lock (R4-2). 2xx — we hold it now.
-          req.log.info({ trackingCode: trackerEvent.trackingCode, reason: result.reason, ledgered: result.ledgered === true }, "carrier webhook: ledgered for post-finalize replay");
+          req.log.info({ trackingCode: logSafeId(trackerEvent.trackingCode), reason: logSafeId(result.reason), ledgered: result.ledgered === true }, "carrier webhook: ledgered for post-finalize replay");
           return reply.code(200).send({ received: true, pending: true, reason: result.reason });
         case "scan_predates_commitment":
           // Permanently non-qualifying (R3-4): the commitment did not predate
           // this scan, so it can never support the pre-commitment claim.
-          req.log.warn({ trackingCode: trackerEvent.trackingCode }, "carrier webhook: scan predates commitment — permanently non-qualifying");
+          req.log.warn({ trackingCode: logSafeId(trackerEvent.trackingCode) }, "carrier webhook: scan predates commitment — permanently non-qualifying");
           return reply.code(200).send({ received: true, matched: false, reason: result.reason });
         default:
           // tracker_missing / tracker_mismatch / shipment_mismatch: same
           // code, different purchase identity — refuse, warn.
-          req.log.warn({ trackingCode: trackerEvent.trackingCode, reason: result.reason }, "carrier webhook: identity refused");
+          req.log.warn({ trackingCode: logSafeId(trackerEvent.trackingCode), reason: logSafeId(result.reason) }, "carrier webhook: identity refused");
           return reply.code(200).send({ received: true, matched: false, reason: result.reason });
       }
     }

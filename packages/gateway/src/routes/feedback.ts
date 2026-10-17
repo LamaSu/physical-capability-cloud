@@ -23,8 +23,9 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
-import { redactSecrets } from "../redaction.js";
+import { redactSecrets, knownErrorClassName, logSafeSmallInt } from "../redaction.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { safeServerEventProperties } from "../services/posthog-policy.js";
 import { auditService } from "../services/audit-service.js";
 
 // Durable storage on the mounted volume (same dir as the gateway DB / WORKFLOW_DB).
@@ -330,9 +331,9 @@ async function notifyDiscord(rec: Record<string, unknown>): Promise<void> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) console.error(`Discord webhook failed: ${res.status}`);
+    if (!res.ok) console.error(`Discord webhook failed: ${logSafeSmallInt(res.status, 100, 599)}`);
   } catch (err) {
-    console.error(`Discord webhook error: ${err}`);
+    console.error("Discord webhook error:", knownErrorClassName(err));
   }
 }
 
@@ -487,7 +488,7 @@ export async function feedbackRoutes(app: FastifyInstance) {
     }
     //  2) A PostHog event for aggregate dashboards.
     try {
-      trackServerEvent("feedback_filed", {
+      trackServerEvent("feedback_filed", safeServerEventProperties({
         feedback_id: rec.id,
         type: rec.type,
         endpoint: rec.endpoint,
@@ -497,7 +498,7 @@ export async function feedbackRoutes(app: FastifyInstance) {
         agent_kind: rec.agentId,
         severity: rec.severity,
         log_count: rec.logs?.length ?? 0,
-      });
+      }));
     } catch {
       /* best-effort telemetry */
     }
@@ -868,7 +869,7 @@ async function handleAttemptReport(req: FastifyRequest, reply: FastifyReply, b: 
     /* best-effort observability */
   }
   try {
-    trackServerEvent("attempt_reported", {
+    trackServerEvent("attempt_reported", safeServerEventProperties({
       attempt_id: rec.id,
       session_id: f.sessionId,
       phase: f.phase,
@@ -878,7 +879,7 @@ async function handleAttemptReport(req: FastifyRequest, reply: FastifyReply, b: 
       device_class: (f.device as { class?: string | null } | null)?.class ?? null,
       tokens_source: (f.tokens as { source?: string } | null)?.source ?? null,
       has_proposal: f.proposal !== null,
-    });
+    }));
   } catch {
     /* best-effort telemetry */
   }

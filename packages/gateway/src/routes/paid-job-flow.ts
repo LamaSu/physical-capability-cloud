@@ -41,6 +41,7 @@ import { TemplateResolver } from "@pcc/contract-builder";
 import { PricingCalculator } from "@pcc/contract-builder";
 import { sanitizeText } from "@pcc/kernel";
 import { pipelineTelemetry } from "../telemetry.js";
+import { logSafeId, logSafeInt, logSafeSmallInt } from "../redaction.js";
 import {
   SETTLEMENT_CURRENCY,
   MAX_QUOTE_QUANTITY,
@@ -398,7 +399,7 @@ export async function createJobFromSession(
           factoryAddrV3,
         );
         console.log(
-          `[paid-job] Created on-chain V3 (Mode A) escrow: ${addr} (token: ${tokenAddr})`,
+          `[paid-job] Created on-chain V3 (Mode A) escrow: ${logSafeId(addr)} (token: ${logSafeId(tokenAddr)})`,
         );
 
         // Every milestone pays the gateway signer.
@@ -427,7 +428,7 @@ export async function createJobFromSession(
             );
           }
           console.log(
-            `[paid-job] V3 milestone added on-chain: stepId=${ms.stepId} amount=${ms.amount} (tx: ${addTx})`,
+            `[paid-job] V3 milestone added on-chain: stepId=${logSafeId(ms.stepId)} amount=${logSafeId(ms.amount)} (tx: ${logSafeId(addTx)})`,
           );
         }
 
@@ -458,7 +459,7 @@ export async function createJobFromSession(
           throw new Error(`V3 fund reverted (tx=${fundTx}, escrow ${addr})`);
         }
         console.log(
-          `[paid-job] V3 escrow ${addr} funded upfront (${normalizedMilestones.length} milestone(s), ${totalFundAmount} base units)`,
+          `[paid-job] V3 escrow ${logSafeId(addr)} funded upfront (${logSafeInt(normalizedMilestones.length)} milestone(s), ${logSafeId(totalFundAmount.toString())} base units)`,
         );
 
         return addr;
@@ -510,7 +511,7 @@ export async function createJobFromSession(
         const addr = extractEscrowCreatedAddress(receipt.logs, factoryAbi as typeof PCCProtocolV2ABI);
         lastAddr = addr;
         console.log(
-          `[paid-job] Created on-chain ${v2 ? "V2 (EAS) " : ""}escrow: ${addr} (tx: ${txHash}, token: ${tokenAddr}, attempt ${attempt}/${MAX_CREATE_ATTEMPTS})`,
+          `[paid-job] Created on-chain ${v2 ? "V2 (EAS) " : ""}escrow: ${logSafeId(addr)} (tx: ${logSafeId(txHash)}, token: ${logSafeId(tokenAddr)}, attempt ${logSafeInt(attempt)}/${MAX_CREATE_ATTEMPTS})`,
         );
 
         // V1 has no on-chain milestones to add — the escrow IS the result.
@@ -554,7 +555,7 @@ export async function createJobFromSession(
             );
           }
           console.log(
-            `[paid-job] V2 milestone added on-chain: stepId=${ms.stepId} amount=${ms.amount} tier=${assuranceTier} (tx: ${addTx})`,
+            `[paid-job] V2 milestone added on-chain: stepId=${logSafeId(ms.stepId)} amount=${logSafeId(ms.amount)} tier=${logSafeSmallInt(assuranceTier, 0, 3)} (tx: ${logSafeId(addTx)})`,
           );
         }
 
@@ -567,7 +568,7 @@ export async function createJobFromSession(
           // moments later). The mined receipts are the authoritative confirmation;
           // read-lag is a consumer concern (/state + the smoke poll the count).
           console.log(
-            `[paid-job] V2 escrow ${addr}: ${normalizedMilestones.length} milestone(s) added, receipts confirmed (attempt ${attempt}/${MAX_CREATE_ATTEMPTS})`,
+            `[paid-job] V2 escrow ${logSafeId(addr)}: ${logSafeInt(normalizedMilestones.length)} milestone(s) added, receipts confirmed (attempt ${logSafeInt(attempt)}/${MAX_CREATE_ATTEMPTS})`,
           );
           return addr;
         }
@@ -575,7 +576,7 @@ export async function createJobFromSession(
         // Only reached when an addMilestone tx was genuinely DROPPED (its receipt timed
         // out) -> that escrow is missing a milestone, so abandon it and mint a fresh one.
         console.warn(
-          `[paid-job] escrow ${addr} had a dropped addMilestone tx (attempt ${attempt}/${MAX_CREATE_ATTEMPTS}) — retrying with a fresh escrow`,
+          `[paid-job] escrow ${logSafeId(addr)} had a dropped addMilestone tx (attempt ${logSafeInt(attempt)}/${MAX_CREATE_ATTEMPTS}) — retrying with a fresh escrow`,
         );
       }
       throw new Error(
@@ -713,15 +714,15 @@ export async function createJobFromSession(
     .where(eq(negotiationSessions.id, session.id))
     .run();
 
-  pipelineTelemetry.emit(jobId, "job_submit", "completed", {
+  pipelineTelemetry.emit(logSafeId(jobId), "job_submit", "completed", {
     metadata: {
-      sessionId: session.id,
-      escrowId,
-      scopeId,
-      kernelId: session.kernelId,
-      capabilityType: session.capabilityType,
+      sessionId: logSafeId(session.id),
+      escrowId: logSafeId(escrowId),
+      scopeId: logSafeId(scopeId),
+      kernelId: logSafeId(session.kernelId),
+      capabilityType: logSafeId(session.capabilityType),
       mockSettlement: isMockSettlement(),
-      scopeStatus,
+      scopeStatus: logSafeId(scopeStatus),
     },
   });
 

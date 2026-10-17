@@ -27,6 +27,7 @@
 import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastify";
 import { randomBytes } from "node:crypto";
 import { trace } from "@opentelemetry/api";
+import { logSafeId } from "../redaction.js";
 import { isWalletRequest } from "../services/telemetry-privacy.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -94,7 +95,7 @@ const traceIdPluginImpl: FastifyPluginAsync = async (app: FastifyInstance) => {
     // Tag the active OTel span so backends can index by it. Safe to no-op
     // when there is no active span.
     try {
-      trace.getActiveSpan()?.setAttribute(TRACE_ID_ATTR, traceId);
+      trace.getActiveSpan()?.setAttribute(TRACE_ID_ATTR, logSafeId(traceId));
     } catch {
       // OTel may be uninitialized in some test environments; do not fail.
     }

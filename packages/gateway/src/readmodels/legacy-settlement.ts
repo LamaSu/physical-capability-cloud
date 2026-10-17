@@ -26,6 +26,7 @@ import {
 import { schema, eq } from "@pcc/store";
 import { getStore } from "../db.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
+import { knownErrorClassName, logSafeId } from "../redaction.js";
 import { gateJobRead } from "./job-read-gate.js";
 import {
   buildJobExecutionDTO,
@@ -324,7 +325,7 @@ export function loadLegacySettlement(
   const tenant = tenantOpts(req as any);
 
   const onReadError = (source: string, error: unknown) =>
-    req.log.warn({ jobId, source, err: error }, "legacy settlement read: source read failed");
+    req.log.warn({ code: "legacy_settlement_source_read_failed", jobId: logSafeId(jobId), source: logSafeId(source), errorClass: knownErrorClassName(error) }, "legacy settlement source read failed");
   // The job's tenant was checked above; its evidence is read through the job (#353 @938a180e).
   const sources = loadJobExecutionSources(job, store.repos as unknown as JobExecutionRepos, store.db, { onReadError });
   const dto = buildJobExecutionDTO(sources, asOf);

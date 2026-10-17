@@ -9,6 +9,7 @@
  * Prod (OTEL_EXPORTER_OTLP_ENDPOINT set): OTLPTraceExporter
  */
 
+import { logSafeId } from "./redaction.js";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { ConsoleSpanExporter } from "@opentelemetry/sdk-trace-node";
@@ -33,8 +34,8 @@ const traceExporter = isProd
 
 export const otelSdk = new NodeSDK({
   resource: resourceFromAttributes({
-    [ATTR_SERVICE_NAME]: process.env.OTEL_SERVICE_NAME ?? "pcc-gateway",
-    [ATTR_SERVICE_VERSION]: process.env.OTEL_SERVICE_VERSION ?? "2.0.0",
+    [ATTR_SERVICE_NAME]: logSafeId(process.env.OTEL_SERVICE_NAME ?? "pcc-gateway"),
+    [ATTR_SERVICE_VERSION]: logSafeId(process.env.OTEL_SERVICE_VERSION ?? "2.0.0"),
   }),
   traceExporter,
   // No auto-instrumentations — manual spans only for facades and A2A messages.
@@ -63,7 +64,7 @@ export function initOtel(): void {
   if (!isProd) {
     console.log("[otel] Initialized with ConsoleSpanExporter (dev mode)");
   } else {
-    console.log(`[otel] Initialized with OTLP exporter → ${otlpEndpoint}`);
+    console.log("[otel] Initialized with OTLP exporter");
   }
 }
 
@@ -89,5 +90,5 @@ export async function shutdownOtel(): Promise<void> {
  * Safe to call before initOtel() — returns a NOOP tracer until the SDK starts.
  */
 export function getTracer(name: string, version = "2.0.0"): Tracer {
-  return trace.getTracer(name, version);
+  return trace.getTracer(logSafeId(name), logSafeId(version));
 }

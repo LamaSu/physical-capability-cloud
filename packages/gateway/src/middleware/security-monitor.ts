@@ -8,8 +8,10 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
-import { createHmac, randomBytes } from "node:crypto";
 import { isIP } from "node:net";
+import { analyticsIdentityDigest } from "../services/analytics-identity.js";
+import { safeServerEventDistinctId, safeServerEventProperties, securityRoutePattern } from "../services/posthog-policy.js";
+import { logSafeId, logSafeInt } from "../redaction.js";
 
 // ---------------------------------------------------------------------------
 // Attack Signatures
@@ -256,7 +258,7 @@ setInterval(() => {
  * path. A path can carry a value (a token or code in a segment, an encoded query); a pattern
  * cannot.
  */
-const routeOf = (req: FastifyRequest) => req.routeOptions?.url ?? "unmatched";
+const routeOf = securityRoutePattern;
 
 /** The client's address when it is one; anything else in its place is not reported. */
 const clientIpOf = (req: FastifyRequest) => (isIP(req.ip) ? req.ip : "invalid");
@@ -265,8 +267,7 @@ const clientIpOf = (req: FastifyRequest) => (isIP(req.ip) ? req.ip : "invalid");
  * The client's identity as PostHog sees it (N107): a keyed hash of the address, under a key that
  * lives only in this process. Events from one client correlate; no address leaves the gateway.
  */
-const IDENTITY_KEY = randomBytes(32);
-const identityOf = (ip: string) => (ip === "invalid" ? "invalid" : createHmac("sha256", IDENTITY_KEY).update(ip).digest("hex").slice(0, 16));
+const identityOf = (ip: string) => analyticsIdentityDigest(ip);
 
 const headerText = (value: unknown) => (typeof value === "string" ? value : Array.isArray(value) ? value.join(",") : "");
 
@@ -353,7 +354,7 @@ function buildFingerprint(req: FastifyRequest) {
 // PostHog Event Emitter (lazy import to avoid circular deps)
 // ---------------------------------------------------------------------------
 
-let _trackServerEvent: ((name: string, props: Record<string, unknown>, distinctId?: string) => void) | null = null;
+let _trackServerEvent: typeof import("../services/posthog-service.js").trackServerEvent | null = null;
 
 /** Strip HTML tags and escape special chars to prevent XSS when viewed in PostHog dashboards */
 function sanitize(val: unknown): unknown {
@@ -374,7 +375,7 @@ async function emitSecurityEvent(name: string, props: Record<string, unknown>) {
     }
     // Sanitize all props to prevent XSS when attacker-controlled data is viewed in dashboards
     const safeProps = sanitize(props) as Record<string, unknown>;
-    _trackServerEvent(name, safeProps, `security:${safeProps.clientId ?? "unknown"}`);
+    _trackServerEvent(logSafeId(name), safeServerEventProperties(safeProps, name), safeServerEventDistinctId(`security:${safeProps.clientId ?? "unknown"}`));
   } catch {
     // PostHog not initialized — non-fatal
   }
@@ -394,7 +395,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         honeypotPath: path,
         severity: "high",
       });
-      app.log.warn({ msg: "HONEYPOT", ip: clientIpOf(req), path, uaClass: fp.uaClass });
+      app.log.warn({ msg: "HONEYPOT", ip: logSafeId(clientIpOf(req)), path: logSafeId(path), uaClass: logSafeId(fp.uaClass) });
       // Add random delay (50-200ms) to match real 404 timing — prevents timing side-channel
       await new Promise((r) => setTimeout(r, 50 + Math.random() * 150));
       return reply.status(404).send({ error: "not_found" });
@@ -417,7 +418,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         ...attackSummary(req, urlAttack, "url", req.url),
         severity: "critical",
       });
-      app.log.warn({ msg: "ATTACK_DETECTED", type: urlAttack, ip: clientIpOf(req), source: "url", path: fp.path });
+      app.log.warn({ msg: "ATTACK_DETECTED", type: logSafeId(urlAttack), ip: logSafeId(clientIpOf(req)), source: "url", path: logSafeId(fp.path) });
       // BLOCK known attacks — detection-only is insufficient for tonight
       return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
     }
@@ -429,7 +430,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         const attack = detectAttack(str);
         if (attack) {
           emitSecurityEvent("attack_detected", { ...fp, ...attackSummary(req, attack, "query", str), severity: "critical" });
-          app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: clientIpOf(req), source: "query", path: fp.path });
+          app.log.warn({ msg: "ATTACK_DETECTED", type: logSafeId(attack), ip: logSafeId(clientIpOf(req)), source: "query", path: logSafeId(fp.path) });
           return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
         }
       }
@@ -442,7 +443,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         const attack = detectAttack(val);
         if (attack) {
           emitSecurityEvent("attack_detected", { ...fp, ...attackSummary(req, attack, `header:${h}`, val), severity: "critical" });
-          app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: clientIpOf(req), source: `header:${h}`, path: fp.path });
+          app.log.warn({ msg: "ATTACK_DETECTED", type: logSafeId(attack), ip: logSafeId(clientIpOf(req)), source: logSafeId(`header:${h}`), path: logSafeId(fp.path) });
           return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
         }
       }
@@ -459,7 +460,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         severity: bot.confidence >= 0.8 ? "high" : "medium",
       });
       if (bot.confidence >= 0.7) {
-        app.log.warn({ msg: "BOT_DETECTED", type: bot.type, ip: clientIpOf(req), reason: bot.reason });
+        app.log.warn({ msg: "BOT_DETECTED", type: logSafeId(bot.type), ip: logSafeId(clientIpOf(req)), reason: logSafeId(bot.reason) });
       }
     }
 
@@ -472,7 +473,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         windowMs: RATE_WINDOW_MS,
         severity: "medium",
       });
-      app.log.warn({ msg: "RATE_LIMIT", ip: clientIpOf(req), count: rate.count });
+      app.log.warn({ msg: "RATE_LIMIT", ip: logSafeId(clientIpOf(req)), count: logSafeInt(rate.count) });
     }
   });
 
@@ -495,7 +496,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         ...attackSummary(req, attack, "body", bodyStr),
         severity: "critical",
       });
-      app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: clientIpOf(req), source: "body", path: fp.path });
+      app.log.warn({ msg: "ATTACK_DETECTED", type: logSafeId(attack), ip: logSafeId(clientIpOf(req)), source: "body", path: logSafeId(fp.path) });
       return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
     }
   });

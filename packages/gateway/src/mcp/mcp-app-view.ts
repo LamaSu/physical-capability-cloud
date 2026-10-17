@@ -48,6 +48,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { knownErrorClassName } from "../redaction.js";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -210,11 +211,11 @@ export function validateMcpAppDomain(value: string): string {
 let mcpAppDomainWarned = false;
 /** Warn ONCE about a missing/invalid MCP-App domain — resolveMcpAppDomain runs
  * per resource-read AND at startup, so dedupe to avoid log spam. */
-function warnMcpAppDomainOnce(message: string): void {
+function warnMcpAppDomainOnce(code: "mcp_app_domain_invalid" | "mcp_app_domain_missing", error?: unknown): void {
   if (mcpAppDomainWarned) return;
   mcpAppDomainWarned = true;
   // eslint-disable-next-line no-console
-  console.warn(`[mcp-app] ${message}`);
+  console.warn({ code, ...(error === undefined ? {} : { errorClass: knownErrorClassName(error) }) }, "MCP App domain unavailable; configure a unique HTTPS origin before release");
 }
 
 /**
@@ -233,17 +234,11 @@ export function resolveMcpAppDomain(): string {
     try {
       return validateMcpAppDomain(configured.trim());
     } catch (error) {
-      warnMcpAppDomainOnce(
-        `${MCP_APP_DOMAIN_ENV} is set but invalid (${error instanceof Error ? error.message : String(error)}) — ` +
-          `MCP App views advertise the placeholder origin ${MCP_APP_DOMAIN_PLACEHOLDER} until it is fixed.`,
-      );
+      warnMcpAppDomainOnce("mcp_app_domain_invalid", error);
       return MCP_APP_DOMAIN_PLACEHOLDER;
     }
   }
-  warnMcpAppDomainOnce(
-    `${MCP_APP_DOMAIN_ENV} is not set — MCP App views advertise the placeholder origin ${MCP_APP_DOMAIN_PLACEHOLDER}. ` +
-      `Set a UNIQUE https origin before prod release (D14 per-view storage isolation, release criterion #9).`,
-  );
+  warnMcpAppDomainOnce("mcp_app_domain_missing");
   return MCP_APP_DOMAIN_PLACEHOLDER;
 }
 

@@ -5,6 +5,7 @@ import { getRepos, getStore } from "../db.js";
 import { gateJobRead, jobReadScopeOf, refuseJobRead } from "../readmodels/job-read-gate.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
+import { knownErrorClassName, logSafeId } from "../redaction.js";
 import {
   buildJobExecutionDTO,
   loadJobExecutionSources,
@@ -126,7 +127,7 @@ export async function jobRoutes(app: FastifyInstance) {
 
     const sources = loadJobExecutionSources(job, store.repos as unknown as JobExecutionRepos, store.db, {
       onReadError: (source, error) =>
-        req.log.warn({ jobId: req.params.jobId, source, err: error }, "job execution read model: source read failed"),
+        req.log.warn({ code: "job_execution_source_read_failed", jobId: logSafeId(req.params.jobId), source: logSafeId(source), errorClass: knownErrorClassName(error) }, "job execution source read failed"),
     });
     reply.header("cache-control", "no-store");
     return buildJobExecutionDTO(sources, asOf);

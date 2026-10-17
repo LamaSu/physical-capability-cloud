@@ -42,6 +42,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import { createRequire } from "node:module";
+import { safeServerEventDistinctId } from "../services/posthog-policy.js";
 
 const analyticsCapture = vi.hoisted(() => vi.fn());
 const analyticsConstruct = vi.hoisted(() => vi.fn());
@@ -1225,9 +1226,10 @@ describe("N71 round 8: analytics capture policy", () => {
     }, `pcc_live_${SENTINEL}`);
     expect(analyticsCapture).toHaveBeenCalledOnce();
     expect(analyticsCapture).toHaveBeenCalledWith({
-      event: "job_submitted", distinctId: "[invalid id]",
+      event: "job_submitted", distinctId: safeServerEventDistinctId(`pcc_live_${SENTINEL}`),
       properties: { kernelId: "[invalid id]", operatorAddress: "[invalid id]", external: true, reason: "not_local", capabilitiesRegistered: 2, assuranceTier: null, source: "gateway", environment: "test" },
     });
+    expect(analyticsCapture.mock.calls[0][0].distinctId).toMatch(/^h:[0-9a-f]{16}$/);
     expect(JSON.stringify(analyticsCapture.mock.calls)).not.toContain(SENTINEL);
   });
 
@@ -1241,9 +1243,10 @@ describe("N71 round 8: analytics capture policy", () => {
     const captured = analyticsCapture.mock.calls.map(([event]) => event).filter((event) => event.event === "job_submitted");
     expect(captured).toHaveLength(1);
     expect(captured[0]).toEqual({
-      event: "job_submitted", distinctId: "[invalid id]",
+      event: "job_submitted", distinctId: safeServerEventDistinctId(`pcc_live_${SENTINEL}`),
       properties: { kernelId, capabilityType: "[invalid id]", external: true, reason: "queue_only", source: "gateway", environment: "test" },
     });
+    expect(captured[0].distinctId).toMatch(/^h:[0-9a-f]{16}$/);
     expect(JSON.stringify(captured)).not.toContain(SENTINEL);
   });
 
@@ -1256,9 +1259,10 @@ describe("N71 round 8: analytics capture policy", () => {
     const captured = analyticsCapture.mock.calls.map(([event]) => event).filter((event) => event.event === "device_registered");
     expect(captured).toHaveLength(1);
     expect(captured[0]).toEqual({
-      event: "device_registered", distinctId: "[invalid id]",
+      event: "device_registered", distinctId: safeServerEventDistinctId(A),
       properties: { kernelId, deviceId: "[invalid id]", type: "sensor", adapterType: "mock", action: "created", capabilitiesRegistered: 0, source: "gateway", environment: "test" },
     });
+    expect(captured[0].distinctId).toMatch(/^h:[0-9a-f]{16}$/);
     expect(JSON.stringify(captured)).not.toContain(SENTINEL);
   });
 });

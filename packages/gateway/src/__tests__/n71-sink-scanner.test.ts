@@ -22,6 +22,7 @@ import {
   scanNode,
   findNamedFunction,
   loadBaseline,
+  baselineFromViolations,
   newViolations,
   staleBaselineEntries,
   N71_SCOPE_FILES,
@@ -204,6 +205,89 @@ describe("N71 round 8: sink provenance and immutable value proofs", () => {
   ])("[neg] rejects %s rather than trusting the initializer", (name, argText) => {
     const result = probeScan(name);
     expect(result.violations.some((violation) => violation.argText === argText), formatViolations(result.violations)).toBe(true);
+  });
+});
+
+describe("N71 round 9: sink escapes, derived sinks and conservative proofs", () => {
+  it.each([
+    "probeStructuralLoggerArgument", "probeStructuralLoggerFields", "probeSinkObjectProperty",
+    "probeSinkConstructorArgument", "probeDestructuredSinkAssignment", "probeSinkReturn",
+    "probeSinkDefault", "probeSinkSpread", "probeSinkArrayEscape", "probePipelineObjectEscape",
+    "probeUnionSinkObjectEscape", "probeDerivedFunctionValueEscape", "probeDerivedObjectMethodEscape", "probeNestedSinkBinding", "probeShorthandSinkProperty", "probeTypedSinkCallableReturn", "probeUnionSinkCallableEscape", "probeConsoleSubclassThisEscape",
+  ])("[neg] fails closed for sink-value escape %s", (name) => {
+    const result = probeScan(name);
+    expect(result.unresolvedCallees.some((row) => row.sink === "<sink-escape>"), formatViolations(result.unresolvedCallees)).toBe(true);
+    if (name === "probeSinkObjectProperty") {
+      expect(result.unresolvedCallees.some((row) => row.sink === "<sink-escape>" && row.argText === "console.warn"), formatViolations(result.unresolvedCallees)).toBe(true);
+    }
+    if (name === "probeConsoleSubclassThisEscape") {
+      expect(result.unresolvedCallees.some((row) => row.sink === "<sink-escape>" && row.argText === "this"), formatViolations(result.unresolvedCallees)).toBe(true);
+    }
+  });
+
+  it.each([
+    "probeVirtualOverride", "probeInterfaceImplementation", "probeLiteralUnionCallRoot",
+    "probeLiteralUnionAwaitRoot", "probeLiteralUnionThisRoot", "probeActiveSpanUnion",
+    "probeExplicitSpanUnion", "probePickLogger", "probeLoggerResolvedSignature", "probeStringifyReplacer", "probeStringifyToJSON",
+    "probeFunctionInDataPosition", "probeReassignedTraceBinding", "probeWrittenTraceBinding", "probeTraceDestructuredDefault",
+  ])("[neg] refuses an unproven argument in %s", (name) => {
+    const result = probeScan(name);
+    expect(result.violations.length, formatViolations(result.violations)).toBeGreaterThan(0);
+  });
+
+  it.each(["probeStructuralDerivedReceiver", "probeStructuralDerivedMethodAlias", "probeOverloadedForwarder", "probeOverloadedConstructor", "probeStructuralDerivedParameter"])("structural receiver erasure cannot hide a caller of %s", (name) => {
+    const result = probeScan(name);
+    const admittedParameterLeaves = baselineFromViolations(result.violations.filter((row) => row.sink !== "<derived-sink>"));
+    expect(newViolations(result.violations, admittedParameterLeaves).some((row) => row.sink === "<derived-sink>" && row.argText === "raw"), formatViolations(result.violations)).toBe(true);
+  });
+
+  it.each(["probePersistedConstructorField", "probePersistedSetterField", "probePersistedGenericField", "probePersistedElementField"])("stored field provenance cannot hide a caller of %s", (name) => {
+    const result = probeScan(name);
+    const admittedBodyLeaves = baselineFromViolations(result.violations.filter((row) => row.sink !== "<derived-sink>"));
+    expect(newViolations(result.violations, admittedBodyLeaves).some((row) => row.sink === "<derived-sink>" && row.argText === "raw"), formatViolations(result.violations)).toBe(true);
+  });
+
+  it("a new raw caller cannot hide behind a baselined forwarder leaf", () => {
+    const result = probeScan("probeForwarderFutureCaller");
+    const forwarderRows = result.violations.filter((row) => row.sink !== "<derived-sink>");
+    expect(newViolations(result.violations, baselineFromViolations(forwarderRows)).some((row) => row.sink === "<derived-sink>" && row.argText === "raw")).toBe(true);
+  });
+
+  it("derives forwarding argument positions to a fixpoint", () => {
+    const result = probeScan("probeForwarderFixpoint");
+    expect(result.violations.some((row) => row.sink === "<derived-sink>" && row.argText === "raw"), formatViolations(result.violations)).toBe(true);
+  });
+
+  it.each(["probeVirtualOverride", "probeInterfaceImplementation", "probeDestructuredParameterForwarder", "probeTaggedForwarder", "probeRestForwarder", "probeSpreadForwarder", "probeDerivedDefaultFixpoint"])("scans callers of the derived sink in %s", (name) => {
+    const result = probeScan(name);
+    expect(result.violations.some((row) => row.sink === "<derived-sink>" && row.argText === "raw"), formatViolations(result.violations)).toBe(true);
+  });
+
+  it.each(["probeDerivedOmittedDefault", "probeDerivedUndefinedDefault", "probeDerivedBindingDefault"])("checks derived default initializers at callers in %s", (name) => {
+    const result = probeScan(name);
+    expect(result.violations.some((row) => row.sink === "<derived-sink>" && row.argText.startsWith("forward(")), formatViolations(result.violations)).toBe(true);
+  });
+
+  it("checks derived constructor arguments", () => {
+    const result = probeScan("probeDerivedConstructor");
+    expect(result.violations.some((row) => row.sink === "<derived-sink>" && row.argText === "raw"), formatViolations(result.violations)).toBe(true);
+  });
+
+  it("fails closed for a tagged derived caller", () => {
+    const result = probeScan("probeDerivedTaggedCaller");
+    expect(result.unresolvedCallees.length, formatViolations(result.unresolvedCallees)).toBeGreaterThan(0);
+  });
+
+  it("keeps literal defaults proven at derived callers", () => {
+    const result = probeScan("probeDerivedLiteralDefaultControl");
+    expect(result.violations, formatViolations(result.violations)).toHaveLength(0);
+    expect(result.unresolvedCallees, formatViolations(result.unresolvedCallees)).toHaveLength(0);
+  });
+
+  it("keeps proven JSON values with the supported replacer forms", () => {
+    const result = probeScan("probeStringifyControls");
+    expect(result.violations, formatViolations(result.violations)).toHaveLength(0);
+    expect(result.unresolvedCallees, formatViolations(result.unresolvedCallees)).toHaveLength(0);
   });
 });
 

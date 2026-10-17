@@ -25,7 +25,7 @@ import { Sentry } from "../sentry.js";
 import { traceCollector, TraceCollector } from "../trace-collector.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { auditService } from "./audit-service.js";
-import { logSafeSmallInt } from "../redaction.js";
+import { knownErrorClassName, logSafeId, logSafeInt, logSafeSmallInt } from "../redaction.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -97,8 +97,8 @@ export class SettlementService {
     if (fabricatedBlocksSettlement) {
       result.error = "fabricated_evidence";
       console.warn(
-        `[settlement] Refusing to settle job ${jobId}: bundle ${bundle.id} contains ` +
-          `fabricated (simulated/mock) events at paid tier ${bundle.assuranceTier}. ` +
+        `[settlement] Refusing to settle job ${logSafeId(jobId)}: bundle ${logSafeId(bundle.id)} contains ` +
+          `fabricated (simulated/mock) events at paid tier ${logSafeSmallInt(bundle.assuranceTier, 0, 3) ?? -1}. ` +
           `Evidence archived + persisted but NOT settled as real.`,
       );
       auditService.log({
@@ -136,8 +136,8 @@ export class SettlementService {
           name: "settlement.pipeline",
           op: "settlement",
           attributes: {
-            "job.id": jobId,
-            "bundle.id": bundle.id,
+            "job.id": logSafeId(jobId),
+            "bundle.id": logSafeId(bundle.id),
             "bundle.assurance_tier": logSafeSmallInt(bundle.assuranceTier, 0, 3) ?? -1,
           },
         },
@@ -153,7 +153,7 @@ export class SettlementService {
             attributes: { "bundle.id": bundle.id },
           });
           await Sentry.startSpan(
-            { name: "settlement.ipfs_archive", op: "storage", attributes: { "bundle.id": bundle.id } },
+            { name: "settlement.ipfs_archive", op: "storage", attributes: { "bundle.id": logSafeId(bundle.id) } },
             async () => {
               try {
                 const { createEvidenceStorage } = await import("@pcc/kernel/evidence-storage-factory");
@@ -161,15 +161,15 @@ export class SettlementService {
                 await storage.init();
                 const archiveResult = await storage.archiveBundle(bundle);
                 result.cid = archiveResult.cid;
-                pipelineTelemetry.emit(jobId, "evidence_archive", "completed", {
-                  metadata: { cid: result.cid, bundleId: bundle.id },
+                pipelineTelemetry.emit(logSafeId(jobId), "evidence_archive", "completed", {
+                  metadata: { cid: logSafeId(result.cid), bundleId: logSafeId(bundle.id) },
                 });
                 traceCollector.endSpan({ traceId: localTraceId, spanId: ipfsSpanId, status: "ok" });
               } catch (err) {
                 // Storage is best-effort — log but continue
-                console.warn("[settlement] Evidence storage failed (best-effort):", err instanceof Error ? err.message : err);
-                pipelineTelemetry.emit(jobId, "evidence_archive", "failed", {
-                  metadata: { error: err instanceof Error ? err.message : String(err) },
+                console.warn("[settlement] Evidence storage failed (best-effort):", knownErrorClassName(err));
+                pipelineTelemetry.emit(logSafeId(jobId), "evidence_archive", "failed", {
+                  metadata: { error: knownErrorClassName(err) },
                 });
                 traceCollector.endSpan({ traceId: localTraceId, spanId: ipfsSpanId, status: "error" });
               }
@@ -187,7 +187,7 @@ export class SettlementService {
             attributes: { "job.id": jobId, "event.count": bundle.events.length },
           });
           await Sentry.startSpan(
-            { name: "settlement.db_persist", op: "db", attributes: { "job.id": jobId, "event.count": bundle.events.length } },
+            { name: "settlement.db_persist", op: "db", attributes: { "job.id": logSafeId(jobId), "event.count": logSafeInt(bundle.events.length) ?? 0 } },
             async () => {
               try {
                 const repos = getRepos();
@@ -220,7 +220,7 @@ export class SettlementService {
                 repos.jobs.updateStatus(jobId, "evidence_stored");
                 traceCollector.endSpan({ traceId: localTraceId, spanId: dbSpanId, status: "ok" });
               } catch (err) {
-                console.warn("[settlement] DB persistence failed:", err instanceof Error ? err.message : err);
+                console.warn("[settlement] DB persistence failed:", knownErrorClassName(err));
                 traceCollector.endSpan({ traceId: localTraceId, spanId: dbSpanId, status: "error" });
                 // Non-fatal — the bundle is still valid
               }
@@ -246,8 +246,8 @@ export class SettlementService {
               name: "settlement.onchain_submit",
               op: "blockchain",
               attributes: {
-                "job.id": jobId,
-                "contract.address": contractAddress ?? "none",
+                "job.id": logSafeId(jobId),
+                "contract.address": logSafeId(contractAddress ?? "none"),
                 "write.enabled": isWriteEnabled(),
               },
             },
@@ -268,12 +268,12 @@ export class SettlementService {
                   } catch {
                     // DB update non-fatal
                   }
-                  pipelineTelemetry.emit(jobId, "verification_request", "completed", {
-                    metadata: { contractAddress, txHash: result.evidenceTxHash },
+                  pipelineTelemetry.emit(logSafeId(jobId), "verification_request", "completed", {
+                    metadata: { contractAddress: logSafeId(contractAddress), txHash: logSafeId(result.evidenceTxHash) },
                   });
                   traceCollector.endSpan({ traceId: localTraceId, spanId: onchainSubmitSpanId, status: "ok" });
                 } catch (err) {
-                  console.warn("[settlement] On-chain evidence submission failed:", err instanceof Error ? err.message : err);
+                  console.warn("[settlement] On-chain evidence submission failed:", knownErrorClassName(err));
                   result.error = err instanceof Error ? err.message : "on_chain_submission_failed";
                   traceCollector.endSpan({ traceId: localTraceId, spanId: onchainSubmitSpanId, status: "error" });
                 }
@@ -289,8 +289,8 @@ export class SettlementService {
             // Find the capability's Story IP registration via the job's capabilityId
             // The job row contains the capabilityId used for this job
             const job = repos.jobs.findById(jobId);
-            pipelineTelemetry.emit(jobId, "settlement_claim", "started", {
-              metadata: { capabilityId: job?.capabilityId },
+            pipelineTelemetry.emit(logSafeId(jobId), "settlement_claim", "started", {
+              metadata: { capabilityId: logSafeId(job?.capabilityId) },
             });
             if (job?.capabilityId) {
               const ipReg = repos.story.findIpByCapabilityId(job.capabilityId);
@@ -317,10 +317,10 @@ export class SettlementService {
                     linkedAt: link.linkedAt,
                   });
                 } catch (dbErr) {
-                  console.warn("[settlement] Story derivative DB persist failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
+                  console.warn("[settlement] Story derivative DB persist failed (best-effort):", knownErrorClassName(dbErr));
                 }
-                pipelineTelemetry.emit(jobId, "settlement_claim", "completed", {
-                  metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
+                pipelineTelemetry.emit(logSafeId(jobId), "settlement_claim", "completed", {
+                  metadata: { derivativeIpId: logSafeId(link.childIpId), parentIpId: logSafeId(link.parentIpId) },
                 });
                 auditService.log({
                   eventType: "settlement.story_registered",
@@ -333,9 +333,9 @@ export class SettlementService {
             }
           } catch (storyErr) {
             // Story registration is best-effort — evidence storage succeeds regardless
-            console.warn("[settlement] Story derivative registration failed (best-effort):", storyErr instanceof Error ? storyErr.message : storyErr);
-            pipelineTelemetry.emit(jobId, "settlement_claim", "failed", {
-              metadata: { error: storyErr instanceof Error ? storyErr.message : String(storyErr) },
+            console.warn("[settlement] Story derivative registration failed (best-effort):", knownErrorClassName(storyErr));
+            pipelineTelemetry.emit(logSafeId(jobId), "settlement_claim", "failed", {
+              metadata: { error: knownErrorClassName(storyErr) },
             });
           }
 
@@ -358,9 +358,9 @@ export class SettlementService {
               name: "settlement.onchain_release",
               op: "blockchain",
               attributes: {
-                "job.id": jobId,
-                "auto_release": autoRelease,
-                "contract.address": contractAddress ?? "none",
+                "job.id": logSafeId(jobId),
+                "auto_release": autoRelease === true,
+                "contract.address": logSafeId(contractAddress ?? "none"),
               },
             },
             async () => {
@@ -375,8 +375,8 @@ export class SettlementService {
                   if (releaseResult.status === "released") {
                     result.releaseTxHash = releaseResult.txHash;
                     result.settled = true;
-                    pipelineTelemetry.emit(jobId, "settlement_complete", "completed", {
-                      metadata: { released: true, txHash: result.releaseTxHash, contractAddress },
+                    pipelineTelemetry.emit(logSafeId(jobId), "settlement_complete", "completed", {
+                      metadata: { released: true, txHash: logSafeId(result.releaseTxHash), contractAddress: logSafeId(contractAddress) },
                     });
                     auditService.log({
                       eventType: "settlement.completed",
@@ -394,9 +394,9 @@ export class SettlementService {
                   }
                   traceCollector.endSpan({ traceId: localTraceId, spanId: onchainReleaseSpanId, status: "ok" });
                 } catch (err) {
-                  console.warn("[settlement] Auto-release failed:", err instanceof Error ? err.message : err);
-                  pipelineTelemetry.emit(jobId, "settlement_complete", "failed", {
-                    metadata: { error: err instanceof Error ? err.message : String(err) },
+                  console.warn("[settlement] Auto-release failed:", knownErrorClassName(err));
+                  pipelineTelemetry.emit(logSafeId(jobId), "settlement_complete", "failed", {
+                    metadata: { error: knownErrorClassName(err) },
                   });
                   traceCollector.endSpan({ traceId: localTraceId, spanId: onchainReleaseSpanId, status: "error" });
                 }
@@ -492,11 +492,11 @@ export class SettlementService {
           const { getStoryIPService } = await import("@pcc/contracts");
           const storyIPService = getStoryIPService();
           await storyIPService.payJobRoyalty(childIpId, royaltyAmount, contractAddress as string);
-          console.log(`[settlement] Story royalty paid: ipId=${childIpId} amount=${royaltyAmount} (${royaltyPercent}% of milestone)`);
+          console.log(`[settlement] Story royalty paid: ipId=${logSafeId(childIpId)} amount=${logSafeInt(Number(royaltyAmount))} (${logSafeInt(royaltyPercent)}% of milestone)`);
         }
       } catch (storyErr) {
         // Royalty payment is best-effort — escrow release succeeds regardless
-        console.warn("[settlement] Story royalty payment failed (best-effort):", storyErr instanceof Error ? storyErr.message : storyErr);
+        console.warn("[settlement] Story royalty payment failed (best-effort):", knownErrorClassName(storyErr));
       }
 
       return {

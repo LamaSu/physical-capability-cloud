@@ -20,8 +20,9 @@
  * resolution only — n71-sink-scanner.test.ts scans individual named functions out
  * of it directly, never the whole file.
  */
-import type { FastifyRequest } from "fastify";
+import type { FastifyRequest, FastifyBaseLogger } from "fastify";
 import type { ServerResponse } from "node:http";
+import { Console as NodeConsole } from "node:console";
 import { trace, type Span } from "@opentelemetry/api";
 import {
   logSafeId,
@@ -52,7 +53,7 @@ export function probeOptionalChainedLoggerCall(req: FastifyRequest, err: Error, 
 export function probeNonSinkCallNeverScanned(freeText: string, actorId: string): void {
   trackServerEventLike("x", { raw: freeText }, actorId);
   auditServiceLikeLog({ metadata: { raw: freeText } });
-  auditServiceLikeLog(pipelineTelemetry);
+  auditServiceLikeLog({ emit: trackServerEventLike });
 }
 function trackServerEventLike(_a: string, _b: unknown, _c: string): void {}
 function auditServiceLikeLog(_a: unknown): void {}
@@ -344,4 +345,282 @@ export function probeRealTrackServerEvent(raw: string): void {
 export function probeReflectAppliedAnyConsoleAlias(raw: string): void {
   const out: any = console;
   Reflect.apply(out.warn, out, [raw]);
+}
+
+// Round-9 probes: recognized values escape in every untracked runtime position.
+interface ProbeStructuralLogger { warn(...values: unknown[]): void }
+export function probeStructuralLoggerArgument(raw: string): void {
+  function emit(log: ProbeStructuralLogger): void { log.warn(raw); }
+  emit(console);
+}
+export function probeStructuralLoggerFields(raw: string): void {
+  class Holder {
+    log: ProbeStructuralLogger = console;
+    warn: (...values: unknown[]) => void = console.warn;
+    emit(): void { this.log.warn(raw); this.warn(raw); }
+  }
+  new Holder().emit();
+}
+export function probeSinkObjectProperty(raw: string): void {
+  function emit(options: { warn: (...values: unknown[]) => void }): void { options.warn(raw); }
+  emit({ warn: console.warn });
+}
+export function probeSinkConstructorArgument(raw: string): void {
+  class Holder {
+    constructor(private warn: (...values: unknown[]) => void) {}
+    emit(): void { this.warn(raw); }
+  }
+  new Holder(console.warn).emit();
+}
+export function probeVirtualOverride(raw: string): void {
+  class Base {
+    emit(_value: string): void {}
+    relay(value: string): void { this.emit(value); }
+  }
+  class Child extends Base { override emit(value: string): void { console.warn(value); } }
+  const child = new Child();
+  child.emit("fixed");
+  child.relay(raw);
+}
+export function probeInterfaceImplementation(raw: string): void {
+  interface Emitter { emit(value: string): void }
+  class Concrete implements Emitter { emit(value: string): void { console.warn(value); } }
+  const concrete = new Concrete();
+  concrete.emit("fixed");
+  const emitter: Emitter = concrete;
+  emitter.emit(raw);
+}
+export function probeLiteralUnionCallRoot(raw: string): void {
+  function source(): { value: "fixed" } { return { value: raw as "fixed" }; }
+  console.warn(source().value);
+}
+export async function probeLiteralUnionAwaitRoot(raw: string): Promise<void> {
+  async function source(): Promise<{ value: "fixed" }> { return { value: raw as "fixed" }; }
+  console.warn((await source()).value);
+}
+export function probeLiteralUnionThisRoot(raw: string): void {
+  class Source {
+    value: "fixed" = raw as "fixed";
+    emit(): void { console.warn(this.value); }
+  }
+  new Source().emit();
+}
+export function probeActiveSpanUnion(raw: string, name: string): void {
+  trace.getActiveSpan()?.addEvent(name, { id: raw });
+}
+export function probeExplicitSpanUnion(span: Span | undefined, raw: string): void {
+  span?.addEvent("fixed", { id: raw });
+}
+export function probePickLogger(log: Pick<FastifyBaseLogger, "warn">, raw: string): void {
+  log.warn({ id: raw });
+}
+export function probeForwarderFutureCaller(raw: string): void {
+  function forward(value: string): void { console.warn(value); }
+  forward("fixed");
+  forward(raw);
+}
+export function probeForwarderFixpoint(raw: string): void {
+  function inner(value: string): void { console.warn(value); }
+  function middle(value: string): void { inner(value); }
+  function outer(value: string): void { middle(value); }
+  outer(raw);
+}
+export function probeDestructuredSinkAssignment(raw: string): void {
+  let warn = (..._values: unknown[]): void => {};
+  ({ warn } = console);
+  warn(raw);
+}
+export function probeStringifyReplacer(raw: string): void {
+  console.warn(JSON.stringify({ value: "fixed" }, (_key, _value) => raw));
+}
+export function probeStringifyToJSON(raw: string): void {
+  console.warn(JSON.stringify({ value: "fixed", toJSON() { return raw; } }));
+}
+export function probeFunctionInDataPosition(raw: string): void {
+  console.warn({ value: function () { return raw; } });
+}
+export function probeReassignedTraceBinding(raw: string): void {
+  let { traceId } = startTrace("fixed", "fixed");
+  traceId = raw;
+  console.warn(traceId);
+}
+export function probeWrittenTraceBinding(raw: string): void {
+  let { traceId } = startTrace("fixed", "fixed");
+  (traceId as unknown as { value: string }).value = raw;
+  console.warn(traceId);
+}
+export function probeSinkReturn(): Console { return console; }
+export function probeSinkDefault(warn: (...values: unknown[]) => void = console.warn): void { warn("fixed"); }
+export function probeSinkSpread(): void { const logger = { ...console }; logger.warn("fixed"); }
+export function probeSinkArrayEscape(): void { const values = [console.warn]; values[0]("fixed"); }
+export function probePipelineObjectEscape(): void { auditServiceLikeLog(pipelineTelemetry); }
+export function probeStringifyControls(): void {
+  console.warn(JSON.stringify({ value: "fixed" }));
+  console.warn(JSON.stringify({ value: "fixed" }, null));
+  console.warn(JSON.stringify({ value: "fixed" }, undefined));
+  console.warn(JSON.stringify({ value: "fixed" }, ["value"]));
+}
+
+export function probeUnionSinkObjectEscape(span: Span | ProbeStructuralLogger): void { auditServiceLikeLog(span); }
+export function probeDerivedFunctionValueEscape(raw: string): void {
+  const options = { emit(value: string): void { console.warn(value); } };
+  function accept(_emit: (value: string) => void): void {}
+  accept(options.emit);
+  options.emit(raw);
+}
+
+export function probeDestructuredParameterForwarder(raw: string): void {
+  function forward({ value }: { value: string }): void { console.warn(value); }
+  forward({ value: raw });
+}
+export function probeTaggedForwarder(raw: string): void {
+  function forward(value: string): void { console.warn`value ${value}`; }
+  forward(raw);
+}
+export function probeNestedSinkBinding(raw: string): void {
+  const { warn: { call } } = console;
+  call(console.warn, raw);
+}
+
+export function probeLoggerResolvedSignature(warn: FastifyBaseLogger["warn"], raw: string): void { warn(raw); }
+
+export function probeRestForwarder(raw: string): void {
+  function forward(...values: unknown[]): void { console.warn(...values); }
+  forward("fixed", raw);
+}
+export function probeSpreadForwarder(raw: string): void {
+  function forward(_first: unknown, value: unknown): void { console.warn(value); }
+  forward(...["fixed", raw] as const);
+}
+
+export function probeDerivedObjectMethodEscape(): void {
+  const target: { emit(value: unknown): void } = { emit(value: unknown): void { console.warn(value); } };
+  auditServiceLikeLog(target);
+}
+
+export function probeShorthandSinkProperty(): void {
+  const { warn } = console;
+  auditServiceLikeLog({ warn });
+}
+export function probeTypedSinkCallableReturn(warn: Console["warn"]): Console["warn"] { return warn; }
+
+export function probeTraceDestructuredDefault(raw: string): void {
+  const { extra = raw } = startTrace("fixed", "fixed") as { extra?: string };
+  console.warn(extra);
+}
+
+export function probeDerivedOmittedDefault(raw: string): void {
+  function forward(value = raw): void { console.warn(value); }
+  forward();
+}
+export function probeDerivedUndefinedDefault(raw: string): void {
+  function forward(value = raw): void { console.warn(value); }
+  forward(undefined);
+}
+export function probeDerivedBindingDefault(raw: string): void {
+  function forward({ value = raw }: { value?: string } = {}): void { console.warn(value); }
+  forward({});
+}
+export function probeDerivedConstructor(raw: string): void {
+  class Forward { constructor(value: string) { console.warn(value); } }
+  new Forward(raw);
+}
+export function probeDerivedTaggedCaller(raw: string): void {
+  function forward(_parts: TemplateStringsArray, value: string): void { console.warn(value); }
+  forward`value ${raw}`;
+}
+export function probeDerivedLiteralDefaultControl(): void {
+  function forward(value = "fixed"): void { console.warn(value); }
+  forward();
+  forward(undefined);
+}
+
+export function probeDerivedDefaultFixpoint(raw: string): void {
+  function outer(value: string): void {
+    function inner(text = value): void { console.warn(text); }
+    inner();
+  }
+  outer(raw);
+}
+export function probeUnionSinkCallableEscape(warn: Console["warn"] | ((...values: unknown[]) => void)): void {
+  auditServiceLikeLog(warn);
+}
+
+export function probeConsoleSubclassThisEscape(): void {
+  class Logger extends NodeConsole { expose(): Logger { return this; } }
+  const logger = new Logger(process.stdout);
+  auditServiceLikeLog(logger.expose());
+}
+
+export function probeStructuralDerivedReceiver(raw: string): void {
+  interface Emitter { emit(value: string): void }
+  class Wrapper { emit(value: string): void { console.warn(value); } }
+  const wrapper: Emitter = new Wrapper();
+  wrapper.emit("fixed");
+  wrapper.emit(raw);
+}
+export function probeStructuralDerivedMethodAlias(raw: string): void {
+  interface Emitter { emit(value: string): void }
+  class Wrapper { emit(value: string): void { console.warn(value); } }
+  const wrapper: Emitter = new Wrapper();
+  const emit = wrapper.emit;
+  emit(raw);
+}
+
+export function probeOverloadedForwarder(raw: string): void {
+  function forward(value: string): void;
+  function forward(value: unknown): void { console.warn(value); }
+  forward("fixed");
+  forward(raw);
+}
+export function probeOverloadedConstructor(raw: string): void {
+  class Wrapper {
+    constructor(value: string);
+    constructor(value: unknown) { console.warn(value); }
+  }
+  new Wrapper(raw);
+}
+
+export function probeStructuralDerivedParameter(raw: string): void {
+  interface Emitter { emit(value: string): void }
+  class Wrapper { emit(value: string): void { console.warn(value); } }
+  function relay(receiver: Emitter, value: string): void { receiver.emit(value); }
+  relay(new Wrapper(), raw);
+}
+
+export function probePersistedConstructorField(raw: string): void {
+  class Wrapper {
+    value: string;
+    constructor(value: string) { this.value = value; }
+    send(): void { console.warn(this.value); }
+  }
+  new Wrapper(raw).send();
+}
+export function probePersistedSetterField(raw: string): void {
+  class Wrapper {
+    value = "fixed";
+    set(value: string): void { this.value = value; }
+    send(): void { console.warn(this.value); }
+  }
+  const wrapper = new Wrapper();
+  wrapper.set(raw);
+  wrapper.send();
+}
+export function probePersistedGenericField(raw: string): void {
+  class Wrapper<T> {
+    value: T;
+    constructor(value: T) { this.value = value; }
+    send(): void { console.warn(this.value); }
+  }
+  new Wrapper<string>(raw).send();
+}
+export function probePersistedElementField(raw: string): void {
+  class Wrapper {
+    value = "fixed";
+    set(value: string): void { [this["value"]] = [value]; }
+    send(): void { console.warn(this["value"]); }
+  }
+  const wrapper = new Wrapper();
+  wrapper.set(raw);
+  wrapper.send();
 }

@@ -42,6 +42,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { knownErrorClassName, logSafeId } from "../redaction.js";
 import {
   toLifecycleView,
   deriveRefundReason,
@@ -293,7 +294,7 @@ export async function settlementReadRoutes(app: FastifyInstance) {
       lifecycle = toLifecycleView(anchors, r.windows());
     } catch (e) {
       if (e instanceof UnreachableUnitStateError) {
-        req.log?.error({ err: e, unitId }, "unreachable unit state from settlement read");
+        req.log?.error({ code: "settlement_read_unreachable_state", errorClass: knownErrorClassName(e), unitId: logSafeId(unitId) }, "unreachable unit state from settlement read");
         fail(reply, "INDEX_NOT_READY", "Settlement state could not be interpreted; read may be stale or misbound");
         return null;
       }

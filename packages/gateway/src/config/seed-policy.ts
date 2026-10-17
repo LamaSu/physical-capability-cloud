@@ -18,6 +18,6 @@ export function warnInvalidSeedDataOverride(
 ): void {
   if (value === undefined || value === "true" || value === "false") return;
   console.warn(
-    `Invalid PCC_SEED_DATA ${JSON.stringify(logSafeId(value))}; falling back to default ${shouldSeedDemoData(undefined, nodeEnv)}.`,
+    `Invalid PCC_SEED_DATA ${JSON.stringify(logSafeId(value))}; falling back to default ${shouldSeedDemoData(undefined, nodeEnv) === true}.`,
   );
 }

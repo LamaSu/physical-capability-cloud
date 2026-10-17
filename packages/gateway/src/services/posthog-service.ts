@@ -7,7 +7,7 @@
  */
 
 import { isKnownNodeEnv, logSafeId } from "../redaction.js";
-import { safeServerEventProperties, safeServerEventDistinctId } from "./posthog-policy.js";
+import { consumeServerEventDistinctId, prepareServerEventDistinctId, safeServerEventProperties, safeServerEventDistinctId } from "./posthog-policy.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let posthog: any = null;
@@ -36,15 +36,15 @@ export function initPostHog(): void {
 export function trackServerEvent(
   event: string,
   properties?: Record<string, unknown>,
-  distinctId?: string,
+  distinctId?: string | ReturnType<typeof prepareServerEventDistinctId>,
 ): void {
   if (!posthog) return;
   try {
     posthog.capture({
-      distinctId: safeServerEventDistinctId(distinctId),
+      distinctId: consumeServerEventDistinctId(distinctId),
       event: logSafeId(event),
       properties: {
-        ...safeServerEventProperties(properties),
+        ...safeServerEventProperties(properties, event),
         source: "gateway",
         environment: analyticsEnvironment(),
       },

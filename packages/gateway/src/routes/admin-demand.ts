@@ -19,6 +19,7 @@
  *   GET /api/admin/demand/composite/:signature
  */
 
+import { knownErrorClassName, logSafeId, logSafeInt } from "../redaction.js";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { DemandAggregator } from "@pcc/demand-intel";
 import type { DemandSnapshot } from "@pcc/spec";
@@ -120,11 +121,11 @@ function runSnapshot(window: "hour" | "day", logger?: { info: (msg: string) => v
     const snap = aggregator.snapshot(window);
     persistSnapshot(snap);
     logger?.info?.(
-      `[demand-intel] persisted ${window} snapshot ${snap.id} (totalIntents=${snap.totalIntents})`,
+      `[demand-intel] persisted ${window} snapshot ${logSafeId(snap.id)} (totalIntents=${logSafeInt(snap.totalIntents)})`,
     );
   } catch (err) {
     logger?.warn?.(
-      `[demand-intel] ${window} snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
+      `[demand-intel] ${window} snapshot failed: ${knownErrorClassName(err)}`,
     );
   }
 }

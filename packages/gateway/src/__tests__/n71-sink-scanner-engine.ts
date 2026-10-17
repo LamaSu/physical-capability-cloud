@@ -9,28 +9,37 @@
  * of 8 call shapes, a per-file name allowlist with prose reasons, and a 12-file
  * scope — and astra's round-7 verdict found four CRITICALs and a MEDIUM sitting
  * exactly in those three hand lists, not in any site the old scanner saw. This file
- * closes the property BY CONSTRUCTION instead:
+ * establishes the following bounded static property:
  *
- *   (1) SINKS BY DECLARATION, default-deny. A `ts.Program` is built from the
- *       gateway's own tsconfig.json, and every call's callee (and, for a method
- *       call, its RECEIVER) is resolved through the `TypeChecker` — never by
- *       matching a hardcoded list of call SHAPES. A callee this resolution cannot
- *       follow (an `as any` escape hatch, most directly) FAILS: it cannot be
- *       exempted by looking like something benign, because nothing is exempted by
- *       looking like anything — every call in scope is classified, or it is a
- *       violation.
- *   (2) NO NAME ALLOWLIST. An argument passes only if it is a literal, an enum
- *       member, a const/local whose value the checker can prove is always a
- *       literal, or the return of a formatter recognized by ITS OWN declaration
- *       (logSafeId, knownErrorClassName, logSafeSmallInt, logSafeInt,
- *       logSafeIsoTimestamp, facadeErrorTelemetryCode, Date.now). There is no
- *       per-file, per-identifier, prose-justified exemption list of any kind.
- *   (3) SCOPE is the whole gateway package (every file tsconfig.json's own
- *       `include`/`exclude` resolves to — the same file list `tsc` itself
- *       compiles), not a hardcoded file list. N71's own files must be at ZERO
- *       violations; every other existing violation is captured in a GENERATED,
- *       shrink-only baseline (see n71-sink-baseline.json and
- *       scripts/generate-n71-sink-baseline.ts).
+ * (P1) A recognized sink value (a sink object, a sink method or a sink-typed receiver) may appear only as the callee or receiver of a call the engine classifies, or as a const alias the engine tracks.
+ * (P2) A sink value in ANY other position is an ESCAPE, and an escape fails closed: it is a violation row, or an unresolved/escape row that needs a reviewed baseline reason. "Any other position" includes:
+ *   - a call or `new` argument;
+ *   - an object-literal property value;
+ *   - an array element;
+ *   - a property or field assignment;
+ *   - a destructuring ASSIGNMENT (not only a declaration);
+ *   - a return value;
+ *   - a default parameter value;
+ *   - a spread.
+ * (P3) A parameter that reaches a sink unformatted makes its function a DERIVED sink for that argument position, and the engine then scans that function's callers. Run it to a fixpoint, not one level. A baseline row may no longer admit a forwarder's parameter leaf for its future callers.
+ * (P4) Receiver recognition covers:
+ *   - union constituents and `checker.getNonNullableType` (so `trace.getActiveSpan()` and `Span | undefined` are recognized);
+ *   - mapped and `Pick<>` types, through `checker.getPropertyOfType(type, method)?.declarations`;
+ *   - pino/fastify `LogFn` and OTel's `Span` in the resolved-signature fallback.
+ * (P5) Proofs:
+ *   - A function expression counts as control flow only in positions the engine verifies, where its return value can't reach the sink argument (codex F5, :925).
+ *   - `JSON.stringify` is transparent only with no second argument, or a null/undefined or literal-array second argument, AND an argument whose value is proven. Any replacer function, or a value that may carry `toJSON`, is unproven (codex F5, :997).
+ *   - A destructured or trace binding that is ever reassigned, or written through a property, is not trusted from its initializer (codex F5, :882).
+ *   - A parameter proof is refused for a method that overrides a base member or implements an interface member (Opus F3 shape 5).
+ *   - The literal-union shortcut applies only to an identifier root, or to a root that is itself proven (Opus F3 shape 6).
+ *
+ * A discarded result of a classified fluent call is not a sink-value use.
+ * Public derived methods make a receiver a sink container; private/protected
+ * helpers remain derived at their callable members and every invocation.
+ * Recognition is declaration/provenance based, not a claim to reconstruct every
+ * runtime value or arbitrary reflection. Unresolved callees and recognized sink
+ * escapes fail closed. The whole gateway package is scanned; the existing
+ * baseline is shrink-only unless an occurrence receives an explicit review.
  *
  * This file is the ENGINE only (Program/TypeChecker setup, sink resolution,
  * argument-safety proof, whole-package scan, baseline diffing) — no vitest
@@ -103,6 +112,7 @@ const SAFE_FORMATTERS: ReadonlyArray<{ name: string; fileSuffix: string }> = [
   { name: "facadeErrorTelemetryCode", fileSuffix: "/src/facades/facade-errors.ts" },
   { name: "safeServerEventProperties", fileSuffix: "/src/services/posthog-policy.ts" },
   { name: "safeServerEventDistinctId", fileSuffix: "/src/services/posthog-policy.ts" },
+  { name: "prepareServerEventDistinctId", fileSuffix: "/src/services/posthog-policy.ts" },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -137,6 +147,13 @@ function isLiteralLike(expr: ts.Expression): boolean {
   return false;
 }
 
+function isBuiltinUndefined(expr: ts.Expression, checker: ts.TypeChecker): boolean {
+  const n = unwrap(expr);
+  if (!ts.isIdentifier(n) || n.text !== "undefined") return false;
+  const symbol = checker.getSymbolAtLocation(n);
+  return !symbol?.valueDeclaration && !symbol?.declarations?.length;
+}
+
 function declarationFiles(sym: ts.Symbol | undefined): string[] {
   if (!sym?.declarations) return [];
   return sym.declarations.map((d) => d.getSourceFile().fileName);
@@ -149,7 +166,8 @@ function anyDeclFileMatches(sym: ts.Symbol | undefined, pred: (file: string) => 
 /** Resolve a symbol at `expr`, following import/re-export aliases to their target. */
 function resolveSymbol(expr: ts.Expression, checker: ts.TypeChecker): ts.Symbol | undefined {
   const n = unwrap(expr);
-  let sym = ts.isPropertyAccessExpression(n) ? checker.getSymbolAtLocation(n.name) : checker.getSymbolAtLocation(n);
+  let sym = ts.isIdentifier(n) && ts.isShorthandPropertyAssignment(n.parent) ? checker.getShorthandAssignmentValueSymbol(n.parent) :
+    ts.isPropertyAccessExpression(n) ? checker.getSymbolAtLocation(n.name) : checker.getSymbolAtLocation(n);
   const seen = new Set<ts.Symbol>();
   while (sym && sym.flags & ts.SymbolFlags.Alias && !seen.has(sym)) {
     seen.add(sym);
@@ -174,7 +192,7 @@ export interface ScannerContext {
   /** Function symbol -> every call site (whole scope) invoking it, for proving a
    *  parameter is always passed a literal across the WHOLE program (e.g.
    *  BaseFacade.execute()'s `operation`, called from every facade subclass). */
-  callSitesByDecl: Map<ts.Node, ts.CallExpression[]>;
+  callSitesByDecl: Map<ts.Node, Invocation[]>;
   escapedFunctions: Set<ts.Node>;
 }
 
@@ -197,6 +215,19 @@ export function getScanner(): ScannerContext {
   return cached;
 }
 
+/** Resolve callable implementations, including variable/property-held closures. */
+function callableDeclaration(expr: ts.Expression, checker: ts.TypeChecker): ts.FunctionLikeDeclaration | undefined {
+  const n = unwrap(expr);
+  if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) return n;
+  const decl = resolveSymbol(n, checker)?.valueDeclaration;
+  if (decl && ts.isFunctionLike(decl) && "parameters" in decl && "body" in decl) return decl as ts.FunctionLikeDeclaration;
+  if (decl && (ts.isVariableDeclaration(decl) || ts.isPropertyAssignment(decl) || ts.isPropertyDeclaration(decl)) && decl.initializer) {
+    const init = unwrap(decl.initializer);
+    if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) return init;
+  }
+  return undefined;
+}
+
 /** Function/method declarations invoked anywhere in `scopeFileNames`, keyed by
  *  declaration node, each with every call site found. Used to prove a PARAMETER
  *  (not just a local variable) is always literal across the whole program — see
@@ -205,8 +236,8 @@ function buildCallSiteIndex(
   program: ts.Program,
   checker: ts.TypeChecker,
   scopeFileNames: string[],
-): { callSitesByDecl: Map<ts.Node, ts.CallExpression[]>; escapedFunctions: Set<ts.Node> } {
-  const index = new Map<ts.Node, ts.CallExpression[]>();
+): { callSitesByDecl: Map<ts.Node, Invocation[]>; escapedFunctions: Set<ts.Node> } {
+  const index = new Map<ts.Node, Invocation[]>();
   const escapedFunctions = new Set<ts.Node>();
   for (const fileName of scopeFileNames) {
     const sf = program.getSourceFile(fileName);
@@ -224,17 +255,11 @@ function buildCallSiteIndex(
           if (!directCall && !declarationName && !memberName && !importName) escapedFunctions.add(decl);
         }
       }
-      if (ts.isCallExpression(node)) {
-        const sym = resolveSymbol(node.expression, checker);
-        const decl = sym?.valueDeclaration;
-        if (
-          decl &&
-          (ts.isMethodDeclaration(decl) ||
-            ts.isFunctionDeclaration(decl) ||
-            ts.isArrowFunction(decl) ||
-            ts.isFunctionExpression(decl) ||
-            ts.isConstructorDeclaration(decl))
-        ) {
+      if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+        const targets = new Set<ts.Node>(callableTargets(node.expression, checker));
+        const signature = checker.getResolvedSignature(node)?.declaration;
+        if (signature) targets.add(signature);
+        for (const decl of targets) if (ts.isFunctionLike(decl)) {
           const arr = index.get(decl) ?? [];
           arr.push(node);
           index.set(decl, arr);
@@ -251,7 +276,8 @@ function buildCallSiteIndex(
 // Sink resolution — ruling (1): by declaration, default-deny
 // ─────────────────────────────────────────────────────────────────────────────
 
-type SinkCall = ts.CallExpression | ts.TaggedTemplateExpression;
+type Invocation = ts.CallExpression | ts.NewExpression;
+type SinkCall = Invocation | ts.TaggedTemplateExpression;
 const UNSUPPORTED_SINK = "<unsupported-sink>";
 
 function memberAccess(expr: ts.Expression): { receiver: ts.Expression; name: string | null } | null {
@@ -368,8 +394,9 @@ function storedMemberValues(
 function isConsoleReceiver(expr: ts.Expression, checker: ts.TypeChecker): boolean {
   return localOrigins(expr, checker).some((n) => {
     if (!ts.isIdentifier(n)) return false;
-    const type = checker.getTypeAtLocation(n);
-    return type.symbol?.getName() === "Console" && anyDeclFileMatches(type.symbol, (f) => !f.startsWith(GATEWAY_SRC));
+    const type = checker.getNonNullableType(checker.getTypeAtLocation(n));
+    const parts = type.isUnionOrIntersection() ? type.types : [type];
+    return parts.some((part) => part.symbol?.getName() === "Console" && anyDeclFileMatches(part.symbol, (f) => !f.startsWith(GATEWAY_SRC)));
   });
 }
 
@@ -387,11 +414,35 @@ function processStreamName(expr: ts.Expression, checker: ts.TypeChecker): string
   return null;
 }
 
-function declaredUnder(expr: ts.Expression, checker: ts.TypeChecker, pred: (file: string) => boolean): boolean {
+function loggerProperty(type: ts.Type, method: string, checker: ts.TypeChecker): boolean {
+  const property = checker.getPropertyOfType(type, method);
+  if (!property) return false;
+  const location = property.valueDeclaration ?? property.declarations?.[0];
+  if (!location) return false;
+  const memberType = checker.getTypeOfSymbolAtLocation(property, location);
+  return memberType.getCallSignatures().some((signature) => {
+    const decl = signature.declaration;
+    if (!decl) return false;
+    const file = decl.getSourceFile().fileName;
+    return (file.includes(PINO_PKG) || file.includes(FASTIFY_PKG)) &&
+      ts.isInterfaceDeclaration(decl.parent) && decl.parent.name.text === "LogFn";
+  });
+}
+
+function declaredUnder(expr: ts.Expression, checker: ts.TypeChecker, pred: (file: string) => boolean, method?: string | null): boolean {
+  const seen = new Set<ts.Type>();
+  const matchesType = (type: ts.Type): boolean => {
+    if (seen.has(type)) return false;
+    seen.add(type);
+    if (type.isUnionOrIntersection() && type.types.some(matchesType)) return true;
+    const nonNullable = checker.getNonNullableType(type);
+    if (nonNullable !== type && matchesType(nonNullable)) return true;
+    if (anyDeclFileMatches(type.symbol, pred)) return true;
+    if (method && anyDeclFileMatches(checker.getPropertyOfType(type, method), pred)) return true;
+    return false;
+  };
   for (const origin of localOrigins(expr, checker)) {
-    if (anyDeclFileMatches(resolveSymbol(origin, checker), pred)) return true;
-    const type = checker.getTypeAtLocation(origin);
-    if (type.symbol?.declarations?.some((decl) => pred(decl.getSourceFile().fileName))) return true;
+    if (anyDeclFileMatches(resolveSymbol(origin, checker), pred) || matchesType(checker.getTypeAtLocation(origin))) return true;
   }
   return false;
 }
@@ -463,10 +514,30 @@ function sinkExpressionUncached(expr: ts.Expression, checker: ts.TypeChecker, se
   if (declaredUnder(target, checker, (f) => f.endsWith(TELEMETRY_FILE_SUFFIX))) return method ? `pipelineTelemetry.${method}` : UNSUPPORTED_SINK;
   if (declaredUnder(target, checker, (f) => f.endsWith(TRACING_FILE_SUFFIX))) return method ?? UNSUPPORTED_SINK;
   if (declaredUnder(target, checker, (f) => f.endsWith(SENTRY_FILE_SUFFIX) || f.includes(SENTRY_PKG))) return method ? `Sentry.${method}` : UNSUPPORTED_SINK;
-  if (declaredUnder(target, checker, (f) => f.includes(OTEL_PKG))) return method ? `otel.${method}` : UNSUPPORTED_SINK;
-  if (access && (method === null || LOGGER_METHODS.has(method)) && declaredUnder(target, checker, (f) => f.includes(FASTIFY_PKG) || f.includes(PINO_PKG))) return method ? `log.${method}` : UNSUPPORTED_SINK;
+  if (declaredUnder(target, checker, (f) => f.includes(OTEL_PKG), method)) return method ? `otel.${method}` : UNSUPPORTED_SINK;
+  if (access && (method === null || LOGGER_METHODS.has(method)) &&
+      localOrigins(target, checker).some((origin) => {
+        const type = checker.getNonNullableType(checker.getTypeAtLocation(origin));
+        return method ? loggerProperty(type, method, checker) : [...LOGGER_METHODS].some((name) => loggerProperty(type, name, checker));
+      })) return method ? `log.${method}` : UNSUPPORTED_SINK;
   const sym = resolveSymbol(n, checker);
   if (sym?.getName() === "trackServerEvent" && anyDeclFileMatches(sym, (f) => f.endsWith(POSTHOG_FILE_SUFFIX))) return "trackServerEvent";
+  return null;
+}
+
+function sinkSignature(decl: ts.SignatureDeclaration | ts.JSDocSignature | undefined, method?: string | null): string | null {
+  if (!decl) return null;
+  const file = decl.getSourceFile().fileName;
+  if (ts.isMethodSignature(decl) && ts.isInterfaceDeclaration(decl.parent) &&
+      decl.parent.name.text === "Console" && !file.startsWith(GATEWAY_SRC)) {
+    const name = decl.name;
+    return ts.isIdentifier(name) || ts.isStringLiteral(name) ? `console.${name.text}` : UNSUPPORTED_SINK;
+  }
+  if ((file.includes(PINO_PKG) || file.includes(FASTIFY_PKG)) && ts.isCallSignatureDeclaration(decl) &&
+      ts.isInterfaceDeclaration(decl.parent) && decl.parent.name.text === "LogFn") return method ? `log.${method}` : "log.call";
+  if (file.includes(OTEL_PKG) && ts.isMethodSignature(decl) && ts.isInterfaceDeclaration(decl.parent) && decl.parent.name.text === "Span") {
+    return method ? `otel.${method}` : UNSUPPORTED_SINK;
+  }
   return null;
 }
 
@@ -474,23 +545,8 @@ function sinkExpressionUncached(expr: ts.Expression, checker: ts.TypeChecker, se
 export function matchSink(call: SinkCall, checker: ts.TypeChecker): string | null {
   const sink = sinkExpression(ts.isTaggedTemplateExpression(call) ? call.tag : call.expression, checker);
   if (sink) return sink;
-  // A known sink passed to another callable can be invoked indirectly there.
-  // Its invocation cannot be classified at this boundary, so reject the escape.
-  if (ts.isCallExpression(call) && call.arguments.some((arg) =>
-    localOrigins(arg, checker).some((origin) => {
-      const escapedSink = sinkExpression(origin, checker);
-      if (!escapedSink) return false;
-      return checker.getTypeAtLocation(origin).getCallSignatures().length > 0 ||
-        escapedSink.startsWith("console.") || escapedSink.startsWith("process.") || escapedSink.startsWith("log.");
-    }),
-  )) return UNSUPPORTED_SINK;
-  const decl = checker.getResolvedSignature(call)?.declaration;
-  if (decl && ts.isMethodSignature(decl) && ts.isInterfaceDeclaration(decl.parent) &&
-      decl.parent.name.text === "Console" && !decl.getSourceFile().fileName.startsWith(GATEWAY_SRC)) {
-    const name = decl.name;
-    return ts.isIdentifier(name) || ts.isStringLiteral(name) ? `console.${name.text}` : UNSUPPORTED_SINK;
-  }
-  return null;
+  return sinkSignature(checker.getResolvedSignature(call)?.declaration,
+    memberAccess(ts.isTaggedTemplateExpression(call) ? call.tag : call.expression)?.name);
 }
 
 /**
@@ -547,13 +603,16 @@ interface ScanCtx {
   sink: string;
   sinkNode: ts.Node;
   out: Violation[];
-  callSitesByDecl: Map<ts.Node, ts.CallExpression[]>;
+  callSitesByDecl: Map<ts.Node, Invocation[]>;
   escapedFunctions: Set<ts.Node>;
   /** Recursion guard for isSafeParameterReference's transitive argument-safety
    *  proof (e.g. BaseFacade.emitTelemetry's `operation` is itself always passed
    *  execute()'s own `operation` parameter, which is in turn always literal at
    *  ITS call sites — two hops). Bounded, not unlimited: defaults to "unsafe". */
   depth: number;
+  /** The derivation pass refuses caller-based proofs to track forwarding itself. */
+  deriving?: boolean;
+  unsafeNodes?: ts.Node[];
 }
 
 function normalizeArgText(node: ts.Node, sourceFile: ts.SourceFile): string {
@@ -576,7 +635,7 @@ function enclosingDeclarationName(node: ts.Node, sourceFile: ts.SourceFile): str
 }
 
 function sinkExpressionIdentity(node: ts.Node, sourceFile: ts.SourceFile): string {
-  if (ts.isCallExpression(node)) return normalizeArgText(node.expression, sourceFile);
+  if (ts.isCallExpression(node) || ts.isNewExpression(node)) return normalizeArgText(node.expression, sourceFile);
   if (ts.isTaggedTemplateExpression(node)) return normalizeArgText(node.tag, sourceFile);
   return normalizeArgText(node, sourceFile);
 }
@@ -622,6 +681,7 @@ export function createViolation(
 
 function pushViolation(ctx: ScanCtx, node: ts.Node): void {
   ctx.out.push(createViolation(ctx.file, ctx.sink, node, ctx.sourceFile, ctx.sinkNode));
+  ctx.unsafeNodes?.push(node);
 }
 
 const DATE_INSTANT_METHODS = new Set(["toISOString", "getTime", "valueOf", "toJSON"]);
@@ -822,11 +882,15 @@ function isSafeVariableReference(symbol: ts.Symbol, ctx: ScanCtx): boolean {
  *  checked fact about tracing.ts's one implementation, not a blanket exemption. */
 function isSafeStartTraceDestructuring(symbol: ts.Symbol, checker: ts.TypeChecker): boolean {
   const decl = symbol.valueDeclaration;
-  if (!decl || !ts.isBindingElement(decl)) return false;
+  if (!decl || !ts.isBindingElement(decl) || decl.dotDotDotToken || decl.initializer) return false;
+  const property = decl.propertyName ?? decl.name;
+  if (!(ts.isIdentifier(property) || ts.isStringLiteral(property)) || (property.text !== "traceId" && property.text !== "spanId")) return false;
   const bindingPattern = decl.parent;
   if (!ts.isObjectBindingPattern(bindingPattern)) return false;
   const varDecl = bindingPattern.parent;
   if (!ts.isVariableDeclaration(varDecl) || !varDecl.initializer) return false;
+  const writes = findAssignmentsTo(symbol, enclosingFunctionOrSourceFile(decl), checker);
+  if (writes.mutated || writes.values.length) return false;
   const init = unwrap(varDecl.initializer);
   if (!ts.isCallExpression(init)) return false;
   const calleeSym = resolveSymbol(init.expression, checker);
@@ -842,13 +906,13 @@ function isSafeStartTraceDestructuring(symbol: ts.Symbol, checker: ts.TypeChecke
  *  A call site that OMITS this parameter entirely (valid when it's optional) is
  *  the same as passing `undefined` — itself literal-like — rather than a failure. */
 function isSafeParameterReference(symbol: ts.Symbol, ctx: ScanCtx): boolean {
-  if (ctx.depth >= MAX_TRANSITIVE_DEPTH) return false;
+  if (ctx.deriving || ctx.depth >= MAX_TRANSITIVE_DEPTH) return false;
   const decl = symbol.valueDeclaration;
   if (!decl || !ts.isParameter(decl)) return false;
   const paramDecl = decl as ts.ParameterDeclaration;
   const fn = paramDecl.parent;
   if (!ts.isFunctionLike(fn) || !("parameters" in fn)) return false;
-  if (ctx.escapedFunctions.has(fn)) return false;
+  if (ctx.escapedFunctions.has(fn) || isVirtualMethod(fn, ctx.checker)) return false;
   const writes = findAssignmentsTo(symbol, fn, ctx.checker);
   if (writes.mutated || writes.values.length) return false;
   const index = fn.parameters.indexOf(paramDecl);
@@ -856,7 +920,7 @@ function isSafeParameterReference(symbol: ts.Symbol, ctx: ScanCtx): boolean {
   const sites = ctx.callSitesByDecl.get(fn as unknown as ts.Node) ?? [];
   if (sites.length === 0) return false; // no call site found anywhere in scope — don't vacuously trust
   for (const call of sites) {
-    const arg = call.arguments[index];
+    const arg = call.arguments?.[index];
     if (!arg) {
       // Omitted at this call site: safe iff the parameter is optional (then the
       // value is `undefined`, itself literal-like) or has a literal/safe default.
@@ -867,6 +931,97 @@ function isSafeParameterReference(symbol: ts.Symbol, ctx: ScanCtx): boolean {
     if (ts.isSpreadElement(arg) || !isExprSafeSilently(arg, ctx)) return false;
   }
   return true;
+}
+
+/** A static caller list cannot prove virtual dispatch through a base/interface. */
+function memberOwner(fn: ts.Node): ts.MethodDeclaration | ts.PropertyDeclaration | undefined {
+  if (ts.isMethodDeclaration(fn)) return fn;
+  if ((ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) && ts.isPropertyDeclaration(fn.parent) && fn.parent.initializer === fn) return fn.parent;
+  return undefined;
+}
+
+function inheritedMembers(fn: ts.Node, checker: ts.TypeChecker): ts.Node[] {
+  const member = memberOwner(fn);
+  if (!member || !ts.isClassLike(member.parent)) return [];
+  const name = member.name && (ts.isIdentifier(member.name) || ts.isStringLiteral(member.name) || ts.isNumericLiteral(member.name)) ? member.name.text : undefined;
+  if (!name) return [];
+  const declarations: ts.Node[] = [];
+  const seen = new Set<ts.Type>();
+  const visit = (type: ts.Type): void => {
+    if (seen.has(type)) return;
+    seen.add(type);
+    const property = checker.getPropertyOfType(type, name);
+    declarations.push(...property?.declarations ?? []);
+    for (const decl of type.symbol?.declarations ?? []) {
+      if (ts.isClassLike(decl) || ts.isInterfaceDeclaration(decl)) {
+        for (const clause of decl.heritageClauses ?? []) for (const base of clause.types) visit(checker.getTypeAtLocation(base));
+      }
+    }
+  };
+  for (const clause of member.parent.heritageClauses ?? []) for (const base of clause.types) visit(checker.getTypeAtLocation(base));
+  return declarations;
+}
+
+function isVirtualMethod(fn: ts.SignatureDeclaration, checker: ts.TypeChecker): boolean {
+  const member = memberOwner(fn);
+  if (!member || !ts.isClassLike(member.parent)) return false;
+  return Boolean(member.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.OverrideKeyword)) || inheritedMembers(fn, checker).length > 0;
+}
+
+function isVerifiedControlFlow(fn: ts.ArrowFunction | ts.FunctionExpression, ctx: ScanCtx): boolean {
+  let value: ts.Node = fn;
+  while (ts.isParenthesizedExpression(value.parent) || ts.isAsExpression(value.parent) || ts.isNonNullExpression(value.parent)) value = value.parent;
+  const call = value.parent;
+  if (!ts.isCallExpression(call) || call !== ctx.sinkNode || call.arguments[call.arguments.length - 1] !== value) return false;
+  const method = memberAccess(call.expression)?.name;
+  const decl = ctx.checker.getResolvedSignature(call)?.declaration;
+  if (!decl) return false;
+  const file = decl.getSourceFile().fileName;
+  // These APIs execute a callback under a span; they never serialize its return.
+  return (file.includes(OTEL_PKG) && method === "startActiveSpan") ||
+    ((file.includes(SENTRY_PKG) || file.endsWith(SENTRY_FILE_SUFFIX)) &&
+      (method === "startSpan" || method === "startSpanManual"));
+}
+
+/** Prove JSON values by provenance as well as their surface type. No user hook
+ * can execute while a purportedly transparent serialization is being checked. */
+function isJsonValueWithoutHooks(expr: ts.Expression, ctx: ScanCtx, seen = new Set<ts.Symbol>()): boolean {
+  const n = unwrap(expr);
+  if (isLiteralLike(n) && (!isIdentifierNamed(n, "undefined") || isBuiltinUndefined(n, ctx.checker))) return true;
+  if (ts.isObjectLiteralExpression(n)) return n.properties.every((property) => {
+    if (!ts.isPropertyAssignment(property)) return false;
+    const name = property.name;
+    if (ts.isComputedPropertyName(name) || ((ts.isIdentifier(name) || ts.isStringLiteral(name)) && name.text === "toJSON")) return false;
+    return isJsonValueWithoutHooks(property.initializer, ctx, seen);
+  });
+  if (ts.isArrayLiteralExpression(n)) return n.elements.every((element) => !ts.isSpreadElement(element) && isJsonValueWithoutHooks(element, ctx, seen));
+  if (ts.isBinaryExpression(n) && (n.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken || n.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken)) return true;
+  if (ts.isTemplateExpression(n)) return n.templateSpans.every((span) => isJsonValueWithoutHooks(span.expression, ctx, seen));
+  if (ts.isConditionalExpression(n)) return isJsonValueWithoutHooks(n.whenTrue, ctx, seen) && isJsonValueWithoutHooks(n.whenFalse, ctx, seen);
+  if (ts.isCallExpression(n) && isSafeFormatterCall(n, ctx.checker)) {
+    const type = ctx.checker.getTypeAtLocation(n);
+    return !(type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Object)) && !type.isIntersection();
+  }
+  if (ts.isIdentifier(n)) {
+    const symbol = resolveSymbol(n, ctx.checker);
+    if (!symbol || seen.has(symbol)) return false;
+    const decl = symbol.valueDeclaration;
+    if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return false;
+    const writes = findAssignmentsTo(symbol, enclosingFunctionOrSourceFile(decl), ctx.checker);
+    const type = ctx.checker.getTypeAtLocation(n);
+    const aggregate = Boolean(type.flags & ts.TypeFlags.Object) || ts.isObjectLiteralExpression(unwrap(decl.initializer)) || ts.isArrayLiteralExpression(unwrap(decl.initializer));
+    if (writes.mutated || (aggregate && aggregateEscapes(symbol, enclosingFunctionOrSourceFile(decl), ctx.checker))) return false;
+    const next = new Set(seen).add(symbol);
+    return [decl.initializer, ...writes.values].every((value) => isJsonValueWithoutHooks(value, ctx, next));
+  }
+  return false;
+}
+
+function isTransparentStringify(call: ts.CallExpression, ctx: ScanCtx): boolean {
+  const replacer = call.arguments[1] && unwrap(call.arguments[1]);
+  if (replacer && replacer.kind !== ts.SyntaxKind.NullKeyword && !isBuiltinUndefined(replacer, ctx.checker) &&
+      !(ts.isArrayLiteralExpression(replacer) && replacer.elements.every((element) => isLiteralLike(element)))) return false;
+  return Boolean(call.arguments[0]) && isExprSafeSilently(call.arguments[0], ctx) && isJsonValueWithoutHooks(call.arguments[0], ctx);
 }
 
 /** The core safety proof for an already-RESOLVED symbol (enum member / safe
@@ -920,13 +1075,11 @@ function isSafeIdentifierReference(expr: ts.Expression, ctx: ScanCtx): boolean {
 export function checkArg(expr: ts.Expression, ctx: ScanCtx): boolean {
   const n = unwrap(expr);
 
-  if (isLiteralLike(n)) return true;
+  if (isLiteralLike(n) && (!isIdentifierNamed(n, "undefined") || isBuiltinUndefined(n, ctx.checker))) return true;
 
-  // A function/arrow-function argument is control flow, not data (e.g. the
-  // callback to facadeTracer.startActiveSpan) — any sink calls INSIDE its body are
-  // found independently by the same whole-file walk; this is never recursed into
-  // as if it were a logged value.
-  if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) return true;
+  // Only declaration-verified tracing callbacks are control flow. A closure in
+  // data position (including a serializer callback) is an unproven value.
+  if ((ts.isArrowFunction(n) || ts.isFunctionExpression(n)) && isVerifiedControlFlow(n, ctx)) return true;
 
   // template-literal holes
   if (ts.isTemplateExpression(n)) {
@@ -941,6 +1094,9 @@ export function checkArg(expr: ts.Expression, ctx: ScanCtx): boolean {
     const b = checkArg(n.whenFalse, ctx);
     return a && b;
   }
+
+  // Strict comparisons produce a primitive boolean independently of input text.
+  if (ts.isBinaryExpression(n) && (n.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken || n.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken)) return true;
 
   // `a ?? b` / `a || b` — same "closed if both sides are closed" shape as a ternary
   if (
@@ -994,12 +1150,8 @@ export function checkArg(expr: ts.Expression, ctx: ScanCtx): boolean {
 
   if (ts.isCallExpression(n)) {
     if (isSafeFormatterCall(n, ctx.checker)) return true;
-    if (isJsonStringifyCall(n, ctx.checker)) {
-      // Transparent wrapper — recurse into its own argument(s) instead of trusting
-      // or rejecting the call itself.
-      let ok = true;
-      for (const a of n.arguments) ok = checkArg(a, ctx) && ok;
-      return ok;
+    if (isJsonStringifyCall(n, ctx.checker) && isTransparentStringify(n, ctx)) {
+      return n.arguments.every((arg) => checkArg(arg, ctx));
     }
     pushViolation(ctx, n);
     return false;
@@ -1009,7 +1161,10 @@ export function checkArg(expr: ts.Expression, ctx: ScanCtx): boolean {
   // "completed"|"failed"`, or BaseFacade's own `FacadeName`), OR a local/parameter
   // the checker can prove is always literal — NEVER a name allowlist.
   if (ts.isIdentifier(n) || ts.isPropertyAccessExpression(n)) {
-    if (hasLiteralUnionType(n, ctx.checker) && !hasUnsafeReferenceWrites(n, ctx)) return true;
+    const root = referenceRoot(n);
+    if (hasLiteralUnionType(n, ctx.checker) &&
+        (ts.isIdentifier(root) || (root !== n && isExprSafeSilently(root, ctx))) &&
+        !hasUnsafeReferenceWrites(n, ctx)) return true;
     if (isSafeIdentifierReference(n, ctx)) return true;
     pushViolation(ctx, n);
     return false;
@@ -1017,6 +1172,404 @@ export function checkArg(expr: ts.Expression, ctx: ScanCtx): boolean {
 
   pushViolation(ctx, n);
   return false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Derived sinks and universal sink-value escapes
+// ─────────────────────────────────────────────────────────────────────────────
+
+type DerivedSinks = Map<ts.Node, Set<number>>;
+const derivedCache = new WeakMap<ScannerContext, DerivedSinks>();
+const derivedDefaults = new WeakMap<DerivedSinks, Map<ts.Node, ts.Expression[]>>();
+const derivedReasons = new WeakMap<ScannerContext, Array<{ file: string; line: number; parameter: string; index: number; via: string; leaf: string }>>();
+
+export function derivedSinkDiagnostics(scanner: ScannerContext): Array<{ file: string; line: number; parameter: string; index: number; via: string; leaf: string }> {
+  getDerivedSinks(scanner);
+  return derivedReasons.get(scanner) ?? [];
+}
+
+/** Resolve callable member implementations through the receiver's value origins,
+ * not only its exposed structural type. A const alias may narrow that type while
+ * retaining an instance whose method forwards to a sink. */
+const callableCallSites = new WeakMap<ts.TypeChecker, Map<ts.Node, Invocation[]>>();
+
+function callableReceiverOrigins(expr: ts.Expression, checker: ts.TypeChecker, seen = new Set<ts.Symbol>()): ts.Expression[] {
+  const origins = new Set<ts.Expression>([...localOrigins(expr, checker), expr]);
+  for (const origin of [...origins]) {
+    if (!ts.isIdentifier(unwrap(origin))) continue;
+    const symbol = resolveSymbol(origin, checker);
+    const declaration = symbol?.valueDeclaration;
+    if (!symbol || seen.has(symbol) || !declaration || !ts.isParameter(declaration)) continue;
+    const fn = declaration.parent;
+    if (!ts.isFunctionLike(fn) || !("parameters" in fn)) continue;
+    const index = fn.parameters.indexOf(declaration);
+    if (index < 0) continue;
+    const next = new Set(seen).add(symbol);
+    if (declaration.initializer) for (const value of callableReceiverOrigins(declaration.initializer, checker, next)) origins.add(value);
+    for (const call of callableCallSites.get(checker)?.get(fn) ?? []) {
+      const argument = call.arguments?.[index];
+      if (!argument || ts.isSpreadElement(argument)) continue;
+      for (const value of callableReceiverOrigins(argument, checker, next)) origins.add(value);
+    }
+  }
+  return [...origins];
+}
+
+const callableTargetsCache = new WeakMap<ts.TypeChecker, WeakMap<ts.Expression, ts.Node[]>>();
+function callableTargets(expr: ts.Expression, checker: ts.TypeChecker): ts.Node[] {
+  let cache = callableTargetsCache.get(checker);
+  if (!cache) callableTargetsCache.set(checker, cache = new WeakMap());
+  const prior = cache.get(expr);
+  if (prior) return prior;
+  const targets = new Set<ts.Node>();
+  for (const candidate of [...localOrigins(expr, checker), expr]) {
+    const direct = callableDeclaration(candidate, checker);
+    if (direct) targets.add(direct);
+    // Overload signatures and their implementation share a symbol; a resolved
+    // overload is never sufficient to discard the implementation's provenance.
+    for (const declaration of resolveSymbol(candidate, checker)?.declarations ?? []) {
+      if (ts.isFunctionLike(declaration) && "body" in declaration) targets.add(declaration);
+      if (ts.isClassLike(declaration) && checker.getTypeAtLocation(candidate).getConstructSignatures().length) for (const member of declaration.members) {
+        if (ts.isConstructorDeclaration(member)) targets.add(member);
+      }
+    }
+    const candidateType = checker.getTypeAtLocation(candidate);
+    for (const signature of candidateType.getConstructSignatures()) {
+      const declaration = signature.declaration;
+      if (declaration && ts.isConstructorDeclaration(declaration) && ts.isClassLike(declaration.parent)) {
+        for (const member of declaration.parent.members) if (ts.isConstructorDeclaration(member)) targets.add(member);
+      }
+    }
+    const member = memberAccess(candidate) ?? (ts.isIdentifier(candidate) ? bindingSource(candidate, checker) : null);
+    if (!member) continue;
+    const seen = new Set<ts.Type>();
+    const visitType = (type: ts.Type): void => {
+      if (seen.has(type)) return;
+      seen.add(type);
+      if (type.isUnionOrIntersection()) for (const part of type.types) visitType(part);
+      const nonNullable = checker.getNonNullableType(type);
+      if (nonNullable !== type) visitType(nonNullable);
+      const properties = member.name === null ? checker.getPropertiesOfType(type) : [checker.getPropertyOfType(type, member.name)].filter((property): property is ts.Symbol => Boolean(property));
+      for (const property of properties) for (const declaration of property.declarations ?? []) {
+        if (ts.isFunctionLike(declaration) && "body" in declaration) targets.add(declaration);
+        if ((ts.isPropertyDeclaration(declaration) || ts.isPropertyAssignment(declaration)) && declaration.initializer) {
+          const initializer = unwrap(declaration.initializer);
+          if (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)) targets.add(initializer);
+        }
+      }
+    };
+    for (const receiver of callableReceiverOrigins(member.receiver, checker)) visitType(checker.getTypeAtLocation(receiver));
+  }
+  const result = [...targets];
+  cache.set(expr, result);
+  return result;
+}
+
+function derivedArgumentPositions(call: Invocation, checker: ts.TypeChecker, derived: DerivedSinks): Set<number> {
+  const positions = new Set<number>();
+  const addDeclaration = (decl: ts.Node | undefined): void => {
+    if (!decl) return;
+    for (const index of derived.get(decl) ?? []) {
+      positions.add(index);
+      if (ts.isFunctionLike(decl) && "parameters" in decl && decl.parameters[index]?.dotDotDotToken) {
+        for (let argument = index; argument < (call.arguments?.length ?? 0); argument++) positions.add(argument);
+      }
+    }
+  };
+  for (const declaration of callableTargets(call.expression, checker)) addDeclaration(declaration);
+  addDeclaration(checker.getResolvedSignature(call)?.declaration);
+  // A spread can shift every later formal position. Inspect the full argument
+  // list rather than assuming that syntactic argument indices still match it.
+  if (positions.size && call.arguments?.some(ts.isSpreadElement)) {
+    for (let index = 0; index < (call.arguments?.length ?? 0); index++) positions.add(index);
+  }
+  return positions;
+}
+
+function defaultsForParameter(parameter: ts.ParameterDeclaration): ts.Expression[] {
+  const values: ts.Expression[] = parameter.initializer ? [parameter.initializer] : [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isBindingElement(node) && node.initializer) values.push(node.initializer);
+    ts.forEachChild(node, visit);
+  };
+  visit(parameter.name);
+  return values;
+}
+
+function derivedDefaultInitializers(call: Invocation, checker: ts.TypeChecker, derived: DerivedSinks): ts.Expression[] {
+  const targets = new Set<ts.Node>();
+  for (const decl of callableTargets(call.expression, checker)) targets.add(decl);
+  const signature = checker.getResolvedSignature(call)?.declaration;
+  if (signature) targets.add(signature);
+  const cached = derivedDefaults.get(derived);
+  if (cached) return [...targets].flatMap((target) => cached.get(target) ?? []);
+  const values: ts.Expression[] = [];
+  for (const [fn, indices] of derived) {
+    if (!ts.isFunctionLike(fn) || !("parameters" in fn) ||
+        (!targets.has(fn) && !inheritedMembers(fn, checker).some((member) => targets.has(member)))) continue;
+    for (const index of indices) if (fn.parameters[index]) values.push(...defaultsForParameter(fn.parameters[index]));
+  }
+  return values;
+}
+
+/** Default expressions can run for omitted/undefined arguments or missing
+ * destructured members. Refuse an unproven default at every derived caller,
+ * including calls through inherited/interface signatures and spread arguments. */
+function derivedDefaultsAreSafe(call: Invocation, checker: ts.TypeChecker, derived: DerivedSinks, ctx: ScanCtx): boolean {
+  return derivedDefaultInitializers(call, checker, derived).every((initializer) =>
+    isExprSafeSilently(initializer, { ...ctx, sourceFile: initializer.getSourceFile() }));
+}
+
+/** Preserve stored-value provenance across methods. A property's declaration is
+ * a shared key when generic/mapped types produce different checker symbols.
+ * Every statically resolved write participates; no execution-order proof is used. */
+const propertyWriteSources = new WeakMap<ts.TypeChecker, Map<ts.Symbol | ts.Declaration, ts.Expression[]>>();
+
+function propertyDependencySymbol(expr: ts.Expression, checker: ts.TypeChecker): ts.Symbol | undefined {
+  const direct = resolveSymbol(expr, checker);
+  if (direct) return direct;
+  const member = memberAccess(expr);
+  return member && member.name !== null ? checker.getPropertyOfType(checker.getTypeAtLocation(member.receiver), member.name) : undefined;
+}
+
+function indexPropertyWriteSources(scanner: ScannerContext): void {
+  if (propertyWriteSources.has(scanner.checker)) return;
+  const sources = new Map<ts.Symbol | ts.Declaration, ts.Expression[]>();
+  const add = (target: ts.Expression, source: ts.Expression): void => {
+    if (ts.isArrayLiteralExpression(target)) { for (const value of target.elements) if (!ts.isOmittedExpression(value)) add(ts.isSpreadElement(value) ? value.expression : value, source); return; }
+    if (ts.isObjectLiteralExpression(target)) {
+      for (const property of target.properties) {
+        if (ts.isPropertyAssignment(property)) add(property.initializer, source);
+        else if (ts.isSpreadAssignment(property)) add(property.expression, source);
+      }
+      return;
+    }
+    if (ts.isBinaryExpression(target)) { add(target.left, source); return; }
+    if (!ts.isPropertyAccessExpression(target) && !ts.isElementAccessExpression(target)) return;
+    const symbol = propertyDependencySymbol(target, scanner.checker);
+    if (symbol) for (const key of [symbol, ...symbol.declarations ?? []]) sources.set(key, [...sources.get(key) ?? [], source]);
+  };
+  for (const file of [...scanner.scopeFileNames, PROBE_FIXTURE_PATH]) {
+    const sf = scanner.program.getSourceFile(file);
+    if (!sf) continue;
+    const visit = (node: ts.Node): void => {
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+        node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) add(node.left, node.right);
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+  }
+  propertyWriteSources.set(scanner.checker, sources);
+}
+
+/** Follow unformatted leaves to parameters, including local forwarding aliases.
+ * The set is monotone: every newly derived argument is propagated until stable. */
+function parameterDependencies(node: ts.Node, checker: ts.TypeChecker, seen = new Set<ts.Symbol>()): Set<ts.ParameterDeclaration> {
+  const result = new Set<ts.ParameterDeclaration>();
+  const visit = (value: ts.Node): void => {
+    if (ts.isCallExpression(value) && isSafeFormatterCall(value, checker)) return;
+    if (ts.isIdentifier(value) || ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) {
+      const symbol = ts.isShorthandPropertyAssignment(value.parent) ? checker.getShorthandAssignmentValueSymbol(value.parent) : propertyDependencySymbol(value, checker);
+      if (!symbol || seen.has(symbol)) {
+        // A shared property symbol must not erase a different receiver root.
+        if (!ts.isIdentifier(value)) ts.forEachChild(value, visit);
+        return;
+      }
+      const decl = symbol.valueDeclaration;
+      const indexed = propertyWriteSources.get(checker);
+      const writes = [...new Set([symbol, ...symbol.declarations ?? []].flatMap((key) => indexed?.get(key) ?? []))];
+      if (writes.length || (decl && ts.isPropertyDeclaration(decl))) {
+        seen.add(symbol);
+        if (decl && ts.isPropertyDeclaration(decl) && decl.initializer) visit(decl.initializer);
+        for (const write of writes) visit(write);
+      }
+      if (decl && ts.isParameter(decl)) { result.add(decl); return; }
+      if (decl && ts.isBindingElement(decl)) {
+        seen.add(symbol);
+        let owner: ts.Node = decl.parent;
+        while (ts.isObjectBindingPattern(owner) || ts.isArrayBindingPattern(owner) || ts.isBindingElement(owner)) owner = owner.parent;
+        if (ts.isParameter(owner)) result.add(owner);
+        else if (ts.isVariableDeclaration(owner) && owner.initializer) visit(owner.initializer);
+        return;
+      }
+      if (decl && ts.isVariableDeclaration(decl)) {
+        seen.add(symbol);
+        if (decl.initializer) visit(decl.initializer);
+        for (const assignment of findAssignmentsTo(symbol, enclosingFunctionOrSourceFile(decl), checker).values) visit(assignment);
+      }
+    }
+    ts.forEachChild(value, visit);
+  };
+  visit(node);
+  return result;
+}
+
+function getDerivedSinks(scanner: ScannerContext): DerivedSinks {
+  indexPropertyWriteSources(scanner);
+  if (callableCallSites.get(scanner.checker) !== scanner.callSitesByDecl) {
+    callableCallSites.set(scanner.checker, scanner.callSitesByDecl);
+    callableTargetsCache.delete(scanner.checker);
+  }
+  const cached = derivedCache.get(scanner);
+  if (cached) return cached;
+  const derived: DerivedSinks = new Map();
+  const reasons: Array<{ file: string; line: number; parameter: string; index: number; via: string; leaf: string }> = [];
+  const calls: SinkCall[] = [];
+  for (const file of [...scanner.scopeFileNames, PROBE_FIXTURE_PATH]) {
+    const sf = scanner.program.getSourceFile(file);
+    if (!sf) continue;
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) || ts.isNewExpression(node) || ts.isTaggedTemplateExpression(node)) calls.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const call of calls) {
+      const nativeSink = matchSink(call, scanner.checker);
+      const args = ts.isTaggedTemplateExpression(call) ? [call.template] : [...call.arguments ?? []];
+      const positions = nativeSink ? new Set(args.map((_, index) => index)) :
+        !ts.isTaggedTemplateExpression(call) ? derivedArgumentPositions(call, scanner.checker, derived) : new Set<number>();
+      if (!positions.size) continue;
+      const unsafeNodes: ts.Node[] = [];
+      const ctx: ScanCtx = {
+        file: "", checker: scanner.checker, sourceFile: call.getSourceFile(), sink: nativeSink ?? "<derived-sink>",
+        sinkNode: call, out: [], callSitesByDecl: scanner.callSitesByDecl,
+        escapedFunctions: scanner.escapedFunctions, depth: 0, deriving: true, unsafeNodes,
+      };
+      for (const index of positions) if (args[index]) checkArg(args[index], ctx);
+      if (!ts.isTaggedTemplateExpression(call)) for (const initializer of derivedDefaultInitializers(call, scanner.checker, derived)) {
+        checkArg(initializer, { ...ctx, sourceFile: initializer.getSourceFile(), sinkNode: initializer });
+      }
+      for (const node of unsafeNodes) for (const parameter of parameterDependencies(node, scanner.checker)) {
+        const fn = parameter.parent;
+        if (!ts.isFunctionLike(fn) || !("parameters" in fn)) continue;
+        const index = fn.parameters.indexOf(parameter);
+        if (index < 0) continue;
+        let indices = derived.get(fn);
+        if (!indices) derived.set(fn, indices = new Set());
+        if (!indices.has(index)) {
+          indices.add(index); changed = true;
+          reasons.push({ file: parameter.getSourceFile().fileName, line: parameter.getSourceFile().getLineAndCharacterOfPosition(parameter.getStart()).line + 1,
+            parameter: parameter.name.getText(), index, via: (ts.isTaggedTemplateExpression(call) ? call.tag : call.expression).getText(), leaf: node.getText() });
+        }
+        for (const inherited of inheritedMembers(fn, scanner.checker)) {
+          const target = (ts.isPropertyDeclaration(inherited) && inherited.initializer &&
+            (ts.isArrowFunction(inherited.initializer) || ts.isFunctionExpression(inherited.initializer))) ? inherited.initializer : inherited;
+          let inheritedIndices = derived.get(target);
+          if (!inheritedIndices) derived.set(target, inheritedIndices = new Set());
+          if (!inheritedIndices.has(index)) { inheritedIndices.add(index); changed = true; }
+        }
+      }
+    }
+  }
+  const defaults = new Map<ts.Node, ts.Expression[]>();
+  for (const [fn, indices] of derived) {
+    if (!ts.isFunctionLike(fn) || !("parameters" in fn)) continue;
+    const initializers: ts.Expression[] = [];
+    for (const index of indices) {
+      const parameter = fn.parameters[index];
+      if (!parameter) continue;
+      initializers.push(...defaultsForParameter(parameter));
+    }
+    for (const target of [fn, ...inheritedMembers(fn, scanner.checker)]) {
+      defaults.set(target, [...defaults.get(target) ?? [], ...initializers]);
+    }
+  }
+  derivedDefaults.set(derived, defaults);
+  derivedCache.set(scanner, derived);
+  derivedReasons.set(scanner, reasons);
+  return derived;
+}
+
+/** Object receivers are values too, even when they have no call signature. */
+const sinkValueCache = new WeakMap<DerivedSinks, WeakMap<ts.Expression, boolean>>();
+function recognizedSinkValue(expr: ts.Expression, checker: ts.TypeChecker, derived: DerivedSinks): boolean {
+  let cache = sinkValueCache.get(derived);
+  if (!cache) sinkValueCache.set(derived, cache = new WeakMap());
+  const prior = cache.get(expr);
+  if (prior !== undefined) return prior;
+  const recognized = recognizedSinkValueUncached(expr, checker, derived);
+  cache.set(expr, recognized);
+  return recognized;
+}
+
+function recognizedSinkValueUncached(expr: ts.Expression, checker: ts.TypeChecker, derived: DerivedSinks): boolean {
+  if (callableTargets(expr, checker).some((declaration) => derived.has(declaration))) return true;
+  const type = checker.getTypeAtLocation(expr);
+  const callable = type.getCallSignatures().length > 0;
+  if (callable && (sinkExpression(expr, checker) || type.getCallSignatures().some((signature) => sinkSignature(signature.declaration)))) return true;
+  if (isConsoleReceiver(expr, checker) || processStreamName(expr, checker)) return true;
+  const types = [...new Set([...localOrigins(expr, checker), expr].flatMap((origin) => {
+    const originType = checker.getTypeAtLocation(origin);
+    return originType.isUnionOrIntersection() ? originType.types : [originType];
+  }))];
+  for (const part of types) {
+    const nonNullable = checker.getNonNullableType(part);
+    // A mapped receiver is identified by its methods' source declarations.
+    for (const property of checker.getPropertiesOfType(nonNullable)) {
+      const propertyDeclaration = property.valueDeclaration ?? property.declarations?.[0];
+      if (propertyDeclaration && checker.getTypeOfSymbolAtLocation(property, propertyDeclaration).getCallSignatures().some((signature) => sinkSignature(signature.declaration))) return true;
+      if (LOGGER_METHODS.has(property.name) && loggerProperty(nonNullable, property.name, checker)) return true;
+      for (const declaration of property.declarations ?? []) {
+        // A receiver's public callable surface can escape through structural
+        // types. Private/protected helpers remain derived at their own calls;
+        // they do not make every ordinary data read on the container an escape.
+        const exposed = !(ts.canHaveModifiers(declaration) && ts.getModifiers(declaration)?.some((modifier) =>
+          modifier.kind === ts.SyntaxKind.PrivateKeyword || modifier.kind === ts.SyntaxKind.ProtectedKeyword)) &&
+          !("name" in declaration && declaration.name && ts.isPrivateIdentifier(declaration.name as ts.Node));
+        if (exposed && derived.has(declaration)) return true;
+        if (exposed && (ts.isPropertyDeclaration(declaration) || ts.isPropertyAssignment(declaration)) && declaration.initializer &&
+            derived.has(unwrap(declaration.initializer))) return true;
+        const file = declaration.getSourceFile().fileName;
+        if (file.includes(OTEL_PKG) && (ts.isMethodSignature(declaration) || ts.isMethodDeclaration(declaration) || ts.isFunctionDeclaration(declaration))) return true;
+        if ((file.endsWith(TELEMETRY_FILE_SUFFIX) || file.endsWith(TRACING_FILE_SUFFIX) || file.endsWith(SENTRY_FILE_SUFFIX) || file.includes(SENTRY_PKG)) &&
+            (ts.isMethodDeclaration(declaration) || ts.isMethodSignature(declaration) || ts.isFunctionDeclaration(declaration))) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Only runtime expression positions participate. Declaration/type/property names
+ * are metadata; shorthand properties are runtime reads of their value symbol. */
+function isRuntimeExpression(node: ts.Node): node is ts.Expression {
+  if (!ts.isExpression(node)) return false;
+  const parent = node.parent;
+  if (!parent) return false;
+  if ((ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+      ((ts.isPropertyAssignment(parent) || ts.isPropertyDeclaration(parent) || ts.isMethodDeclaration(parent) ||
+        ts.isMethodSignature(parent) || ts.isPropertySignature(parent) || ts.isVariableDeclaration(parent) ||
+        ts.isParameter(parent) || ts.isFunctionDeclaration(parent) || ts.isClassDeclaration(parent) ||
+        ts.isBindingElement(parent)) && parent.name === node)) return false;
+  for (let ancestor: ts.Node | undefined = parent; ancestor; ancestor = ancestor.parent) {
+    if (ts.isTypeNode(ancestor) || ts.isImportDeclaration(ancestor) || ts.isExportDeclaration(ancestor)) return false;
+    if (ts.isStatement(ancestor) || ts.isExpressionStatement(ancestor)) break;
+  }
+  return true;
+}
+
+function sinkValueUseIsTracked(expr: ts.Expression, scanner: ScannerContext, derived: DerivedSinks): boolean {
+  let value: ts.Node = expr;
+  // Receiver/callee chains are allowed only when their actual call is classified.
+  for (;;) {
+    const parent = value.parent;
+    if (ts.isParenthesizedExpression(parent) || ts.isAsExpression(parent) || ts.isTypeAssertionExpression(parent) || ts.isNonNullExpression(parent)) { value = parent; continue; }
+    if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === value) { value = parent; continue; }
+    if (((ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.expression === value) || (ts.isTaggedTemplateExpression(parent) && parent.tag === value)) {
+      return Boolean(matchSink(parent, scanner.checker)) || (!ts.isTaggedTemplateExpression(parent) && derivedArgumentPositions(parent, scanner.checker, derived).size > 0);
+    }
+    if (ts.isCallExpression(value) && ts.isExpressionStatement(parent) && matchSink(value, scanner.checker)) return true;
+    if (ts.isVariableDeclaration(parent) && parent.initializer === value &&
+        ts.isVariableDeclarationList(parent.parent) && Boolean(parent.parent.flags & ts.NodeFlags.Const)) {
+      // Binding/object aliases are tracked by localOrigins/bindingSource.
+      return ts.isIdentifier(parent.name) || (ts.isObjectBindingPattern(parent.name) && parent.name.elements.every((element) =>
+        ts.isIdentifier(element.name) && !element.dotDotDotToken && (!element.propertyName || ts.isIdentifier(element.propertyName) || ts.isStringLiteral(element.propertyName))));
+    }
+    return false;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1037,9 +1590,16 @@ export function scanNode(node: ts.Node, file: string, sourceFile: ts.SourceFile,
   const t0 = performance.now();
   const violations: Violation[] = [];
   const unresolvedCallees: Violation[] = [];
+  const derived = getDerivedSinks(scanner);
   const visit = (n: ts.Node): void => {
-    if (ts.isCallExpression(n) || ts.isTaggedTemplateExpression(n)) {
-      const sink = matchSink(n, scanner.checker);
+    if ((isRuntimeExpression(n) && recognizedSinkValue(n, scanner.checker, derived) && !sinkValueUseIsTracked(n, scanner, derived)) ||
+        (ts.isMethodDeclaration(n) && ts.isObjectLiteralExpression(n.parent) && derived.has(n))) {
+      unresolvedCallees.push(createViolation(file, "<sink-escape>", n, sourceFile));
+    }
+    if (ts.isCallExpression(n) || ts.isNewExpression(n) || ts.isTaggedTemplateExpression(n)) {
+      const nativeSink = matchSink(n, scanner.checker);
+      const derivedPositions = !ts.isTaggedTemplateExpression(n) ? derivedArgumentPositions(n, scanner.checker, derived) : new Set<number>();
+      const sink = nativeSink ?? (derivedPositions.size ? "<derived-sink>" : null);
       if (sink && sink !== UNSUPPORTED_SINK) {
         const ctx: ScanCtx = {
           file,
@@ -1055,7 +1615,11 @@ export function scanNode(node: ts.Node, file: string, sourceFile: ts.SourceFile,
         if (ts.isTaggedTemplateExpression(n)) {
           checkArg(n.template, ctx);
         } else {
-          for (const arg of n.arguments) checkArg(arg, ctx);
+          const args = n.arguments ?? [];
+          for (let index = 0; index < args.length; index++) {
+            if (nativeSink || derivedPositions.has(index)) checkArg(args[index], ctx);
+          }
+          if (!derivedDefaultsAreSafe(n, scanner.checker, derived, ctx)) pushViolation(ctx, n);
         }
       } else if (sink === UNSUPPORTED_SINK || !calleeResolves(n, scanner.checker)) {
         // Ruling (1): "A callee that cannot be resolved in a scanned file FAILS."

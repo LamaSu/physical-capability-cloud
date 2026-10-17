@@ -17,7 +17,7 @@ import { getKernelService } from "../services/kernel-service.js";
 import { jobSubmitQueueOnly, localJobDispatchDecision, type LocalJobDispatchReason } from "../services/local-job-dispatch.js";
 import { emergencyStopState } from "./device-relay.js";
 import { trackServerEvent } from "../services/posthog-service.js";
-import { safeServerEventProperties, safeServerEventDistinctId } from "../services/posthog-policy.js";
+import { safeServerEventProperties, prepareServerEventDistinctId } from "../services/posthog-policy.js";
 import { auditService } from "../services/audit-service.js";
 import {
   isKnownNodeEnv,
@@ -825,7 +825,7 @@ export async function setupRoutes(app: FastifyInstance) {
           adapterType,
           action,
           capabilitiesRegistered: capabilities?.length ?? 0,
-        }), safeServerEventDistinctId((req as any).operatorId ?? (req as any).apiKeyId));
+        }), prepareServerEventDistinctId((req as any).operatorId ?? (req as any).apiKeyId));
         auditService.log({
           eventType: action === "created" ? "device.registered" : "device.updated",
           actor: (req as any).operatorId ?? (req as any).apiKeyId,

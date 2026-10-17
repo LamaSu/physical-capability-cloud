@@ -1,3 +1,4 @@
+import { logSafeInt } from "../redaction.js";
 import { sql, type Store } from "@pcc/store";
 import { parseStoredScopes, SELF_SERVICE_KEY_SCOPES } from "../auth/key-scopes.js";
 
@@ -89,6 +90,6 @@ export function applyWildcardKeyMigrationFromEnv(store: Store): WildcardKeyMigra
   const ids = [...new Set((process.env.PCC_REVOKE_API_KEY_IDS ?? "").split(",").map((id) => id.trim()).filter(Boolean))];
   const keepIds = [...new Set((process.env.PCC_WILDCARD_KEY_KEEP_IDS ?? "").split(",").map((id) => id.trim()).filter(Boolean))];
   const counts = runWildcardKeyMigration(store, SELF_SERVICE_KEY_SCOPES, ids, () => new Date().toISOString(), keepIds);
-  console.log(`[wildcard-key-migration] narrowed ${counts.narrowed}, revoked ${counts.revoked}, already revoked ${counts.alreadyRevoked}, kept ${counts.kept}, kept inactive ${counts.keptInactive}`);
+  console.log(`[wildcard-key-migration] narrowed ${logSafeInt(counts.narrowed)}, revoked ${logSafeInt(counts.revoked)}, already revoked ${logSafeInt(counts.alreadyRevoked)}, kept ${logSafeInt(counts.kept)}, kept inactive ${logSafeInt(counts.keptInactive)}`);
   return counts;
 }

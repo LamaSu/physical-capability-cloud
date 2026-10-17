@@ -31,6 +31,8 @@ import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastif
 import { trace } from "@opentelemetry/api";
 import { auditService } from "./audit-service.js";
 import { identifyAgent, trackServerEvent } from "./posthog-service.js";
+import { prepareServerEventDistinctId, safeServerEventProperties } from "./posthog-policy.js";
+import { logSafeId, logSafeSmallInt } from "../redaction.js";
 
 // ── Stages ───────────────────────────────────────────────────────────────────
 
@@ -167,18 +169,18 @@ export function recordStage(
     if (stage === "provision") {
       identifyAgent(traceId, { first_stage: "provision", first_route: route });
     }
-    trackServerEvent(`onboarding_${stage}`, { trace_id: traceId, route, status }, traceId);
+    trackServerEvent(logSafeId(`onboarding_${stage}`), safeServerEventProperties({ trace_id: traceId, route, status }), prepareServerEventDistinctId(traceId));
   } catch {
     /* analytics must never break request flow */
   }
 
   // 3. OTel span event on the active span (no new span).
   try {
-    trace.getActiveSpan()?.addEvent(`pcc.funnel.${stage}`, {
-      "pcc.trace_id": traceId,
-      "pcc.funnel.stage": stage,
-      "pcc.funnel.route": route,
-      "pcc.funnel.status": status,
+    trace.getActiveSpan()?.addEvent(logSafeId(`pcc.funnel.${stage}`), {
+      "pcc.trace_id": logSafeId(traceId),
+      "pcc.funnel.stage": logSafeId(stage),
+      "pcc.funnel.route": logSafeId(route),
+      "pcc.funnel.status": logSafeSmallInt(status, 100, 599) ?? 0,
     });
   } catch {
     /* OTel may be uninitialised in tests */
@@ -475,14 +477,14 @@ export function recordOperatorStage(
   // reconstruct the operator-onboarding chart natively.
   try {
     trackServerEvent(
-      `operator_${stage}`,
-      {
+      logSafeId(`operator_${stage}`),
+      safeServerEventProperties({
         kernel_id: kernelId,
         device_id: deviceId,
         capability_id: capabilityId,
         job_id: jobId,
-      },
-      kernelId,
+      }),
+      prepareServerEventDistinctId(kernelId),
     );
   } catch {
     /* analytics must never break request flow */
@@ -490,12 +492,12 @@ export function recordOperatorStage(
 
   // 3. OTel span event on the active span (no new span).
   try {
-    trace.getActiveSpan()?.addEvent(`pcc.operator_funnel.${stage}`, {
-      "pcc.kernel_id": kernelId,
-      "pcc.operator_funnel.stage": stage,
-      ...(deviceId ? { "pcc.device_id": deviceId } : {}),
-      ...(capabilityId ? { "pcc.capability_id": capabilityId } : {}),
-      ...(jobId ? { "pcc.job_id": jobId } : {}),
+    trace.getActiveSpan()?.addEvent(logSafeId(`pcc.operator_funnel.${stage}`), {
+      "pcc.kernel_id": logSafeId(kernelId),
+      "pcc.operator_funnel.stage": logSafeId(stage),
+      ...(deviceId ? { "pcc.device_id": logSafeId(deviceId) } : {}),
+      ...(capabilityId ? { "pcc.capability_id": logSafeId(capabilityId) } : {}),
+      ...(jobId ? { "pcc.job_id": logSafeId(jobId) } : {}),
     });
   } catch {
     /* OTel may be uninitialised in tests */

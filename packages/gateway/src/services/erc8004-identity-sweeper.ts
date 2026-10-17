@@ -17,7 +17,7 @@ import {
 } from "./erc8004-identity-write.js";
 import { getRepos } from "../db.js";
 import { classifyChainError, type ChainErrorCode } from "./chain-error-code.js";
-import { logSafeId } from "../redaction.js";
+import { logSafeId, logSafeInt } from "../redaction.js";
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const DEFAULT_BATCH_SIZE = 5;
@@ -48,14 +48,15 @@ export function startIdentitySweeper(opts: StartOptions = {}): void {
   const gatewayUrl =
     opts.gatewayUrl ?? process.env.PCC_GATEWAY_URL ?? "https://capability.network";
   const logger = opts.logger ?? {
-    info: (m) => console.log(`[erc8004-sweeper] ${m}`),
-    warn: (fields, message) => console.warn(`[erc8004-sweeper] ${message}`, {
+    info: (m) => console.log({ code: "identity_sweeper_event", detail: logSafeId(m) }),
+    warn: (fields, message) => console.warn("identity_sweeper_warning", {
+      message: logSafeId(message),
       keyId: logSafeId(fields.keyId),
-      code: fields.code,
+      code: logSafeId(fields.code),
     }),
   };
 
-  logger.info(`starting (every ${intervalMs}ms, batch ${batchSize})`);
+  logger.info(`starting (every ${logSafeInt(intervalMs)}ms, batch ${logSafeInt(batchSize)})`);
   _timer = setInterval(() => {
     runSweep({ batchSize, gatewayUrl, logger }).catch((err) => {
       logger.warn({ code: classifyChainError(err) }, "sweep error");
@@ -105,7 +106,7 @@ export async function runSweep(opts: {
       repo.recordOnchainSuccess(key.id, result);
       succeeded++;
       logger.info(
-        `wrote agent ${result.agentId} for key ${key.id} (tx ${result.txHash})`,
+        `wrote agent ${logSafeId(result.agentId)} for key ${logSafeId(key.id)} (tx ${logSafeId(result.txHash)})`,
       );
     } catch (err) {
       const code = classifyChainError(err);
@@ -115,7 +116,7 @@ export async function runSweep(opts: {
         // non-fatal
       }
       failed++;
-      logger.warn({ keyId: key.id, code }, "retry failed");
+      logger.warn({ keyId: logSafeId(key.id), code }, "retry failed");
     }
   }
   return { attempted: pending.length, succeeded, failed };

@@ -6,6 +6,7 @@
  * here they start with demo seed data.
  */
 
+import { knownErrorClassName } from "./redaction.js";
 import { SensorPipeline, BatchTracker, EncryptionService, createLitEncryptionService } from "@pcc/kernel";
 import { CommitmentService, NoirProofService } from "@pcc/verifier";
 import type { SensorChannelDescriptor } from "@pcc/spec";
@@ -197,8 +198,8 @@ export const litEncryptionService = createLitEncryptionService({
 // Connect Lit service (non-blocking — will be ready by first request)
 litEncryptionService.connect().catch((err) => {
   console.error(
-    `Failed to connect LitEncryptionService:`,
-    err,
+    "Failed to connect LitEncryptionService:",
+    knownErrorClassName(err),
   );
 });
 

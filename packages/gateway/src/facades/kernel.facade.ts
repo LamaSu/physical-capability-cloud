@@ -31,7 +31,7 @@ import {
 import { locationVisibilityOf, storedLocation } from "./populators/public-location.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
-import { safeServerEventProperties, safeServerEventDistinctId } from "../services/posthog-policy.js";
+import { safeServerEventProperties, prepareServerEventDistinctId } from "../services/posthog-policy.js";
 import { logSafeId, logSafeInt, logSafeIsoTimestamp } from "../redaction.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
@@ -541,7 +541,7 @@ export class KernelFacade extends BaseFacade {
       trackServerEvent(
         "kernel_registered",
         safeServerEventProperties({ kernelId: id, operatorAddress: kernelData.operatorAddress }),
-        safeServerEventDistinctId(actorId),
+        prepareServerEventDistinctId(actorId),
       );
       auditService.log({
         eventType: "kernel.created",

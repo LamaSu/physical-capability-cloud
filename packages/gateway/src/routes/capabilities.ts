@@ -5,6 +5,7 @@ import { getCapabilityFacade, type CreateCapabilityInput } from "../facades/inde
 import { JOB_STATUSES } from "../config/job-status.js";
 import { getCsdRegistry } from "./csd.js";
 import { recordOperatorStage } from "../services/funnel-tracker.js";
+import { knownErrorClassName } from "../redaction.js";
 
 // ── POST /api/capabilities — accepted top-level body fields ─────────────────
 //
@@ -158,7 +159,7 @@ export async function getApiCapabilityTypes(
       }
     } else {
       log?.warn(
-        { err: dbTypes.error },
+        { code: "capability_distinct_types_failed", errorClass: knownErrorClassName(dbTypes.error) },
         "[capabilities/types] distinct-type query failed; catalog types omitted from union",
       );
     }
@@ -166,7 +167,7 @@ export async function getApiCapabilityTypes(
     for (const type of csdRegisteredTypes()) merged.add(type);
   } catch (err) {
     log?.error(
-      { err },
+      { code: "capability_type_union_failed", errorClass: knownErrorClassName(err) },
       "[capabilities/types] union build failed; falling back to templates",
     );
     return [...new Set(getRegisteredTypes())].sort();

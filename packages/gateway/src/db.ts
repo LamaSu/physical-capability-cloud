@@ -55,7 +55,7 @@ export function initStore(options?: { seed?: boolean }): Store {
     throw error;
   }
 
-  console.log(`[db] Store initialised (${dbPath === ":memory:" ? "in-memory" : dbPath})`);
+  console.log(dbPath === ":memory:" ? "[db] Store initialised (in-memory)" : "[db] Store initialised (file)");
   return _store;
 }
 

@@ -53,6 +53,7 @@
  *    the future Step-3 event-sourced projection (which owns the read model).
  */
 
+import { knownErrorClassName, logSafeId, logSafeInt } from "../redaction.js";
 import type { Address } from "viem";
 import type { IRepositories } from "@pcc/store";
 import {
@@ -215,9 +216,7 @@ export async function runKeeperSweep(
       // Soft-fail: one unreadable escrow must not abort the sweep.
       result.readErrors += 1;
       logger?.warn?.(
-        `[settlement-keeper] read failed for ${escrow.id} (${address}): ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `[settlement-keeper] read failed for ${logSafeId(escrow.id)} (${logSafeId(address)}): ${knownErrorClassName(err)}`,
       );
       continue;
     }
@@ -300,9 +299,7 @@ export async function runKeeperSweep(
           reason: err instanceof Error ? err.message : String(err),
         });
         logger?.warn?.(
-          `[settlement-keeper] drive failed for ${escrow.id}#${idx}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          `[settlement-keeper] drive failed for ${logSafeId(escrow.id)}#${logSafeInt(idx)}: ${knownErrorClassName(err)}`,
         );
       }
     }
@@ -318,9 +315,7 @@ export async function runKeeperSweep(
         // Reconciliation is best-effort — the on-chain release already happened,
         // which is the load-bearing outcome. A failed DB write is logged, not fatal.
         logger?.warn?.(
-          `[settlement-keeper] DB reconcile failed for ${escrow.id}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          `[settlement-keeper] DB reconcile failed for ${logSafeId(escrow.id)}: ${knownErrorClassName(err)}`,
         );
       }
     }
@@ -339,8 +334,7 @@ export function resolveKeeperIntervalSec(): number {
     parsed > KEEPER_INTERVAL_UPPER_BOUND_SEC
   ) {
     console.warn(
-      `[settlement-keeper] SETTLEMENT_KEEPER_INTERVAL_SEC="${raw}" out of band ` +
-        `[${KEEPER_INTERVAL_LOWER_BOUND_SEC},${KEEPER_INTERVAL_UPPER_BOUND_SEC}]; using ${KEEPER_INTERVAL_DEFAULT_SEC}`,
+      "[settlement-keeper] interval_out_of_band; using default",
     );
     return KEEPER_INTERVAL_DEFAULT_SEC;
   }
@@ -387,8 +381,8 @@ export function startSettlementKeeper(reposProvider: () => IRepositories, logger
   }
 
   const log = logger ?? {
-    info: (m: string) => console.log(`[settlement-keeper] ${m}`),
-    warn: (m: string) => console.warn(`[settlement-keeper] ${m}`),
+    info: (m: string) => console.log({ code: "settlement_keeper_event", detail: logSafeId(m) }),
+    warn: (m: string) => console.warn({ code: "settlement_keeper_warning", detail: logSafeId(m) }),
   };
 
   const timer = setInterval(() => {
@@ -396,13 +390,13 @@ export function startSettlementKeeper(reposProvider: () => IRepositories, logger
       (r) => {
         if (r.released > 0 || r.terminalOther > 0 || r.blocked > 0 || r.reconciledCompleted > 0) {
           log.info(
-            `swept ${r.scannedEscrows} escrows: released=${r.released} terminalOther=${r.terminalOther} ` +
-              `blocked=${r.blocked} reconciled=${r.reconciledCompleted} (skipV3=${r.skippedV3} readErr=${r.readErrors})`,
+            `swept ${logSafeInt(r.scannedEscrows)} escrows: released=${logSafeInt(r.released)} terminalOther=${logSafeInt(r.terminalOther)} ` +
+              `blocked=${logSafeInt(r.blocked)} reconciled=${logSafeInt(r.reconciledCompleted)} (skipV3=${logSafeInt(r.skippedV3)} readErr=${logSafeInt(r.readErrors)})`,
           );
         }
       },
       (err) => {
-        log.warn(`sweep error: ${err instanceof Error ? err.message : String(err)}`);
+        log.warn(`sweep error: ${knownErrorClassName(err)}`);
       },
     );
   }, intervalSec * 1000);
@@ -410,7 +404,7 @@ export function startSettlementKeeper(reposProvider: () => IRepositories, logger
     (timer as { unref: () => void }).unref();
   }
   _timer = timer;
-  log.info(`started (every ${intervalSec}s)`);
+  log.info(`started (every ${logSafeInt(intervalSec)}s)`);
 
   return {
     stop: () => {

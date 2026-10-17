@@ -7,6 +7,7 @@
  * so dev/test environments work without the oracle running.
  */
 
+import { logSafeId, logSafeSmallInt } from "../redaction.js";
 import {
   encodeAbiParameters,
   decodeAbiParameters,
@@ -204,8 +205,8 @@ function mockVerification(request: OracleVerifyRequest): OracleResponse {
 
   if (isPaidTier) {
     console.warn(
-      `[oracle] Mock verification REFUSED for paid tier ${request.assuranceTier} ` +
-        `(job ${request.jobId}) — no real oracle configured. Failing closed (verified:false).`,
+      `[oracle] Mock verification REFUSED for paid tier ${logSafeSmallInt(request.assuranceTier, 0, 3)} ` +
+        `(job ${logSafeId(request.jobId)}) — no real oracle configured. Failing closed (verified:false).`,
     );
   }
 

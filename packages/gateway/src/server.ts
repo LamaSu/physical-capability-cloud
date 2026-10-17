@@ -1,5 +1,5 @@
 import { initSentry, Sentry } from "./sentry.js";
-import { knownErrorClassName } from "./redaction.js";
+import { knownErrorClassName, logSafeId, logSafeInt } from "./redaction.js";
 import { buildReportHint, decorateWithReportHint } from "./report-hint.js";
 // Must be called before any other imports so Sentry patches HTTP/fetch/Fastify
 initSentry();
@@ -246,7 +246,10 @@ export async function createGateway(port = 3200) {
     // For 5xx errors, report to Sentry before responding
     const statusCode = error.statusCode ?? 500;
     if (statusCode >= 500) {
-      Sentry.captureException(error, { extra: { url: request.url, method: request.method } });
+      Sentry.captureException(
+        { name: knownErrorClassName(error), message: "gateway_request_failed" },
+        { extra: { route: logSafeId(request.routeOptions.url ?? "unmatched"), method: logSafeId(request.method) } },
+      );
     }
     const body: Record<string, unknown> = {
       error: statusCode >= 500 ? "internal_error" : "request_error",
@@ -542,8 +545,8 @@ export async function createGateway(port = 3200) {
   // Persists DemandSnapshots into materializedViews. Auth-gated read via
   // /api/admin/demand/*. NOT a public oracle.
   startDemandSnapshotCron({
-    info: (msg) => app.log.info(msg),
-    warn: (msg) => app.log.warn(msg),
+    info: (msg) => app.log.info({ code: "background_service_event", detail: logSafeId(msg) }),
+    warn: (msg) => app.log.warn({ code: "background_service_warning", detail: logSafeId(msg) }),
   });
 
   // Job-offers — generic /api/job-offers/* matching primitive. Replaces
@@ -567,20 +570,20 @@ export async function createGateway(port = 3200) {
     }).$client;
     initJobOffersStore(rawSqlite ? { sqlite: rawSqlite } : {});
     startJobOffersSweeper({
-      info: (msg) => app.log.info(msg),
-      warn: (msg) => app.log.warn(msg),
+      info: (msg) => app.log.info({ code: "background_service_event", detail: logSafeId(msg) }),
+      warn: (msg) => app.log.warn({ code: "background_service_warning", detail: logSafeId(msg) }),
     });
   } catch (err) {
     // Best-effort wiring — if the store handle is shaped differently in some
     // environments (e.g. tests that build the app without initStore), fall
     // back to a pure in-memory job-offers store so routes still respond.
     app.log.warn(
-      `[job-offers] could not attach SQLite (${err instanceof Error ? err.message : String(err)}); falling back to in-memory`,
+      `[job-offers] could not attach SQLite (${knownErrorClassName(err)}); falling back to in-memory`,
     );
     initJobOffersStore({});
     startJobOffersSweeper({
-      info: (msg) => app.log.info(msg),
-      warn: (msg) => app.log.warn(msg),
+      info: (msg) => app.log.info({ code: "background_service_event", detail: logSafeId(msg) }),
+      warn: (msg) => app.log.warn({ code: "background_service_warning", detail: logSafeId(msg) }),
     });
   }
 
@@ -622,8 +625,8 @@ export async function createGateway(port = 3200) {
   // the first /api/tools/search call doesn't pay the load+parse cost. Safe
   // to call if agent-package.json is missing (index just stays empty).
   prewarmToolIndex({
-    info: (msg) => app.log.info(msg),
-    warn: (msg) => app.log.warn(msg),
+    info: (msg) => app.log.info({ code: "background_service_event", detail: logSafeId(msg) }),
+    warn: (msg) => app.log.warn({ code: "background_service_warning", detail: logSafeId(msg) }),
   });
 
   // Scope-based RBAC — enforces required scopes per endpoint (after apiGate sets key)
@@ -1039,7 +1042,7 @@ export async function createGateway(port = 3200) {
       return reply.type("text/html").send(indexHtml);
     });
 
-    console.log(`[gateway] Serving dashboard from ${dashboardPath}`);
+    console.log("[gateway] Dashboard serving enabled");
   }
 
   return {
@@ -1047,14 +1050,14 @@ export async function createGateway(port = 3200) {
     start: async () => {
       // Initialize agent bridge in background (non-blocking)
       initAgentBridge().catch((err) =>
-        console.warn("[gateway] Agent bridge init failed:", err),
+        console.warn("[gateway] Agent bridge init failed:", knownErrorClassName(err)),
       );
 
       // Initialize ERC-4337 batch settlement in background (non-blocking)
       import("./contracts/batch-settlement.js")
         .then(({ initBatchSettlement }) => initBatchSettlement())
         .catch((err) =>
-          console.warn("[gateway] Batch settlement init failed:", err),
+          console.warn("[gateway] Batch settlement init failed:", knownErrorClassName(err)),
         );
 
       // Start ERC-8004 identity write retry sweeper (no-op if write disabled)
@@ -1078,10 +1081,10 @@ export async function createGateway(port = 3200) {
         );
         const handle = startKernelTtlSweeper(() => getRepos());
         console.log(
-          `[gateway] kernel-ttl-sweeper started (interval=${handle.intervalSec}s)`,
+          `[gateway] kernel-ttl-sweeper started (interval=${logSafeInt(handle.intervalSec)}s)`,
         );
       } catch (err) {
-        console.warn("[gateway] kernel-ttl-sweeper start failed:", err);
+        console.warn("[gateway] kernel-ttl-sweeper start failed:", knownErrorClassName(err));
       }
 
       // Start the settlement keeper (settlement pivot Step 2). OPT-IN via
@@ -1095,20 +1098,20 @@ export async function createGateway(port = 3200) {
           "./services/settlement-keeper.js"
         );
         const handle = startSettlementKeeper(() => getRepos(), {
-          info: (m) => app.log.info(`[settlement-keeper] ${m}`),
-          warn: (m) => app.log.warn(`[settlement-keeper] ${m}`),
+          info: (m) => app.log.info({ code: "settlement_keeper_event", detail: logSafeId(m) }),
+          warn: (m) => app.log.warn({ code: "settlement_keeper_warning", detail: logSafeId(m) }),
         });
         if (process.env.SETTLEMENT_KEEPER_ENABLED === "true") {
           console.log(
-            `[gateway] settlement-keeper started (interval=${handle.intervalSec}s)`,
+            `[gateway] settlement-keeper started (interval=${logSafeInt(handle.intervalSec)}s)`,
           );
         }
       } catch (err) {
-        console.warn("[gateway] settlement-keeper start failed:", err);
+        console.warn("[gateway] settlement-keeper start failed:", knownErrorClassName(err));
       }
 
       const address = await app.listen({ port, host });
-      console.log(`PCC Gateway listening on ${address}`);
+      console.log("[gateway] Listening");
       return address;
     },
   };
@@ -1119,11 +1122,11 @@ import { fileURLToPath } from "node:url";
 const isMain = process.argv[1] === fileURLToPath(import.meta.url);
 if (isMain) {
   const port = parseInt(process.env.PORT ?? "3200", 10);
-  console.log(`[gateway] Starting PCC Gateway on port ${port} (pid=${process.pid})...`);
+  console.log(`[gateway] Starting PCC Gateway on port ${logSafeInt(port)} (pid=${logSafeInt(process.pid)})...`);
   createGateway(port)
     .then(({ start }) => start())
     .catch((err) => {
-      console.error("[gateway] FATAL: Failed to start gateway:", err);
+      console.error("[gateway] FATAL: Failed to start gateway:", knownErrorClassName(err));
       process.exit(1);
     });
 }
@@ -1131,9 +1134,9 @@ if (isMain) {
 // Catch unhandled rejections and uncaught exceptions so the process
 // never exits silently. Railway needs log output to diagnose failures.
 process.on("unhandledRejection", (reason) => {
-  console.error("[gateway] Unhandled rejection:", reason);
+  console.error("[gateway] Unhandled rejection:", knownErrorClassName(reason));
 });
 process.on("uncaughtException", (err) => {
-  console.error("[gateway] Uncaught exception:", err);
+  console.error("[gateway] Uncaught exception:", knownErrorClassName(err));
   process.exit(1);
 });
