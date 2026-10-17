@@ -23,6 +23,7 @@ import { DASHBOARD_CSD_URL } from "@pcc/spec";
 import {
   runDashboardViewBoot,
   runGalleryViewBoot,
+  enrichOnRampToolResult,
   MCP_APP_TOOL_RESULT_METHOD,
 } from "../mcp/mcp-app-view.js";
 
@@ -250,13 +251,13 @@ describe("MCP Apps lifecycle — gallery (search) view", () => {
     expect(document.getElementById("pcc-kit-status")).not.toBeNull();
     completeInit(posted, deliver);
     deliver(
-      toolResult({
+      toolResult(enrichOnRampToolResult("search_dashboards", {
         entries: [
-          { slug: "a-dash-1111", name: "A", title: "Alpha" },
-          { slug: "b-dash-2222", name: "B", title: "Bravo" },
+          { slug: "a-dash-1111", name: "A", manifest: { title: "Alpha" } },
+          { slug: "b-dash-2222", name: "B", manifest: { title: "Bravo" } },
         ],
         total: 2,
-      }),
+      }, "ok").structuredContent!),
     );
 
     expect(document.getElementById("pcc-kit-status")).toBeNull();
