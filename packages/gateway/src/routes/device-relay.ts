@@ -80,6 +80,7 @@ import { schema, eq, and, sql } from "@pcc/store";
 import { getManifest, warmManifestCache } from "../services/tool-manifest-service.js";
 import { mockFundsWrites } from "../services/settlement-mode.js";
 import { scopeExpiryMs } from "../services/scope-expiry.js";
+import { isJobHeld } from "../services/job-holds.js";
 import { getSafetyGateway, initSafetyGateway } from "@pcc/kernel";
 
 const {
@@ -205,6 +206,7 @@ function validateToolCall(scope: typeof executionScopes.$inferSelect, toolName: 
 
 /** Why `scope` does not authorize a write of `toolName` now, or null. */
 function scopeWriteRefusal(scope: typeof executionScopes.$inferSelect, toolName: string): string | null {
+  if (scope.jobId && isJobHeld(scope.jobId)) return "job_held";
   if (scope.status !== "active") return "scope_not_active";
   if (scopeExpiryMs(scope.expiresAt) < Date.now()) return "scope_expired"; // unreadable: expired (N133)
   if (!(scope.allowedTools as string[]).includes(toolName)) return "tool_not_allowed";
@@ -544,6 +546,7 @@ function dispatchRefusal(call: typeof toolCallRelay.$inferSelect): string | null
   const scope = db.select().from(executionScopes).where(eq(executionScopes.id, call.scopeId)).get();
   if (!scope) return "scope_not_found";
   if (scope.kernelId !== call.kernelId) return "scope_kernel_mismatch";
+  if (scope.jobId && isJobHeld(scope.jobId)) return "job_held";
   // F2: a call needs live scope authority (#6771: every call, whatever its tool).
   if (scope.status !== "active") return "scope_not_active";
   if (scopeExpiryMs(scope.expiresAt) < Date.now()) return "scope_expired"; // unreadable: expired (N133)
@@ -1510,6 +1513,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
           message: "jobId must name a job on this kernel.",
         });
       }
+      if (isJobHeld(jobId)) return reply.status(409).send({ error: "job_held" });
     }
 
     // The kernel's emergency stop (N4b-gw r6): no scope is minted while the stop

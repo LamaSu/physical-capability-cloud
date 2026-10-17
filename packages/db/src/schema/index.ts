@@ -1,6 +1,7 @@
 export * from "./kernels.js";
 export * from "./capabilities.js";
 export * from "./jobs.js";
+export * from "./job-holds.js";
 export * from "./evidence.js";
 export * from "./settlement.js";
 export * from "./gateway-receipts.js";

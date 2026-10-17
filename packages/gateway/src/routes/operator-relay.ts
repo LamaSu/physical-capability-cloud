@@ -33,6 +33,7 @@ import { v4 as uuidv4 } from "uuid";
 import { writeJobStatusGuarded, SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
 import { authorityOf, isAnonymous, refuseKernelAction, AUTHENTICATION_REQUIRED, type KernelAction } from "../auth/kernel-authority.js";
 import { emergencyStopState } from "./device-relay.js";
+import { isJobHeld } from "../services/job-holds.js";
 
 function isNonEmptyId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
@@ -119,9 +120,10 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
     const emergencyStop = emergencyStopState(kernelId);
     // The HOST must treat anything but "clear", including an absent field, as stop.
 
-    const result = await jobFacade.list({ kernelId, status });
+    const result = await jobFacade.list({ kernelId, status, excludeHeld: true });
     if (!result.success) return { jobs: [], emergencyStop };
-    const jobs = result.data.items ?? [];
+    // Re-read after the facade's await: a stop may have held a row since it was listed.
+    const jobs = (result.data.items ?? []).filter(job => !isJobHeld(job.id));
     return {
       jobs: emergencyStop === "clear" ? jobs : jobs.filter((job) => executionPhaseOf(job.status) !== "queued"),
       emergencyStop,

@@ -6,6 +6,7 @@ export function jobFlowFixture(): JobExecutionDTO {
     schemaId: "pcc.job-execution/v1",
     asOf: "2026-10-14T12:00:00Z",
     job: {
+      held: false,
       jobId: "job-print-1", stepId: "step-print-1", capabilityId: "cap-printer-1", kernelId: "kernel-1",
       capabilityType: "3D print", capabilityName: "Print bracket", kernelName: "Workshop",
       contractedTier: 2, createdAt: "2026-10-14T10:00:00Z",

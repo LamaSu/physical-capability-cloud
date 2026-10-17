@@ -20,6 +20,7 @@ import {
   operatorPhaseOf,
   toBaseUnits,
   type OperatorIncomeDTO,
+  type JobHoldFields,
   type OperatorIncomeRow,
   type OperatorIncomeTotal,
   type OperatorWorkAction,
@@ -76,6 +77,7 @@ export interface ApprovalRow {
 
 export interface KernelJobSource {
   job: JobRow;
+  hold?: JobHoldFields;
   /** This job's settlement axis, from the same resolver as the execution read model. */
   settlement: SettlementAxis;
   /**
@@ -465,6 +467,7 @@ function kernelJobItem(
   return {
     id: `kernel_job:${job.id}`,
     source: "kernel_job",
+    ...(src.hold ?? { held: false }),
     capabilityType: nonEmpty(capability?.type),
     title: nonEmpty(capability?.name),
     executorKind: "kernel",
@@ -731,13 +734,14 @@ export function buildOperatorIncomeDTO(
   const rows: OperatorIncomeRow[] = [];
   let unreadableJobs = 0;
   if (src.kernelJobs.ok) {
-    for (const { job, settlement, disputes } of src.kernelJobs.value) {
+    for (const { job, settlement, disputes, hold } of src.kernelJobs.value) {
       if (settlement.link === "not_linked") continue;
       if (settlement.link === "unavailable") unreadableJobs++;
       const pay = kernelJobPay(settlement, { jobDisputed: normalizeJobRowStatus(job.status) === "disputed", disputes });
       rows.push({
         workRef: `kernel_job:${job.id}`,
         jobId: job.id,
+        ...(hold ?? { held: false }),
         kernelId: job.kernelId,
         amount: pay.amount,
         amountBaseUnits: pay.amountBaseUnits,

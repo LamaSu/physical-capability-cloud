@@ -9,8 +9,20 @@ import { reconcileAnswer, reconcileFundingRefusal, reconcilePaidScope, type Reco
 import { paidScopeActivationTerms } from "../services/paid-scope-activation-terms.js";
 import { emergencyStopState, stopRefusal } from "./device-relay.js";
 import { scopeExpiryMs } from "../services/scope-expiry.js";
+import { z } from "zod";
+import { holdUndispatchedJobs, listHeldJobs, moveHeldJobs, isJobHeld } from "../services/job-holds.js";
+import { refuseKernelRequest } from "./operator-relay.js";
 
 const { operatorPolicies, pendingApprovals, toolCallRelay, executionScopes } = schema;
+
+const heldIds = z.array(z.string().refine(id => id.trim().length > 0)).min(1).max(100);
+const heldJobsBody = z.object({
+  kernelId: z.string().refine(id => id.trim().length > 0),
+  release: z.union([heldIds, z.literal("all")]).optional(),
+  cancel: heldIds.optional(),
+}).strict().refine(body => body.release !== undefined || body.cancel !== undefined)
+  .refine(body => (Array.isArray(body.release) ? body.release.length : 0) + (body.cancel?.length ?? 0) <= 100)
+  .refine(body => !Array.isArray(body.release) || !body.cancel?.some(id => body.release!.includes(id)));
 
 /*
  * Board N31: every write here checks who may act on the kernel through auth/kernel-authority.ts
@@ -138,18 +150,21 @@ export async function operatorRoutes(app: FastifyInstance) {
         const { db } = getStore();
         const now = new Date().toISOString();
 
-        db.insert(operatorPolicies)
-          .values({
-            kernelId: req.params.kernelId,
-            policy: policy as any,
-            updatedAt: now,
-            updatedBy: "api",
-          })
-          .onConflictDoUpdate({
-            target: operatorPolicies.kernelId,
-            set: { policy: policy as any, updatedAt: now, updatedBy: "api" },
-          })
-          .run();
+        db.transaction(() => {
+          db.insert(operatorPolicies)
+            .values({
+              kernelId: req.params.kernelId,
+              policy: policy as any,
+              updatedAt: now,
+              updatedBy: "api",
+            })
+            .onConflictDoUpdate({
+              target: operatorPolicies.kernelId,
+              set: { policy: policy as any, updatedAt: now, updatedBy: "api" },
+            })
+            .run();
+          if (policy.emergencyStop) holdUndispatchedJobs(req.params.kernelId, now);
+        });
 
         return { policy, updated: true, updatedAt: now };
       } catch {
@@ -179,18 +194,21 @@ export async function operatorRoutes(app: FastifyInstance) {
         const merged = { ...existing, ...patch, version: 1 } as OperatorPolicy;
         const now = new Date().toISOString();
 
-        db.insert(operatorPolicies)
-          .values({
-            kernelId: req.params.kernelId,
-            policy: merged as any,
-            updatedAt: now,
-            updatedBy: "api",
-          })
-          .onConflictDoUpdate({
-            target: operatorPolicies.kernelId,
-            set: { policy: merged as any, updatedAt: now, updatedBy: "api" },
-          })
-          .run();
+        db.transaction(() => {
+          db.insert(operatorPolicies)
+            .values({
+              kernelId: req.params.kernelId,
+              policy: merged as any,
+              updatedAt: now,
+              updatedBy: "api",
+            })
+            .onConflictDoUpdate({
+              target: operatorPolicies.kernelId,
+              set: { policy: merged as any, updatedAt: now, updatedBy: "api" },
+            })
+            .run();
+          if (merged.emergencyStop) holdUndispatchedJobs(req.params.kernelId, now);
+        });
 
         return { policy: merged, updated: true };
       } catch {
@@ -223,38 +241,41 @@ export async function operatorRoutes(app: FastifyInstance) {
       policy.emergencyStop = true;
       const now = new Date().toISOString();
 
-      db.insert(operatorPolicies)
-        .values({ kernelId, policy: policy as any, updatedAt: now, updatedBy: "emergency-stop" })
-        .onConflictDoUpdate({
-          target: operatorPolicies.kernelId,
-          set: { policy: policy as any, updatedAt: now, updatedBy: "emergency-stop" },
-        })
-        .run();
+      db.transaction(() => {
+        db.insert(operatorPolicies)
+          .values({ kernelId, policy: policy as any, updatedAt: now, updatedBy: "emergency-stop" })
+          .onConflictDoUpdate({
+            target: operatorPolicies.kernelId,
+            set: { policy: policy as any, updatedAt: now, updatedBy: "emergency-stop" },
+          })
+          .run();
 
-      // Cancel all pending approvals for this kernel
-      db.update(pendingApprovals)
-        .set({
-          status: "rejected",
-          decidedAt: now,
-          rejectionReason: `Emergency stop: ${reason ?? "operator activated"}`,
-        })
-        .where(and(
-          eq(pendingApprovals.kernelId, kernelId),
-          eq(pendingApprovals.status, "pending"),
-        ))
-        .run();
+        // Cancel all pending approvals for this kernel
+        db.update(pendingApprovals)
+          .set({
+            status: "rejected",
+            decidedAt: now,
+            rejectionReason: `Emergency stop: ${reason ?? "operator activated"}`,
+          })
+          .where(and(
+            eq(pendingApprovals.kernelId, kernelId),
+            eq(pendingApprovals.status, "pending"),
+          ))
+          .run();
 
-      // Reject the relay calls still queued for this kernel. A reset must not
-      // restart motion (ISO 13850): a command queued before a stop must not run
-      // after the resume, even if the node never polled during the stop. Calls
-      // the node has already claimed are the operator node's to stop.
-      db.update(toolCallRelay)
-        .set({ status: "rejected", error: "emergency_stopped", completedAt: now })
-        .where(and(
-          eq(toolCallRelay.kernelId, kernelId),
-          eq(toolCallRelay.status, "pending"),
-        ))
-        .run();
+        // Reject the relay calls still queued for this kernel. A reset must not
+        // restart motion (ISO 13850): a command queued before a stop must not run
+        // after the resume, even if the node never polled during the stop. Calls
+        // the node has already claimed are the operator node's to stop.
+        db.update(toolCallRelay)
+          .set({ status: "rejected", error: "emergency_stopped", completedAt: now })
+          .where(and(
+            eq(toolCallRelay.kernelId, kernelId),
+            eq(toolCallRelay.status, "pending"),
+          ))
+          .run();
+        holdUndispatchedJobs(kernelId, now);
+      });
 
       return { stopped: true, kernelId, reason, timestamp: now };
     } catch {
@@ -289,9 +310,46 @@ export async function operatorRoutes(app: FastifyInstance) {
         .where(eq(operatorPolicies.kernelId, kernelId))
         .run();
 
-      return { resumed: true, kernelId, timestamp: now };
+      const held = listHeldJobs(kernelId);
+      return { resumed: true, kernelId, timestamp: now, ...held, confirmRequired: held.heldCount > 0 };
     } catch {
       return reply.status(500).send({ error: "Failed to resume" });
+    }
+  });
+
+  /** Same read authority as the node's jobs poll, even while stopped. */
+  app.get("/api/operator/held-jobs", async (req, reply) => {
+    const { kernelId } = req.query as { kernelId?: unknown };
+    if (typeof kernelId !== "string" || !kernelId.trim()) return reply.code(400).send({ error: "kernelId required" });
+    const refusal = refuseKernelRequest(req, kernelId);
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
+    try {
+      return { kernelId, ...listHeldJobs(kernelId) };
+    } catch {
+      return reply.code(503).send({ error: "read_failed" });
+    }
+  });
+
+  /** Reset leaves work held; only a separate operator decision moves it. */
+  app.post("/api/operator/held-jobs", async (req, reply) => {
+    const authority = authorityOf(req);
+    if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+    const parsed = heldJobsBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid_body" });
+    const { kernelId, release, cancel } = parsed.data;
+    const refusal = refuseKernelAction(req, authority, kernelId, "decide");
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
+    // No await between the stop read and the service's synchronous transaction.
+    const stop = emergencyStopState(kernelId);
+    if (stop === "stopped") return reply.code(409).send({ error: "emergency_stopped" });
+    if (stop === "unavailable") return reply.code(503).send({ error: "policy_unavailable" });
+    try {
+      const result = moveHeldJobs(kernelId, release, cancel);
+      if (result.kind === "overlap") return reply.code(400).send({ error: "invalid_body" });
+      if (result.kind === "not_held_for_kernel") return reply.code(409).send({ error: "not_held_for_kernel" });
+      return { kernelId, released: result.released, cancelled: result.cancelled, refused: result.refused };
+    } catch {
+      return reply.code(500).send({ error: "Failed to update held jobs" });
     }
   });
 
@@ -543,6 +601,7 @@ export async function operatorRoutes(app: FastifyInstance) {
       // synchronous section (better-sqlite3): no stop request runs between them.
       const stop = emergencyStopState(scope.kernelId);
       if (stop !== "clear") return stopRefusal(reply, stop);
+      if (scope.jobId && isJobHeld(scope.jobId)) return reply.code(409).send({ error: "job_held" });
       const funding = scopeFundingVerdict(scope);
       const status = funding.kind === "mock_funded" ? "active" : SCOPE_AWAITING_FUNDING;
       // The accept and, on a verification record, the activation: one transaction (reconcilePaidScope

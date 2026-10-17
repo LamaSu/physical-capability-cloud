@@ -22,6 +22,7 @@ import type {
   EscrowStatus,
   RegisteredSigner,
   ExecutionPhase,
+  JobHoldFields,
 } from "@pcc/spec";
 
 // ── Population Context ─────────────────────────────────────────────────────
@@ -45,6 +46,8 @@ export interface PopulationContext {
   reputationCache?: Map<string, number>;
   /** Pre-loaded queue depths (capabilityId → depth) */
   queueDepthCache?: Map<string, number>;
+  /** Pre-loaded dispatch hold fields, keyed by job id. */
+  jobHolds?: ReadonlyMap<string, JobHoldFields>;
   /**
    * When true, the populator will cap maxAssuranceTier using the cold-start gate
    * (job count + effective reputation thresholds). Defaults to false to preserve
@@ -135,7 +138,7 @@ export interface CapabilitySearchCriteria {
 
 // ── Job DTOs ───────────────────────────────────────────────────────────────
 
-export interface JobDTO {
+export interface JobDTO extends JobHoldFields {
   id: Id;
   capabilityId: Id;
   kernelId: Id;

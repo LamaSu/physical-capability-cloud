@@ -125,6 +125,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   getStore().db.delete(schema.operatorPolicies).run();
+  getStore().db.delete(schema.jobHolds).run();
   for (const operator of ["A", "B"] as const) getRepos().jobs.update(QUEUED[operator], { status: "queued" });
   getRepos().jobs.update(RUNNING, { status: "running" });
 });
@@ -138,7 +139,7 @@ afterAll(async () => {
 });
 
 describe("GET /api/operator/jobs emergency-stop contract", () => {
-  it.each([undefined, "queued"])("real stop blocks queued jobs and real resume restores them (status=%s)", async (status) => {
+  it.each([undefined, "queued"])("real stop blocks queued jobs and real resume keeps them held until a release (status=%s)", async (status) => {
     expect(getRepos().jobs.findByKernelAndStatus(KERNELS.A, "queued").map((job) => job.id)).toEqual([QUEUED.A]);
     await stop();
     const stopped = await poll("A", status);
@@ -151,11 +152,22 @@ describe("GET /api/operator/jobs emergency-stop contract", () => {
       payload: { kernelId: KERNELS.A },
     });
     expect(resumed.statusCode).toBe(200);
-    expect(resumed.json()).toMatchObject({ resumed: true, kernelId: KERNELS.A });
+    expect(resumed.json()).toMatchObject({ resumed: true, kernelId: KERNELS.A, heldCount: 1, confirmRequired: true });
+    expect(resumed.json().heldJobs[0].jobId).toBe(QUEUED.A);
     const clear = await poll("A", status);
     expect(clear.statusCode).toBe(200);
     expect(clear.json().emergencyStop).toBe("clear");
-    expect(clear.json().jobs.map((job: { id: string }) => job.id)).toEqual([QUEUED.A]);
+    expect(clear.json().jobs).toEqual([]);
+    expect(getRepos().jobs.findById(QUEUED.A)?.status).toBe("queued");
+    const released = await app.inject({
+      method: "POST", url: "/api/operator/held-jobs", headers: { ...bearer("A"), "x-admin-key": ADMIN },
+      payload: { kernelId: KERNELS.A, release: "all" },
+    });
+    expect(released.statusCode).toBe(200);
+    expect(released.json().released).toEqual([QUEUED.A]);
+    const afterRelease = await poll("A", status);
+    expect(afterRelease.statusCode).toBe(200);
+    expect(afterRelease.json().jobs.map((job: { id: string }) => job.id)).toEqual([QUEUED.A]);
   });
 
   it.each(POLICY_CASES)("poll and device relay agree for $label", async ({ state, policy, malformedJSON, throwingRead }) => {

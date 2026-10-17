@@ -83,6 +83,7 @@ import {
   type FundingVerificationRecord,
 } from "./funding-record-port.js";
 import type { PaidScopeActivationTerms } from "./paid-scope-activation-terms.js";
+import { isJobHeld } from "./job-holds.js";
 
 const { executionScopes, operatorPolicies } = schema;
 
@@ -114,6 +115,8 @@ export const RECONCILE_REFUSALS = [
   /** The record names another scope. */
   "record_scope_mismatch",
   "scope_not_found",
+  /** A reset leaves the job held until its operator explicitly releases it. */
+  "job_held",
   /** The record's verified payer is not the scope's buyer. */
   "record_buyer_not_scope_buyer",
   /** The scope's job has no escrow row (no job, no session, no escrow). */
@@ -225,6 +228,7 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
       const now = new Date();
       const scope = tx.select().from(executionScopes).where(eq(executionScopes.id, scopeId)).get();
       if (!scope) return refused("scope_not_found");
+      if (scope.jobId && isJobHeld(scope.jobId)) return refused("job_held");
 
       // Bound to this scope: the binding rule (funding-binding.ts), shared with the funding-status DTO.
       const bound = recordScopeRefusal(record, scope, expectedChainId);

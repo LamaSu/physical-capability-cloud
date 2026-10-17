@@ -17,6 +17,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { getStore } from "../db.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 import { getJobOffersStore } from "../services/job-offers-store.js";
+import { jobHoldFieldsById } from "../services/job-holds.js";
 import { jobReadCallerOf } from "../readmodels/job-execution.js";
 import {
   buildOperatorIncomeDTO,
@@ -130,6 +131,10 @@ function load(req: FastifyRequest): Load {
     tenant: tenantOpts(req as any),
     onReadError: (source, error) => req.log.warn({ source, err: error }, "operator read model: source read failed"),
   });
+  if (sources.kernelJobs.ok) {
+    const holds = jobHoldFieldsById(sources.kernelJobs.value.map(({ job }) => job.id));
+    for (const source of sources.kernelJobs.value) source.hold = holds.get(source.job.id) ?? { held: false };
+  }
   return { ok: true, sources };
 }
 

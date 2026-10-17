@@ -17,7 +17,7 @@
  * jobs. Its totals sum every row across all pages, not only the page shown, and it says
  * plainly that no per-operator payout history exists yet.
  */
-import type { MoneyStateView, PayoutState } from "./job-execution.js";
+import type { JobHoldFields, MoneyStateView, PayoutState } from "./job-execution.js";
 
 export const OPERATOR_WORK_SCHEMA_ID = "pcc.operator-work/v1" as const;
 export const OPERATOR_INCOME_SCHEMA_ID = "pcc.operator-income/v1" as const;
@@ -215,7 +215,7 @@ export interface OperatorWorkAction {
   kernelIds?: string[];
 }
 
-export interface OperatorWorkItem {
+export interface OperatorWorkItem extends Partial<JobHoldFields> {
   /** `<source>:<source id>`, stable across reads. */
   id: string;
   source: OperatorWorkSource;
@@ -297,7 +297,7 @@ export interface OperatorWorkDTO {
 
 // ── OperatorIncomeDTO ─────────────────────────────────────────────────────────
 
-export interface OperatorIncomeRow {
+export interface OperatorIncomeRow extends JobHoldFields {
   /** `kernel_job:<jobId>`, the same id as the OperatorWorkDTO item. */
   workRef: string;
   jobId: string;

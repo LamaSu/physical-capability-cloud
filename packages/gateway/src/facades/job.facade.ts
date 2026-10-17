@@ -29,6 +29,7 @@ import {
 } from "./populators/device.populator.js";
 import { getKernelService } from "../services/kernel-service.js";
 import { localJobDispatchDecision } from "../services/local-job-dispatch.js";
+import { createJobWithHold, jobHoldFields, jobHoldFieldsById } from "../services/job-holds.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
@@ -69,6 +70,8 @@ export interface JobFilters {
   /** Only these jobs: the ids the caller may read (jobReadScopeOf). Applied before the
    *  page is cut, so `total` and `hasMore` count only readable jobs. */
   jobIds?: ReadonlySet<string>;
+  /** Internal relay dispatch filter, applied before pagination so holds cannot hide released work. */
+  excludeHeld?: boolean;
 }
 
 export interface SubmitJobInput {
@@ -97,6 +100,8 @@ export interface JobSubmitResult {
 export interface JobStatusResult {
   jobId: string;
   status: string;
+  held: boolean;
+  holdReason?: "emergency_stop";
   progress?: number;
   deviceId: string | null;
   evidenceBundleId: string | null;
@@ -202,6 +207,10 @@ export class JobFacade extends BaseFacade {
         const readable = filters.jobIds;
         jobs = jobs.filter((job) => readable.has(job.id));
       }
+      if (filters?.excludeHeld) {
+        const holds = jobHoldFieldsById(jobs.map(job => job.id));
+        jobs = jobs.filter(job => !holds.get(job.id)?.held);
+      }
 
       const total = jobs.length;
       const page = jobs.slice(offset, offset + limit);
@@ -212,7 +221,9 @@ export class JobFacade extends BaseFacade {
       const capabilityIds = [...new Set(page.map((j) => j.capabilityId))];
       const capabilityMap = this.loadCapabilityMap(capabilityIds);
 
-      const items = populateJobList(page, kernelMap, capabilityMap, context);
+      const items = populateJobList(page, kernelMap, capabilityMap, {
+        ...context, jobHolds: jobHoldFieldsById(page.map((job) => job.id)),
+      });
 
       return { items, total, offset, limit, hasMore: offset + limit < total };
     });
@@ -238,7 +249,9 @@ export class JobFacade extends BaseFacade {
       const capabilityMap = this.loadCapabilityMap([job.capabilityId]);
       const evidenceBundles = this.repos.evidence.findByJob(jobId);
 
-      return populateJobDetailDTO(job, kernelMap, capabilityMap, evidenceBundles, context);
+      return populateJobDetailDTO(job, kernelMap, capabilityMap, evidenceBundles, {
+        ...context, jobHolds: jobHoldFieldsById([jobId]),
+      });
     });
   }
 
@@ -265,7 +278,9 @@ export class JobFacade extends BaseFacade {
       const kernelMap = this.loadKernelMap([updated.kernelId]);
       const capabilityMap = this.loadCapabilityMap([updated.capabilityId]);
 
-      return populateJobDTO(updated, kernelMap, capabilityMap, this.defaultContext());
+      return populateJobDTO(updated, kernelMap, capabilityMap, {
+        ...this.defaultContext(), jobHolds: jobHoldFieldsById([jobId]),
+      });
     });
   }
 
@@ -308,7 +323,7 @@ export class JobFacade extends BaseFacade {
       }
 
       // Insert job to DB (status = queued)
-      this.repos.jobs.insert({
+      createJobWithHold({
         id: jobId,
         stepId,
         cwmId: `cwm-${uuidv4()}`,
@@ -322,7 +337,7 @@ export class JobFacade extends BaseFacade {
         // F8 — persist the tier the job was submitted at (default 0 =
         // self-attested) so JobDTOs report the real value, not a hardcoded 0.
         assuranceTier: typeof assuranceTier === "number" ? assuranceTier : 0,
-      });
+      }, (row) => this.repos.jobs.insert(row));
 
       // Only an explicitly matched, enabled, unstopped local kernel may run.
       let svc;
@@ -352,7 +367,7 @@ export class JobFacade extends BaseFacade {
         return { jobId, deviceId: null, status: "queued" as const, reason };
       };
 
-      const decision = localJobDispatchDecision(svc?.kernelId, kernelId, svc?.hasExplicitConfig ?? false, body.queueOnly);
+      const decision = localJobDispatchDecision(svc?.kernelId, kernelId, svc?.hasExplicitConfig ?? false, body.queueOnly, jobId);
       if (!decision.ok) return queued(decision.reason);
 
       // Local kernel: fire-and-forget via KernelService
@@ -403,6 +418,7 @@ export class JobFacade extends BaseFacade {
         if (!job) throw new NotFoundError("job", jobId, "not_found");
         return {
           jobId,
+          ...jobHoldFields(jobId),
           status: job.status,
           progress: job.progress,
           deviceId: job.assignedDevices[0] ?? null,
@@ -417,6 +433,7 @@ export class JobFacade extends BaseFacade {
         if (!job) throw new NotFoundError("job", jobId, "not_found");
         return {
           jobId,
+          ...jobHoldFields(jobId),
           status: job.status,
           progress: job.progress,
           deviceId: job.assignedDevices[0] ?? null,
@@ -426,6 +443,7 @@ export class JobFacade extends BaseFacade {
 
       return {
         jobId,
+        ...jobHoldFields(jobId),
         status: result.status,
         progress: result.progress,
         deviceId: result.deviceId ?? null,

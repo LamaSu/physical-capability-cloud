@@ -35,6 +35,7 @@
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { getStore } from "../db.js";
+import { jobHoldFields } from "../services/job-holds.js";
 import { schema, eq } from "@pcc/store";
 import { getTemplate, TemplateResolver } from "@pcc/contract-builder";
 import { applyPricingRules } from "@pcc/kernel";
@@ -548,6 +549,7 @@ async function handlePccVerify(params: PccVerifyParams): Promise<A2AArtifact[]> 
         data: {
           jobId: params.jobId,
           jobStatus: jobRow?.status ?? "unknown",
+          ...jobHoldFields(params.jobId),
           bundleCount: rows.length,
           bundles: rows,
         },

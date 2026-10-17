@@ -451,7 +451,7 @@
     },
     {
       "name": "list_jobs",
-      "description": "List all jobs with status. Optionally filter by kernelId or status.",
+      "description": "List all jobs with status, held (boolean), and holdReason (emergency_stop while held). Optionally filter by kernelId or status. Resume clears the stop; held work remains held until the operator releases it.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -473,7 +473,7 @@
     },
     {
       "name": "get_job",
-      "description": "Get job details including progress, evidence bundles, and milestones.",
+      "description": "Get job details including progress, evidence bundles, milestones, held (boolean), and holdReason (emergency_stop while held). A held job keeps its status and waits for the operator to release it.",
       "input_schema": {
         "type": "object",
         "properties": {

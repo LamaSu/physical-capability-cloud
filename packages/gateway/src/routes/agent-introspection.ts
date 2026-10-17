@@ -35,6 +35,7 @@ import { schema, sql } from "@pcc/store";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { authorityOf, ownerOf } from "../auth/kernel-authority.js";
 import { getRepos, getStore } from "../db.js";
+import { jobHoldFields } from "../services/job-holds.js";
 import { provenOwnerAddress } from "./provision.js";
 
 // ── Scope registry ──────────────────────────────────────────────────
@@ -299,6 +300,7 @@ export async function agentIntrospectionRoutes(app: FastifyInstance) {
           id: j.id,
           kernel_id: j.kernelId,
           status: j.status,
+          ...jobHoldFields(j.id),
           progress: j.progress ?? null,
         })),
         unavailable: jobs.error,

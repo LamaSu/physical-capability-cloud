@@ -437,7 +437,13 @@ export type JobExecutionNoticeCode =
   /** The job-row status is not a documented job status. */
   | "unknown_execution_status";
 
-export interface JobIdentityView {
+/** Dispatch hold metadata; a hold leaves the job's status and execution phase unchanged. */
+export interface JobHoldFields {
+  held: boolean;
+  holdReason?: "emergency_stop";
+}
+
+export interface JobIdentityView extends JobHoldFields {
   jobId: string;
   stepId: string;
   capabilityId: string;

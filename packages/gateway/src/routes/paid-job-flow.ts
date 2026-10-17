@@ -83,6 +83,7 @@ import {
 import { withSignerLock } from "../contracts/signer-lock.js";
 import { emergencyStopState } from "./device-relay.js";
 import { canDispatchJobLocally } from "../services/local-job-dispatch.js";
+import { createJobWithHold, isJobHeld } from "../services/job-holds.js";
 import { authorityOf } from "../auth/kernel-authority.js";
 import { bindBuyer } from "../auth/buyer-identity.js";
 import { isMockSettlement } from "../services/settlement-mode.js";
@@ -256,7 +257,7 @@ function extractEscrowCreatedAddress(
  *     can only be a test's mock escrow: no verification record can name a scope that does not
  *     exist yet, so a real escrow's scope goes live later, through reconcilePaidScope.
  */
-export function mintedScopeStatus(kernelId: string, buyer: string, escrowId: string): string {
+export function mintedScopeStatus(kernelId: string, buyer: string, escrowId: string, jobId?: string): string {
   let policy: unknown;
   try {
     const row = getStore().db.select().from(operatorPolicies).where(eq(operatorPolicies.kernelId, kernelId)).get();
@@ -268,7 +269,7 @@ export function mintedScopeStatus(kernelId: string, buyer: string, escrowId: str
   }
   const acceptance = acceptanceFor(policy, buyer);
   if (acceptance === "refused") return SCOPE_REJECTED;
-  if (acceptance === "awaiting_operator" || emergencyStopState(kernelId) !== "clear") return SCOPE_AWAITING_ACCEPTANCE;
+  if (acceptance === "awaiting_operator" || emergencyStopState(kernelId) !== "clear" || (jobId && isJobHeld(jobId))) return SCOPE_AWAITING_ACCEPTANCE;
   return buyerFundingRefusal(getRepos().escrows.findById(escrowId), buyer) === null ? "active" : SCOPE_AWAITING_FUNDING;
 }
 
@@ -659,9 +660,9 @@ export async function createJobFromSession(
   } catch {
     localKernelId = undefined;
   }
-  const isExternal = !canDispatchJobLocally(localKernelId, session.kernelId, hasExplicitConfig);
+  const isExternal = !canDispatchJobLocally(localKernelId, session.kernelId, hasExplicitConfig, jobId);
 
-  repos.jobs.insert({
+  createJobWithHold({
     id: jobId,
     stepId,
     cwmId: session.cwmId ?? `cwm-${crypto.randomUUID().slice(0, 12)}`,
@@ -674,7 +675,7 @@ export async function createJobFromSession(
     parameters: (session.selections ?? null) as any,
     // F8 — persist the contracted tier so JobDTOs report the real value.
     assuranceTier,
-  });
+  }, (row) => repos.jobs.insert(row));
 
   // ── 3. Create execution scope ──────────────────────────────────────
   // N133: the buyer's write scope goes live ("active", the only status the relay admits) only
@@ -688,7 +689,7 @@ export async function createJobFromSession(
   // The scope's lifetime; for a scope that is not live yet, its window to be accepted and funded.
   const expiry = new Date(Date.now() + PAID_SCOPE_TTL_MS).toISOString(); // 1 hour
 
-  const scopeStatus = mintedScopeStatus(session.kernelId, buyer, escrowId);
+  const scopeStatus = mintedScopeStatus(session.kernelId, buyer, escrowId, jobId);
   db.insert(executionScopes).values({
     id: scopeId,
     kernelId: session.kernelId,

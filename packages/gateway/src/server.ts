@@ -204,7 +204,7 @@ export async function createGateway(port = 3200) {
   app.log.info(isRelayGateOpen()
     ? "[relay] The device relay is open."
     : "[relay] The device relay is admin-only.");
-  const dispatch = localJobDispatchDecision(kernelService.kernelId, kernelService.kernelId, kernelService.hasExplicitConfig);
+  const dispatch = localJobDispatchDecision(kernelService.kernelId, kernelService.kernelId, kernelService.hasExplicitConfig, undefined, undefined);
   app.log.info({ queueOnly: jobSubmitQueueOnly(), localDispatch: dispatch.ok, reason: dispatch.ok ? undefined : dispatch.reason },
     "[jobs] Effective local dispatch policy");
 

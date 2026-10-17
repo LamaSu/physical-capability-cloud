@@ -332,13 +332,13 @@ export class KernelService {
     { jobId: string; deviceId: null; status: "queued"; reason: LocalJobDispatchReason }
   > {
     const { jobId, stepId, gcodeHash, assuranceTier = 0 } = params;
-    let decision = localJobDispatchDecision(this.config.kernelId, params.kernelId, this.hasExplicitConfig);
+    let decision = localJobDispatchDecision(this.config.kernelId, params.kernelId, this.hasExplicitConfig, undefined, jobId);
     const queued = () => {
       if (decision.ok) throw new Error("local_dispatch_not_blocked");
       return { jobId, deviceId: null, status: "queued" as const, reason: decision.reason };
     };
     const refreshDecision = () => {
-      decision = localJobDispatchDecision(this.config.kernelId, params.kernelId, this.hasExplicitConfig);
+      decision = localJobDispatchDecision(this.config.kernelId, params.kernelId, this.hasExplicitConfig, undefined, jobId);
       return decision.ok;
     };
     // A route cannot bypass local identity, the operator's queue-only switch,
@@ -382,7 +382,8 @@ export class KernelService {
     // to validateAndRelay, which recorded a phantom success on every job and
     // prevented the breaker from ever tripping on real device failures.)
     const preflight = await gateway.validateOnly(preflightCmd);
-    // The asynchronous governor may yield while an operator engages the stop.
+    // The asynchronous governor may yield while an operator engages and resets
+    // the stop. Re-read both the stop and the job's persistent hold.
     if (!refreshDecision()) return queued();
     if (!preflight.allowed) {
       throw new Error(

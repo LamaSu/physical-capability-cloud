@@ -43,6 +43,7 @@ import {
   type ExecutionAxis,
   type JobExecutionDTO,
   type JobExecutionNoticeCode,
+  type JobHoldFields,
   type MoneyStateView,
   type PayoutState,
   type ReadError,
@@ -135,6 +136,7 @@ export type SourceRead<T> = { ok: true; value: T } | { ok: false };
 
 export interface JobExecutionSources {
   job: JobRow;
+  hold?: JobHoldFields;
   capability: SourceRead<{ type?: string | null; name?: string | null } | null>;
   kernel: SourceRead<{ name?: string | null } | null>;
   evidence: SourceRead<EvidenceBundleRow[]>;
@@ -179,6 +181,7 @@ export function buildJobExecutionDTO(src: JobExecutionSources, asOf: string): Jo
       stepId: src.job.stepId,
       capabilityId: src.job.capabilityId,
       kernelId: src.job.kernelId,
+      ...(src.hold ?? { held: false }),
       capabilityType: nonEmpty(capability?.type),
       capabilityName: nonEmpty(capability?.name),
       kernelName: nonEmpty(kernel?.name),

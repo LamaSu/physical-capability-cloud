@@ -87,6 +87,7 @@ export function populateJobDTO(
     capabilityId: model.capabilityId,
     kernelId: model.kernelId,
     status: model.status as JobDTO["status"],
+    ...(ctx.jobHolds?.get(model.id) ?? { held: false }),
     progress: model.progress ?? undefined,
     assuranceTier: normalizeAssuranceTier(model.assuranceTier),
     createdAt: model.startedAt ?? new Date().toISOString(),

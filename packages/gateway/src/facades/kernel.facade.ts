@@ -30,6 +30,7 @@ import {
 } from "./populators/kernel.populator.js";
 import { locationVisibilityOf, storedLocation } from "./populators/public-location.js";
 import { auditService } from "../services/audit-service.js";
+import { jobHoldFieldsById } from "../services/job-holds.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { safeServerEventProperties, safeServerEventDistinctId } from "../services/posthog-policy.js";
 import { logSafeId, logSafeInt, logSafeIsoTimestamp } from "../redaction.js";
@@ -283,6 +284,7 @@ export class KernelFacade extends BaseFacade {
       const capabilities = this.repos.capabilities.findByKernel(kernelId);
       const devices = this.repos.kernels.findDevicesByKernel(kernelId);
       const recentJobs = this.repos.jobs.findByKernel(kernelId);
+      context.jobHolds = jobHoldFieldsById(recentJobs.map((job) => job.id));
 
       if (context.includeReputation && kernel) {
         context.reputationCache = new Map([[kernel.id, kernel.reputation ?? 500]]);
@@ -325,12 +327,14 @@ export class KernelFacade extends BaseFacade {
     return this.execute("getJobs", async () => {
       const jobs = this.repos.jobs.findByKernel(kernelId);
       const kernel = this.repos.kernels.findById(kernelId);
+      const holds = jobHoldFieldsById(jobs.map((job) => job.id));
 
       return jobs.map((job: any) => ({
         id: job.id,
         capabilityId: job.capabilityId,
         kernelId: job.kernelId,
         status: job.status as JobDTO["status"],
+        ...(holds.get(job.id) ?? { held: false }),
         progress: job.progress ?? undefined,
         assuranceTier: 0 as JobDTO["assuranceTier"],
         createdAt: job.startedAt ?? new Date().toISOString(),

@@ -2059,6 +2059,17 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS wallet_links_account_lower_idx ON wallet_links (lower(account_id));
   `);
 
+  // Emergency-stop interlock; mirrors migrations/0005_job_holds.sql.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS job_holds (
+      job_id TEXT PRIMARY KEY REFERENCES jobs(id),
+      kernel_id TEXT NOT NULL,
+      reason TEXT NOT NULL CHECK (reason = 'emergency_stop'),
+      held_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS job_holds_kernel_idx ON job_holds(kernel_id);
+  `);
+
   // ── ALTER TABLE migrations (ERC-8004 onchain tracking) ──────────
   // Use the in-scope 3-arg safeAddColumn (closure captures sqlite).
   // SQLite has no ALTER COLUMN; new columns are appended idempotently.

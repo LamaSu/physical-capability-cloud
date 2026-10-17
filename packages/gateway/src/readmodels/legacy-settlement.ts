@@ -19,12 +19,14 @@ import {
   normalizeJobRowStatus,
   type JobExecutionDTO,
   type JobExecutionNoticeCode,
+  type JobHoldFields,
   type PayoutState,
   type SettlementAxis,
   type SettlementLink,
 } from "@pcc/spec";
 import { schema, eq } from "@pcc/store";
 import { getStore } from "../db.js";
+import { jobHoldFields } from "../services/job-holds.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 import { gateJobRead } from "./job-read-gate.js";
 import {
@@ -139,7 +141,7 @@ const SETTLEMENT_NOTICES: ReadonlySet<JobExecutionNoticeCode> = new Set<JobExecu
 ]);
 
 /** The fields both legacy reads share: the money claim, stated with its basis. */
-export interface LegacySettlementClaim {
+export interface LegacySettlementClaim extends JobHoldFields {
   status: string;
   /** The job row's own status, as recorded. */
   jobStatus: string;
@@ -170,6 +172,8 @@ function claimOf(dto: JobExecutionDTO, unavailable: string[]): LegacySettlementC
   return {
     status: legacySettlementStatus(dto),
     jobStatus: dto.execution.sourceStatus,
+    held: dto.job.held,
+    ...(dto.job.holdReason ? { holdReason: dto.job.holdReason } : {}),
     settled: s.payout === "paid",
     settledAt: null,
     payout: s.payout,
@@ -327,6 +331,7 @@ export function loadLegacySettlement(
     req.log.warn({ jobId, source, err: error }, "legacy settlement read: source read failed");
   // The job's tenant was checked above; its evidence is read through the job (#353 @938a180e).
   const sources = loadJobExecutionSources(job, store.repos as unknown as JobExecutionRepos, store.db, { onReadError });
+  sources.hold = jobHoldFields(job.id);
   const dto = buildJobExecutionDTO(sources, asOf);
 
   let sessions: SessionRead = { ok: true, sessions: [] };

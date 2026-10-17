@@ -16,6 +16,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { createHash, randomUUID } from "node:crypto";
 import { getRepos } from "../db.js";
+import { jobHoldFields } from "../services/job-holds.js";
 import { jobReadScopeOf, refuseJobRead, scopeAllows, type JobReadScope } from "../readmodels/job-read-gate.js";
 import { getCapabilityFacade, getKernelFacade } from "../facades/index.js";
 import { getIntentClassifier } from "../services/intent-classifier.js";
@@ -176,7 +177,9 @@ async function executeIntentQuery(
   const repos = getRepos();
   const readable = (jobId: unknown) => jobScope !== null && scopeAllows(jobScope, jobId);
   const readableJobs = () =>
-    (repos.jobs.findAll() as unknown as Record<string, unknown>[]).filter((job) => readable(job["id"]));
+    (repos.jobs.findAll() as unknown as Record<string, unknown>[])
+      .filter((job) => readable(job["id"]))
+      .map((job) => ({ ...job, ...jobHoldFields(String(job["id"])) }));
 
   switch (intent) {
     case "job_status": {
@@ -184,7 +187,7 @@ async function executeIntentQuery(
       if (jobId) {
         const job = readable(jobId) ? repos.jobs.findById(jobId) : undefined;
         return {
-          rows: job ? [job as unknown as Record<string, unknown>] : [],
+          rows: job ? [{ ...job, ...jobHoldFields(job.id) }] : [],
           table: "jobs",
         };
       }

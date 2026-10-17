@@ -15,6 +15,7 @@ import { getRepos } from "../db.js";
 import { getKernelFacade, getJobFacade } from "../facades/index.js";
 import { getKernelService } from "../services/kernel-service.js";
 import { jobSubmitQueueOnly, localJobDispatchDecision, type LocalJobDispatchReason } from "../services/local-job-dispatch.js";
+import { createJobWithHold } from "../services/job-holds.js";
 import { emergencyStopState } from "./device-relay.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { safeServerEventProperties, safeServerEventDistinctId } from "../services/posthog-policy.js";
@@ -396,7 +397,7 @@ export async function setupRoutes(app: FastifyInstance) {
       const svc = getKernelService();
       kernelServiceReady = true;
       const devices = await svc.listDevices();
-      localDispatch = localJobDispatchDecision(svc.kernelId, svc.kernelId, svc.hasExplicitConfig).ok
+      localDispatch = localJobDispatchDecision(svc.kernelId, svc.kernelId, svc.hasExplicitConfig, undefined, undefined).ok
         && devices.some((d) => d.type === "machine" && svc.hasRunner(d.id));
       // N71 round 4 (astra pack 83c, CRITICAL #2): a live device's id/type/adapterType
       // come from the runtime KernelService, not from a fixed server-side allow-list —
@@ -1041,7 +1042,7 @@ export async function setupRoutes(app: FastifyInstance) {
         // No capability found — that's okay for a test job
       }
       if (capabilityId) {
-        repos.jobs.insert({
+        createJobWithHold({
           id: jobId,
           stepId,
           cwmId: `cwm-${uuidv4()}`,
@@ -1053,7 +1054,7 @@ export async function setupRoutes(app: FastifyInstance) {
           progress: 0,
           // F8 — persist the requested tier (defaults to 0 above).
           assuranceTier: typeof assuranceTier === "number" ? assuranceTier : 0,
-        });
+        }, (row) => repos.jobs.insert(row));
       }
     } catch {
       // DB insert is best-effort for test jobs
@@ -1067,7 +1068,7 @@ export async function setupRoutes(app: FastifyInstance) {
     // Submit the job
     // A setup test is also a physical job: queue-only mode and the kernel's
     // emergency stop apply before entering the in-process runtime.
-    const dispatch = localJobDispatchDecision(svc.kernelId, kernelId, svc.hasExplicitConfig, queueOnly);
+    const dispatch = localJobDispatchDecision(svc.kernelId, kernelId, svc.hasExplicitConfig, queueOnly, jobId);
     if (!dispatch.ok) return queuedResponse(dispatch.reason);
 
     let submitResult: Awaited<ReturnType<typeof svc.submitJob>>;

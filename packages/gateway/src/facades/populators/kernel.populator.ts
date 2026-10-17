@@ -202,7 +202,7 @@ export function populateKernelHealthSnapshot(
 ): KernelHealthSnapshot {
   const base = populateKernelDTO(model, capabilities, ctx, activeJobCount);
   const devices = rawDevices.map(populateDeviceStatusDTO);
-  const jobDTOs = recentJobs.map((job) => populateJobDTO(job, model));
+  const jobDTOs = recentJobs.map((job) => populateJobDTO(job, model, ctx));
 
   return {
     ...base,
@@ -246,12 +246,13 @@ function populateDeviceStatusDTO(raw: RawDevice): DeviceStatusDTO {
   };
 }
 
-function populateJobDTO(job: RawJob, kernel: RawKernel): JobDTO {
+function populateJobDTO(job: RawJob, kernel: RawKernel, ctx: PopulationContext): JobDTO {
   return {
     id: job.id,
     capabilityId: job.capabilityId,
     kernelId: kernel.id,
     status: job.status as JobDTO["status"],
+    ...(ctx.jobHolds?.get(job.id) ?? { held: false }),
     progress: job.progress ?? undefined,
     assuranceTier: normalizeAssuranceTier(job.assuranceTier),
     createdAt: job.startedAt ?? new Date().toISOString(),

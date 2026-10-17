@@ -131,7 +131,7 @@ function expectOwner(body: Awaited<ReturnType<typeof me>>, activeKeys: number) {
   expect(body.identity.operator).toBe(owner);
   expect(body.kernels).toEqual({ count: 1, items: [expect.objectContaining({ id: KERNEL, name: "N171 owner site" })] });
   expect(body.devices).toEqual({ count: 1 });
-  expect(body.work).toEqual({ in_flight: 1, items: [{ id: JOB, kernel_id: KERNEL, status: "in_progress", progress: 37 }] });
+  expect(body.work).toEqual({ in_flight: 1, items: [{ id: JOB, kernel_id: KERNEL, status: "in_progress", progress: 37, held: false }] });
   expect(body.keys.active).toBe(activeKeys);
   expect(body.keys).not.toHaveProperty("unavailable");
   expect(body.next).toEqual(["1 job(s) in flight — GET /api/jobs/{jobId} for detail."]);
