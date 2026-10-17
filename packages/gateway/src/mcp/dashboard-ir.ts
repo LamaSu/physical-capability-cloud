@@ -21,6 +21,64 @@
  */
 import type { BoundSourceClass, DashboardManifest, RenderSourceClass } from "@pcc/spec";
 
+// Capture the boundary's intrinsics before any module code can replace a global or prototype.
+const TEXT_STORE_GET: (this: WeakMap<object, string>, key: object) => string | undefined = WeakMap.prototype.get;
+const TEXT_STORE_SET: (this: WeakMap<object, string>, key: object, value: string) => WeakMap<object, string> = WeakMap.prototype.set;
+const TEXT_FREEZE = Object.freeze;
+const TEXT_APPLY: <T, A extends unknown[], R>(target: (this: T, ...args: A) => R, receiver: T, args: A) => R = Reflect.apply;
+const textDiagnostics = globalThis as typeof globalThis & { __PCC_UI_TEXT_VIOLATIONS__?: number };
+
+/** Opaque display objects. Their read-only .t accessor reads the module-private identity store. */
+export type KitText = Readonly<{ t: string; readonly __kitText: unique symbol }>;
+/** Manifest prose retains its authorship; only the agent-marking sink accepts it. */
+export type AgentText = Readonly<{ t: string; readonly __agentText: unique symbol }>;
+// ONE module owns both stores. Copying, cloning, proxying or asserting cannot register an identity.
+const TEXT_BRANDS = new WeakMap<object, string>();
+const AGENT_TEXT_BRANDS = new WeakMap<object, string>();
+textDiagnostics.__PCC_UI_TEXT_VIOLATIONS__ ??= 0;
+function textViolation(): void {
+  textDiagnostics.__PCC_UI_TEXT_VIOLATIONS__ = (textDiagnostics.__PCC_UI_TEXT_VIOLATIONS__ ?? 0) + 1;
+}
+/** Internal constructors: imports and calls are confined to the guard's declared mints. */
+export function registerKitText(t: string): KitText {
+  if (typeof t !== "string") { textViolation(); t = "—"; }
+  const identity = { get t(): string { return TEXT_APPLY(TEXT_STORE_GET, TEXT_BRANDS, [identity]) ?? "—"; } };
+  const text = TEXT_FREEZE(identity) as KitText;
+  TEXT_APPLY(TEXT_STORE_SET, TEXT_BRANDS, [identity, t]);
+  return text;
+}
+export function registerAgentText(t: string): AgentText {
+  if (typeof t !== "string") { textViolation(); t = "—"; }
+  const identity = { get t(): string { return TEXT_APPLY(TEXT_STORE_GET, AGENT_TEXT_BRANDS, [identity]) ?? "—"; } };
+  const text = TEXT_FREEZE(identity) as AgentText;
+  TEXT_APPLY(TEXT_STORE_SET, AGENT_TEXT_BRANDS, [identity, t]);
+  return text;
+}
+export function isKitText(value: unknown): boolean {
+  return value !== null && typeof value === "object" && typeof TEXT_APPLY(TEXT_STORE_GET, TEXT_BRANDS, [value]) === "string";
+}
+/** Checked reader retains identity for structural renderer ports; .t is a store-backed accessor,
+ * never a mutable text mirror. No property is read before the private identity lookup. */
+export function readText(value: unknown, tier?: "kit"): KitText;
+export function readText(value: unknown, tier: "agent" | "authored"): KitText | AgentText;
+export function readText(value: unknown, tier: "kit" | "agent" | "authored" = "kit"): KitText | AgentText {
+  if (value !== null && typeof value === "object" &&
+      ((tier !== "agent" && typeof TEXT_APPLY(TEXT_STORE_GET, TEXT_BRANDS, [value]) === "string") ||
+       (tier !== "kit" && typeof TEXT_APPLY(TEXT_STORE_GET, AGENT_TEXT_BRANDS, [value]) === "string"))) {
+    return value as KitText | AgentText;
+  }
+  textViolation();
+  return INVALID_TEXT;
+}
+/** The one constructor for PCC-owned copy. Server/manifest values use typed helpers below. */
+export function kitText(s: string): KitText { return registerKitText(s); }
+const INVALID_TEXT = kitText("—");
+/** Every input must be genuine; a single forged member withholds the entire composition. */
+export function joinKitText(...parts: KitText[]): KitText {
+  for (const part of parts) if (!isKitText(part)) return readText(part);
+  return registerKitText(parts.map((part) => readText(part).t).join(""));
+}
+
 // Frozen catalog = the EXACT set of node types the adapter emits (nothing more).
 export const IR_NODE_TYPES = [
   "root", "section", "heading", "text", "stat", "card", "receipt", "list",
@@ -64,8 +122,8 @@ export const LIST_ROW_CAP = LIM.listRows;
 // English and other major languages. A claim may not be split across prose either: each section's
 // agent prose, then the whole dashboard's, is also checked as one text (see withholdSplitClaims).
 // It remains a backstop to the agent-authored marking, not a proof that prose is harmless.
-export const WITHHELD_PROSE =
-  "Agent text withheld: it stated an amount or a payment or verification status. Money facts appear only in PCC cards.";
+export const WITHHELD_PROSE = kitText(
+  "Agent text withheld: it stated an amount or a payment or verification status. Money facts appear only in PCC cards.");
 // Case-aware: each capital maps to the Latin capital it imitates, before lowercasing.
 const LOOKALIKE: Readonly<Record<string, string>> = {
   // Cyrillic
@@ -93,11 +151,11 @@ const LOOKALIKE: Readonly<Record<string, string>> = {
   "\u0224": "Z", "\u024c": "R", "\u0246": "E", "\u023b": "C",
 };
 // Marks, format/bidi controls and invisible fillers vanish; a braille blank reads as a space.
-const INVISIBLE_RE = /[\p{M}\p{Cf}\u115f\u1160\u3164\uffa0]/gu;
+const INVISIBLE_RE = /[\p{M}\p{Cf}\p{Default_Ignorable_Code_Point}\u115f\u1160\u3164\uffa0]/gu;
 const MONEY_EMOJI_RE = /[\u{1F4B0}-\u{1F4B8}\u{1F911}\u{1FA99}]/gu;
 /** The one fold every check uses: lowercase Latin skeleton of what a reader sees. Whitespace runs
  *  collapse to one space, as HTML renders them; that also keeps every match below linear-time. */
-function foldForClaims(text: string): string {
+export function foldForClaims(text: string): string {
   let t = text.normalize("NFKD").replace(INVISIBLE_RE, "").normalize("NFKC");
   t = t.replace(/\u2800/g, " ").replace(MONEY_EMOJI_RE, " $ ");
   t = t.replace(/[^\x00-\x7f]/g, (c) => LOOKALIKE[c] ?? c);
@@ -219,22 +277,43 @@ const scriptIn = (f: string): boolean => /[^\x00-\x7f]/.test(f) && SCRIPT_CLAIM_
 // money noun alone does not, because real lab types use them ("liquid-transfer", "analytical-balance").
 const IDENT_NOUN_RE = new RegExp(`\\b${CLAIM_NOUN_GROUP}\\b`);
 const IDENT_GENERIC_RE = new RegExp(`\\b${GENERIC_GROUP}\\b`);
-export function identifierText(field: string, value: string): string {
-  if (value === "") return value;
-  const t = boundValueText(field, value);
+export function identifierText(field: string, value: string): KitText {
+  if (typeof value !== "string") return readText(null);
+  const text = value;
+  if (text === "") return kitText("");
+  const t = boundValueText(field, text);
   if (t === WITHHELD_FIELD) return t;
-  for (const v of views(foldForClaims(value))) if (IDENT_NOUN_RE.test(v) && IDENT_GENERIC_RE.test(v)) return WITHHELD_FIELD;
-  return REPORTED_PREFIX + value;
+  const stripped = text.replace(STRONG_RTL_RE, "");
+  for (const candidate of stripped === text ? [text] : [text, stripped]) {
+    for (const v of views(foldForClaims(candidate))) if (IDENT_NOUN_RE.test(v) && IDENT_GENERIC_RE.test(v)) return WITHHELD_FIELD;
+  }
+  return registerKitText(readText(REPORTED_PREFIX).t + text);
 }
-export function statesAmount(text: string): boolean { return AMOUNT_RE.test(foldForClaims(text)); }
+/** Raw direction controls can reverse claims or PCC's own qualifier. Never strip them. */
+export function hasBidiControl(text: string): boolean { return /\p{Bidi_Control}/u.test(text) || text.includes(String.fromCodePoint(0x070f)); }
+// Unicode 17 DerivedBidiClass R/AL (including unassigned @missing defaults).
+// https://www.unicode.org/Public/17.0.0/ucd/extracted/DerivedBidiClass.txt
+// ECMAScript has no Bidi_Class property escape; keep this dependency-free mirror in both kits.
+const STRONG_RTL_RE = /[\u{5be}\u{5c0}\u{5c3}\u{5c6}\u{5d0}-\u{5ea}\u{5ef}-\u{5f4}\u{608}\u{60b}\u{60d}\u{61b}-\u{64a}\u{66d}-\u{66f}\u{671}-\u{6d5}\u{6e5}-\u{6e6}\u{6ee}-\u{6ef}\u{6fa}-\u{70d}\u{70f}-\u{710}\u{712}-\u{72f}\u{74d}-\u{7a5}\u{7b1}\u{7c0}-\u{7ea}\u{7f4}-\u{7f5}\u{7fa}\u{7fe}-\u{815}\u{81a}\u{824}\u{828}\u{830}-\u{83e}\u{840}-\u{858}\u{85e}\u{860}-\u{86a}\u{870}-\u{88f}\u{8a0}-\u{8c9}\u{200f}\u{fb1d}\u{fb1f}-\u{fb28}\u{fb2a}-\u{fb36}\u{fb38}-\u{fb3c}\u{fb3e}\u{fb40}-\u{fb41}\u{fb43}-\u{fb44}\u{fb46}-\u{fbc2}\u{fbd3}-\u{fd3d}\u{fd50}-\u{fd8f}\u{fd92}-\u{fdc7}\u{fdf0}-\u{fdfc}\u{fe70}-\u{fe74}\u{fe76}-\u{fefc}\u{10800}-\u{10805}\u{10808}\u{1080a}-\u{10835}\u{10837}-\u{10838}\u{1083c}\u{1083f}-\u{10855}\u{10857}-\u{1089e}\u{108a7}-\u{108af}\u{108e0}-\u{108f2}\u{108f4}-\u{108f5}\u{108fb}-\u{1091b}\u{10920}-\u{10939}\u{1093f}-\u{10959}\u{10980}-\u{109b7}\u{109bc}-\u{109cf}\u{109d2}-\u{10a00}\u{10a10}-\u{10a13}\u{10a15}-\u{10a17}\u{10a19}-\u{10a35}\u{10a40}-\u{10a48}\u{10a50}-\u{10a58}\u{10a60}-\u{10a9f}\u{10ac0}-\u{10ae4}\u{10aeb}-\u{10af6}\u{10b00}-\u{10b35}\u{10b40}-\u{10b55}\u{10b58}-\u{10b72}\u{10b78}-\u{10b91}\u{10b99}-\u{10b9c}\u{10ba9}-\u{10baf}\u{10c00}-\u{10c48}\u{10c80}-\u{10cb2}\u{10cc0}-\u{10cf2}\u{10cfa}-\u{10d23}\u{10d4a}-\u{10d65}\u{10d6f}-\u{10d85}\u{10d8e}-\u{10d8f}\u{10e80}-\u{10ea9}\u{10ead}\u{10eb0}-\u{10eb1}\u{10ec2}-\u{10ec7}\u{10f00}-\u{10f27}\u{10f30}-\u{10f45}\u{10f51}-\u{10f59}\u{10f70}-\u{10f81}\u{10f86}-\u{10f89}\u{10fb0}-\u{10fcb}\u{10fe0}-\u{10ff6}\u{1e800}-\u{1e8c4}\u{1e8c7}-\u{1e8cf}\u{1e900}-\u{1e943}\u{1e94b}\u{1e950}-\u{1e959}\u{1e95e}-\u{1e95f}\u{1ec71}-\u{1ecb4}\u{1ed01}-\u{1ed3d}\u{1ee00}-\u{1ee03}\u{1ee05}-\u{1ee1f}\u{1ee21}-\u{1ee22}\u{1ee24}\u{1ee27}\u{1ee29}-\u{1ee32}\u{1ee34}-\u{1ee37}\u{1ee39}\u{1ee3b}\u{1ee42}\u{1ee47}\u{1ee49}\u{1ee4b}\u{1ee4d}-\u{1ee4f}\u{1ee51}-\u{1ee52}\u{1ee54}\u{1ee57}\u{1ee59}\u{1ee5b}\u{1ee5d}\u{1ee5f}\u{1ee61}-\u{1ee62}\u{1ee64}\u{1ee67}-\u{1ee6a}\u{1ee6c}-\u{1ee72}\u{1ee74}-\u{1ee77}\u{1ee79}-\u{1ee7c}\u{1ee7e}\u{1ee80}-\u{1ee89}\u{1ee8b}-\u{1ee9b}\u{1eea1}-\u{1eea3}\u{1eea5}-\u{1eea9}\u{1eeab}-\u{1eebb}]|(?=\p{Cn})[\u{590}-\u{8ff}\u{fb1d}-\u{fdcf}\u{fdf0}-\u{fdff}\u{fe70}-\u{feff}\u{10800}-\u{10fff}\u{1e800}-\u{1efff}]/gu;
+function claimIn(text: string, checks: readonly WordCheck[]): boolean {
+  const f = foldForClaims(text);
+  if (AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, checks)) return true;
+  const stripped = text.replace(STRONG_RTL_RE, "");
+  if (stripped === text) return false;
+  const visual = foldForClaims(stripped);
+  return AMOUNT_RE.test(visual) || scriptIn(visual) || wordsIn(visual, checks);
+}
+export function statesAmount(text: string): boolean { return AMOUNT_RE.test(foldForClaims(text)) || AMOUNT_RE.test(foldForClaims(text.replace(STRONG_RTL_RE, ""))); }
 /** Does the text state an amount or a payment or verification status? */
-export function isMoneyClaim(text: string): boolean { const f = foldForClaims(text); return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, PAIR_WORDS]); }
+export function isMoneyClaim(text: string): boolean { return hasBidiControl(text) || claimIn(text, [MONEY_WORDS, PAIR_WORDS]); }
 /** Does the text mention PCC's withheld notice ("withheld", "withhold")? Only PCC may say that. */
-export function mentionsWithheld(text: string): boolean { return wordsIn(foldForClaims(text), [NOTICE_WORDS]); }
+export function mentionsWithheld(text: string): boolean {
+  const stripped = text.replace(STRONG_RTL_RE, "");
+  return wordsIn(foldForClaims(text), [NOTICE_WORDS]) || (stripped !== text && wordsIn(foldForClaims(stripped), [NOTICE_WORDS]));
+}
 /** Agent prose that may not be shown: a money claim, or a mention of PCC's notice (one fold). */
 export function isProseClaim(text: string): boolean {
-  const f = foldForClaims(text);
-  return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, NOTICE_WORDS, PAIR_WORDS]);
+  return hasBidiControl(text) || claimIn(text, [MONEY_WORDS, NOTICE_WORDS, PAIR_WORDS]);
 }
 
 // A bound RECORD status is the record's own word, never a payment fact: a job row can literally say
@@ -243,13 +322,14 @@ export function isProseClaim(text: string): boolean {
 // sink (metric, run card, list badge and list meta). Narrower than CLAIM_RE on purpose ("verified",
 // "approved" are not money states). Look-alikes, zero-width characters, fullwidth forms and camel,
 // snake or kebab joins ("SETTLED_RELEASED", "payoutPending") are folded first.
-export const RECORD_STATUS_NOTE = " - reported by the record, not confirmed by a settlement read";
+export const RECORD_STATUS_NOTE = kitText(" - reported by the record, not confirmed by a settlement read");
 const MONEY_STATE_RE = /\b(?:settled|released|paid|unpaid|payout|payouts|refund|refunded|refunds|funded|unfunded|charged|credited|debited|deposited|withdrawn|escrowed)\b/;
 export function isMoneyState(value: string): boolean {
   return MONEY_STATE_RE.test(foldForClaims(value).replace(/[^a-z0-9]+/g, " "));
 }
+/** Legacy formatting only; its raw result is deliberately not display text. */
 export function recordValueText(field: string, value: string): string {
-  return value !== "" && /(^|\.)status$/.test(field) && isMoneyState(value) ? value + RECORD_STATUS_NOTE : value;
+  return value !== "" && /(^|\.)status$/.test(field) && isMoneyState(value) ? value + readText(RECORD_STATUS_NOTE).t : value;
 }
 
 // ── A CLOSED safe vocabulary for bound status values (astra r3 H1) ───────────────────────
@@ -258,7 +338,7 @@ export function recordValueText(field: string, value: string): string {
 // CLOSED: a status is shown bare ONLY when it normalizes EXACTLY to a word on this list. No payment
 // or money-movement word may be in it (checked by a test). Same list as #313's (pcc-design #3013,
 // job-status terms); this file is dependency-free, so it is duplicated here rather than imported.
-export const SAFE_STATUS_WORDS: ReadonlySet<string> = new Set([
+export const SAFE_STATUS_WORDS: readonly string[] = Object.freeze([
   "RUNNING", "IN_PROGRESS", "PROGRESS", "STREAMING", "BUILDING", "CONNECTING", "PENDING", "QUEUED", "WAITING", "PAUSED",
   "REVIEW", "CONFIRM", "NEEDS_INPUT", "NEEDS_YOU", "ERROR", "FAILED", "DENIED", "CANCELLED", "CANCELED", "REJECTED",
   "DONE", "COMPLETE", "COMPLETED", "OK", "SUCCESS", "SUCCEEDED", "RESOLVED", "READY", "DISPATCHED", "ACCEPTED",
@@ -273,7 +353,7 @@ export const SAFE_STATUS_WORDS: ReadonlySet<string> = new Set([
 function normalizeStatusWord(value: string): string {
   return foldForClaims(value).toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 }
-function isSafeStatusWord(value: string): boolean { return SAFE_STATUS_WORDS.has(normalizeStatusWord(value)); }
+function isSafeStatusWord(value: string): boolean { return SAFE_STATUS_WORDS.includes(normalizeStatusWord(value)); }
 
 // ── Bound values (astra r2 F2; astra r3 H1 fail-closed status) ───────────────────────────
 // A fetched value is data, but a free field still carries words: a capability NAMED "Paid $1M -
@@ -282,11 +362,11 @@ function isSafeStatusWord(value: string): boolean { return SAFE_STATUS_WORDS.has
 // states an amount or mentions the notice is WITHHELD_FIELD; (2) a SAFE_STATUS_WORDS word is shown
 // bare; (3) a money state (isMoneyState) gets RECORD_STATUS_NOTE; (4) ANY other value gets
 // RECORD_CLAIM_NOTE — never shown bare just because it wasn't independently recognised as a claim.
-// A non-status field is unchanged: a claim becomes WITHHELD_FIELD, using the stronger detector. Only
+// A non-status field is attributed: a claim becomes WITHHELD_FIELD, using the stronger detector. Only
 // a PCC card's own money fields (the price and its currency) show money, and they never pass through
 // here — they are now type-validated instead (dashboard-ir-renderer.ts readField).
-export const RECORD_CLAIM_NOTE = " - reported by the record, not confirmed by PCC";
-export const WITHHELD_FIELD = "withheld: stated money or verification";
+export const RECORD_CLAIM_NOTE = kitText(" - reported by the record, not confirmed by PCC");
+export const WITHHELD_FIELD = kitText("withheld: stated money or verification");
 /** The CLOSED status treatment (4 cases, checked in order) — factored out of `boundValueText` so
  *  it can be applied BY ROLE (astra r4 finding 1): any value the caller already knows is a status
  *  WORD by its list field KIND (LIST_FIELD_KINDS below, "status"), wherever that field appears —
@@ -295,17 +375,23 @@ export const WITHHELD_FIELD = "withheld: stated money or verification";
  *  SAFE_STATUS_WORDS word is shown bare; (3) a money state (isMoneyState) gets RECORD_STATUS_NOTE;
  *  (4) ANY other value gets RECORD_CLAIM_NOTE — never shown bare just because it wasn't
  *  independently recognised as a claim. */
-export function boundStatusText(value: string): string {
-  if (value === "") return value;
-  if (statesAmount(value) || mentionsWithheld(value)) return WITHHELD_FIELD; // 1
-  if (isSafeStatusWord(value)) return value; // 2
-  if (isMoneyState(value)) return value + RECORD_STATUS_NOTE; // 3
-  return value + RECORD_CLAIM_NOTE; // 4 - fail closed, not "bare unless recognised"
+export function boundStatusText(value: string): KitText {
+  if (typeof value !== "string") return readText(null);
+  const text = value;
+  if (text === "") return kitText("");
+  if (hasBidiControl(text)) return WITHHELD_FIELD;
+  if (/(?=\p{Cn})\p{Default_Ignorable_Code_Point}/u.test(text) && isProseClaim(text)) return WITHHELD_FIELD;
+  if (statesAmount(text) || mentionsWithheld(text)) return WITHHELD_FIELD; // 1
+  if (isSafeStatusWord(text)) return registerKitText(text); // 2
+  if (isMoneyState(text)) return registerKitText(text + readText(RECORD_STATUS_NOTE).t); // 3
+  return registerKitText(text + readText(RECORD_CLAIM_NOTE).t); // 4 - fail closed, not "bare unless recognised"
 }
-export function boundValueText(field: string, value: string): string {
-  if (value === "") return value;
-  if (/(^|\.)status$/.test(field)) return boundStatusText(value);
-  return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : value;
+export function boundValueText(field: string, value: string): KitText {
+  if (typeof value !== "string") return readText(null);
+  const text = value;
+  if (text === "") return kitText("");
+  if (/(^|\.)status$/.test(field)) return boundStatusText(text);
+  return isMoneyClaim(text) || mentionsWithheld(text) ? WITHHELD_FIELD : registerKitText(readText(REPORTED_PREFIX).t + text);
 }
 
 // ── Attributed free text (astra r5 F1; same rule astra accepted on #313's F12) ───────────
@@ -315,9 +401,11 @@ export function boundValueText(field: string, value: string): string {
 // TEXT-kind bound value is explicitly attributed to the record that reported it — structural,
 // not merely a backstop. A value the lexical detector DOES catch is still WITHHELD_FIELD (the
 // detector remains defense in depth underneath this, never replaced by it).
-export const REPORTED_PREFIX = "reported: ";
-export function reportedFieldText(field: string, value: string): string {
-  return boundValueText(field, value) === WITHHELD_FIELD ? WITHHELD_FIELD : REPORTED_PREFIX + value;
+export const REPORTED_PREFIX = kitText("reported: ");
+export function reportedFieldText(field: string, value: string): KitText {
+  if (typeof value !== "string") return readText(null);
+  const text = value;
+  return boundValueText(field, text) === WITHHELD_FIELD ? WITHHELD_FIELD : registerKitText(readText(REPORTED_PREFIX).t + text);
 }
 
 // ── PCC-owned list field profiles (PX-5 review #2504) ────────────────────────────────────
@@ -406,14 +494,14 @@ function listProfileViolation(path: string, props: Record<string, unknown>): str
   const prof = LIST_PROFILES[path];
   if (!prof) return `no list field profile for ${path}`;
   if (typeof props.rowTitle !== "string" || !prof.title.includes(props.rowTitle)) return `list title field not in the ${path} profile`;
-  const meta = Array.isArray(props.rowMeta) ? props.rowMeta : [];
+  const meta: unknown[] = Array.isArray(props.rowMeta) ? props.rowMeta : [];
   for (const m of meta) if (typeof m !== "string" || !prof.meta.includes(m)) return `list meta field not in the ${path} profile`;
   if (props.statusFrom !== undefined && (typeof props.statusFrom !== "string" || !prof.status.includes(props.statusFrom))) return `list status field not in the ${path} profile`;
   return null;
 }
 
 // The ONE fixed PCC-owned approval sentence. B renders exactly this — never manifest prose.
-const APPROVAL_NOTICE = "This action is confirmed only on the authenticated PCC surface.";
+export const APPROVAL_NOTICE = kitText("This action is confirmed only on the authenticated PCC surface.");
 
 // ── Governed bindings — EXACT, end-anchored routes pinned to the REAL route table ──
 // Deny-by-default. Each RegExp is a specific verified read endpoint.
@@ -517,6 +605,12 @@ const BIND_POLICY: Record<string, BindPolicy> = {
   // approval in B is a STATIC notice — no live bind (live approval state is C+D out-of-band).
 };
 
+/** Return the PCC-owned query label for this exact list route, never the caller's key. */
+export function listQueryLabel(path: string, key: string): string | undefined {
+  const routes = BIND_POLICY.list.queryByRoute;
+  return routes && Object.prototype.hasOwnProperty.call(routes, path) ? routes[path]?.find((label) => label === key) : undefined;
+}
+
 export interface IrBind { path: string; select?: string; query?: Record<string, string | number | boolean>; pollMs?: number; sse?: string; schema?: BindSchema }
 export interface IrNode { type: IrNodeType; id: string; props?: Record<string, string | number | boolean | string[]>; bind?: IrBind; children?: IrNode[]; untrusted?: true }
 export interface IrDoc { ir: "pcc-dashboard-ir/v1"; title: IrNode; root: IrNode }
@@ -528,7 +622,8 @@ const PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
  * Object.create(evil), poisoned prototypes, class instances). */
 function isPlain(v: unknown): v is Record<string, unknown> {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
-  const p = Object.getPrototypeOf(v);
+  const getPrototypeOf: (value: object) => unknown = Object.getPrototypeOf;
+  const p = getPrototypeOf(v);
   return p === Object.prototype || p === null;
 }
 function strictStr(v: unknown, max: number = LIM.str): string | null {
@@ -563,7 +658,7 @@ function deepClean(v: unknown, depth = 0, budget: { n: number } = { n: LIM.clean
       if (typeof k === "symbol") return false;
       if (k !== "length" && !INDEX_KEY.test(k)) return false;
     }
-    for (const e of v) if (!deepClean(e, depth + 1, budget)) return false;
+    for (const e of v as unknown[]) if (!deepClean(e, depth + 1, budget)) return false;
     return true;
   }
   if (!isPlain(v)) return false;
@@ -622,19 +717,19 @@ function isCredentialName(k: string): boolean {
 //    computeUptimePercent, one of 0/50/100/undefined (percent); capabilityCount/
 //    totalJobsCompleted/activeJobCount are all non-negative integer counts.
 export type MetricFieldKind = "status" | "percent" | "count" | "bool" | "time" | "id" | "text" | "version";
-interface MetricField { label: string; source: string; kind: MetricFieldKind }
+interface MetricField { label: KitText; source: string; kind: MetricFieldKind }
 const METRIC_PROFILE: ReadonlyArray<{ route: RegExp; fields: Readonly<Record<string, MetricField>> }> = [
   { route: route("/api/jobs/:/status"), fields: { // top-level envelope
-    status: { label: "Status", source: "status", kind: "status" },
-    progress: { label: "Progress", source: "progress", kind: "percent" },
+    status: { label: kitText("Status"), source: "status", kind: "status" },
+    progress: { label: kitText("Progress"), source: "progress", kind: "percent" },
   } },
   { route: route("/api/kernels/:"), fields: { // GET /api/kernels/:id → { kernel: KernelHealthSnapshot }
-    status: { label: "Status", source: "kernel.status", kind: "status" },
-    reputation: { label: "Reputation", source: "kernel.reputation", kind: "count" },
-    uptimePercent: { label: "Uptime", source: "kernel.uptimePercent", kind: "percent" },
-    capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount", kind: "count" },
-    totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted", kind: "count" },
-    activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount", kind: "count" },
+    status: { label: kitText("Status"), source: "kernel.status", kind: "status" },
+    reputation: { label: kitText("Reputation"), source: "kernel.reputation", kind: "count" },
+    uptimePercent: { label: kitText("Uptime"), source: "kernel.uptimePercent", kind: "percent" },
+    capabilityCount: { label: kitText("Capabilities"), source: "kernel.capabilityCount", kind: "count" },
+    totalJobsCompleted: { label: kitText("Jobs completed"), source: "kernel.totalJobsCompleted", kind: "count" },
+    activeJobCount: { label: kitText("Active jobs"), source: "kernel.activeJobCount", kind: "count" },
   } },
 ];
 /** Adapter side: (route, logical selector) → the field profile (label + real source + kind), or null. */
@@ -654,7 +749,7 @@ function metricFieldForSource(path: string, source: unknown): MetricField | null
   return null;
 }
 /** Validator side: (route, SOURCE path already in bind.select) → the expected PCC label, or null. */
-function metricLabelForSource(path: string, source: unknown): string | null {
+export function metricLabelForSource(path: string, source: unknown): KitText | null {
   return metricFieldForSource(path, source)?.label ?? null;
 }
 /** Renderer side (astra r5 F2): (route, SOURCE path already in bind.select) → the field's closed
@@ -666,7 +761,7 @@ export function metricKindForSource(path: string, source: unknown): MetricFieldK
 }
 /** Closed typed-op descriptor grammar (submit/execute/approve/deny/action). Its
  * content is DISCARDED in B, but a malformed shape is REJECTED, never stripped. */
-function isOpDescriptor(v: unknown): boolean {
+function isOpDescriptor(v: unknown): v is Record<string, unknown> {
   if (!isPlain(v) || !onlyKeys(v, ["id", "label", "confirm", "intentText", "operation_id", "arguments"])) return false;
   if (v.operation_id !== undefined && (typeof v.operation_id !== "string" || !OP_ID_GRAMMAR.test(v.operation_id))) return false;
   if (v.id !== undefined && strictStr(v.id, LIM.title) === null) return false;
@@ -854,7 +949,7 @@ export function dashboardManifestToIr(m: DashboardManifest | null | undefined): 
   const nextId = (() => { let n = 0; return () => `n${++n}`; })();
 
   const sectionNodes: IrNode[] = [];
-  for (const secRaw of mm.sections) {
+  for (const secRaw of mm.sections as unknown[]) {
     if (!isPlain(secRaw) || !onlyKeys(secRaw, ["heading", "windows"])) return { ok: false, reason: "bad section" };
     if (!Array.isArray(secRaw.windows)) return { ok: false, reason: "section.windows not array" };
     if (secRaw.windows.length > LIM.windowsPerSection) return { ok: false, reason: "too many windows" };
@@ -865,7 +960,7 @@ export function dashboardManifestToIr(m: DashboardManifest | null | undefined): 
       if (!budget()) return { ok: false, reason: "node budget" };
       children.push(proseNode("heading", nextId(), h, { level: 2 }));
     }
-    for (const w of secRaw.windows) { const r = mapWindow(w, nextId, budget, bindBudget); if (!r.ok) return r; children.push(r.node); }
+    for (const w of secRaw.windows as unknown[]) { const r = mapWindow(w, nextId, budget, bindBudget); if (!r.ok) return r; children.push(r.node); }
     if (!budget()) return { ok: false, reason: "node budget" };
     sectionNodes.push({ type: "section", id: nextId(), children });
   }
@@ -902,7 +997,7 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
         if (!field) return { ok: false, reason: "metric (route, select) not an allowlisted metric field" };
         const b = mapBind(w.binding, "metric", field.source); if (!b.ok) return b; // bind.select = REAL source path
         if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
-        return { ok: true, node: { type: "stat", id, props: { label: field.label }, bind: b.bind } }; } // PCC-owned label → NOT untrusted
+        return { ok: true, node: { type: "stat", id, props: { label: readText(field.label).t }, bind: b.bind } }; } // PCC-owned label → NOT untrusted
     case "capability":
       if (!onlyKeys(w, ["kind", "binding"])) return { ok: false, reason: "capability extra key" };
       { const b = mapBind(w.binding, "capability"); if (!b.ok) return b;
@@ -928,7 +1023,7 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
         const rowMeta: string[] = [];
         if (item.meta !== undefined) {
           if (!Array.isArray(item.meta) || item.meta.length > LIM.metaItems) return { ok: false, reason: "list.meta" };
-          for (const mi of item.meta) { if (!isSelector(mi)) return { ok: false, reason: "list.meta selector" }; rowMeta.push(mi); }
+          for (const mi of item.meta as unknown[]) { if (!isSelector(mi)) return { ok: false, reason: "list.meta selector" }; rowMeta.push(mi); }
         }
         const props: IrNode["props"] = { rowTitle: item.title, rowMeta };
         if (item.statusFrom !== undefined) { if (!isSelector(item.statusFrom)) return { ok: false, reason: "list.statusFrom selector" }; props.statusFrom = item.statusFrom; }
@@ -954,7 +1049,7 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
       if (w.deny !== undefined && !isOpDescriptor(w.deny)) return { ok: false, reason: "approval.deny grammar" };
       if (w.binding !== undefined && !isPlain(w.binding)) return { ok: false, reason: "approval.binding shape" };
       // Static notice, NO bind — live approval state is the C+D out-of-band surface.
-      return { ok: true, node: { type: "approval-notice", id, props: { notice: APPROVAL_NOTICE } } };
+      return { ok: true, node: { type: "approval-notice", id, props: { notice: readText(APPROVAL_NOTICE).t } } };
     case "chain":
       if (!onlyKeys(w, ["kind", "composeRef", "execute"])) return { ok: false, reason: "chain extra key" };
       if (!isPlain(w.composeRef)) return { ok: false, reason: "chain.composeRef shape" };
@@ -965,10 +1060,10 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
       { const acts = w.actions;
         if (!Array.isArray(acts) || acts.length === 0 || acts.length > LIM.fields) return { ok: false, reason: "actions" };
         const children: IrNode[] = [];
-        for (const a of acts) {
+        for (const a of acts as unknown[]) {
           if (!budget()) return { ok: false, reason: "node budget" };
           if (!isOpDescriptor(a)) return { ok: false, reason: "action grammar" };
-          const label = strictStr((a as Record<string, unknown>).label, LIM.title); if (label === null) return { ok: false, reason: "action.label" };
+          const label = strictStr(a.label, LIM.title); if (label === null) return { ok: false, reason: "action.label" };
           children.push(proseNode("badge", nextId(), label, { tone: "neutral" }));
         }
         return { ok: true, node: { type: "grid", id, props: { kind: "actions-readonly" }, children } }; }
@@ -1001,7 +1096,7 @@ function mapBind(b: unknown, key: string, topSelect?: unknown): { ok: true; bind
 function fieldLabels(schema: unknown): { ok: true; labels: string[] } | { ok: false; reason: string } {
   if (!isPlain(schema) || !onlyKeys(schema, ["type", "properties", "required"])) return { ok: false, reason: "form.schema shape" };
   if (schema.type !== undefined && schema.type !== "object") return { ok: false, reason: "form.schema.type" };
-  if (schema.required !== undefined && (!Array.isArray(schema.required) || !schema.required.every((x) => typeof x === "string"))) return { ok: false, reason: "form.schema.required" };
+  if (schema.required !== undefined && (!Array.isArray(schema.required) || !schema.required.every((x: unknown) => typeof x === "string"))) return { ok: false, reason: "form.schema.required" };
   const props = schema.properties;
   if (!isPlain(props)) return { ok: false, reason: "form.schema.properties" };
   const keys = Object.keys(props);
@@ -1082,7 +1177,7 @@ function propType(v: unknown, t: PropT): boolean {
     case "number": return typeof v === "number" && Number.isFinite(v);
     case "limit": return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= LIM.listRows;
     case "boolean": return typeof v === "boolean";
-    case "string[]": return Array.isArray(v) && v.length <= LIM.metaItems && v.every((x) => isSelector(x));
+    case "string[]": return Array.isArray(v) && v.length <= LIM.metaItems && v.every((x: unknown) => isSelector(x));
     case "level": return v === 1 || v === 2 || v === 3;
     case "tone": return typeof v === "string" && TONE_SET.has(v);
     case "card-kind": return typeof v === "string" && CARD_KINDS.has(v);
@@ -1096,7 +1191,7 @@ const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnPropert
 export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: string } {
   if (!isPlain(doc) || doc.ir !== "pcc-dashboard-ir/v1" || !onlyKeys(doc, ["ir", "title", "root"])) return { ok: false, reason: "not an IR doc" };
   if (!deepClean(doc)) return { ok: false, reason: "proto/nonfinite/symbol in IR" };
-  if (!isPlain(doc.title) || (doc.title as Record<string, unknown>).type !== "heading" || (doc.title as any).props?.level !== 1) return { ok: false, reason: "doc.title not H1" };
+  if (!isPlain(doc.title) || (doc.title as Record<string, unknown>).type !== "heading" || (doc.title as { props?: { level?: unknown } }).props?.level !== 1) return { ok: false, reason: "doc.title not H1" };
   if (!isPlain(doc.root) || (doc.root as Record<string, unknown>).type !== "root") return { ok: false, reason: "doc.root not root" };
   const ids = new Set<string>();
   let count = 0;
@@ -1120,10 +1215,10 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
     }
     for (const req of withheld ? Object.keys(pspec) : spec.required ?? []) if (!n.props || !hasOwn(n.props as object, req)) return `missing prop ${req} on ${n.type}`;
     // approval-notice text is the ONE fixed PCC sentence — never manifest prose
-    if (n.type === "approval-notice" && (n.props as any)?.notice !== APPROVAL_NOTICE) return "approval-notice text not the fixed PCC sentence";
+    if (n.type === "approval-notice" && (n.props as { notice?: unknown } | undefined)?.notice !== readText(APPROVAL_NOTICE).t) return "approval-notice text not the fixed PCC sentence";
     // card kind ⇒ exact companion props
     if (n.type === "card") {
-      const k = (n.props as any)?.kind;
+      const k = (n.props as { kind?: unknown } | undefined)?.kind;
       if (k === "run") { if (!hasOwn(n.props as object, "statusFrom") || !hasOwn(n.props as object, "latestFrom")) return "run card missing selectors"; }
       else if (hasOwn((n.props ?? {}) as object, "statusFrom") || hasOwn((n.props ?? {}) as object, "latestFrom")) return "capability card has run props";
     }
@@ -1131,8 +1226,8 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
     if (n.bind !== undefined) {
       if (spec.noBind || !spec.bindKey) return `${n.type} must not bind`;
       if (!isPlain(n.bind) || !onlyKeys(n.bind, ["path", "select", "query", "pollMs", "sse", "schema"])) return "bind shape";
-      const bk = policyKeyOf(n as unknown as IrNode) as string; // ONE resolution, shared with provenanceOf
-      const reason = bindMatchesPolicy(n.bind as unknown as IrBind, bk); if (reason) return `bind: ${reason}`;
+      const bk = policyKeyOf(n as Record<string, unknown> & IrNode) as string; // ONE resolution, shared with provenanceOf
+      const reason = bindMatchesPolicy(n.bind as Record<string, unknown> & IrBind, bk); if (reason) return `bind: ${reason}`;
       if (++bindCount > LIM.boundWindowsTotal) return "bound-window budget"; // poll-amplification cap (mirrors adapter)
     } else if (spec.needsBind) return `${n.type} requires a bind`;
     // stat (metric) label is PCC-OWNED — must equal the fixed label for its ALLOWLISTED
@@ -1143,7 +1238,7 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
       const bpath = (n.bind as { path?: unknown } | undefined)?.path;
       const expected = typeof bpath === "string" ? metricLabelForSource(bpath, src) : null;
       if (expected === null) return "stat (route, source) not an allowlisted metric field";
-      if ((n.props as { label?: unknown } | undefined)?.label !== expected) return "stat label is not the PCC-owned label for its (route, source)";
+      if ((n.props as { label?: unknown } | undefined)?.label !== readText(expected).t) return "stat label is not the PCC-owned label for its (route, source)";
     }
     // lists show only their route's PCC-owned field profile (never money fields)
     if (n.type === "list") {
@@ -1172,11 +1267,11 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
       if (spec.maxChildren !== undefined && n.children.length > spec.maxChildren) return `${n.type} too many children`;
       let windowKids = 0;
       for (let i = 0; i < n.children.length; i++) {
-        const c = n.children[i];
+        const c = (n.children as unknown[])[i];
         if (!isPlain(c) || !spec.parentOf || !spec.parentOf.includes((c as Record<string, unknown>).type as IrNodeType)) return `illegal child under ${n.type}`;
         if (n.type === "section") { // ≤1 heading, only at index 0, H2; the rest are windows (≤ cap)
           const ct = (c as Record<string, unknown>).type;
-          if (ct === "heading") { if (i !== 0) return "section heading must be first"; if ((c as any).props?.level !== 2) return "section heading must be H2"; }
+          if (ct === "heading") { if (i !== 0) return "section heading must be first"; if ((c as { props?: { level?: unknown } }).props?.level !== 2) return "section heading must be H2"; }
           else if (++windowKids > LIM.windowsPerSection) return "too many windows in section";
         }
         const e = walk(c, depth + 1); if (e) return e;
@@ -1187,7 +1282,7 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
   const e1 = walk(doc.title, 0); if (e1) return { ok: false, reason: `title: ${e1}` };
   const e2 = walk(doc.root, 0); if (e2) return { ok: false, reason: e2 };
   // a claim may not be split across prose (mirror of withholdSplitClaims) on the now well-formed tree
-  const sections = (doc.root as unknown as IrNode).children ?? [];
-  if (splitClaim([doc.title as unknown as IrNode, ...sections].flatMap((n) => agentProse(n)))) return { ok: false, reason: "agent prose states a claim across nodes" };
+  const sections = (doc.root as Record<string, unknown> & IrNode).children ?? [];
+  if (splitClaim([doc.title as Record<string, unknown> & IrNode, ...sections].flatMap((n) => agentProse(n)))) return { ok: false, reason: "agent prose states a claim across nodes" };
   return { ok: true };
 }

@@ -21,9 +21,16 @@ import { dirname, resolve } from "node:path";
 import { TextDecoder as NodeTextDecoder, TextEncoder as NodeTextEncoder } from "node:util";
 import { JSDOM } from "jsdom";
 import { describe, it, expect } from "vitest";
-import { LIST_PROFILES, dashboardManifestToIr, validateIr } from "./dashboard-ir.js";
+import { LIST_PROFILES, dashboardManifestToIr, validateIr, readText } from "./dashboard-ir.js";
 import type { IrNode } from "./dashboard-ir.js";
-import { listWindow } from "./dashboard-ir-renderer.js";
+import { listWindow as brandedListWindow } from "./dashboard-ir-renderer.js";
+
+// Keep this disclosure table about displayed text while authenticating the new
+// object representation before reading the same expected strings.
+function listWindow(...args: Parameters<typeof brandedListWindow>) {
+  const result = brandedListWindow(...args);
+  return { empty: readText(result.empty).t, note: result.note === null ? null : readText(result.note).t };
+}
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const KIT = readFileSync(resolve(HERE, "../../../../apps/dashboard/public/ui-kit/v1/pcc-ir-kit.js"), "utf8");
@@ -38,6 +45,13 @@ function listNode(bind: { path?: string; query?: Record<string, unknown> } | und
 }
 
 describe("N110 listWindow: unit table (pure, no DOM)", () => {
+  it.each([[Number.MAX_SAFE_INTEGER, "9007199254740992"], [Number.MAX_SAFE_INTEGER - 1, "9007199254740991"]])("maximum boundary offset %s retains master's row position", (offset, row) => {
+    const result = listWindow(listNode({ path: "/api/jobs", query: { offset } }), { jobs: [], total: 0 }, 0);
+    expect(result.note).toBe(`from row ${row} · total not shown`);
+    expect(result.empty).toBe("no rows in this window");
+    expect(result.empty).not.toBe("none");
+    expect(result.note).not.toContain("of 0 returned");
+  });
   it("no query: none, no note", () => {
     expect(listWindow(listNode(undefined), undefined, 0)).toEqual({ empty: "none", note: null });
   });
@@ -192,7 +206,7 @@ function scene(replies: Reply[], nowMs: number, opts: { origin?: boolean } = {})
     timers.splice(timers.indexOf(t), 1); now = t.at; t.fn(); await settle();
   };
   const q = (sel: string) => w.document.querySelector(sel) as any;
-  return { w, deliver, settle, nextPoll, q, close: () => w.close() };
+  return { w, deliver, settle, nextPoll, q, close: () => { expect(w.__PCC_UI_TEXT_VIOLATIONS__ ?? 0).toBe(0); w.close(); } };
 }
 const T0 = Date.parse("2026-09-24T12:00:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -213,6 +227,16 @@ const jobsManifest = (query?: Record<string, unknown>) => ({
 const JOB_ROW = { id: "job-001", capabilityId: "cap-nyc-fdm", kernelId: "kernel-nyc", status: "completed" };
 
 describe("N110 end-to-end on the rebuilt pcc-ir-kit.js", () => {
+  it.each([[Number.MAX_SAFE_INTEGER, "9007199254740992"], [Number.MAX_SAFE_INTEGER - 1, "9007199254740991"]])("committed bundle maximum boundary offset %s retains master's row position", async (offset, row) => {
+    const s = scene([{ status: 200, json: { jobs: [], total: 0, asOf: iso(T0) } }], T0);
+    try {
+      s.deliver(jobsManifest({ offset })); await s.settle();
+      expect(s.q(".pcc-list .pcc-window").textContent).toBe(`from row ${row} · total not shown`);
+      expect(s.q(".pcc-list .pcc-empty").textContent).toBe("no rows in this window");
+      expect(s.q(".pcc-list .pcc-empty").textContent).not.toBe("none");
+      expect(s.q(".pcc-list .pcc-window").textContent).not.toContain("of 0 returned");
+    } finally { s.close(); }
+  });
   it("a filtered, timed, empty capabilities list: 'no rows in this window' + a window note, never 'none'", async () => {
     const s = scene([{ status: 200, json: { items: [], total: 0, asOf: iso(T0) } }], T0);
     s.deliver(capsManifest({ type: "pizza" })); await s.settle();
