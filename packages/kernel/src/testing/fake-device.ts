@@ -150,7 +150,7 @@ export class FakeDevice implements MachineAdapter {
     }
     this.bindingKey = options.bindingKey ?? (this.ipp ? "ippJobId" : "deviceJobId");
     nonemptyString(this.bindingKey, "bindingKey");
-    if (["jobId", "mock", "origin", "progress", "state", "reason", "jobStateReasons"].includes(this.bindingKey)) {
+    if (["jobId", "mock", "origin", "progress", "state", "reason", "jobStateReasons", "settlementUnitId", "challengeNonce"].includes(this.bindingKey)) {
       throw new Error(`reserved bindingKey: ${this.bindingKey}`);
     }
     this.emissionBindingKey = this.bindingKey;

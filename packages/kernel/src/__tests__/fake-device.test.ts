@@ -40,6 +40,10 @@ describe("FakeDevice construction", () => {
   it.each(["jobId", "mock", "origin", "", "progress", "state", "reason", "jobStateReasons"])("rejects reserved or empty bindingKey %j", (bindingKey) => {
     expect(() => fixture({ bindingKey })).toThrow();
   });
+  it.each(["settlementUnitId", "challengeNonce"])("RV-INFO-B rejects bindingKey %s", (bindingKey) => {
+    expect(() => fixture({ bindingKey })).toThrow(`reserved bindingKey: ${bindingKey}`);
+  });
+
   it.each([
     { preset: "unknown" }, { type: "" }, { type: 5 }, { deviceType: "unknown" },
     { bindingKey: 5 }, { startedType: "unknown" }, { progressType: "unknown" },
