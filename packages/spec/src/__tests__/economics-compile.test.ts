@@ -628,6 +628,33 @@ describe("refusal identity is (code, path), with a normative path grammar", () =
   });
 });
 
+// ── Closed rule grammar (CC1) ────────────────────────────────────────────────
+
+describe("closed rule grammar (CC1)", () => {
+  it("unknown-rule-kind: royalty-forever is SCHEMA_INVALID and compiles no units", () => {
+    const ag = baseAgreement();
+    const r = compileEconomics({
+      ...ag,
+      clauses: [{ ...ag.clauses[0]!, rule: { kind: "royalty-forever", bps: 100 } }],
+    });
+    expect(codes(r)).toEqual(["SCHEMA_INVALID"]);
+    expect(r).not.toHaveProperty("units");
+  });
+
+  it("unknown-rule-key: a percent rule with an extra field is SCHEMA_INVALID and compiles no units", () => {
+    const ag = baseAgreement();
+    const r = compileEconomics({
+      ...ag,
+      clauses: [{
+        ...ag.clauses[0]!,
+        rule: { kind: "percent", bps: 10000, of: "net", min: null, max: null, rateSource: null, royaltyForever: true },
+      }],
+    });
+    expect(codes(r)).toEqual(["SCHEMA_INVALID"]);
+    expect(r).not.toHaveProperty("units");
+  });
+});
+
 // ── Every refusal, provoked ──────────────────────────────────────────────────
 
 describe("every refusal code is reachable", () => {

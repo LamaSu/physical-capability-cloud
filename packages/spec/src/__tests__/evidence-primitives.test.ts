@@ -33,18 +33,18 @@ const LIVE_FIRST_CLASS = [
 ];
 
 // The locked golden manifest hash of the shipped vocabulary (v1 16 + the
-// v1.5-industrial #52-#55 = 20 active defs). Any contract change (adding/removing
-// a primitive, changing tierSupport, auth, params, deps, gates, status) moves
-// this — the golden test then fails on purpose. Recomputed for the additive
-// v1.5-industrial cut (was 0x499f3a5d… for the v1-only 16-primitive contract).
+// v1.5-industrial #52-#55 + input.hash_bound #56 = 21 active defs). Any contract
+// change (adding/removing a primitive, changing tierSupport, auth, params, deps,
+// gates, status) moves this — the golden test then fails on purpose. Recomputed for the additive
+// input.hash_bound cut (was 0x9e034dd9… for the 20-primitive contract).
 const GOLDEN_VOCAB_MANIFEST_HASH =
-  "0x9e034dd9df85748de1bac4d199bd3928f6c4477b81eb20a83264bcd7fdd441ed";
+  "0x069ff08c4b39cc2b0ce808d0e8dcb3ba6eb57349c709e73b454bda2994c59582";
 
 // ── 1. The registry validates ───────────────────────────────────────
 
 describe("evidence vocabulary — registry validates", () => {
-  it("ships the 16 v1 + 4 v1.5-industrial primitives (20), all status:active", () => {
-    expect(EVIDENCE_PRIMITIVES).toHaveLength(20);
+  it("ships the 16 v1 + 4 v1.5-industrial + input.hash_bound primitives (21), all status:active", () => {
+    expect(EVIDENCE_PRIMITIVES).toHaveLength(21);
     for (const d of EVIDENCE_PRIMITIVES) expect(d.status).toBe("active");
   });
 

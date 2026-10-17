@@ -19,7 +19,7 @@ python3 -c "import json; print(json.load(open('.pcc/kernel.json'))['kernel']['id
 **Check:** HTTP 201, and `.pcc/kernel-id` holds an id such as `kernel_…`. The location comes from intake, as coarse as the human chose. The gateway reads only `lat` and `lng` from `location`, so a text address goes in `physicalAddress`.
 
 ## 2. The kernel's signing key
-Register the node key you made in phase 0 (step 3) as the kernel's signing key. The node signs its evidence with it, so its work can be checked against the kernel. pcc-node proves possession by signing a challenge; the private half never leaves the selected key file. Use the default `~/.pcc-node/keys.json`, or set `PCC_NODE_KEY_PATH` to a path outside every source checkout. Use the same location as phase 0, keeping any override set. Keep this owner-only location outside every source checkout. Key persistence requires Linux; the location checks arrive with the first release containing #374 (see phase 0 step 3).
+Register the node key you made in phase 0 (step 3) as the kernel's signing key. The node signs its evidence with it, so its work can be checked against the kernel. pcc-node proves possession by signing a challenge; the private half never leaves the selected key file. Use the default `~/.pcc-node/keys.json`, or set `PCC_NODE_KEY_PATH` (or the fallback `PCC_NODE_KEYS_FILE`) to an absolute path outside this folder and every source checkout. Use the same location as phase 0, keeping any override set. Keep this owner-only location outside every source checkout. Key persistence requires Linux; the location checks arrive with the first release containing #374 (see phase 0 step 3).
 
 **First, GET `$BASE/api/kernels/<id>`** and check it is the kernel you just created, with no signing key yet. A mistyped id would sign, and create, a different kernel.
 ```bash
@@ -30,7 +30,9 @@ import nacl.signing                                 # refuses here if the crypto
 from pcc_node.crypto import load_or_create_keys
 from pcc_node.register import register_signing_key
 read = lambda name: open(".pcc/" + name).read().strip()
-key_path = os.environ.get("PCC_NODE_KEY_PATH") or os.path.expanduser("~/.pcc-node/keys.json")
+key_path = os.environ.get("PCC_NODE_KEY_PATH") or os.environ.get("PCC_NODE_KEYS_FILE") or os.path.expanduser("~/.pcc-node/keys.json")
+if not os.path.isabs(key_path) or os.path.realpath(key_path).startswith(os.path.realpath(".") + os.sep):
+    raise SystemExit("The node key location must be an absolute path outside this folder and every source checkout")
 os.makedirs(os.path.dirname(key_path), mode=0o700, exist_ok=True)  # 0.1.1 r2 does not create it
 pub, sec = load_or_create_keys(key_path)              # explicit: 0.1.1 r2 would otherwise write ./pcc-keys.json
 status, _ = register_signing_key(read("base"), read("api-key"), read("kernel-id"), pub, sec)

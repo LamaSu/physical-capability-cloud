@@ -6,7 +6,8 @@
  * signed evidence bundle.
  */
 
-import type { AssuranceTier, SHA256 } from "@pcc/spec";
+import { createHash } from "node:crypto";
+import { computeTierLadderDigest, TierLadderError, type AssuranceTier, type EvidenceEvent, type SHA256, type TierLadderV1 } from "@pcc/spec";
 import type { MachineAdapter, SensorAdapter, CameraAdapter } from "./adapters/types.js";
 import { EvidenceEmitter } from "./evidence-emitter.js";
 import { openEvidenceSession } from "./evidence-session.js";
@@ -24,10 +25,17 @@ export type OnPhaseCallback = (
 export interface JobConfig {
   jobId: string;
   stepId: string;
-  gcodeHash: SHA256;
+  /** Exact input bytes' SHA-256: sha256: followed by 64 lowercase hex digits. Give exactly one hash. */
+  inputHash?: SHA256;
+  /** Legacy alias of inputHash. Give exactly one of inputHash and gcodeHash. */
+  gcodeHash?: SHA256;
   assuranceTier: AssuranceTier;
-  /** Input file data (in production: fetch from storage) */
-  gcodeData?: string;
+  /** Exact input bytes; required for prepare. A string means its UTF-8 bytes. Give at most one data field. */
+  inputData?: string | Uint8Array;
+  /** Legacy alias of inputData. Give at most one of inputData and gcodeData. */
+  gcodeData?: string | Uint8Array;
+  /** From compileTierLadder(csd). Required for prepare; replaces FDM defaults on legacy jobs. */
+  tierLadder?: TierLadderV1;
   /**
    * Optional callback for phase telemetry events.
    * The kernel package cannot import gateway telemetry directly, so callers
@@ -94,7 +102,64 @@ export class JobRunner {
 
   async run(config: JobConfig): Promise<JobResult> {
     const startTime = Date.now();
-    const { jobId, stepId, gcodeHash, assuranceTier, onPhase } = config;
+    const { jobId, stepId, inputHash, gcodeHash: legacyGcodeHash, inputData, gcodeData, tierLadder, assuranceTier, onPhase } = config;
+    const refuse = (error: string): JobResult => ({ success: false, error, durationMs: Date.now() - startTime });
+
+    // Synchronous preflight: no session, step registration, command or phase callback.
+    if ((inputHash !== undefined) === (legacyGcodeHash !== undefined)) {
+      return refuse("give exactly one of inputHash and gcodeHash");
+    }
+    const gcodeHash = inputHash !== undefined ? inputHash : legacyGcodeHash!;
+    if (inputData !== undefined && gcodeData !== undefined) {
+      return refuse("give at most one of inputData and gcodeData");
+    }
+    const data = inputData !== undefined ? inputData : gcodeData;
+    const accepts = this.machine.accepts;
+    let prepare = false;
+    if (accepts !== undefined) {
+      if (!Array.isArray(accepts) || !accepts.every((type) => typeof type === "string")) {
+        return refuse("accepts must be a list of command types");
+      }
+      if (accepts.includes("prepare")) prepare = true;
+      else if (!accepts.includes("load_gcode")) return refuse("accepts neither prepare nor load_gcode");
+      if (!accepts.includes("start")) return refuse("adapter does not accept start");
+    }
+    if (prepare && (typeof gcodeHash !== "string" || !/^sha256:[0-9a-f]{64}$/.test(gcodeHash))) {
+      return refuse("inputHash must be sha256: followed by 64 lowercase hex digits");
+    }
+    if (prepare && data === undefined) return refuse("the prepare path needs input data");
+    let inputBytes: Uint8Array | undefined;
+    if (data !== undefined) {
+      if (typeof data !== "string" && !(data instanceof Uint8Array)) {
+        return refuse("input data must be a string or bytes");
+      }
+      if (typeof data === "string" && Buffer.from(data, "utf8").toString("utf8") !== data) {
+        return refuse("input data is not well-formed text");
+      }
+      // Keep the hashed bytes private, including when the caller uses SharedArrayBuffer.
+      try {
+        inputBytes = typeof data === "string" ? new Uint8Array(Buffer.from(data, "utf8")) : new Uint8Array(data);
+      } catch {
+        return refuse("input data must be a string or bytes");
+      }
+      const computed = `sha256:${createHash("sha256").update(inputBytes).digest("hex")}`;
+      if (computed !== gcodeHash) return refuse("input data does not match its hash");
+    }
+    let requirements: TierLadderV1["tiers"] | undefined;
+    if (tierLadder !== undefined) {
+      try {
+        computeTierLadderDigest(tierLadder);
+        requirements = structuredClone(tierLadder.tiers);
+      } catch (err) {
+        const code = err instanceof TierLadderError ? err.code : "malformed-ladder";
+        return refuse(`tier ladder is malformed: ${code}`);
+      }
+      if (!requirements.some((entry) => entry.tier === assuranceTier)) {
+        return refuse(`tier ladder has no tier ${assuranceTier}`);
+      }
+    } else if (prepare) {
+      return refuse("the prepare path needs a tier ladder");
+    }
 
     // addEvent hashes asynchronously before it stores an event, so each one is
     // recorded on one chain, in the order it was emitted, and the tier check and the
@@ -108,6 +173,28 @@ export class JobRunner {
     // Its chain then lacks that event, so the run fails: success would sign an incomplete
     // record (found with astra pack 192, where printer-job.ts swallowed the same failure).
     const unrecorded: { first: { type: string; error: string } | null } = { first: null };
+    const adapterMethodLoaded: { first: Omit<EvidenceEvent, "id" | "hash"> | null } = { first: null };
+    let deviceJobId: string | undefined;
+    const carriesInputHash = (payload: Record<string, unknown>): boolean =>
+      payload !== null && typeof payload === "object" && "inputHash" in payload;
+    const forbiddenAdapterMethod = (event: Omit<EvidenceEvent, "id" | "hash">): boolean =>
+      event.type === "method_loaded" && (prepare || carriesInputHash(event.payload));
+    const record = (event: Omit<EvidenceEvent, "id" | "hash">, adapterOrigin = false): void => {
+      recorded = recorded.then(async () => {
+        if (sealed) return;
+        // A listener may mutate an adapter event while it waits in this queue.
+        if (adapterOrigin && carriesInputHash(event.payload) && forbiddenAdapterMethod(event)) {
+          adapterMethodLoaded.first ??= event;
+          return;
+        }
+        try {
+          await this.evidenceEmitter.addEvent(jobId, stepId, event);
+        } catch (err) {
+          unrecorded.first ??= { type: event.type, error: err instanceof Error ? err.message : String(err) };
+          console.error(err);
+        }
+      });
+    };
 
     // Every refusal below comes before any adapter command, and before registerStep,
     // which would overwrite the step of a job already running under the same ids. The
@@ -144,15 +231,11 @@ export class JobRunner {
       adapters,
       { jobId, stepId },
       (event) => {
-        recorded = recorded.then(async () => {
-          if (sealed) return;
-          try {
-            await this.evidenceEmitter.addEvent(jobId, stepId, event);
-          } catch (err) {
-            unrecorded.first ??= { type: event.type, error: err instanceof Error ? err.message : String(err) };
-            console.error(err);
-          }
-        });
+        if (forbiddenAdapterMethod(event)) {
+          adapterMethodLoaded.first ??= event;
+          return;
+        }
+        record(event, true);
       },
     );
     if (!opened.ok) {
@@ -200,7 +283,43 @@ export class JobRunner {
           },
         },
         async () => {
-          // 1. Load G-code
+          // 1. Stage neutral input, or use the unchanged legacy G-code command.
+          if (prepare) {
+            const prepareResult = await Sentry.startSpan(
+              { name: "job.prepare", op: "job.phase", attributes: { "job.id": jobId } },
+              async () => this.machine.execute({
+                type: "prepare",
+                payload: {
+                  jobId,
+                  inputHash: gcodeHash,
+                  inputData: new Uint8Array(inputBytes!),
+                },
+              }),
+            );
+            // Read the ack once. Only validated local values reach the kernel proof.
+            const success = prepareResult.success;
+            const message = prepareResult.message;
+            const data = prepareResult.data;
+            const ack = data !== null && typeof data === "object" && !Array.isArray(data) ? data : undefined;
+            const ackJobId = ack?.jobId;
+            const ackInputHash = ack?.inputHash;
+            const ackDeviceJobId = ack?.deviceJobId;
+            if (success !== true) return refuse(`Failed to prepare the input: ${message}`);
+            if (ack === undefined) return refuse("the prepare ack carries no data");
+            if (ackJobId !== jobId) return refuse("the prepare ack did not echo jobId");
+            if (ackInputHash !== gcodeHash) return refuse("the prepare ack did not echo inputHash");
+            if (typeof ackDeviceJobId !== "string" || ackDeviceJobId.length === 0) {
+              return refuse("the prepare ack named no deviceJobId");
+            }
+            deviceJobId = ackDeviceJobId;
+            if (adapterMethodLoaded.first !== null) return refuse("an adapter emitted method_loaded");
+            record({
+              type: "method_loaded",
+              timestamp: new Date().toISOString(),
+              source: { ...this.machine.source },
+              payload: { jobId, deviceJobId, inputHash: gcodeHash },
+            });
+          } else {
           const loadResult = await Sentry.startSpan(
             { name: "job.load_gcode", op: "job.phase", attributes: { "job.id": jobId } },
             async () =>
@@ -213,6 +332,8 @@ export class JobRunner {
           );
           if (!loadResult.success) {
             return { success: false, error: `Failed to load G-code: ${loadResult.message}`, durationMs: Date.now() - startTime };
+          }
+          if (adapterMethodLoaded.first !== null) return refuse("an adapter emitted method_loaded");
           }
 
           // 2. Start sensors (Tier 1+)
@@ -311,7 +432,23 @@ export class JobRunner {
           // Check tier requirements are met, over every event the run accepted. A camera event
           // counts only as an LO-SE-1 capture for THIS job, so the check needs the jobId.
           const events = this.evidenceEmitter.getEvents(jobId, stepId);
-          const check = this.evidenceEmitter.checkTierRequirements(events, assuranceTier, undefined, { jobId });
+          if (adapterMethodLoaded.first !== null) return refuse("an adapter emitted method_loaded");
+          const methods = events.filter((event) => event.type === "method_loaded");
+          if (prepare) {
+            // Adapter events retain their references until recording. A type changed
+            // after emission must not introduce another input proof into the bundle.
+            const payload = methods[0]?.payload;
+            // TODO PR-2a: allow the emitter's unit binding fields once JobRunner registers a unit.
+            if (methods.length !== 1 || payload === null || typeof payload !== "object" ||
+                Array.isArray(payload) || Reflect.ownKeys(payload).length !== 3 ||
+                !["jobId", "deviceJobId", "inputHash"].every((key) => Object.hasOwn(payload, key)) ||
+                payload.jobId !== jobId || payload.deviceJobId !== deviceJobId || payload.inputHash !== gcodeHash) {
+              return refuse("the bundle would carry a method_loaded the kernel did not record");
+            }
+          } else if (methods.some((event) => carriesInputHash(event.payload))) {
+            return refuse("the bundle would carry a method_loaded the kernel did not record");
+          }
+          const check = this.evidenceEmitter.checkTierRequirements(events, assuranceTier, requirements, { jobId });
           if (!check.met) {
             // For tier >= 2, unmet requirements are a hard failure
             if (assuranceTier >= 2) {

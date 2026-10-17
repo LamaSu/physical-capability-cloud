@@ -78,10 +78,16 @@ vi.mock("../contracts/batch-settlement.js", () => ({
 }));
 
 // ── Imports (after mocks) ─────────────────────────────────────────────────────
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos, getStore } from "../db.js";
+import { schema } from "@pcc/store";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { UNAVAILABLE_POLICY_CASES, applyUnavailablePolicy } from "./helpers/emergency-stop-policy-cases.js";
 import { Sentry } from "../sentry.js";
-import { KernelService } from "../services/kernel-service.js";
+import { KernelService, initKernelService, resetKernelService } from "../services/kernel-service.js";
 import {
+  JobRunner,
   getSafetyGateway,
   initSafetyGateway,
   resetSafetyGateway,
@@ -187,6 +193,8 @@ class HeldAdapter implements MachineAdapter {
 const FAIL_TYPE = "test-fail-load-ks-safety";
 const OFFLINE_TYPE = "test-offline-ks-safety";
 const HELD_TYPE = "test-held-ks-safety";
+const DIFFERENT_ID_TYPE = "test-different-id-ks-safety";
+const SLOW_TYPE = "test-slow-ks-safety";
 let heldAdapter: HeldAdapter | undefined;
 
 async function waitFor(pred: () => boolean, timeoutMs = 2_000): Promise<void> {
@@ -207,24 +215,46 @@ beforeAll(() => {
   registerMachineAdapter(OFFLINE_TYPE, (device, _cfg, kernelId) => new OfflineAdapter(device.id, kernelId));
   try { unregisterMachineAdapter(HELD_TYPE); } catch { /* not registered */ }
   registerMachineAdapter(HELD_TYPE, (device, _cfg, kernelId) => (heldAdapter = new HeldAdapter(device.id, kernelId)));
+  registerMachineAdapter(DIFFERENT_ID_TYPE, (_device, _cfg, kernelId) => new OfflineAdapter("runtime-device-id", kernelId));
+  registerMachineAdapter(SLOW_TYPE, (device, _cfg, kernelId) => {
+    const adapter = new OfflineAdapter(device.id, kernelId);
+    adapter.getStatus = () => new Promise(() => {});
+    return adapter;
+  });
 });
 
 afterAll(() => {
   try { unregisterMachineAdapter(FAIL_TYPE); } catch { /* already gone */ }
   try { unregisterMachineAdapter(OFFLINE_TYPE); } catch { /* already gone */ }
   try { unregisterMachineAdapter(HELD_TYPE); } catch { /* already gone */ }
+  try { unregisterMachineAdapter(DIFFERENT_ID_TYPE); } catch { /* already gone */ }
+  try { unregisterMachineAdapter(SLOW_TYPE); } catch { /* already gone */ }
 });
 
 beforeEach(() => {
-  process.env.PCC_DB_PATH = ":memory:";
+  vi.stubEnv("PCC_DB_PATH", ":memory:");
+  vi.stubEnv("DATABASE_URL", ":memory:");
+  vi.stubEnv("PCC_JOB_SUBMIT_QUEUE_ONLY", undefined);
+  vi.stubEnv("NODE_ENV", "test");
+  for (const key of ["KERNEL_CONFIG", "KERNEL_CONFIG_FILE", "KERNEL_ID"]) {
+    vi.stubEnv(key, "");
+    delete process.env[key];
+  }
   initStore({ seed: false });
   resetSafetyGateway();
+  vi.mocked(Sentry.startSpanManual).mockImplementation((_o: unknown, cb: (span: object) => void) => {
+    cb({ end: vi.fn(), setStatus: vi.fn() });
+  });
 });
 
 afterEach(() => {
+  resetKernelService();
   resetSafetyGateway();
   closeStore();
+  vi.restoreAllMocks();
   vi.clearAllMocks();
+  vi.unstubAllEnvs();
+  vi.useRealTimers();
 });
 
 // ── Real execution failures reach the breaker ─────────────────────────────────
@@ -244,18 +274,18 @@ describe("KernelService.submitJob — real device failures trip the breaker", ()
     const svc = new KernelService(config);
 
     // Job 1 — fails.
-    await svc.submitJob({ jobId: "ks-fail-1", stepId: "s", assuranceTier: 0, deviceId: "dev-fail" });
+    await svc.submitJob({ kernelId: config.kernelId, jobId: "ks-fail-1", stepId: "s", assuranceTier: 0, deviceId: "dev-fail" });
     await waitFor(() => (gw.getStatus().circuits.get("dev-fail")?.failures ?? 0) >= 1);
     expect(gw.getStatus().circuits.get("dev-fail")?.state).toBe("closed"); // 1 of 2
 
     // Job 2 — fails → trips.
-    await svc.submitJob({ jobId: "ks-fail-2", stepId: "s", assuranceTier: 0, deviceId: "dev-fail" });
+    await svc.submitJob({ kernelId: config.kernelId, jobId: "ks-fail-2", stepId: "s", assuranceTier: 0, deviceId: "dev-fail" });
     await waitFor(() => gw.getStatus().circuits.get("dev-fail")?.state === "open");
     expect(gw.getStatus().circuits.get("dev-fail")?.state).toBe("open");
 
     // Job 3 — blocked by the tripped breaker (admission rejects before accepting).
     await expect(
-      svc.submitJob({ jobId: "ks-fail-3", stepId: "s", assuranceTier: 0, deviceId: "dev-fail" }),
+      svc.submitJob({ kernelId: config.kernelId, jobId: "ks-fail-3", stepId: "s", assuranceTier: 0, deviceId: "dev-fail" }),
     ).rejects.toThrow(/circuit_open|denied/i);
   });
 });
@@ -304,10 +334,10 @@ async function busyRefusalsAreNotFailures(kernelId: string): Promise<void> {
   };
 
   // Job 1 runs, and holds the device until its adapter answers.
-  await svc.submitJob({ jobId: "ks-busy-1", stepId: "s", assuranceTier: 0, deviceId: "dev-held" });
+  await svc.submitJob({ kernelId, jobId: "ks-busy-1", stepId: "s", assuranceTier: 0, deviceId: "dev-held" });
   // Jobs 2 and 3 are refused busy: twice the breaker's threshold, were refusals failures.
   for (const jobId of ["ks-busy-2", "ks-busy-3"]) {
-    await svc.submitJob({ jobId, stepId: "s", assuranceTier: 0, deviceId: "dev-held" });
+    await svc.submitJob({ kernelId, jobId, stepId: "s", assuranceTier: 0, deviceId: "dev-held" });
     await waitDone(jobId);
   }
   expect(heldAdapter?.commands, "commands the device received: job 1's only").toEqual(["load_gcode", "start"]);
@@ -315,7 +345,7 @@ async function busyRefusalsAreNotFailures(kernelId: string): Promise<void> {
   expect.soft(gw.getStatus().circuits.get("dev-held")?.failures ?? 0, "device failures recorded").toBe(0);
   expect.soft(gw.getStatus().circuits.get("dev-held")?.state ?? "closed", "the breaker").toBe("closed");
   await expect.soft(
-    svc.submitJob({ jobId: "ks-busy-4", stepId: "s", assuranceTier: 0, deviceId: "dev-held" }),
+    svc.submitJob({ kernelId, jobId: "ks-busy-4", stepId: "s", assuranceTier: 0, deviceId: "dev-held" }),
     "job 4's admission",
   ).resolves.toMatchObject({ status: "accepted" });
   await waitDone("ks-busy-4").catch(() => {});
@@ -363,6 +393,299 @@ describe("KernelService.listDevices — real health, not hardcoded", () => {
       "dev-ok": "healthy",        // untouched
       "dev-degrade": "degraded",  // adapter idle + breaker open → degraded
       "dev-off": "offline",       // adapter offline
+    });
+  });
+});
+
+const DISPATCH_KERNEL = "kernel-ks-n104";
+
+function seedDispatchKernel() {
+  const now = new Date().toISOString();
+  getRepos().kernels.insert({
+    id: DISPATCH_KERNEL, name: DISPATCH_KERNEL, operatorAddress: "operator-n104",
+    location: { lat: 0, lng: 0 }, physicalAddress: "1 Bench Row", maxAssuranceTier: 2,
+    publicKey: "pk", reputation: 0, totalJobsCompleted: 0, status: "online",
+    registeredAt: now, lastHeartbeat: now, version: "1",
+  } as never);
+}
+
+function stopDispatchKernel() {
+  getStore().db.insert(schema.operatorPolicies).values({
+    kernelId: DISPATCH_KERNEL,
+    policy: { emergencyStop: true },
+    updatedAt: new Date().toISOString(),
+  }).run();
+}
+
+function dispatchService(config: Partial<KernelConfig> = {}) {
+  return new KernelService({
+    kernelId: DISPATCH_KERNEL,
+    devices: [{ id: "dev-n104", type: "machine", adapterType: "mock", config: {} }],
+    ...config,
+  });
+}
+
+describe.each(["Sentry span", "Sentry fallback"])("N104 local dispatch final defense — %s", (path) => {
+  beforeEach(() => {
+    seedDispatchKernel();
+    vi.mocked(Sentry.startSpanManual).mockImplementation((_o: unknown, cb: (span: object) => void) => {
+      if (path === "Sentry fallback") throw new Error("Sentry unavailable");
+      cb({ end: vi.fn(), setStatus: vi.fn() });
+    });
+  });
+
+  afterEach(() => {
+    vi.mocked(Sentry.startSpanManual).mockImplementation((_o: unknown, cb: (span: object) => void) => {
+      cb({ end: vi.fn(), setStatus: vi.fn() });
+    });
+  });
+
+  it.each([
+    ["no local kernel id", undefined, DISPATCH_KERNEL, false, false, "not_local"],
+    ["empty local kernel id", "", DISPATCH_KERNEL, false, false, "not_local"],
+    ["different kernel id", DISPATCH_KERNEL, "remote-kernel", false, false, "not_local"],
+    ["queue-only mode", DISPATCH_KERNEL, DISPATCH_KERNEL, true, false, "queue_only"],
+    ["emergency stop", DISPATCH_KERNEL, DISPATCH_KERNEL, false, true, "emergency_stop"],
+  ] as const)("queues before admission for %s", async (_label, localId, jobKernelId, queueOnly, stopped, reason) => {
+    // Explicit undefined is intentional: KernelService may be initialized with
+    // an incomplete runtime config, which must never authorize actuation.
+    const svc = dispatchService({ kernelId: localId as string });
+    if (queueOnly) vi.stubEnv("PCC_JOB_SUBMIT_QUEUE_ONLY", "true");
+    if (stopped) stopDispatchKernel();
+    const run = vi.spyOn(JobRunner.prototype, "run");
+    const preflight = vi.spyOn(getSafetyGateway(), "validateOnly");
+    await expect(svc.submitJob({ jobId: "n104-blocked", kernelId: jobKernelId, stepId: "s" }))
+      .resolves.toEqual({ jobId: "n104-blocked", deviceId: null, status: "queued", reason });
+    expect(preflight).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it.each(UNAVAILABLE_POLICY_CASES)("queues before admission for $label", async (policyCase) => {
+    const svc = dispatchService();
+    applyUnavailablePolicy(DISPATCH_KERNEL, policyCase);
+    const run = vi.spyOn(JobRunner.prototype, "run");
+    const preflight = vi.spyOn(getSafetyGateway(), "validateOnly");
+    await expect(svc.submitJob({ jobId: "n104-unavailable", kernelId: DISPATCH_KERNEL, stepId: "s" }))
+      .resolves.toEqual({ jobId: "n104-unavailable", deviceId: null, status: "queued", reason: "policy_unavailable" });
+    expect(preflight).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "false", "TRUE", "1"])("dispatches a positive match with queue-only=%s", async (flag) => {
+    vi.stubEnv("PCC_JOB_SUBMIT_QUEUE_ONLY", flag);
+    const svc = dispatchService();
+    const run = vi.spyOn(JobRunner.prototype, "run").mockResolvedValue({ success: true, durationMs: 0 });
+    await expect(svc.submitJob({ jobId: "n104-matched", kernelId: DISPATCH_KERNEL, stepId: "s" }))
+      .resolves.toMatchObject({ deviceId: "dev-n104", status: "accepted" });
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("rechecks the emergency stop after an awaited safety preflight", async () => {
+    const svc = dispatchService();
+    const run = vi.spyOn(JobRunner.prototype, "run");
+    vi.spyOn(getSafetyGateway(), "validateOnly").mockImplementation(async () => {
+      await Promise.resolve();
+      stopDispatchKernel();
+      return { allowed: true, executed: false };
+    });
+    await expect(svc.submitJob({ jobId: "n104-preflight-stop", kernelId: DISPATCH_KERNEL, stepId: "s" }))
+      .resolves.toMatchObject({ status: "queued" });
+    expect(run).not.toHaveBeenCalled();
+    expect(Sentry.startSpanManual).not.toHaveBeenCalled();
+  });
+
+  it.each(["emergency stop", "queue-only mode"])("rechecks %s immediately before runner.run", async (blocker) => {
+    const svc = dispatchService();
+    const run = vi.spyOn(JobRunner.prototype, "run");
+    vi.mocked(Sentry.startSpanManual).mockImplementation((_o: unknown, cb: (span: object) => void) => {
+      if (blocker === "emergency stop") stopDispatchKernel();
+      else vi.stubEnv("PCC_JOB_SUBMIT_QUEUE_ONLY", "true");
+      if (path === "Sentry fallback") throw new Error("Sentry unavailable");
+      cb({ end: vi.fn(), setStatus: vi.fn() });
+    });
+    await expect(svc.submitJob({ jobId: "n104-runner-stop", kernelId: DISPATCH_KERNEL, stepId: "s" }))
+      .resolves.toEqual({
+        jobId: "n104-runner-stop", deviceId: null, status: "queued",
+        reason: blocker === "emergency stop" ? "emergency_stop" : "queue_only",
+      });
+    expect(run).not.toHaveBeenCalled();
+    expect(await svc.getJobStatus("n104-runner-stop")).toMatchObject({ status: "unknown" });
+  });
+
+  it("resets a persisted job to queued when dispatch is blocked in the span callback", async () => {
+    const svc = dispatchService();
+    getRepos().capabilities.insert({
+      id: "cap-n104-persisted", kernelId: DISPATCH_KERNEL, type: "fdm", name: "N104",
+      materials: [], assuranceTiers: [0], pricing: { currency: "USDC", baseCost: "0", minimum: "0" },
+      availability: {}, location: { lat: 0, lng: 0 },
+    });
+    getRepos().jobs.insert({
+      id: "n104-persisted", stepId: "s", cwmId: "cwm-n104", capabilityId: "cap-n104-persisted",
+      kernelId: DISPATCH_KERNEL, status: "queued", assignedDevices: [], progress: 0,
+    });
+    const run = vi.spyOn(JobRunner.prototype, "run");
+    vi.mocked(Sentry.startSpanManual).mockImplementation((_o: unknown, cb: (span: object) => void) => {
+      expect(getRepos().jobs.findById("n104-persisted")?.status).toBe("executing");
+      stopDispatchKernel();
+      if (path === "Sentry fallback") throw new Error("Sentry unavailable");
+      cb({ end: vi.fn(), setStatus: vi.fn() });
+    });
+    await expect(svc.submitJob({ jobId: "n104-persisted", kernelId: DISPATCH_KERNEL, stepId: "s" }))
+      .resolves.toEqual({ jobId: "n104-persisted", deviceId: null, status: "queued", reason: "emergency_stop" });
+    expect(run).not.toHaveBeenCalled();
+    expect(getRepos().jobs.findById("n104-persisted")?.status).toBe("queued");
+    expect(await svc.getJobStatus("n104-persisted")).toMatchObject({ status: "queued", progress: 0 });
+  });
+});
+
+describe("N104 explicit local configuration", () => {
+  it.each([undefined, "kernel-from-id-only"])("does not authorize generated defaults with KERNEL_ID=%s", async (id) => {
+    vi.stubEnv("KERNEL_ID", id ?? "");
+    if (id === undefined) delete process.env.KERNEL_ID;
+    const svc = new KernelService();
+    expect(svc.hasExplicitConfig).toBe(false);
+    const run = vi.spyOn(JobRunner.prototype, "run");
+    await expect(svc.submitJob({ jobId: "default-blocked", kernelId: svc.kernelId, stepId: "s" }))
+      .resolves.toEqual({ jobId: "default-blocked", deviceId: null, status: "queued", reason: "no_configured_local_kernel" });
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it.each(["constructor", "KERNEL_CONFIG", "KERNEL_CONFIG_FILE"])("records explicit configuration from %s", (source) => {
+    const config = { kernelId: DISPATCH_KERNEL, devices: [] };
+    const dir = mkdtempSync(join(tmpdir(), "n104-kernel-config-"));
+    try {
+      if (source === "KERNEL_CONFIG") vi.stubEnv("KERNEL_CONFIG", JSON.stringify(config));
+      if (source === "KERNEL_CONFIG_FILE") {
+        const filename = join(dir, "kernel.json");
+        writeFileSync(filename, JSON.stringify(config));
+        vi.stubEnv("KERNEL_CONFIG_FILE", filename);
+      }
+      const svc = new KernelService(source === "constructor" ? config : undefined);
+      expect(svc.hasExplicitConfig).toBe(true);
+      expect(svc.kernelId).toBe(DISPATCH_KERNEL);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("never treats the placeholder as a local identity even with an explicit config", async () => {
+    const svc = dispatchService({ kernelId: "kernel_dev_001" });
+    expect(svc.hasExplicitConfig).toBe(true);
+    const run = vi.spyOn(JobRunner.prototype, "run");
+    await expect(svc.submitJob({ jobId: "placeholder-blocked", kernelId: "kernel_dev_001", stepId: "s" }))
+      .resolves.toEqual({ jobId: "placeholder-blocked", deviceId: null, status: "queued", reason: "no_configured_local_kernel" });
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("does not load or refresh DB machines under the placeholder (explicit=%s)", (explicit) => {
+    const now = new Date().toISOString();
+    getRepos().kernels.insert({
+      id: "kernel_dev_001", name: "placeholder", operatorAddress: "operator-n104",
+      location: { lat: 0, lng: 0 }, physicalAddress: "1 Bench Row", maxAssuranceTier: 2,
+      publicKey: "pk", reputation: 0, totalJobsCompleted: 0, status: "online",
+      registeredAt: now, lastHeartbeat: now, version: "1",
+    } as never);
+    getRepos().kernels.insertDevice({
+      id: "dev-default-db", kernelId: "kernel_dev_001", type: "machine", model: "BENCH",
+      firmware: "1.0", status: "idle", contributesToCapabilities: [], lastUpdated: now,
+      adapterType: OFFLINE_TYPE,
+    } as never);
+    const svc = new KernelService(explicit ? { kernelId: "kernel_dev_001", devices: [] } : undefined);
+    expect(svc.hasRunner("dev-default-db")).toBe(false);
+    expect(svc.refreshDeviceFromDb("dev-default-db"))
+      .toEqual({ installed: false, reason: "no_configured_local_kernel" });
+    expect(svc.hasRunner("dev-default-db")).toBe(false);
+  });
+});
+
+it("does not dispatch a second runner if Sentry throws after invoking the callback", async () => {
+  const svc = dispatchService();
+  const run = vi.spyOn(JobRunner.prototype, "run").mockResolvedValue({ success: true, durationMs: 0 });
+  vi.mocked(Sentry.startSpanManual).mockImplementation((_o: unknown, cb: (span: object) => void) => {
+    cb({ end: vi.fn(), setStatus: vi.fn() });
+    throw new Error("Sentry failed after dispatch");
+  });
+  await expect(svc.submitJob({ jobId: "n104-once", kernelId: DISPATCH_KERNEL, stepId: "s" }))
+    .resolves.toEqual({ jobId: "n104-once", deviceId: "dev-n104", status: "accepted" });
+  expect(run).toHaveBeenCalledTimes(1);
+});
+
+describe("N104 listDevices runtime inventory", () => {
+  it("reports a runtime factory whose adapter id differs from its config id", async () => {
+    const svc = dispatchService({
+      devices: [{ id: "configured-device-id", type: "machine", adapterType: DIFFERENT_ID_TYPE, config: {} }],
+    });
+    expect(svc.hasRunner("runtime-device-id")).toBe(true);
+    expect(await svc.listDevices()).toContainEqual({
+      id: "runtime-device-id", type: "machine", adapterType: "unknown", healthStatus: "offline",
+    });
+  });
+
+  it("bounds a slow DB device's health check and reports unknown while other devices stay healthy", async () => {
+    vi.useFakeTimers();
+    seedDispatchKernel();
+    getRepos().kernels.insertDevice({
+      id: "dev-n104-slow", kernelId: DISPATCH_KERNEL, type: "machine", model: "BENCH",
+      firmware: "1.0", status: "idle", contributesToCapabilities: [], lastUpdated: new Date().toISOString(),
+      adapterType: SLOW_TYPE,
+    } as never);
+    const svc = dispatchService();
+    expect(svc.hasRunner("dev-n104-slow")).toBe(true);
+    let completed = false;
+    const inventory = svc.listDevices().then((devices) => { completed = true; return devices; });
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(completed).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await inventory).toEqual(expect.arrayContaining([
+      { id: "dev-n104", type: "machine", adapterType: "mock", healthStatus: "healthy" },
+      { id: "dev-n104-slow", type: "machine", adapterType: SLOW_TYPE, healthStatus: "unknown" },
+    ]));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("includes DB-registered runners absent from config and keeps live adapter metadata", async () => {
+    seedDispatchKernel();
+    const now = new Date().toISOString();
+    getRepos().kernels.insertDevice({
+      id: "dev-n104-db", kernelId: DISPATCH_KERNEL, type: "machine", model: "BENCH",
+      firmware: "1.0", status: "idle", contributesToCapabilities: [], lastUpdated: now,
+      adapterType: OFFLINE_TYPE,
+    } as never);
+    const svc = initKernelService({
+      kernelId: DISPATCH_KERNEL,
+      devices: [{ id: "dev-n104", type: "machine", adapterType: "mock", config: {} }],
+    });
+    expect(svc.hasRunner("dev-n104-db")).toBe(true);
+    expect(await svc.listDevices()).toEqual(expect.arrayContaining([
+      { id: "dev-n104", type: "machine", adapterType: "mock", healthStatus: "healthy" },
+      { id: "dev-n104-db", type: "machine", adapterType: OFFLINE_TYPE, healthStatus: "offline" },
+    ]));
+    const { default: Fastify } = await import("fastify");
+    const { setupRoutes } = await import("../routes/setup.js");
+    const app = Fastify({ logger: false });
+    try {
+      await app.register(setupRoutes);
+      const detected = await app.inject({ method: "GET", url: "/api/setup/detect" });
+      expect(detected.statusCode).toBe(200);
+      expect(detected.json().kernelService).toMatchObject({
+        ready: true,
+        devices: expect.arrayContaining([
+          { id: "dev-n104-db", type: "machine", adapterType: OFFLINE_TYPE, healthy: false },
+        ]),
+      });
+    } finally {
+      await app.close();
+    }
+    // A refreshed DB registration can replace a configured runner; report
+    // the installed adapter rather than stale config metadata.
+    getRepos().kernels.insertDevice({
+      id: "dev-n104", kernelId: DISPATCH_KERNEL, type: "machine", model: "BENCH",
+      firmware: "1.0", status: "idle", contributesToCapabilities: [], lastUpdated: now,
+      adapterType: OFFLINE_TYPE,
+    } as never);
+    expect(svc.refreshDeviceFromDb("dev-n104")).toEqual({ installed: true });
+    expect(await svc.listDevices()).toContainEqual({
+      id: "dev-n104", type: "machine", adapterType: OFFLINE_TYPE, healthStatus: "offline",
     });
   });
 });

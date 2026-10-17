@@ -247,41 +247,6 @@ class TestRunDaemonLoop:
         announce.assert_not_called()
         client.announce_capabilities.assert_not_called()
 
-    def test_daemon_executes_jobs_from_poll(self):
-        """A queued job never becomes an execution through this daemon.
-
-        The former execution expectation conflicts with master's reviewed
-        heartbeat-only daemon (verdict 68c). Keep the scenario and enforce
-        the stronger refusal to poll or construct an executor.
-        """
-        with mock.patch("pcc_node.job_executor.JobExecutor") as executor:
-            client, _, _ = self._run_once(self._config())
-        client.poll_for_jobs.assert_not_called()
-        executor.assert_not_called()
-        client.send_heartbeat.assert_called()
-
-    def test_daemon_marks_jobs_seen_before_execution(self):
-        """Queued jobs stay unseen and unexecuted until typed operations run.
-
-        The previous assertion required marking and executing a queued job;
-        master's reviewed daemon must do neither (verdict 68c).
-        """
-        with mock.patch("pcc_node.job_executor.JobExecutor") as executor:
-            client, _, _ = self._run_once(self._config(devices=[]))
-        client.mark_job_seen.assert_not_called()
-        client.poll_for_jobs.assert_not_called()
-        executor.assert_not_called()
-
-    def test_daemon_announces_capabilities_on_startup(self):
-        """Startup announces no work that this daemon will not perform.
-
-        Retain the startup scenario with master's stronger reviewed refusal
-        to announce capabilities (verdict 68c).
-        """
-        client, _, announce = self._run_once(self._config(kernel_id="k-test3"))
-        announce.assert_not_called()
-        client.announce_capabilities.assert_not_called()
-
     def test_daemon_registers_kernel_on_startup(self):
         config = self._config(kernel_id="k-reg", devices=[])
         _, register, _ = self._run_once(config)

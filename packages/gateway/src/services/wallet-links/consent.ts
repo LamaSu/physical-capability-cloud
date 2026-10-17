@@ -1,5 +1,14 @@
 import { createHash } from "node:crypto";
 
+/**
+ * Append-only registry of every CONSENT_SHA256 that reached a deployed environment.
+ * Each commit holds its exact consent text; staging deploys every master push whose CI passes, so a new hash is added right after the merge that changes it.
+ * b67a22ec99407e127574c4171d26e808dcdc0741c135fa7f2c51e156c4473675
+ *   -> consent.ts at e5404d0f (prod since 2026-10-15 21:22 PDT).
+ * 24480b7fd41e13804038619c248b398cd247d009729a8ff69d98b486c8b0dc19
+ *   -> consent.ts at 062663b5f (#647, merged as dce2676c at 2026-10-16 00:43 PDT; on staging from about 01:15 PDT; prod since 2026-10-16 19:25 PDT, with 4c99f0ce).
+ * The hash covers only CONSENT_TEMPLATES' text. TESTNET_FUNDING and CONSENT_VERSION are outside it, so an amount change needs a new hash: edit the template, or hash it with the amounts filled in.
+ */
 export const CONSENT_VERSION = "wallet-link-v1";
 export const NETWORK_NAME = "Base Sepolia (test network, chain 84532)";
 export const TESTNET_FUNDING = Object.freeze({
@@ -23,7 +32,7 @@ What PCC stores: the address or public key, the label, these terms (wallet-link 
 Approve and link. Deny.`;
 
 const AGENT_PERMISSIONS = "sign in as your agent; ask for quotes; approve and fund jobs from this wallet's own balance; read the status of its own jobs. It cannot spend from your other wallets, change your account, or approve its own link.";
-const AGENT_FUNDING = "after you approve, PCC will ask Coinbase's test faucet to send this wallet {testEth} test ETH (for fees) and {testUsdc} test USDC.";
+const AGENT_FUNDING = "after you approve, PCC will ask Coinbase's test faucet to send this wallet {testEth} test ETH (for fees) and {testUsdc} test USDC if it is an EVM (secp256k1) key and PCC's daily faucet limits allow. If only the faucet's daily test-USDC allowance is used up, it sends the test ETH only. Ed25519 keys get no test funds.";
 const AGENT_DURATION = "30 days after approval, or until you unlink it.";
 
 export const CONSENT_TEMPLATES = Object.freeze({
@@ -37,7 +46,7 @@ export const CONSENT_TEMPLATES = Object.freeze({
     .replace("{who}", "{label} (a device{client}). Device {kernel} will sign evidence for jobs on this kernel. It cannot spend")
     .replace("{permissions}", "sign evidence for jobs on this kernel. It cannot spend from this wallet or your other wallets, change your account, or approve its own link.")
     .replace("{spendingLimit}", "this device cannot spend.")
-    .replace("{funding}", "after you approve, PCC will ask Coinbase's test faucet to send this wallet {testEth} test ETH (for fees).")
+    .replace("{funding}", "after you approve, PCC will ask Coinbase's test faucet to send this wallet {testEth} test ETH (for fees) if it is an EVM (secp256k1) key and PCC's daily faucet limits allow. Ed25519 device keys get no test funds.")
     .replace("{duration}", "until unlinked."),
   hosted: BASE_TEMPLATE
     .replace("{who}", "{label} (an agent{client}). Runs in {partner}'s sandbox. {partner} operates the machine that holds the key and could use it up to the limit below")

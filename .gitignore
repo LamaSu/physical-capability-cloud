@@ -48,3 +48,4 @@ __pycache__/
 /pcc-keys.json.exposed
 /packages/pcc-node/pcc-keys.json.exposed
 /starter/pcc-keys.json
+/starter/pcc-keys.json.exposed

@@ -61,6 +61,10 @@ class KeyFileError(RuntimeError):
     checkout. Also raised where the platform cannot check that location."""
 
 
+class _KeyLinkCountError(KeyFileError):
+    """All preceding file checks passed, but the open file has extra names."""
+
+
 def _strict_hex(value, byte_length):
     """Exactly ``byte_length`` bytes as ``2 * byte_length`` hex characters.
 
@@ -197,7 +201,6 @@ _KEY_LOCATION_ADVICE = (
     "source checkout. If you passed a path explicitly, change that argument or omit it to use "
     "the default or environment setting."
 )
-DEFAULT_KEYS_PATH = os.path.join(os.path.expanduser("~"), ".pcc-node", "keys.json")
 LEGACY_KEYS_PATH = "pcc-keys.json"
 _POSIX = os.name != "nt"
 _FSYNC_UNSUPPORTED = {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}
@@ -215,14 +218,21 @@ _MOUNT_REFUSAL = (
 def default_key_path():
     """Where a node keeps its key pair: ``$PCC_NODE_KEY_PATH`` when set,
     else master's ``$PCC_NODE_KEYS_FILE``, else ``~/.pcc-node/keys.json``.
-    Either override receives the same location and file checks when
+    Either override must be absolute, without expanding a literal ``~``.
+    Both receive the same location and file checks when
     the key is loaded or created (see :func:`load_or_create_keys`), and the file
     must then lie outside every source checkout. The old default,
     ``./pcc-keys.json``, resolved to a key file committed to the repository
     whenever the node ran from the package directory."""
-    override = os.environ.get(KEY_PATH_ENV) or os.environ.get("PCC_NODE_KEYS_FILE")
-    if override:
-        return override
+    for variable in (KEY_PATH_ENV, "PCC_NODE_KEYS_FILE"):
+        override = os.environ.get(variable)
+        if override:
+            if not os.path.isabs(override):
+                raise KeyFileError(
+                    "%s must be an absolute path; relative paths and literal '~' paths "
+                    "are not allowed." % variable
+                )
+            return override
     return os.path.join(os.path.expanduser("~"), ".pcc-node", "keys.json")
 
 
@@ -757,10 +767,83 @@ def _judge_key_file(fd, key_path, legacy=False):
             % (key_path, legacy_note, reason)
         )
     if st.st_nlink != 1:
-        raise KeyFileError(
+        error = _KeyLinkCountError if st.st_nlink > 1 else KeyFileError
+        raise error(
             "%s has %d hard links; a key file must have exactly one name, because another may sit "
             "inside a source checkout" % (key_path, st.st_nlink)
         )
+
+
+def _recover_temporary_key_links(dir_fd, name, fd, key_path):
+    """Remove only publication names for this open inode in its verified directory.
+
+    Return diagnostics for matching names still present, or None where directory
+    enumeration cannot be bound to a descriptor. Never follow a sibling symlink.
+    """
+    supported = {call.__name__ for call in os.supports_fd}
+    if "listdir" in supported:
+        def names():
+            return os.listdir(dir_fd)
+    elif "scandir" in supported:
+        def names():
+            with os.scandir(dir_fd) as entries:
+                return [entry.name for entry in entries]
+    else:
+        return None
+    pattern = re.compile(r"\A\." + re.escape(name) + r"\.[0-9]+\.[0-9a-f]{8}\.tmp\Z")
+    opened = os.fstat(fd)
+
+    def siblings():
+        for sibling in names():
+            if pattern.fullmatch(sibling) is None:
+                continue
+            try:
+                st = os.stat(sibling, dir_fd=dir_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) == (opened.st_dev, opened.st_ino):
+                yield sibling
+
+    failures = {}
+    for sibling in siblings():
+        try:
+            os.unlink(sibling, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass  # another loader removed the same publication name first
+        except OSError as err:
+            failures[sibling] = err
+        else:
+            log.warning("removed interrupted key publication temporary name %s", sibling)
+    _fsync_dir(dir_fd)
+    remaining = []
+    for sibling in sorted(siblings()):
+        detail = os.path.join(os.path.dirname(key_path), sibling)
+        if sibling in failures:
+            err = failures[sibling]
+            detail += " (removal failed: errno %s, %s)" % (
+                err.errno, errno.errorcode.get(err.errno, "unknown")
+            )
+        remaining.append(detail)
+    return remaining
+
+
+def _judge_final_key_file(dir_fd, name, fd, key_path):
+    """Judge a final name, recovering only extra links from atomic publication."""
+    try:
+        _judge_persisted_key_file(dir_fd, name, fd, key_path)
+    except _KeyLinkCountError:
+        remaining = _recover_temporary_key_links(dir_fd, name, fd, key_path)
+        if remaining is None:
+            raise
+        try:
+            _judge_persisted_key_file(dir_fd, name, fd, key_path)
+        except _KeyLinkCountError as err:
+            if remaining:
+                raise KeyFileError(
+                    "%s. Temporary publication names still present: %s"
+                    % (err, "; ".join(remaining))
+                ) from None
+            raise
 
 
 _MAX_KEY_FILE_BYTES = 64 * 1024
@@ -781,7 +864,7 @@ def _read_key_file(dir_fd, name, key_path):
             raise KeyFileError(key_path + " is a symbolic link; a key file must be a regular file") from None
         raise
     try:
-        _judge_persisted_key_file(dir_fd, name, fd, key_path)
+        _judge_final_key_file(dir_fd, name, fd, key_path)
         chunks = []
         size = 0
         while True:
@@ -826,7 +909,7 @@ def _create_key_file(dir_fd, name, key_path, public_hex, secret_hex):
         try:
             os.link(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
         except FileExistsError:
-            _scrub_and_remove(dir_fd, tmp, fd, key_path, None)
+            _scrub_and_remove(dir_fd, tmp, fd, key_path, os.path.join(os.path.dirname(key_path), tmp), None)
             temp_exists = False
             os.close(fd)
             return None  # another process published an identity first; load its checked file
@@ -837,29 +920,44 @@ def _create_key_file(dir_fd, name, key_path, public_hex, secret_hex):
                 % (key_path, errno.errorcode.get(err.errno, err.errno), _KEY_LOCATION_ADVICE)
             ) from None
         installed = True
-        os.unlink(tmp, dir_fd=dir_fd)
+        try:
+            os.unlink(tmp, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass  # a concurrent loader recovered this same-inode publication name
         temp_exists = False
         _fsync_dir(dir_fd)
     except BaseException as err:
         try:
-            # Attempt both cleanups even when the first reports a failure.
+            # Attempt both cleanups even when the first reports a failure, and
+            # report both: they are two names of the same file.
+            first = None
             try:
                 if temp_exists:
-                    _scrub_and_remove(dir_fd, tmp, fd, key_path, err)
+                    _scrub_and_remove(dir_fd, tmp, fd, key_path, os.path.join(os.path.dirname(key_path), tmp), err)
+            except KeyFileError as cleanup_error:
+                first = cleanup_error
             finally:
                 if installed:
-                    _scrub_and_remove(dir_fd, name, fd, key_path, err)
+                    try:
+                        _scrub_and_remove(dir_fd, name, fd, key_path, os.path.join(os.path.dirname(key_path), name), err)
+                    except KeyFileError as second:
+                        if first is None:
+                            raise
+                        raise KeyFileError("%s Also: %s" % (second, first)) from err
+            if first is not None:
+                raise first
         finally:
             os.close(fd)
         raise
     return fd
 
 
-def _scrub_and_remove(dir_fd, name, fd, key_path, cause):
+def _scrub_and_remove(dir_fd, name, fd, key_path, cleaned_path, cause):
     """A new key file that must not stay: empty it through its own descriptor
     first (so no secret survives even if removal fails), then remove its name.
     The descriptor is closed by the caller. A failed removal is reported, never
-    treated as success."""
+    treated as success. Cleanup advice names *cleaned_path*; *key_path* remains
+    the identity that was refused."""
     emptied = False
     try:
         os.ftruncate(fd, 0)
@@ -895,18 +993,18 @@ def _scrub_and_remove(dir_fd, name, fd, key_path, cause):
         except OSError:
             other_links = "unknown"
         raise KeyFileError(
-            "%s was refused; its name was removed, but the new key file could not be emptied first: THE SECRET "
-            "MAY REMAIN through another name of the same file (%s other link(s) right now). Find and delete it "
-            "by hand." % (key_path, other_links)
+            "%s was refused; the name %s was removed, but the new key file could not be emptied first: THE SECRET "
+            "MAY REMAIN through another name of %s (%s other link(s) right now). Find and delete it "
+            "by hand." % (key_path, cleaned_path, cleaned_path, other_links)
         ) from cause
     if emptied:
         raise KeyFileError(
-            "%s was refused, and the new key file could not be removed (it was emptied first: no secret "
-            "remains in it): %s" % (key_path, unlink_error)
+            "%s was refused, and the new key file %s could not be removed (it was emptied first: no secret "
+            "remains in it): %s" % (key_path, cleaned_path, unlink_error)
         ) from cause
     raise KeyFileError(
         "%s was refused, and the new key file could neither be emptied nor removed: THE SECRET MAY REMAIN "
-        "in it. Delete %s by hand: %s" % (key_path, key_path, unlink_error)
+        "in %s. Delete %s by hand: %s" % (key_path, cleaned_path, cleaned_path, unlink_error)
     ) from cause
 
 
@@ -951,7 +1049,7 @@ def _check_key_location(dir_fd, key_fd, key_path):
     """Terminal checks on the same open directory and file used for the key."""
     _refuse_checkout(dir_fd, key_path)
     _check_directory(dir_fd, os.path.dirname(key_path))
-    _judge_persisted_key_file(dir_fd, os.path.basename(key_path), key_fd, key_path)
+    _judge_final_key_file(dir_fd, os.path.basename(key_path), key_fd, key_path)
     _refuse_file_aliases(key_fd, key_path)
 
 
@@ -973,7 +1071,7 @@ def _create_exclusive(path, public_hex, secret_hex):
         try:
             _check_key_location(dir_fd, key_fd, key_path)
         except BaseException as err:
-            _scrub_and_remove(dir_fd, name, key_fd, key_path, err)
+            _scrub_and_remove(dir_fd, name, key_fd, key_path, os.path.join(os.path.dirname(key_path), name), err)
             raise
         return True
     finally:
@@ -1002,8 +1100,9 @@ def load_or_create_keys(path=None):
 
     What is proven is relative to this process's view: no checkout is visible
     above the key through this process's root and mounts, the key has one hard
-    link, and (on Linux) neither the key nor any directory above it is reached
-    through a bind mount of a subtree, which would give it names this process
+    link after removing any same-inode temporary sibling from interrupted or
+    concurrent publication, and (on Linux) neither the key nor any directory
+    above it is reached through a bind mount of a subtree, which would give it names this process
     cannot see. A checkout hidden above this process's root (a chroot or a
     mount namespace that shows only part of a tree) cannot be seen from here.
     On Linux every other mount of the same filesystem that shows the key's
@@ -1025,8 +1124,9 @@ def load_or_create_keys(path=None):
     The key file is then opened or created relative to that same directory,
     never through a symbolic link. An existing file must be a regular file
     owned by this user with exactly one name (a second hard link could sit in a
-    checkout); a new file is created 0600 from the first byte, never over an
-    existing name. Directories that do not exist yet are created 0700. Where
+    checkout); a same-inode temporary sibling from an interrupted or concurrent
+    publication is removed first. A new file is created 0600 from the first
+    byte, never over an existing name. Directories that do not exist yet are created 0700. Where
     the platform cannot do this (no ``dir_fd`` calls, no ``O_DIRECTORY`` or
     ``O_NOFOLLOW``: native Windows), or lacks usable Linux mount discovery
     (including native macOS), the key is refused.
@@ -1099,7 +1199,7 @@ def load_or_create_keys(path=None):
             _check_key_location(dir_fd, key_fd, abs_path)
         except BaseException as err:
             if created is not None:
-                _scrub_and_remove(dir_fd, name, key_fd, abs_path, err)
+                _scrub_and_remove(dir_fd, name, key_fd, abs_path, os.path.join(parent, name), err)
             raise
         return public_hex, secret_hex
     finally:

@@ -7,6 +7,7 @@ import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
 import { writeAuditHook } from "./services/write-audit-hook.js";
 import { GATEWAY_LOGGER_OPTIONS, telemetryLookalikeHook, isWalletRequest } from "./services/telemetry-privacy.js";
 import { walletsRoutes } from "./routes/wallets.js";
+import { walletFaucetRoutes } from "./routes/wallet-faucet.js";
 initPostHog();
 import { randomBytes } from "node:crypto";
 
@@ -180,6 +181,7 @@ import { notificationSSE } from "./sse/notifications.js";
 import { topicSSE } from "./sse/topic-sse.js";
 import { ProducerManager } from "./sse/producers.js";
 import { getOrCreateSession } from "./session.js";
+import { jobSubmitQueueOnly, localJobDispatchDecision } from "./services/local-job-dispatch.js";
 
 export async function createGateway(port = 3200) {
   const host = resolveListenHost(process.env.PCC_LISTEN_HOST);
@@ -189,7 +191,7 @@ export async function createGateway(port = 3200) {
 
   // Initialize KernelService (mock mode by default)
   const { initKernelService } = await import("./services/kernel-service.js");
-  initKernelService();
+  const kernelService = initKernelService();
 
   const app = Fastify({
     // Default pino logger, with a request serializer that never logs the public
@@ -202,6 +204,9 @@ export async function createGateway(port = 3200) {
   app.log.info(isRelayGateOpen()
     ? "[relay] The device relay is open."
     : "[relay] The device relay is admin-only.");
+  const dispatch = localJobDispatchDecision(kernelService.kernelId, kernelService.kernelId, kernelService.hasExplicitConfig);
+  app.log.info({ queueOnly: jobSubmitQueueOnly(), localDispatch: dispatch.ok, reason: dispatch.ok ? undefined : dispatch.reason },
+    "[jobs] Effective local dispatch policy");
 
   // Sentry error handler — captures Fastify errors and attaches request context
   // Must be registered before other error handlers
@@ -689,6 +694,7 @@ export async function createGateway(port = 3200) {
   await app.register(spaceRoutes);
   await app.register(operatorRoutes);
   await app.register(walletsRoutes);
+  await app.register(walletFaucetRoutes);
   await app.register(operatorWorkRoutes);
   await app.register(productHomeRoutes);
   await app.register(operatorsPublicRoutes);
