@@ -1,5 +1,5 @@
 import { fetchWithKey, installKeyEgressGuard, type EgressGuardOptions } from "./gateway-base.js";
-import { isSessionKeyActive, renewSessionKey, sessionIdentity } from "./session-key-recovery.js";
+import { isSessionKeyActive, notifyMissingSessionBearer, renewSessionKey, sessionIdentity } from "./session-key-recovery.js";
 
 const STORAGE_KEY = "pcc-api-key";
 
@@ -111,6 +111,9 @@ export function hasStoredApiKey(): boolean {
  * key does it through here.
  */
 export async function authorizedFetch(target: string, init: RequestInit = {}): Promise<Response> {
+  if (!storedApiKey && ["POST", "PUT", "PATCH", "DELETE"].includes((init.method ?? "GET").toUpperCase())) {
+    notifyMissingSessionBearer();
+  }
   const version = keyVersion;
   const sessionKey = isSessionKeyActive();
   const identity = sessionIdentity();
