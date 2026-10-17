@@ -149,9 +149,11 @@ When a tool call fails within a scope:
   A resume is a reset, not a restart. Held jobs stay held until the operator
   releases or cancels them (`POST /api/operator/held-jobs`), and the resume's
   answer lists them (`heldCount`, `heldJobs`, `confirmRequired`). Work that came
-  back to the queue during the stop is held as well. The calls the stop rejected
-  are not replayed; submit them again. A scope still inside its expiry works
-  again after the resume; revoke it to end it sooner.
+  back to the queue during the stop is held as well. A PUT or PATCH that clears a
+  stop (`/api/operator/policy/:kernelId`) holds the same jobs. Only Resume's reply
+  lists them. The calls the stop rejected are not replayed; submit them again. A
+  scope still inside its expiry works again after the resume; revoke it to end it
+  sooner.
 
 ## Who may call the relay
 
