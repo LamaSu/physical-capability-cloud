@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 // Plain ESM with no side effects on import (unlike the check script itself).
 import {
+  ALLOWED_OPTIONAL_PEERS,
   contentProblems,
+  installedPeerProblems,
   installedProblems,
   isChainClient,
   manifestProblems,
@@ -154,5 +156,107 @@ describe("verdict 101 F6: payload text is scanned for secrets", () => {
       "-----BEGIN PUBLIC KEY-----",
     ].join("\n");
     expect(contentProblems("@pcc/x", "README.md", ordinary)).toEqual([]);
+  });
+});
+
+
+describe("optional peers: only a listed, optional peer is allowed, and it stays uninstalled", () => {
+  it("allows a listed peer that peerDependenciesMeta marks optional", () => {
+    expect(
+      manifestProblems(
+        "@pcc/spec",
+        {
+          dependencies: { "@noble/hashes": "^1.7.0", zod: "^3.23.0" },
+          peerDependencies: { viem: "^2" },
+          peerDependenciesMeta: { viem: { optional: true } },
+        },
+        { packed, privateNames },
+      ),
+    ).toEqual([]);
+  });
+
+  it("still refuses a listed peer that is not marked optional or not a peer", () => {
+    const cases = [
+      { peerDependencies: { viem: "^2" } },
+      { peerDependencies: { viem: "^2" }, peerDependenciesMeta: { viem: {} } },
+      { peerDependencies: { viem: "^2" }, peerDependenciesMeta: { viem: { optional: false } } },
+      { peerDependencies: { viem: "^2" }, peerDependenciesMeta: { viem: { optional: "true" } } },
+      { dependencies: { viem: "^2" }, peerDependenciesMeta: { viem: { optional: true } } },
+      { optionalDependencies: { viem: "^2" }, peerDependenciesMeta: { viem: { optional: true } } },
+    ];
+    for (const pj of cases) {
+      expect(manifestProblems("@pcc/spec", pj, { packed, privateNames })).toEqual([
+        "@pcc/spec: depends on chain client viem",
+      ]);
+    }
+  });
+
+  it("still refuses an optional peer that is not on the list for its package", () => {
+    expect(
+      manifestProblems(
+        "@pcc/spec",
+        { peerDependencies: { ethers: "^6" }, peerDependenciesMeta: { ethers: { optional: true } } },
+        { packed, privateNames },
+      ),
+    ).toEqual([
+      "@pcc/spec: depends on chain client ethers",
+      "@pcc/spec: optional peer ethers is not on the allowed list",
+    ]);
+
+    expect(
+      manifestProblems(
+        "@pcc/kernel-sdk",
+        { peerDependencies: { viem: "^2" }, peerDependenciesMeta: { viem: { optional: true } } },
+        { packed, privateNames },
+      ),
+    ).toEqual([
+      "@pcc/kernel-sdk: depends on chain client viem",
+      "@pcc/kernel-sdk: optional peer viem is not on the allowed list",
+    ]);
+
+    expect(
+      manifestProblems(
+        "@pcc/spec",
+        { peerDependencies: { "left-pad": "^1.3.0" }, peerDependenciesMeta: { "left-pad": { optional: true } } },
+        { packed, privateNames },
+      ),
+    ).toEqual([
+      "@pcc/spec: optional peer left-pad is not on the allowed list",
+    ]);
+
+    expect(
+      manifestProblems(
+        "@pcc/spec",
+        { peerDependencies: { viem: "npm:ethers@^6" }, peerDependenciesMeta: { viem: { optional: true } } },
+        { packed, privateNames },
+      ),
+    ).toEqual([
+      "@pcc/spec: depends on chain client viem",
+      "@pcc/spec: depends on chain client ethers (as viem)",
+    ]);
+  });
+
+  it("fails when a listed optional peer is installed", () => {
+    const clean = [
+      { name: "@pcc/adk", version: "0.1.0", dir: "a" },
+      { name: "tweetnacl", version: "1.0.3", dir: "b" },
+    ];
+    expect(installedPeerProblems(clean)).toEqual([]);
+    expect(installedPeerProblems([...clean, { name: "viem", version: "2.21.0", dir: "c" }])).toEqual([
+      "installed graph contains viem@2.21.0 (c), an optional peer that must stay uninstalled",
+    ]);
+  });
+
+  it("names each allowed optional peer with its package and a one-line reason", () => {
+    expect(ALLOWED_OPTIONAL_PEERS.map((entry) => [entry.package, entry.peer])).toEqual([
+      ["@pcc/spec", "viem"],
+    ]);
+    expect(Object.isFrozen(ALLOWED_OPTIONAL_PEERS)).toBe(true);
+    for (const entry of ALLOWED_OPTIONAL_PEERS) {
+      expect(typeof entry.reason).toBe("string");
+      expect(entry.reason.trim().length).toBeGreaterThan(0);
+      expect(entry.reason).not.toMatch(/[\r\n]/);
+      expect(Object.isFrozen(entry)).toBe(true);
+    }
   });
 });

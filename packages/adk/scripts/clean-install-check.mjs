@@ -11,9 +11,9 @@
  *      "workspace:" anywhere; every dependency spec resolved to the registry
  *      package it installs, `npm:` aliases included, and none of them an @pcc/*
  *      package outside the packed set or private in the workspace, or a chain
- *      client; only package.json, README, LICENSE and dist/ output that has a
- *      src/ source in the payload; no payload file whose text looks like a
- *      secret;
+ *      client, except an optional peer the policy lists for its package; only
+ *      package.json, README, LICENSE and dist/ output that has a src/ source in
+ *      the payload; no payload file whose text looks like a secret;
  *   4. create a temp project outside the workspace that depends on the adk
  *      tarball, with pnpm.overrides pointing @pcc/spec and @pcc/kernel-sdk at
  *      their tarballs, and install it OFFLINE from the local pnpm store (no
@@ -21,7 +21,9 @@
  *      already resolved);
  *   5. gate the complete installed graph: every package in the consumer's
  *      pnpm store, by its real name, is checked for chain clients and for
- *      @pcc/* packages outside the kit;
+ *      @pcc/* packages outside the kit; no listed optional peer is installed,
+ *      and no module reached from an entry of @pcc/adk's exports map imports
+ *      one (scripts/import-graph.mjs);
  *   6. import it from plain Node ESM (the kit's surface, and no registration
  *      client or kernel handler), and type-check a TypeScript consumer
  *      against the installed declarations.
@@ -32,11 +34,12 @@
  * project. Exits non-zero on any failure.
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, relative, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
-import { contentProblems, installedProblems, manifestProblems, payloadProblems } from "./boundary-policy.mjs";
+import { ALLOWED_OPTIONAL_PEERS, contentProblems, installedPeerProblems, installedProblems, manifestProblems, payloadProblems } from "./boundary-policy.mjs";
+import { walkImportGraph } from "./import-graph.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "../../..");
@@ -171,7 +174,27 @@ function main() {
       if (!installed.some((pkg) => pkg.name === name)) fail(`${name} is not in the installed graph; the graph walk is broken`);
     }
     for (const problem of installedProblems(installed, { packed: packedNames })) fail(problem);
+    for (const problem of installedPeerProblems(installed)) fail(problem);
     console.log(`ok: ${installed.length} installed packages, none a chain client or an @pcc/* package outside the kit`);
+
+    // 5b. The import graph from every entry in @pcc/adk's exports map.
+    const peers = new Set(ALLOWED_OPTIONAL_PEERS.map((entry) => entry.peer));
+    const graph = walkImportGraph(realpathSync(join(project, "node_modules", "@pcc", "adk")), {
+      forbidden: peers,
+      root: realpathSync(project),
+    });
+    for (const problem of graph.problems) fail(problem);
+    for (const kind of ["runtime", "types"]) {
+      for (const name of ["@pcc/spec", "@pcc/kernel-sdk"]) {
+        if (!graph[kind].packages.includes(name)) {
+          fail(`${name} is not in @pcc/adk's ${kind} import graph; the graph walk is broken`);
+        }
+      }
+      for (const peer of peers) {
+        if (graph[kind].packages.includes(peer)) fail(`@pcc/adk's ${kind} import graph reaches ${peer}`);
+      }
+    }
+    console.log(`ok: ${graph.runtime.files.length} modules and ${graph.types.files.length} declaration files reached from @pcc/adk's exports; none imports ${[...peers].join(", ")}`);
 
     // 6a. Import from plain Node ESM.
     writeFileSync(

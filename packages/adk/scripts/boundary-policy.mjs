@@ -8,6 +8,10 @@
  *   its target), and anything that is not a registry range is refused.
  * - installedProblems: every package actually installed in the consumer
  *   project, by its real name, so a transitive dependency is checked too.
+ * - ALLOWED_OPTIONAL_PEERS: package-specific exceptions with reasons.
+ *   manifestProblems allows a listed chain client only as an optional peer,
+ *   refuses other optional peers, and installedPeerProblems rejects a listed
+ *   peer if it is installed.
  * - payloadProblems: the tarball's file list against an allowlist. Only
  *   package.json, README, LICENSE and build output under dist/ that has a
  *   source file under src/ may ship, so a stale or stray file fails.
@@ -72,6 +76,23 @@ export function specTarget(alias, spec) {
 
 const DEPENDENCY_FIELDS = ["dependencies", "peerDependencies", "optionalDependencies"];
 
+/**
+ * Only the chain-client rule is waived, for a listed peer marked optional by
+ * its declaring package. Clean install also proves it is absent from the
+ * installed tree and unreachable from the kit's exported entry points.
+ */
+export const ALLOWED_OPTIONAL_PEERS = Object.freeze([
+  Object.freeze({
+    package: "@pcc/spec",
+    peer: "viem",
+    reason: "only the @pcc/spec/funding subpath (the buyer-funding SDK) imports it; a buyer who uses that subpath installs viem",
+  }),
+]);
+
+function isAllowedOptionalPeer(packageName, peer) {
+  return ALLOWED_OPTIONAL_PEERS.some((entry) => entry.package === packageName && entry.peer === peer);
+}
+
 /** Problems with one packed package.json. `packed` is the set of names packed together. */
 export function manifestProblems(name, pj, { packed, privateNames }) {
   const problems = [];
@@ -89,12 +110,22 @@ export function manifestProblems(name, pj, { packed, privateNames }) {
         problems.push(`${name}: ${field}: ${resolved.problem}`);
         continue;
       }
+      const allowedPeer =
+        field === "peerDependencies" &&
+        resolved.target === alias &&
+        isAllowedOptionalPeer(name, alias) &&
+        pj.peerDependenciesMeta?.[alias]?.optional === true;
       for (const dep of new Set([alias, resolved.target])) {
         const via = dep === alias ? "" : ` (as ${alias})`;
         if (dep.startsWith("@pcc/") && !packed.has(dep)) problems.push(`${name}: depends on ${dep}${via}, which is not part of the public kit`);
         if (dep.startsWith("@pcc/") && privateNames.has(dep) && dep !== "@pcc/adk") problems.push(`${name}: depends on private ${dep}${via}`);
-        if (isChainClient(dep)) problems.push(`${name}: depends on chain client ${dep}${via}`);
+        if (isChainClient(dep) && !allowedPeer) problems.push(`${name}: depends on chain client ${dep}${via}`);
       }
+    }
+  }
+  for (const [peer, meta] of Object.entries(pj.peerDependenciesMeta ?? {}).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+    if (meta?.optional === true && !isAllowedOptionalPeer(name, peer)) {
+      problems.push(`${name}: optional peer ${peer} is not on the allowed list`);
     }
   }
   return problems;
@@ -108,6 +139,17 @@ export function installedProblems(installed, { packed }) {
     if (typeof name !== "string" || name === "") problems.push(`installed package without a name at ${dir}`);
     else if (isChainClient(name)) problems.push(`installed graph contains chain client ${where}`);
     else if (name.startsWith("@pcc/") && !packed.has(name)) problems.push(`installed graph contains ${where}, which is not part of the public kit`);
+  }
+  return problems;
+}
+
+/** Listed optional peers must not be present anywhere in the installed tree. */
+export function installedPeerProblems(installed) {
+  const problems = [];
+  for (const { name, version, dir } of installed) {
+    if (ALLOWED_OPTIONAL_PEERS.some((entry) => entry.peer === name)) {
+      problems.push(`installed graph contains ${name}@${version} (${dir}), an optional peer that must stay uninstalled`);
+    }
   }
   return problems;
 }

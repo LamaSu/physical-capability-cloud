@@ -40,7 +40,7 @@ Next, per the reconciliation note (`returns/pcc-adk.md`):
 | Script | What it does |
 |---|---|
 | `pnpm --filter @pcc/adk generate` | Regenerates `src/generated/agent-pin.ts` from `apps/dashboard/public/agent-package.json`. |
-| `pnpm --filter @pcc/adk check:generated` | Exits 1 if the pin is stale. The unit tests check the same thing. |
+| `pnpm --filter @pcc/adk check:generated` | Exits 1 if the pin is stale. The unit tests check the same thing, and CI's build-and-test job runs the unit tests. |
 | `pnpm --filter @pcc/adk check:clean-install` | The clean external install (below). |
 
 **When the agent package changes, regenerate the pin in the same PR.** The test `is generated from the package the dashboard serves, byte for byte` fails until you do.
@@ -54,11 +54,11 @@ This proves an operator's project can install and use the kit without npm and wi
 3. **Boundary gate** on every tarball. The rules live in `scripts/boundary-policy.mjs` and are unit-tested in `src/__tests__/boundary-policy.test.ts`. It fails on any of these:
    - `workspace:` left anywhere, or a bundled dependency;
    - a dependency spec that is not a registry range (`file:`, `link:`, git, a URL, …);
-   - a dependency that is an `@pcc/*` package outside the packed set or private in the workspace, or a chain client (`viem`, `ethers`, `wagmi`, the `@ethersproject/*` family, …). An `npm:` alias is checked by its target too;
+   - a dependency that is an `@pcc/*` package outside the packed set or private in the workspace, or a chain client (`viem`, `ethers`, `wagmi`, the `@ethersproject/*` family, …). An `npm:` alias is checked by its target too. The one exception is an optional peer that `scripts/boundary-policy.mjs` lists, with its reason, for the package that declares it, and that `peerDependenciesMeta` marks optional (today only `viem`, for `@pcc/spec`); any other optional peer fails;
    - any payload file other than `package.json`, README, LICENSE, and `dist/` build output that has a matching `src/` source;
    - payload text that looks like a secret: a private key block, a PCC, AWS, GitHub, Stripe or Slack token, or a secret-valued key field.
 4. **Install.** Create a consumer project **outside the workspace** (under `$TMPDIR`) that depends on the adk tarball, with `pnpm.overrides` pointing `@pcc/spec` and `@pcc/kernel-sdk` at their tarballs. Install it **offline** from the local pnpm store, so no network is used.
-5. **Installed graph.** Check every package in the consumer's pnpm store, by the name in its own `package.json`, for chain clients and for `@pcc/*` packages outside the kit. This covers transitive dependencies.
+5. **Installed graph.** Check every package in the consumer's pnpm store, by the name in its own `package.json`, for chain clients and for `@pcc/*` packages outside the kit. This covers transitive dependencies. Each listed optional peer must be absent, and no module reached from an entry of `@pcc/adk`'s `exports` map may import it: `scripts/import-graph.mjs` follows the JavaScript and the type declarations into `@pcc/spec`, `@pcc/kernel-sdk` and every other installed package.
 6. **Import** the kit from plain Node ESM, and **type-check** a TypeScript consumer against the installed declarations. The import check also fails if the kit exports a registration client or a kernel handler.
 
 The chain-client list and the secret patterns are lists of known names and shapes. They catch those, not every possible chain client or secret.
