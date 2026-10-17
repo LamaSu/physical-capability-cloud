@@ -12,11 +12,10 @@ using VNextReadLens for VNextSettlementEscrow;
 
 /// @title The economics -> escrow seam (reconciliation R15 / invariant 12: prove the seam, not a unit)
 /// @notice The payouts below are exactly what `compileEconomics` (@pcc/spec economics, TypeScript) emits
-///         for three of the worked example agreements. Here they fund a real `VNextSettlementEscrow` and are
+///         for all five worked example agreements. Here they fund a real `VNextSettlementEscrow` and are
 ///         released, and every recipient, the fee recipient and the payer end with EXACTLY the compiled
-///         amounts. The literals are the golden outputs in
-///         packages/spec/src/__tests__/fixtures/economics-golden-v1.json; the vitest
-///         `economics-forge-parity.test.ts` fails if this file and that fixture ever disagree.
+///         amounts. The vitest `economics-forge-parity.test.ts` compares the literals with each template's
+///         compiled output, including the spare printer's published royalty schedule.
 /// @dev    Units are Tier-0 so release is the payer's explicit buyer approval: the seam under test is
 ///         economics' output vs the escrow's funding and allocation rules, not the evidence machine.
 ///         stepId = keccak256(nodeId), as composition's `stepIdBytes32` derives it. Test money only.
@@ -86,6 +85,15 @@ contract VNextEconomicsSeamTest is Test {
         });
     }
 
+    /// @dev ex1-spare-printer: the kit's published schedule pays 0.40% of gross, then the owner keeps the rest.
+    function _exampleSparePrinter() internal view returns (VNextSettlementEscrow.UnitConfig[] memory cfgs) {
+        PayoutEntry[] memory u0 = new PayoutEntry[](2);
+        u0[0] = _leg(address(0x5a0002), 24312500);
+        u0[1] = _leg(address(0x9a1a03), 100000);
+        cfgs = new VNextSettlementEscrow.UnitConfig[](1);
+        cfgs[0] = _unit("print", 0, 25000000, 587500, u0);
+    }
+
     /// @dev ex2-print-and-mail: fixed upstream prices, postage at cost, a per-use method fee, composer margin.
     function _examplePrintAndMail() internal view returns (VNextSettlementEscrow.UnitConfig[] memory cfgs) {
         PayoutEntry[] memory u0 = new PayoutEntry[](2);
@@ -112,6 +120,19 @@ contract VNextEconomicsSeamTest is Test {
         u0[5] = _leg(address(0x7ea5002), 13057962);
         cfgs = new VNextSettlementEscrow.UnitConfig[](1);
         cfgs[0] = _unit("repair", 0, 180010000, 4230235, u0);
+    }
+
+    /// @dev ex4-lab-assay: minimum model royalty split by lineage, a net protocol royalty and two lab roles.
+    function _exampleLabAssay() internal view returns (VNextSettlementEscrow.UnitConfig[] memory cfgs) {
+        PayoutEntry[] memory u0 = new PayoutEntry[](6);
+        u0[0] = _leg(address(0x1e5006), 1953000);
+        u0[1] = _leg(address(0x1ab0002), 53647000);
+        u0[2] = _leg(address(0x1ab0002), 320000000);
+        u0[3] = _leg(address(0x3a10003), 10500000);
+        u0[4] = _leg(address(0xda7a004), 2700000);
+        u0[5] = _leg(address(0xda7b005), 1800000);
+        cfgs = new VNextSettlementEscrow.UnitConfig[](1);
+        cfgs[0] = _unit("assay", 0, 400000000, 9400000, u0);
     }
 
     /// @dev ex5-deck-milestones: three milestones; the build step is the one that fails in the refund test.
@@ -234,6 +255,24 @@ contract VNextEconomicsSeamTest is Test {
 
     // ── The seam: compiled legs fund and release to the base unit ────────────────────────────────
 
+    function test_Seam_SparePrinter_EveryPartyPaidExactlyTheCompiledAmount() public {
+        VNextSettlementEscrow.UnitConfig[] memory cfgs = _exampleSparePrinter();
+        VNextSettlementEscrow e = _escrowFor(keccak256("ex1-spare-printer"), cfgs);
+        uint256 payerBefore = usdc.balanceOf(payer);
+        uint256 ownerBefore = usdc.balanceOf(address(0x5a0002));
+        uint256 kitAuthorBefore = usdc.balanceOf(address(0x9a1a03));
+        uint256 treasuryBefore = usdc.balanceOf(_feeTreasury());
+        _fund(e, cfgs);
+        assertEq(usdc.balanceOf(address(e)), 25000000);
+        _release(e, cfgs[0]);
+
+        assertEq(usdc.balanceOf(address(0x5a0002)) - ownerBefore, 24312500, "printer owner residual");
+        assertEq(usdc.balanceOf(address(0x9a1a03)) - kitAuthorBefore, 100000, "kit schedule royalty: 0.40% of gross");
+        assertEq(usdc.balanceOf(_feeTreasury()) - treasuryBefore, 587500, "protocol fee");
+        assertEq(usdc.balanceOf(address(e)), 0, "nothing left in escrow");
+        assertEq(payerBefore - usdc.balanceOf(payer), 25000000, "payer spent exactly the price");
+    }
+
     function test_Seam_PrintAndMail_EveryPartyPaidExactlyTheCompiledAmount() public {
         VNextSettlementEscrow.UnitConfig[] memory cfgs = _examplePrintAndMail();
         VNextSettlementEscrow e = _escrowFor(keccak256("ex2-print-and-mail"), cfgs);
@@ -265,6 +304,30 @@ contract VNextEconomicsSeamTest is Test {
         assertEq(usdc.balanceOf(address(0x15e0007)), 2700150);
         assertEq(usdc.balanceOf(_feeTreasury()), 4230235);
         assertEq(usdc.balanceOf(address(e)), 0);
+    }
+
+    function test_Seam_LabAssay_EveryPartyPaidExactlyTheCompiledAmount() public {
+        VNextSettlementEscrow.UnitConfig[] memory cfgs = _exampleLabAssay();
+        VNextSettlementEscrow e = _escrowFor(keccak256("ex4-lab-assay"), cfgs);
+        uint256 payerBefore = usdc.balanceOf(payer);
+        uint256 protocolAuthorBefore = usdc.balanceOf(address(0x1e5006));
+        uint256 labBefore = usdc.balanceOf(address(0x1ab0002));
+        uint256 modelAuthorBefore = usdc.balanceOf(address(0x3a10003));
+        uint256 datasetABefore = usdc.balanceOf(address(0xda7a004));
+        uint256 datasetBBefore = usdc.balanceOf(address(0xda7b005));
+        uint256 treasuryBefore = usdc.balanceOf(_feeTreasury());
+        _fund(e, cfgs);
+        assertEq(usdc.balanceOf(address(e)), 400000000);
+        _release(e, cfgs[0]);
+
+        assertEq(usdc.balanceOf(address(0x1e5006)) - protocolAuthorBefore, 1953000, "protocol royalty: 0.5% of net");
+        assertEq(usdc.balanceOf(address(0x1ab0002)) - labBefore, 373647000, "lab margin + fixed run price, two legs one wallet");
+        assertEq(usdc.balanceOf(address(0x3a10003)) - modelAuthorBefore, 10500000, "model author: 70% of minimum royalty");
+        assertEq(usdc.balanceOf(address(0xda7a004)) - datasetABefore, 2700000, "dataset A: 18% of minimum royalty");
+        assertEq(usdc.balanceOf(address(0xda7b005)) - datasetBBefore, 1800000, "dataset B: 12% of minimum royalty");
+        assertEq(usdc.balanceOf(_feeTreasury()) - treasuryBefore, 9400000, "protocol fee");
+        assertEq(usdc.balanceOf(address(e)), 0, "nothing left in escrow");
+        assertEq(payerBefore - usdc.balanceOf(payer), 400000000, "payer spent exactly the price");
     }
 
     function test_Seam_DeckMilestones_FailedBuildStepIsRefundedAndOnlyThatStep() public {
