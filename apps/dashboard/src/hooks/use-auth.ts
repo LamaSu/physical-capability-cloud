@@ -85,6 +85,7 @@ export function useAuth() {
         const state = useAuthStore.getState();
         if (active && state.keyEpoch === epoch && !state.sessionToken && data?.address) {
           setAddress(data.address);
+          // Restore identity for reads; minting still needs a fresh sign-in bearer.
           setSession("cookie");
           return mintSessionKey();
         }
