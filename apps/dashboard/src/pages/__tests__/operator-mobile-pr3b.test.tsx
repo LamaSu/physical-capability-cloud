@@ -249,3 +249,104 @@ describe("operator mobile PR-3b", () => {
     });
   }
 });
+
+function stubDigest(holdA?: Promise<void>) {
+  vi.stubGlobal("crypto", { subtle: { digest: vi.fn(async (_alg: string, bytes: Uint8Array) => {
+    const isA = bytes[bytes.length - 1] === 0x41; // "photo-A"
+    if (isA && holdA) await holdA;
+    return new Uint8Array(32).fill(isA ? 0xaa : 0xbb).buffer;
+  }) } });
+}
+
+async function choosePhoto(name: "A" | "B") {
+  const input = host.querySelector<HTMLInputElement>('input[type="file"]')!;
+  Object.defineProperty(input, "files", { configurable: true, value: [new File([name], `photo-${name}.png`)] });
+  await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
+  await settle();
+}
+
+describe("operator mobile PR-3b photo read", () => {
+  it("a late hash for photo A never replaces photo B", async () => {
+    let releaseA!: () => void;
+    stubDigest(new Promise<void>((resolve) => { releaseA = resolve; }));
+    await render();
+    await choosePhoto("A");
+    await choosePhoto("B");
+    releaseA();
+    await settle();
+    expect(host.querySelector("img")?.getAttribute("src")).toBe(PHOTO_B);
+    expect(host.textContent).toContain("bb".repeat(32));
+    expect(host.textContent).not.toContain("aa".repeat(32));
+  });
+
+  it("a mode switch while photo A is read drops photo A", async () => {
+    let releaseA!: () => void;
+    stubDigest(new Promise<void>((resolve) => { releaseA = resolve; }));
+    await render();
+    await choosePhoto("A");
+    await click("Verify Print");
+    releaseA();
+    await settle();
+    expect(host.querySelector("img")).toBeNull();
+    expect(host.textContent).toContain("Take Photo");
+  });
+});
+
+describe("operator mobile PR-3b photo submission after a late hash", () => {
+  it.each(["upload", "compare"] as const)("%s sends photo B after photo A finishes hashing", async (operation) => {
+    let releaseA!: () => void;
+    stubDigest(new Promise<void>((resolve) => { releaseA = resolve; }));
+    fetchMock.mockResolvedValue(response(operationConfig[operation].result));
+    await render();
+    await click(operationConfig[operation].mode);
+    await choosePhoto("A");
+    await choosePhoto("B");
+    releaseA();
+    await settle();
+    if (operation === "compare") await enter(jobIdInput(), CHOSEN_JOB_ID);
+    await click(operationConfig[operation].submit);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [path, init] = fetchMock.mock.calls[0];
+    expect(path).toBe(operationConfig[operation].path);
+    expect(JSON.parse(String(init?.body))).toEqual(operation === "upload"
+      ? { image: PHOTO_B, sha256: "bb".repeat(32), notes: "" }
+      : { image: PHOTO_B, jobId: CHOSEN_JOB_ID });
+  });
+});
+
+describe("operator mobile PR-3b Job ID rules", () => {
+  it("refuses a whitespace-only Job ID without sending a comparison", async () => {
+    fetchMock.mockResolvedValue(response(operationConfig.compare.result));
+    await prepare("compare");
+    await enter(jobIdInput(), "   ");
+    await click("Compare to Reference");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(button("Compare to Reference").disabled).toBe(true);
+  });
+
+  it("sends the trimmed operator-entered Job ID", async () => {
+    fetchMock.mockResolvedValue(response(operationConfig.compare.result));
+    await prepare("compare");
+    await enter(jobIdInput(), `  ${CHOSEN_JOB_ID} `);
+    await click("Compare to Reference");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [path, init] = fetchMock.mock.calls[0];
+    expect(path).toBe(operationConfig.compare.path);
+    expect(JSON.parse(String(init?.body))).toEqual({ image: PHOTO_A, jobId: CHOSEN_JOB_ID });
+  });
+
+  it("locks the Job ID while a comparison is in flight and unlocks it after failure", async () => {
+    const held = deferred<Response>();
+    fetchMock.mockReturnValue(held.promise);
+    await prepare("compare");
+    expect(jobIdInput().disabled).toBe(false);
+    await click("Compare to Reference");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(jobIdInput().disabled).toBe(true);
+    held.reject(new TypeError(SERVER_TEXT));
+    await settle();
+    expect(host.textContent).toContain(operationConfig.compare.error);
+    expect(jobIdInput().disabled).toBe(false);
+    expect(jobIdInput().value).toBe(CHOSEN_JOB_ID);
+  });
+});
