@@ -213,7 +213,7 @@ As for a license, `outbound.shareAlikeTag` is required exactly when `outbound.cl
 
 **Reading the input.** The input and the options are untrusted. Before any check, each is copied into plain JSON data, and every property is read exactly once. All later work uses the copy, so nothing the caller does can make the compiler see two different values of one field. The copy is refused (`SCHEMA_INVALID`) if the value:
 - is anything other than null, a boolean, a number, a string, an array or a plain object (for example a function, a bigint, a Date or a class instance);
-- has an accessor property, a symbol key or a hole in an array;
+- has an accessor property (an enumerable member, or any array element), a symbol key or a hole in an array;
 - contains itself;
 - nests too deep. The input itself is at depth 0, and a value inside an object or array at depth `d` is at depth `d + 1`. An object or array at depth 64 or more is refused; a null, boolean, number or string at depth 64 is not;
 - has an array with more than 65,536 entries;
@@ -227,7 +227,7 @@ Only an object's own enumerable properties are read, as `JSON.stringify` does. A
 |---|---|
 | `forbiddenRecipients: Address[] (0..64)` | The escrow clone, the settlement token and the factory. The zero address is always forbidden. |
 | `authorityFloor: Authority` | The weakest license authority accepted; the default is `counterparty-accepted`. |
-| `schedules: RateSchedule[] (0..64)` | Sealed rate-schedule bodies. Each must hash to its own `scheduleHash`. A body is trusted only for the hash it actually has, so listing order never matters. Only `version` and `segments` enter the hash. Unknown fields are dropped before hashing, at every depth: in the body and inside each segment. The registry does the same when it publishes, so an unknown field changes neither the hash nor the rate. The one closed object is a `capture-class-indexed` segment's `byClass`; a key there other than `CC0`..`CC5` is refused. The known fields outside the hash are still checked: `scheduleHash` and `publishedAt` (a string) are required, and `notes`, when present, is a string. Each body must also be **well formed**:<br>1. No segment follows an open-ended one (`endTime: null`).<br>2. Each segment starts at or after the previous segment's `endTime`.<br>3. A set `endTime` is not before its `startTime`.<br>4. A `linear-decay` segment's `endTime` is after its `startTime`.<br>5. Its numbers are in §1's ranges: `version` is `1 .. 10^9`; every integer field (times, bps, `thresholdCents`) is `0 .. 2^53 − 1`; `scale` and `decayPerSecond` are finite, with magnitude at most `2^53 − 1`. A larger integer does not mean the same number to every JSON reader (JavaScript rounds it), and `1e400` reads as infinity. Every double from `2^53` up is such an integer, so the canonical form has no form for it (evidence profile v1 §1, D5) and such a body has no hash. The compiler refuses a body it cannot hash (`SCHEMA_INVALID`, path `["options"]`) and never throws. The registry refuses to seal such a body, with the same rules. |
+| `schedules: RateSchedule[] (0..64)` | Sealed rate-schedule bodies. Each must hash to its own `scheduleHash`. A body is trusted only for the hash it actually has, so listing order never matters. Only `version` and `segments` enter the hash. Unknown fields are dropped before hashing, at every depth: in the body and inside each segment. The registry does the same when it publishes, so an unknown field changes neither the hash nor the rate. The one closed object is a `capture-class-indexed` segment's `byClass`; a key there other than `CC0`..`CC5` is refused. The known fields outside the hash are still checked: `scheduleHash` and `publishedAt` (a string) are required, and `notes`, when present, is a string. Each body must also be **well formed**:<br>1. No segment follows an open-ended one (`endTime: null`).<br>2. Each segment starts at or after the previous segment's `endTime`.<br>3. A set `endTime` is not before its `startTime`.<br>4. A `linear-decay` segment's `endTime` is after its `startTime`.<br>5. Its numbers are in §1's ranges: `version` is `1 .. 10^9`; every integer field (times, bps, `thresholdCents`) is `0 .. 2^53 − 1`; `scale` and `decayPerSecond` are numbers greater than 0 and at most `2^53 − 1`, and need not be integers. A larger integer does not mean the same number to every JSON reader (JavaScript rounds it), and `1e400` reads as infinity. Every double from `2^53` up is such an integer, so the canonical form has no form for it (evidence profile v1 §1, D5) and such a body has no hash. The compiler refuses a body it cannot hash (`SCHEMA_INVALID`, path `["options"]`) and never throws. The registry refuses to seal such a body, with the same rules. |
 | `fee: { feeBps: integer 0..1000, feeRecipient: Address \| null }` | The fee the server charges. It obeys §2's own rule: a recipient exactly when `feeBps > 0`. |
 | `rateFacts: { jobsPerDay?: integer >= 0 \| null, captureClass?: "CC0".."CC5" \| null }` | Facts some schedules depend on (§2.4). Each field may be omitted, which means `null`. |
 
@@ -453,7 +453,7 @@ CompiledEconomicsV1 {
 
 **Canonical JSON** is `@pcc/spec` `canonicalize`: object keys sorted, no whitespace, strings as JSON strings, `null` kept. All amounts are strings. All other numbers in an agreement are integers below 2^53, written in decimal with no exponent (`-0` is written `0`).
 
-A rate-schedule body (§3) is hashed in the same canonical form, and it has two fields that are not integers, `scale` and `decayPerSecond`. Every number in a schedule body is written as ECMAScript's `Number.prototype.toString` writes it. That is the shortest decimal that reads back as the same double, with no exponent from `10^−6` up to below `10^21` (`0.000001`, `100.5`, `10000000000000000`), and exponent form outside that range (`1e-7`, `1.5e-9`, `1e+21`). So `1e-9` is written `1e-9`, never `1e-09`.
+A rate-schedule body (§3) is hashed in the same canonical form, and it has two fields that are not integers, `scale` and `decayPerSecond`. Every number in a schedule body is written as ECMAScript's `Number.prototype.toString` writes it. That is the shortest decimal that reads back as the same double. A number of magnitude `10^−6` to `2^53 − 1` is written with no exponent (`0.000001`, `100.5`, `9007199254740991`). A number of smaller magnitude, other than 0, is written in exponent form (`1e-7`, `1.5e-9`). `0` and `-0` are written `0`. A number of magnitude `2^53` or more has no canonical form (§3, rule 5). So `1e-9` is written `1e-9`, never `1e-09`.
 
 A string is written exactly as ECMAScript `JSON.stringify` writes it:
 - `"` is written `\"` and `\` is written `\\`;
@@ -497,14 +497,23 @@ A unit's default outcome is `released`. A **released** unit pays its legs and it
   - The `ipId` becomes the clause's subject, so it must be an Id (`INVALID_ID`).
   - Contributor addresses are looked up among the table's own keys only (`UNKNOWN_CONTRIBUTOR`).
 - **`TrainingManifest`**: a `model-author` allocation pays to a split of the model author (weight `10000 − passThroughBps`) and the training inputs (weight `passThroughBps`).
-  - The training inputs are the datasets by `weightBps` and, when a base model is declared, the base model with an explicit `baseModelWeightBps`, recursively.
-  - `passThroughBps` and `baseModelWeightBps` are explicit inputs, and are refused when missing.
+  - The training inputs are the datasets by `weightBps` and, when a base model is declared, the base model with an explicit `baseModel.weightBps`, recursively.
+  - `passThroughBps` and `baseModel.weightBps` are explicit inputs, and are refused when missing.
   - The manifest must pass its own schema, so its dataset weights total exactly 10000 (`MANIFEST_INVALID`). Its model and dataset ids must be Ids (`INVALID_ID`).
   - The expansion subdivides one allocation and never adds to it.
+- **The calls.** The adapters are exported from `@pcc/spec/economics` (economics/adapters.ts). A result is `{ ok: true, ... }` or `{ ok: false, refusals }`, and a refusal is `{ code, message, path }`.
+  - `clausesFromCompositionManifest(input)` returns `{ ok: true, clauses, splits }` on success. `input` is a `ManifestAdapterInput`: `{ manifest, pinnedRates, partyByAddress, appliesTo, idPrefix }`, and every member is required. `manifest` is a `CompositionManifest` (`CompositionManifestSchema`, from `@pcc/spec`). `pinnedRates` lists `{ bps, rateSource }`: the rate each schedule gave when the deal was quoted, with its `RateSource` (§2.4). A group whose schedule has no pinned rate is `RATE_NOT_PINNED`. `partyByAddress` maps a lowercase contributor address to a party id. `appliesTo` is a clause's `appliesTo` (§2.4).
+  - `splitsFromTrainingManifest(input, idPrefix)` returns `{ ok: true, splits, rootSplitId }` on success. `input` is a `LineageInput`, one level of the lineage: `{ manifest, modelAuthorParty, passThroughBps, datasetParty, baseModel }`. Every member but `baseModel` is required. `manifest` is a `TrainingManifest` (`TrainingManifestSchema`, from `@pcc/spec`). `modelAuthorParty` is the model author's party id, and `datasetParty` maps a dataset id to a party id. `baseModel` is `{ weightBps, lineage }`, where `lineage` is the base model's own level. It is present exactly when the manifest declares a base model.
+  - `splitsFromContributionGraph(graphInput, usedComponents, idPrefix)` returns `{ ok: true, splits, rootPayee }` on success, where `rootPayee` is `{ split }`. `graphInput` is a contribution graph (`ContributionGraph`, checked by `ContributionGraphSchema`, both from `@pcc/spec/economics`; its `schema` is `"pcc.contribution-graph.v1"`). `usedComponents` is the `Set` of component refs that run in the unit: a real `Set` that is `instanceof Set`, not a proxy of one and not one from another realm. A member that is not a string is ignored.
+  - `idPrefix` is a string. Every clause and split id an adapter makes is `<idPrefix>/<suffix>`: `c0`, `s0` and so on for a composition, `m0`, `m0i`, `m0d` and so on for a training lineage, and the `nodeId` for a graph. One that is not an Id is refused (`ID_TOO_LONG`).
 - **Every adapter reads its input once**, into a plain copy (`snapshotJson` with `canonical`, economics/input.ts). Everything after that, the schema, the hash and the payout, uses that one copy, so the hash and the payout always see the same manifest.
-  - The copy refuses an accessor without calling it, a cycle, a non-plain object, nesting deeper than 64, anything that cannot be read as plain JSON data (a throwing proxy trap included), and a number the canonical form cannot write (one that is not finite, or of magnitude `2^53` or more). The refusal is `INPUT_INVALID`, or `GRAPH_INVALID` for a contribution graph. It is the same with or without D5 in `canonicalize`.
-  - An undefined object member is dropped, as `canonicalize` drops it.
-  - A manifest that fails its schema is `MANIFEST_INVALID`. So is one whose hash still cannot be computed. Each manifest is then checked against its `manifestHash`.
+  - The copy is §3's (Reading the input), with two changes: an undefined object member is dropped, as `canonicalize` drops it, and a number the canonical form cannot write is refused (one that is not finite, or of magnitude `2^53` or more). A refused copy is `INPUT_INVALID`, or `GRAPH_INVALID` for a contribution graph. It is the same with or without D5 in `canonicalize`.
+  - It reads object members and array elements from their own descriptors, so it never calls their getters. On a proxy it calls only `getPrototypeOf`, `ownKeys` and `getOwnPropertyDescriptor` for an object, and `get` (for `length`) and `getOwnPropertyDescriptor` for an array. It copies what those traps report, so a proxy is refused when what they report would be refused.
+  - Composition: after the copy, `input` is checked against one schema, and only its first issue is reported. An `input` that is not a plain object is `INPUT_INVALID`. Otherwise a `manifest` that is missing or fails `CompositionManifestSchema` comes first, and is `MANIFEST_INVALID`. Then a member that is missing or not of its kind is `INPUT_INVALID`: `pinnedRates` must list `{ bps, rateSource }` with a bps (§1) and a `RateSource`, `partyByAddress` must be a plain object, `appliesTo` one of §2.4's forms, and `idPrefix` a string.
+  - Training: `idPrefix` is checked before the copy, and one that is not a string is `INPUT_INVALID`. After the copy, a level that is not a plain object, or whose `manifest` or `datasetParty` is not one, is `INPUT_INVALID`. A `manifest` that fails `TrainingManifestSchema` is `MANIFEST_INVALID`. Then a `modelAuthorParty` that is missing or not an Id is `INVALID_ID`, and a `passThroughBps` that is missing or not an integer from 0 to 10000 is `EXPANSION_SHARE_UNDECLARED`. So is a `baseModel` given without a declared base model, missing with one, not a plain object, or whose `weightBps` is not an integer from 0 to 10000. Its `lineage` is checked as a level.
+  - Graph: `idPrefix` is checked first, then the copy, then `usedComponents`, then the graph's schema. An `idPrefix` that is not a string, or a `usedComponents` that is not such a `Set`, is `INPUT_INVALID`. A graph that fails its schema is `GRAPH_INVALID`, and so is one with a repeated `nodeId`, two edges with the same `from` and `to`, or an edge or root that names an unknown node.
+  - A `partyByAddress` or `datasetParty` entry that is missing, or is not an Id, is `UNKNOWN_CONTRIBUTOR`.
+  - A manifest whose hash cannot be computed is `MANIFEST_INVALID`. Each manifest is then checked against its `manifestHash` (`MANIFEST_HASH_MISMATCH`).
   - On any input, an adapter returns a result. It does not throw.
 - **`ContributionGraphV1`** (optional, for open ecosystems): each node keeps a `retain` weight and passes shares along **accepted** edges. An edge is dropped when:
   - it is not accepted;
@@ -556,3 +565,120 @@ On success it returns each unit's payouts in plan order, with `agreementHash` an
 - Any rule an agent writes as code.
 - An exact rate for an `exponential-decay` segment below its starting rate (unverifiable, §2.4).
 - A required scheduled royalty over units in different value bands (§2.4). New rule kinds are added to this document and to the compiler together, with golden vectors, under a new domain version.
+
+## 12. Kit licenses and the lineage split
+
+Section 11 is reserved for agreement templates.
+
+A Kit version (a capability or terms template) carries an ordinary License (§2.5). Its only payment requirement, when it has one, is a percent of the gross of every unit that runs the kit, paid to the kit's fork lineage. The compile pays it as payout legs in the unit's release, like any other required payment. There is no second ledger and no claim step. The functions below are in `economics/kits.ts`, and each is pure.
+
+### 12.1 A License's content address (`licenseHash`)
+
+`licenseHash(license) = H("PCC:license:v1", license)`, with §6's `H`: `"0x"` followed by 64 lowercase hex digits.
+
+- **Read, then checked.** The License is read once, as §3's "Reading the input" reads an agreement. The copy then goes through §3's schema phase on its own: §2.5's License shape, §1's conventions, and every rule marked as a schema rule (for example, `shareAlikeTag` exactly when the class is `share-alike`, and unique `requirementId`s). A License that fails either step is refused, never hashed.
+- **No later phase.** Nothing after the schema phase applies. A requirement whose `min` is above its `max` still hashes (the compile refuses it later, `INVALID_BOUNDS`), and so does a License whose `validFrom` is after its `validUntil`. Its licensor and distribution parties need not be parties of any agreement.
+- **As published.** None of §6's normalization applies:
+  - No array is sorted. `grants.fieldsOfUse`, `grants.regions`, `requires.payments` and every `distribution` are hashed in the order they are written.
+  - No hash is lowercased. A `percent_by_schedule` requirement's `scheduleHash` is hashed in the case it is written.
+  - So reordering one of those arrays, or changing a hash's case, gives a different `licenseHash`. Key order does not matter, because canonical JSON sorts keys.
+- **Where kits use it.** A Kit manifest (`pcc.capability-kit/v1`) pins its License by this hash, in `economics.economicTermsHash` (kits #4102). The field shares its name with an agreement's `economicTermsHash` (§6), but it holds a different value, under a different domain.
+- **Result:** `{ ok: true, hash }`, or `{ ok: false, reason }`. The reason is free text, not a code.
+
+Example: this License's canonical JSON is 788 bytes. Its one requirement is `kitRoyaltyRequirement({ bps: 50, lineage: ["carol", "bob", "ann"] })` (§12.2).
+
+```
+{"authority":"registry-anchored","class":"permissive","grants":{"commercialUse":true,"compose":true,"fieldsOfUse":["*"],"modify":true,"regions":["*"],"resell":true},"label":"Kit license","licenseId":"kit-license","licensor":"carol","requires":{"attribution":true,"payments":[{"payee":{"distribution":[{"party":"ann","role":null,"subject":null,"weight":1},{"party":"bob","role":null,"subject":null,"weight":2},{"party":"carol","role":null,"subject":null,"weight":4}]},"per":"using-unit","requirementId":"kit-royalty","role":"protocol-author","rule":{"bps":50,"kind":"percent","max":null,"min":null,"of":"gross","rateSource":null}}]},"shareAlikeTag":null,"subject":"kit:sha256:abababababababababababababababababababababababababababababababab","validFrom":null,"validUntil":null,"version":1}
+```
+
+Its `licenseHash` is `0x1112bfa7d0da2195b118df02734b16a1d7ba93848157ec7eacd5922974b83686`.
+
+### 12.2 The lineage and its distribution
+
+A kit version's **lineage** lists publishers, nearest first: the kit's own publisher (the forker), then its parent's publisher, then its grandparent's, and so on. It is an array of 1 to 1,024 entries. Every entry must be an Id (§1), although only the first three are paid. Anything else is refused.
+
+`kitLineageDistribution(lineage)` is the distribution the royalty is paid to:
+
+1. Take the first three entries, or all of them if there are fewer. Nearest first, their weights are 1 for one entry, 2 : 1 for two, and 4 : 2 : 1 for three (`KIT_LINEAGE_WEIGHTS = [4, 2, 1]`). Nothing past the grandparent is paid.
+2. A party that appears more than once among them (a self-fork) is one member, with the summed weight.
+3. Divide every weight by the greatest common divisor of all of them.
+4. Sort the members by party id (byte order). Each member is `{ party, weight, role: null, subject: null }`.
+
+A refused lineage throws a `RangeError`.
+
+| Lineage | Distribution (party: weight) |
+|---|---|
+| `["ann"]` | ann: 1 |
+| `["bob", "ann"]` | ann: 1, bob: 2 |
+| `["carol", "bob", "ann"]` | ann: 1, bob: 2, carol: 4 |
+| `["dave", "carol", "bob", "ann"]` | bob: 1, carol: 2, dave: 4 |
+| `["ann", "ann"]` | ann: 1 |
+| `["ann", "bob", "ann"]` | ann: 5, bob: 2 |
+| `["ann", "ann", "bob"]` | ann: 6, bob: 1 |
+| `["ann", "bob", "bob"]` | ann: 4, bob: 3 |
+
+`kitRoyaltyRequirement({ bps, lineage })` is the payment requirement of a kit version's License. `bps` must be an integer from 0 to 10000. The lineage is then checked as above, even at 0 bps. Either failure throws a `RangeError`. A free kit (0 bps) asks for no payment, so the result is `null`. Otherwise it is:
+
+```
+{ requirementId: "kit-royalty", role: "protocol-author", per: "using-unit",
+  payee: { distribution: kitLineageDistribution(lineage) },
+  rule: { kind: "percent", bps, of: "gross", min: null, max: null, rateSource: null } }
+```
+
+### 12.3 What a buyer funds (`computeKitSplit`)
+
+`computeKitSplit({ quoteMinor, currency, feeBps, licenseBps, lineage })` prices one unit that runs one kit: the operator's quote, with the kit's royalty on top. It runs the compile (§4) for every amount, so the amounts are exactly what settlement pays at that gross.
+
+**Input.** Each field is read once, as an own data property, and so are `currency`'s two fields and the lineage's entries. A field's getter is never called, so a field given by an accessor counts as missing, and so does an inherited one. Every field is required, so such an input is refused.
+- `quoteMinor`: an Amount (§1), or a non-negative bigint. It is at least 5.
+- `currency`: `{ code, decimals }`, a string and an integer. The compile then checks them as §2 does.
+- `feeBps`: PCC's fee, an integer from 0 to 1000.
+- `licenseBps`: the royalty, an integer from 1 to 1000. A free kit pays nobody, so it has no split.
+- `lineage`: as in §12.2. The ids `kit-split:buyer` and `kit-split:operator` are reserved, and a lineage that names one is refused.
+
+A refused input answers `{ ok: false, reason }`, with a free-text reason.
+
+**The one-unit agreement** is `kitSplitAgreement(gross, input)`:
+- One unit, `job`, at the given gross. It uses the kit component `kit:kit-split` once.
+- The kit's License, `kit-license` version 1, whose licensor is `lineage[0]`. It is `permissive` and `registry-anchored`. It grants commercial use, composing, reselling and modifying in any field of use and region, requires attribution, and has one payment requirement: `kitRoyaltyRequirement({ bps: licenseBps, lineage })`.
+- A split, `lineage`, whose members are the distribution's parties at their weights.
+- The clause `kit-royalty`: a `percent` of `gross` at `licenseBps`, paid to the split `lineage` in every unit that uses the kit, under `kit-license` version 1.
+- The clause `operator`: the `residual`, paid to `kit-split:operator`.
+- PCC's fee at `feeBps`. The intended use is plain commercial use: not composite, not resold, in any field of use and region.
+
+Its other fields (labels, placeholder payout addresses and `asOf`) are fixed in the code and mean nothing. This section specifies only the amounts the agreement compiles to. `kitSplitAgreement` takes no quote, and it throws a `RangeError` for any other input that the **Input** rules above refuse. It does not compile, so an input that only the compile refuses, such as a negative `decimals`, still gives an agreement.
+
+**The gross.** Let `floor = quote − floor(quote × feeBps / 10000)`, the least the operator may receive under §9 (`OPERATOR_BELOW_QUOTE`). The gross `G` is the smallest amount, at least `quote`, at which the one-unit agreement pays the operator at least `floor`. At gross `G`, §4 gives:
+- the fee, `F = floor(G × feeBps / 10000)` (§4.2);
+- the royalty, `R`: `G × licenseBps / 10000` rounded to the nearest base unit, with a half rounding up. This is §4.3's largest remainder, for one clause against the rest claimant;
+- each member's share of `R`, by weight, by §4.5's largest remainder (a tie goes to the party whose id sorts first);
+- the operator's amount, `G − F − R`.
+
+One more base unit of gross can raise `F` and `R` together, so the operator's amount does not rise steadily with `G`. `G` is therefore the first amount from `quote` upward that passes, not the solution of an equation. If the compile refuses (a currency that §2 refuses, or a `G` above §2.2's bound), `computeKitSplit` refuses, and its reason lists the compiler's codes.
+
+**Result.**
+
+```
+{ ok: true, grossMinor: G, feeMinor: F, royaltyMinor: R, operatorMinor: G − F − R,
+  shares: { party, weight, amountMinor }[],
+  rounding: <the text below> }
+```
+
+Every amount is an Amount string. `shares` lists the distribution's members in the order they first appear in the lineage. A member whose share rounds to 0 is listed with `"0"`: it is a zero leg (§4.6), so it is not paid. `rounding` is always this text:
+
+> Exact base units. PCC's fee is the gross times its rate, rounded down. The royalty is the license's rate of the gross, rounded to the nearest base unit (a half rounds up). The royalty divides by lineage weight, by largest remainder; a tie goes to the party whose id sorts first. The operator receives the rest.
+
+**Examples** (USDC, 6 decimals):
+
+| Quote | feeBps | licenseBps | Lineage | G | F | R | Operator | Shares |
+|---|---|---|---|---|---|---|---|---|
+| 25000000 | 235 | 50 | carol, bob, ann | 25128666 | 590523 | 125643 | 24412500 | carol 71796, bob 35898, ann 17949 |
+| 2500000000 | 235 | 100 | bob, ann | 2525866528 | 59357863 | 25258665 | 2441250000 | bob 16839110, ann 8419555 |
+| 5 | 0 | 1000 | ann | 6 | 0 | 1 | 5 | ann 1 |
+| 1000 | 1000 | 1000 | ann, bob, ann | 1124 | 112 | 112 | 900 | ann 80, bob 32 |
+
+In the first row, `floor = 25000000 − 587500 = 24412500`, and at `G − 1` the operator would receive 24412499. In the third row, at `G = 5` the royalty of 0.5 rounds up to 1, which would leave the operator 4.
+
+**It assumes the operator is not one of the lineage's payees.** When the operator is also a contributor, §9's check counts the operator's share toward its minimum as well, so a smaller gross can pass. `computeKitSplit` does not look for that smaller gross.
+
+**Not in v1:** folding a share below the smallest leg into the forker's share, and a cap per unit over all kits. Both need a compiler rule, after the operator rules on the rates (operator item 99).
