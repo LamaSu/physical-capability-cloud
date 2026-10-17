@@ -329,6 +329,7 @@ export class FakeDevice implements MachineAdapter {
     this.delivering = true;
     try {
       const clonedPayload = structuredClone(payload);
+      // Checking the caller is defence in depth; the event is built only from the clone.
       if (Object.hasOwn(payload, "jobId") || Object.hasOwn(clonedPayload, "jobId")) throw new Error("payload.jobId is reserved for the PCC job (LO-EV-9)");
       for (const key of ["settlementUnitId", "challengeNonce"]) {
         if (Object.hasOwn(payload, key) || Object.hasOwn(clonedPayload, key)) throw new Error(`payload.${key} is reserved for the evidence binding`);

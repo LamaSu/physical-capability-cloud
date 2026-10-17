@@ -206,6 +206,18 @@ describe("FakeDevice evidence honesty", () => {
     device.complete();
   });
 
+  it.each(["jobId", "settlementUnitId", "challengeNonce", "mock"])("RV-orig-half refuses a non-enumerable caller key %s", async (key) => {
+    const device = await accepted();
+    const events: Emitted[] = [];
+    device.onEvidence((event) => events.push(event));
+    const payload = Object.defineProperty({}, key, { value: "reserved", enumerable: false });
+    expect(Object.hasOwn(structuredClone(payload), key)).toBe(false);
+    expect(() => device.emit("execution_progress", payload)).toThrow(`payload.${key} is reserved`);
+    expect(events).toEqual([]);
+    expect(await device.getStatus()).toBe("busy");
+    device.complete();
+  });
+
   it.each(["jobId", "settlementUnitId", "challengeNonce", "mock"])("a getter cannot hide cloned reserved field %s by deleting the caller's copy", async (key) => {
     const device = await accepted();
     const payload: Record<string, unknown> = { [key]: "reserved" };
@@ -577,6 +589,35 @@ describe("FakeDevice quiescence and cancellation", () => {
     device.complete();
     await quiescent;
     expect(events[0].payload.deviceJobId).toBe("replacement");
+  });
+
+  it("RV-finish-order a stale finalizer preserves the replacement's silent deadline", async () => {
+    const device = await accepted({ cancelBehavior: "silent", cancelConfirmMs: 5 });
+    const lifecycle = device as unknown as {
+      active: { id: string | number; end: () => void };
+      finishWork: (job: { id: string | number; end: () => void }) => void;
+    };
+    const old = lifecycle.active;
+    device.complete();
+    device.scriptStart({ outcome: "accept", deviceJobId: "replacement" });
+    await device.execute({ type: "start" });
+    const events: Emitted[] = [];
+    device.onEvidence((event) => events.push(event));
+    let idle = false;
+    const quiescent = device.quiesceEvidence().then(() => { idle = true; });
+    await device.cancelJob("replacement");
+    // Public re-entry cannot replace active work mid-delivery. Exercise this
+    // defensive boundary directly, with a timer that belongs to the new job.
+    lifecycle.finishWork(old);
+    expect(await device.getStatus()).toBe("busy");
+    expect(idle).toBe(false);
+    await Promise.race([quiescent, new Promise<void>((resolve) => setTimeout(resolve, 200))]);
+    expect(events.map((event) => [event.type, event.payload.deviceJobId, event.payload.reason])).toEqual([
+      ["execution_failed", "replacement", "cancel-unconfirmed"],
+    ]);
+    expect(events[0].payload.origin).toBe("device");
+    expect(await device.getStatus()).toBe("idle");
+    await quiescent;
   });
 
   it.each(["complete", "fail"] as const)("refuses every emit API after %s without invoking listeners", async (terminal) => {
