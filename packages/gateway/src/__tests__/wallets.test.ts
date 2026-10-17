@@ -1080,3 +1080,29 @@ describe("X-PCC-API-Key never changes the lookup principal", () => {
     expect(withHeader.json().consent.text).toContain("account-a");
   });
 });
+
+describe("the linked key's own SIWE principal cannot list or revoke its link, for each role and approver", () => {
+  // sessionHeaders() inserts the session row directly: /api/auth/verify's 30-per-minute
+  // limiter is module state that the per-test reset leaves alone, and this file shares it.
+  it.each([
+    ["agent", "cookie"], ["agent", "session key"], ["agent", "claimed key"],
+    ["device", "cookie"], ["device", "session key"], ["device", "claimed key"],
+  ] as const)("a %s link approved by a %s: the linked EOA's cookie and minted key get [] and 404", async (role, approver) => {
+    const a = sessionHeaders(`cells-owner-${role}-${approver}`);
+    const approverHeaders = approver === "cookie" ? a : approver === "session key" ? (await mintSessionKey(a)).headers : owner;
+    const { account, request } = await proved({ role });
+    const approval = await approve(request, approverHeaders);
+    expect(approval.statusCode).toBe(200);
+    const linkId = approval.json().linkId;
+    const stored = getStore().db.get<{ approved_by_key_id: string | null }>(sql`SELECT approved_by_key_id FROM wallet_links WHERE id = ${linkId}`);
+    expect(stored?.approved_by_key_id === null).toBe(approver === "cookie");
+    const self = sessionHeaders(`cells-self-${role}-${approver}`, account.address);
+    const skSelf = await mintSessionKey(self);
+    for (const headers of [self, skSelf.headers]) {
+      expect((await app.inject({ url: "/api/wallets", headers })).json()).toEqual({ links: [] });
+      expect((await revoke(linkId, headers)).statusCode).toBe(404);
+    }
+    expect(await resolveActiveWalletLink({ address: account.address, chainId: 84532 }))
+      .toMatchObject({ linkId, role, accountProof: approver === "claimed key" ? "claimed" : "siwe" });
+  });
+});
