@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# FC-8 round 4 (astra pack 61c) test fixture: a PATH-shim `curl` that plants
+# the canary in the fields smoke-digital-verifier.sh actually READS and
+# COMPARES/PRINTS/persists (status, result.verified, overall,
+# litProtocol/starknet.configured, valid) — round 3's shim put canaries in
+# ignored fields instead (astra's finding 2). Never touches the network.
+#
+# N44 merge note (fc8-split-n44-mergetree.txt): see the companion comment
+# in support/fc8-round3-bash-shim/curl — http_request() (N44) sends every
+# request through curl with a trailing `-w '\n%{http_code}'`, which this
+# shim must echo back (always 200; this suite is about canary leakage, not
+# HTTP-status branching) or http_request()'s split lands on nothing.
+CANARY="${FC8_CANARY:?FC8_CANARY must be set}"
+ARGS="$*"
+WANTS_CODE=0
+for a in "$@"; do [ "$a" = "-w" ] && WANTS_CODE=1; done
+
+case "$ARGS" in
+  *"/api/health"*)
+    echo "{\"status\":\"$CANARY\"}" ;;
+  *"/api/setup/status"*)
+    echo "{\"overall\":\"$CANARY\"}" ;;
+  *"/verify"*)
+    echo "{\"result\":{\"verified\":\"$CANARY\",\"reason\":\"$CANARY\"}}" ;;
+  *"/health"*)
+    echo "{\"status\":\"$CANARY\"}" ;;
+  *"/api/auth/provision"*)
+    echo "{\"api_key\":\"pcc_test_$CANARY\"}" ;;
+  *"/api/capabilities/types"*)
+    echo "{\"types\":\"$CANARY\"}" ;;
+  *"/api/status/integrations"*)
+    echo "{\"litProtocol\":{\"configured\":\"$CANARY\"},\"starknet\":{\"configured\":\"$CANARY\"}}" ;;
+  *"/api/auth/validate"*)
+    echo "{\"valid\":\"$CANARY\"}" ;;
+  *"/api/kernels"*)
+    echo "{\"kernels\":\"$CANARY\"}" ;;
+  *)
+    echo "{}" ;;
+esac
+[ "$WANTS_CODE" = 1 ] && echo "200"
+exit 0
