@@ -53,12 +53,17 @@ export function jobHoldFields(jobId: string): JobHoldFields {
   return isJobHeld(jobId) ? { held: true, holdReason: "emergency_stop" } : { held: false };
 }
 
+/** SQLite binds at most 32766 variables per statement, so a kernel's whole job list is read in chunks. */
+const HOLD_LOOKUP_CHUNK = 500;
+
 export function jobHoldFieldsById(ids: string[]): Map<string, ReturnType<typeof jobHoldFields>> {
   const result = new Map(ids.map(id => [id, { held: false } as ReturnType<typeof jobHoldFields>]));
-  if (ids.length === 0) return result;
-  const rows = getStore().db.select({ jobId: jobHolds.jobId }).from(jobHolds)
-    .where(sql`${jobHolds.jobId} IN (${sql.join(ids.map(id => sql`${id}`), sql`, `)})`).all();
-  for (const { jobId } of rows) result.set(jobId, { held: true, holdReason: "emergency_stop" });
+  for (let i = 0; i < ids.length; i += HOLD_LOOKUP_CHUNK) {
+    const chunk = ids.slice(i, i + HOLD_LOOKUP_CHUNK);
+    const rows = getStore().db.select({ jobId: jobHolds.jobId }).from(jobHolds)
+      .where(sql`${jobHolds.jobId} IN (${sql.join(chunk.map(id => sql`${id}`), sql`, `)})`).all();
+    for (const { jobId } of rows) result.set(jobId, { held: true, holdReason: "emergency_stop" });
+  }
   return result;
 }
 

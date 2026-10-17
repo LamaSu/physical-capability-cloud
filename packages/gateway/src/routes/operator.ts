@@ -149,6 +149,8 @@ export async function operatorRoutes(app: FastifyInstance) {
       try {
         const { db } = getStore();
         const now = new Date().toISOString();
+        // A reset restarts nothing (N174): work that came back to the queue during the stop is held too.
+        const prior = emergencyStopState(req.params.kernelId);
 
         db.transaction(() => {
           db.insert(operatorPolicies)
@@ -163,7 +165,7 @@ export async function operatorRoutes(app: FastifyInstance) {
               set: { policy: policy as any, updatedAt: now, updatedBy: "api" },
             })
             .run();
-          if (policy.emergencyStop) holdUndispatchedJobs(req.params.kernelId, now);
+          if (policy.emergencyStop || prior !== "clear") holdUndispatchedJobs(req.params.kernelId, now);
         });
 
         return { policy, updated: true, updatedAt: now };
@@ -193,6 +195,8 @@ export async function operatorRoutes(app: FastifyInstance) {
         const existing = (row?.policy ?? DEFAULT_OPERATOR_POLICY) as unknown as OperatorPolicy;
         const merged = { ...existing, ...patch, version: 1 } as OperatorPolicy;
         const now = new Date().toISOString();
+        // A reset restarts nothing (N174): work that came back to the queue during the stop is held too.
+        const prior = emergencyStopState(req.params.kernelId);
 
         db.transaction(() => {
           db.insert(operatorPolicies)
@@ -207,7 +211,7 @@ export async function operatorRoutes(app: FastifyInstance) {
               set: { policy: merged as any, updatedAt: now, updatedBy: "api" },
             })
             .run();
-          if (merged.emergencyStop) holdUndispatchedJobs(req.params.kernelId, now);
+          if (merged.emergencyStop || prior !== "clear") holdUndispatchedJobs(req.params.kernelId, now);
         });
 
         return { policy: merged, updated: true };
@@ -302,13 +306,18 @@ export async function operatorRoutes(app: FastifyInstance) {
       if (!row) return reply.status(404).send({ error: "No policy found for kernel" });
 
       const policy = row.policy as unknown as OperatorPolicy;
+      // A reset restarts nothing (N174): work that came back to the queue during the stop is held too.
+      const prior = emergencyStopState(kernelId);
       policy.emergencyStop = false;
       const now = new Date().toISOString();
 
-      db.update(operatorPolicies)
-        .set({ policy: policy as any, updatedAt: now, updatedBy: "emergency-resume" })
-        .where(eq(operatorPolicies.kernelId, kernelId))
-        .run();
+      db.transaction(() => {
+        db.update(operatorPolicies)
+          .set({ policy: policy as any, updatedAt: now, updatedBy: "emergency-resume" })
+          .where(eq(operatorPolicies.kernelId, kernelId))
+          .run();
+        if (prior !== "clear") holdUndispatchedJobs(kernelId, now);
+      });
 
       const held = listHeldJobs(kernelId);
       return { resumed: true, kernelId, timestamp: now, ...held, confirmRequired: held.heldCount > 0 };

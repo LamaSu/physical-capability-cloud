@@ -14,7 +14,7 @@ import { jobSubmitRoutes } from "../routes/job-submit.js";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { deviceRelayRoutes } from "../routes/device-relay.js";
 import { getKernelService, KernelService } from "../services/kernel-service.js";
-import { HOLDABLE_JOB_STATUSES } from "../services/job-holds.js";
+import { HOLDABLE_JOB_STATUSES, jobHoldFieldsById } from "../services/job-holds.js";
 import { localJobDispatchDecision } from "../services/local-job-dispatch.js";
 import { applyUnavailablePolicy } from "./helpers/emergency-stop-policy-cases.js";
 
@@ -331,6 +331,68 @@ describe("N174 the undispatched hold set", () => {
     expect(reset.statusCode).toBe(200);
     expect(await heldIds()).toEqual([id]);
     expect((await poll()).json()).toEqual({ emergencyStop: "clear", jobs: [] });
+  });
+
+  it.each([
+    ["in_progress", "queued"],
+    ["paused", "pending"],
+  ])("a %s job the node returns to %s during the stop is held by the reset", async (from, to) => {
+    const id = seedJob(`job-n174-returned-${from}`, from);
+    await stop();
+    expect(await heldIds()).toEqual([]);
+    const returned = await app.inject({
+      method: "POST", url: "/api/operator/job-status", headers: CLAIMED(),
+      payload: { jobId: id, kernelId: KERNEL, status: to },
+    });
+    expect(returned.statusCode).toBe(200);
+    expect((await resume()).json()).toMatchObject({ heldCount: 1, confirmRequired: true });
+    expect(await heldIds()).toEqual([id]);
+    expect((await poll(to)).json()).toEqual({ emergencyStop: "clear", jobs: [] });
+    expect(localJobDispatchDecision(KERNEL, KERNEL, true, undefined, id)).toEqual({ ok: false, reason: "held" });
+  });
+
+  it.each(["PUT", "PATCH"] as const)("a %s that clears the stop holds work returned to the queue during it", async (method) => {
+    const id = seedJob(`job-n174-returned-${method.toLowerCase()}`, "in_progress");
+    await stop();
+    expect((await app.inject({
+      method: "POST", url: "/api/operator/job-status", headers: CLAIMED(),
+      payload: { jobId: id, kernelId: KERNEL, status: "queued" },
+    })).statusCode).toBe(200);
+    const reset = await app.inject({
+      method, url: `/api/operator/policy/${KERNEL}`, headers: HEADERS(),
+      payload: { version: 1, emergencyStop: false },
+    });
+    expect(reset.statusCode).toBe(200);
+    expect(await heldIds()).toEqual([id]);
+    expect((await poll()).json()).toEqual({ emergencyStop: "clear", jobs: [] });
+  });
+
+  it.each(["resume", "PUT", "PATCH"] as const)("a %s of a kernel that is not stopped holds nothing", async (kind) => {
+    const clear = await app.inject({
+      method: "PUT", url: `/api/operator/policy/${KERNEL}`, headers: HEADERS(),
+      payload: { version: 1, emergencyStop: false },
+    });
+    expect(clear.statusCode).toBe(200);
+    const id = seedJob(`job-n174-not-stopped-${kind.toLowerCase()}`);
+    const res = kind === "resume"
+      ? await resume()
+      : await app.inject({
+        method: kind, url: `/api/operator/policy/${KERNEL}`, headers: HEADERS(),
+        payload: { version: 1, emergencyStop: false },
+      });
+    expect(res.statusCode).toBe(200);
+    if (kind === "resume") expect(res.json()).toMatchObject({ heldCount: 0, confirmRequired: false });
+    expect(await heldIds()).toEqual([]);
+    expect((await poll()).json().jobs.map((j: { id: string }) => j.id)).toEqual([id]);
+  });
+
+  it("reads holds for more job ids than SQLite binds in one statement", async () => {
+    const id = seedJob("job-n174-many-ids");
+    await stop();
+    const holds = jobHoldFieldsById([...Array.from({ length: 32_767 }, (_, i) => `job-n174-absent-${i}`), id]);
+    expect(holds.size).toBe(32_768);
+    expect(holds.get(id)).toEqual({ held: true, holdReason: "emergency_stop" });
+    expect(holds.get("job-n174-absent-0")).toEqual({ held: false });
   });
 });
 
