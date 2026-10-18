@@ -91,7 +91,7 @@ async function request(path = "/api/jobs/submit") {
 }
 
 describe("wallet session credentials", () => {
-  it("mints once after verification with cookies and adopts volatile metadata", async () => {
+  it("mints once after verification with the bearer and adopts volatile metadata", async () => {
     const writes = vi.spyOn(Storage.prototype, "setItem");
     await signIn();
     expect(count("/api/auth/session-key")).toBe(1);
@@ -174,7 +174,7 @@ describe("wallet session credentials", () => {
     expect(new Headers(calls.at(-1)!.init.headers).get("Authorization")).toBe(`Bearer ${NEXT}`);
   });
 
-  it("restores a wallet credential from its cookie after reopening", async () => {
+  it("restores a wallet session without minting from its cookie after reopening", async () => {
     await signIn();
     expect(localStorage.getItem("pcc-api-key")).toBeNull();
     await act(async () => { root.unmount(); adoptApiKey(null); });
@@ -220,6 +220,30 @@ describe("wallet session credentials", () => {
     } finally {
       await act(async () => { second.unmount(); });
       host.remove();
+    }
+  });
+
+  it("keeps a live session key when a second disconnected wallet control mounts", async () => {
+    await signIn();
+    const keyId = useAuthStore.getState().sessionKeyId;
+    expect(keyId).toBe("session-key-1");
+    expect(count("/api/auth/session-key")).toBe(1);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const second = createRoot(host);
+    wallet.isConnected = false;
+    try {
+      await act(async () => second.render(<SecondUser />));
+      expect(count("/api/auth/session-key")).toBe(1);
+      expect(useAuthStore.getState().sessionKeyId).toBe(keyId);
+      expect(calls.map((call) => call.path)).not.toContain("/api/auth/logout");
+      expect(hasStoredApiKey()).toBe(true);
+      await request();
+      expect(new Headers(calls.at(-1)!.init.headers).get("Authorization")).toBe(`Bearer ${KEY}`);
+    } finally {
+      await act(async () => second.unmount());
+      host.remove();
+      wallet.isConnected = true;
     }
   });
 
@@ -303,7 +327,7 @@ describe("session request renewal", () => {
     expect(count("/api/auth/session-key")).toBe(1);
   });
 
-  it("checks the cookie, mints once, and retries the original request once", async () => {
+  it("checks the sign-in bearer, mints once, and retries the original request once", async () => {
     await signIn();
     calls = [];
     const network = fetch;
@@ -704,25 +728,49 @@ describe("operator actions require a sign-in bearer", () => {
     expect(container.textContent).toBe(notice);
   });
 
-  it.each(["cookie", null])("a decision without a bearer (%s) shows the notice and a cookie read still succeeds", async (token) => {
-    await act(async () => { useAuthStore.getState().setSession(token); });
-    calls = [];
-    requestReply = () => reply(401, { error: "session_required" });
-    let decision!: Response;
-    await act(async () => { decision = await authorizedFetch("/api/operator/emergency-resume", { method: "POST" }); });
-    expect(auth.authNotice).toBe(notice);
-    expect(container.textContent).toBe(notice);
-    expect(decision.status).toBe(401);
-    expect(await decision.json()).toMatchObject({ error: "session_required" });
+  it("never creates a pre-request notice for anonymous or connected-but-unsigned writes", async () => {
+    await act(async () => {
+      useAuthStore.getState().setAddress(null);
+      useAuthStore.getState().setSession(null);
+    });
+    await request();
+    expect(auth.authNotice).toBeNull();
+    expect(new Headers(calls.at(-1)!.init.headers).has("Authorization")).toBe(false);
+    await act(async () => useAuthStore.getState().setAddress(wallet.address));
+    await request();
+    expect(auth.authNotice).toBeNull();
+    expect(new Headers(calls.at(-1)!.init.headers).has("Authorization")).toBe(false);
     expect(count("/api/auth/session-key")).toBe(0);
+  });
+
+  it("preserves a key-limit notice across keyless decisions, including a later cookie session", async () => {
+    mintReply = () => reply(429, { error: "too_many_keys" });
+    await signIn();
+    const keyLimit = "Your wallet is signed in. You have reached the active-key limit; remove an unused key to enable operator actions.";
+    expect(auth.authNotice).toBe(keyLimit);
+    expect(hasStoredApiKey()).toBe(false);
+    await request();
+    expect(auth.authNotice).toBe(keyLimit);
+    await act(async () => useAuthStore.getState().setSession("cookie"));
+    await request();
+    expect(auth.authNotice).toBe(keyLimit);
+    expect(count("/api/auth/session-key")).toBe(1);
+  });
+
+  it("prefers a persisted pasted key to the cookie placeholder after reopening", async () => {
+    meValid = true;
+    await act(async () => { expect(await useAuthStore.getState().login(PASTED)).toBe(true); });
+    expect(localStorage.getItem("pcc-api-key")).toBe(PASTED);
+    await act(async () => root.unmount());
     calls = [];
-    requestReply = () => reply(200, { ok: true });
-    const read = await authorizedFetch("/api/operator/jobs");
-    expect(read.status).toBe(200);
-    expect(calls).toHaveLength(1);
-    expect(calls[0].init.credentials ?? "same-origin").toBe("same-origin");
-    expect(new Headers(calls[0].init.headers).has("Authorization")).toBe(false);
+    root = createRoot(container);
+    await act(async () => root.render(<Harness />));
+    expect(useAuthStore.getState()).toMatchObject({ sessionToken: "cookie", sessionKeyId: null });
+    expect(auth.authNotice).toBeNull();
     expect(count("/api/auth/session-key")).toBe(0);
+    await request();
+    expect(auth.authNotice).toBeNull();
+    expect(new Headers(calls.at(-1)!.init.headers).get("Authorization")).toBe(`Bearer ${PASTED}`);
   });
 
   it("a tokenless login never mints and shows the shared sign-in notice", async () => {

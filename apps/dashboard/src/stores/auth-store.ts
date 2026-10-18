@@ -1,7 +1,10 @@
 import { create } from "zustand";
 import { fetchWithKey, gatewayUrl } from "../lib/gateway-base.js";
 import { authorizedFetch, hasStoredApiKey, onStoredKeyChange, setStoredApiKey } from "../lib/authorized-fetch.js";
-import { configureSessionKeyRecovery, SESSION_KEY_SIGN_IN_NOTICE } from "../lib/session-key-recovery.js";
+import { configureSessionKeyRecovery } from "../lib/session-key-recovery.js";
+import { OPERATOR_SIGN_IN_NOTICE } from "../lib/auth-notices.js";
+
+const walletSignInNotice = `Your wallet is signed in. ${OPERATOR_SIGN_IN_NOTICE}`;
 
 /**
  * Sign-in state. The API key itself is not here, not in the state and not in
@@ -129,7 +132,7 @@ function mintSessionKey(checkSession: boolean): Promise<boolean> {
   const state = useAuthStore.getState();
   if (signingOut || (hasStoredApiKey() && !state.sessionKeyId)) return Promise.resolve(false);
   if (!state.sessionToken || state.sessionToken === "cookie") {
-    useAuthStore.setState({ authNotice: SESSION_KEY_SIGN_IN_NOTICE });
+    useAuthStore.setState({ authNotice: walletSignInNotice });
     return Promise.resolve(false);
   }
   if (mintFlight && mintKeyEpoch === state.keyEpoch && mintSessionEpoch === state.sessionEpoch) return mintFlight;
@@ -166,7 +169,7 @@ function mintSessionKey(checkSession: boolean): Promise<boolean> {
         const data = await response.json().catch(() => ({}));
         if (!current()) {
           if (currentSession() && useAuthStore.getState().address !== address) {
-            useAuthStore.setState({ authNotice: SESSION_KEY_SIGN_IN_NOTICE });
+            useAuthStore.setState({ authNotice: walletSignInNotice });
           }
           return false;
         }
@@ -180,7 +183,7 @@ function mintSessionKey(checkSession: boolean): Promise<boolean> {
         const notice = data.error === "too_many_keys"
           ? "Your wallet is signed in. You have reached the active-key limit; remove an unused key to enable operator actions."
           : data.error === "session_required" || data.error === "api_key_required"
-            ? SESSION_KEY_SIGN_IN_NOTICE
+            ? walletSignInNotice
             : "Your wallet is signed in. Operator access is temporarily unavailable; try again shortly.";
         useAuthStore.setState({ authNotice: notice });
         return false;
@@ -224,12 +227,6 @@ configureSessionKeyRecovery({
   isActive: () => !signingOut && !!useAuthStore.getState().sessionKeyId,
   identity: () => useAuthStore.getState().sessionEpoch,
   renew: () => mintSessionKey(true),
-  notifyMissingBearer: () => {
-    const state = useAuthStore.getState();
-    if ((state.address || state.sessionToken) && (!state.sessionToken || state.sessionToken === "cookie")) {
-      useAuthStore.setState({ authNotice: SESSION_KEY_SIGN_IN_NOTICE });
-    }
-  },
 });
 
 /**

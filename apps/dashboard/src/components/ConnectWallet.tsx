@@ -2,6 +2,21 @@ import React from "react";
 import { useConnect, useDisconnect } from "wagmi";
 import { GlassPanel } from "@pcc/ui";
 import { useAuth } from "../hooks/use-auth.js";
+import { useAuthStore } from "../stores/auth-store.js";
+
+/** One wallet re-sign action, also used after a gateway quickstart refusal. */
+export function SignInAgainButton({ login, isVerifying }: { login: () => Promise<void>; isVerifying: boolean }) {
+  return (
+    <button
+      type="button"
+      onClick={() => void login()}
+      disabled={isVerifying}
+      className="px-3 py-1.5 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 text-xs hover:bg-yellow-500/15 transition-colors disabled:opacity-50"
+    >
+      Sign in again
+    </button>
+  );
+}
 
 /**
  * Wallet connect button + SIWE auth flow.
@@ -9,6 +24,8 @@ import { useAuth } from "../hooks/use-auth.js";
  */
 export function ConnectWallet({ showNotice = true }: { showNotice?: boolean } = {}) {
   const { address, isConnected, isAuthenticated, isVerifying, error, authNotice, login, logout } = useAuth();
+  const sessionToken = useAuthStore((s) => s.sessionToken);
+  const hasKey = useAuthStore((s) => s.isAuthenticated);
   const { connectors, connect } = useConnect();
   const { disconnect } = useDisconnect();
   const [showModal, setShowModal] = React.useState(false);
@@ -30,6 +47,7 @@ export function ConnectWallet({ showNotice = true }: { showNotice?: boolean } = 
           <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
           {address.slice(0, 6)}...{address.slice(-4)}
         </button>
+        {sessionToken === "cookie" && !hasKey && <SignInAgainButton login={login} isVerifying={isVerifying} />}
         {showNotice && authNotice && <p role="status" className="max-w-xs text-xs text-white/60">{authNotice}</p>}
         {showModal && (
           <div className="absolute right-0 top-full mt-2 z-50">
