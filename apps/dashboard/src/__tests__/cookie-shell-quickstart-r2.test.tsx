@@ -287,3 +287,39 @@ describe("contributor quickstart explicit credentials", () => {
     expect(button("Sign in again")).toBeUndefined();
   });
 });
+
+describe("re-sign control edges", () => {
+  it("lets a sign-in that reached the key limit through, with its notice and no Sign in again", async () => {
+    const network = fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const target = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (new URL(target, window.location.origin).pathname !== "/api/auth/session-key") return network(input, init);
+      calls.push({ path: "/api/auth/session-key", init });
+      return json({ error: "too_many_keys" }, 429);
+    }));
+    await renderAt("/operator");
+    await vi.waitFor(() => expect(button("Sign In")).toBeDefined());
+    await act(async () => button("Sign In")!.click());
+    await vi.waitFor(() => expect(button(`EMERGENCY STOP: ${MACHINE.name}`)).toBeDefined());
+    expect(useAuthStore.getState()).toMatchObject({ sessionToken: "session-token", isAuthenticated: false, sessionKeyId: null });
+    expect(container.textContent).toContain("You have reached the active-key limit");
+    expect(button("Sign in again")).toBeUndefined();
+    expect(seen("/api/auth/session-key")).toHaveLength(1);
+  });
+
+  it("drops the quickstart re-sign control when a later attempt fails for another reason", async () => {
+    quickstartError = "session_required";
+    useAuthStore.getState().setAddress(wallet.address);
+    useAuthStore.getState().setSession("cookie");
+    await renderAt("/earn");
+    await submitQuickstart();
+    await vi.waitFor(() => expect(button("Sign in again")).toBeDefined());
+    await act(async () => button("Try again")!.click());
+    quickstartError = "api_key_required";
+    calls = [];
+    await submitQuickstart();
+    await vi.waitFor(() => expect(button("Try again")).toBeDefined());
+    expect(container.textContent).toContain("Signup failed (401)");
+    expect(button("Sign in again")).toBeUndefined();
+  });
+});
