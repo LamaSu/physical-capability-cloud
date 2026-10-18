@@ -370,4 +370,18 @@ describe("re-sign after a failed attempt", () => {
     expect(seen("/api/auth/nonce")).toHaveLength(2);
     expect(hasStoredApiKey()).toBe(true);
   });
+
+  it("starts one sign-in when Sign in again is clicked twice before the page updates", async () => {
+    cookieLive = true;
+    await renderAt("/operator");
+    await vi.waitFor(() => expect(button("Sign in again")).toBeDefined());
+    await act(async () => {
+      const control = button("Sign in again")!;
+      control.click();
+      control.click();
+    });
+    await vi.waitFor(() => expect(seen("/api/auth/session-key")).toHaveLength(1));
+    expect(seen("/api/auth/nonce")).toHaveLength(1);
+    expect(wallet.signMessageAsync).toHaveBeenCalledTimes(1);
+  });
 });
