@@ -15,8 +15,9 @@
  * Before anything is read, in this order (RECONCILE_REFUSALS' order): the record store
  * (funding_record_store_unavailable), then the expected chain (expected_chain_unavailable), then the
  * TTL (activation_ttl_unavailable), then the record's own checks (record_malformed,
- * record_chain_mismatch, record_scope_mismatch), then testnet_buyer_not_allowed when the testnet
- * buyer list is unset, empty, malformed or does not name the verified payer.
+ * record_chain_mismatch, record_scope_mismatch), then, for testnet-only terms,
+ * testnet_buyer_not_allowed when the buyer list is unset, empty, malformed or does not name the
+ * verified payer.
  * Production has no store, so it answers the first.
  *
  * One synchronous SQLite transaction (BEGIN IMMEDIATE; better-sqlite3 runs nothing else on the

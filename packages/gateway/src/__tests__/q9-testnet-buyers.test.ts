@@ -137,6 +137,7 @@ describe("Q9 testnet live-window buyer allowance", () => {
 
   it.each([
     ["unset list", undefined, BUYER, "testnet_buyer_not_allowed"],
+    ["list without opt-in flag", BUYER, BUYER, "expected_chain_unavailable"],
     ["explicitly listed", BUYER, BUYER, "bound"],
     ["unlisted", OTHER, BUYER, "testnet_buyer_not_allowed"],
     ["malformed after a valid buyer", `${BUYER},bad`, BUYER, "testnet_buyer_not_allowed"],
@@ -150,10 +151,19 @@ describe("Q9 testnet live-window buyer allowance", () => {
     const scope = scopeRow(scopeId);
     const escrow = escrowForJob(scope.jobId)!;
     const record = verification(scopeId, { buyer });
-    const allowance = testnetBuyerAllowance(testnetTerms);
-    const binding = fundingBindingRefusal(record, scope, escrow, testnetTerms.expectedChainId, allowance) ?? "bound";
-    const dto = projectFundingStatus(scope, record, escrow, testnetTerms.expectedChainId, new Date().toISOString(), allowance);
-    const reconciled = reconcilePaidScope(scopeId, record, testnetTerms);
+    // The no-opt-in case must read the actual deployment terms, just as the accept route does.
+    // R-c rejects the testnet-only record before an otherwise listed buyer reaches the allow-list.
+    const noOptIn = _case === "list without opt-in flag";
+    const warn = noOptIn ? vi.spyOn(console, "warn").mockImplementation(() => {}) : null;
+    const terms = noOptIn ? configuredTerms(scopeId) : testnetTerms;
+    if (warn) {
+      expect(warn.mock.calls).toEqual([["vnext_record_refused R-c"]]);
+      expect(terms.expectedChainId).toBeNull();
+    }
+    const allowance = testnetBuyerAllowance(terms);
+    const binding = fundingBindingRefusal(record, scope, escrow, terms.expectedChainId, allowance) ?? "bound";
+    const dto = projectFundingStatus(scope, record, escrow, terms.expectedChainId, new Date().toISOString(), allowance);
+    const reconciled = reconcilePaidScope(scopeId, record, terms);
     const reason = reconciled.kind === "activated" ? "bound" : reconciled.kind === "refused" ? reconciled.reason : reconciled.kind;
     expect(binding).toBe(expected);
     expect(dto.binding).toBe(expected);

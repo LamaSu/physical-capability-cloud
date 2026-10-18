@@ -224,8 +224,8 @@ Full rationale, growth math, vacuum guidance, and recovery semantics: [`docs/WOR
 ## Buyer-funding V-next record: operator-approved live window
 
 On production, keep all three variables **unset**: `PCC_VNEXT_RECORD_NETWORK`,
-`PCC_VNEXT_ALLOW_TESTNET_RECORD`, and `PCC_VNEXT_TESTNET_BUYERS`. Unset values
-refuse testnet activation; they are not deployment defaults.
+`PCC_VNEXT_ALLOW_TESTNET_RECORD`, and `PCC_VNEXT_TESTNET_BUYERS`. Leaving them unset
+keeps testnet-record activation disabled; do not configure them as persistent production settings.
 
 For **one operator-approved live window**, with an explicit go, set all three:
 
@@ -238,8 +238,9 @@ An all-uppercase entry, a bad checksum, an empty entry, whitespace, or an invali
 invalidates the **entire** list. An empty or unset list permits nobody. After the live
 window, **unset all three variables** again; do not leave the opt-in on production.
 
-Q9 only creates the empty storage tables. **Nothing activates** via this path until both
-S1.1 (prepared TTL terms) and S1.2 (the production funding-store wiring) land.
+This change adds empty funding storage tables, fail-closed record-reader refusals R-a through R-d
+(with fixed-code warnings), and the testnet buyer allow-list refusal. **Nothing activates** via
+this path until both S1.1 (prepared TTL terms) and S1.2 (the production funding-store wiring) land.
 
 ## What this does NOT yet include
 

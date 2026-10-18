@@ -159,8 +159,20 @@ export const FUNDING_RECORD_STORE_CONTRACT: readonly StoreContractCheck[] = [
       store.plant(unfinalized(record("scope_u1", A)));
       for (const [address, finality] of [[A_UPPER, "safe"], [A, "FINALIZED"]] as const) {
         const candidate = unfinalized(record("scope_u1", address), finality);
-        if (store.refusesUnknownFinality) expect(() => store.plant(candidate)).toThrow(/CHECK constraint failed/);
-        else store.plant(candidate);
+        if (store.refusesUnknownFinality) {
+          // Drizzle wraps the SQLite CHECK error in DrizzleError.cause. Assert the actual
+          // SQLite constraint, not the wrapper's generic "Failed to run the query" message.
+          let thrown: unknown;
+          try {
+            store.plant(candidate);
+          } catch (error) {
+            thrown = error;
+          }
+          expect(thrown, `planting ${finality} must throw`).toBeInstanceOf(Error);
+          const sqliteError = (thrown as Error & { cause?: unknown }).cause ?? thrown;
+          expect(sqliteError).toBeInstanceOf(Error);
+          expect((sqliteError as Error).message).toMatch(/CHECK constraint failed: finality/);
+        } else store.plant(candidate);
       }
       expect(store.findByScope(db, "scope_u1")).toBeNull();
       for (const lookup of [A, A_UPPER, mixedCase(A)]) expect(store.findByEscrow(db, CHAIN, lookup), lookup).toBeNull();
