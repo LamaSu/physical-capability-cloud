@@ -323,3 +323,34 @@ describe("re-sign control edges", () => {
     expect(button("Sign in again")).toBeUndefined();
   });
 });
+
+describe("re-sign while a machine is stopped", () => {
+  it("keeps a confirmed stop and its Resume control across Sign in again", async () => {
+    cookieLive = true;
+    await renderAt("/operator");
+    await vi.waitFor(() => expect(button(`EMERGENCY STOP: ${MACHINE.name}`)).toBeDefined());
+    await act(async () => button(`EMERGENCY STOP: ${MACHINE.name}`)!.click());
+    await vi.waitFor(() => expect(button(`Resume Operations: ${MACHINE.name}`)).toBeDefined());
+    await act(async () => button("Sign in again")!.click());
+    await vi.waitFor(() => expect(hasStoredApiKey()).toBe(true));
+    await vi.waitFor(() => expect(button(`Resume Operations: ${MACHINE.name}`)).toBeDefined());
+    expect(container.textContent).toContain(`EMERGENCY STOP ACTIVE for ${MACHINE.name}`);
+    expect(seen("/api/operator/emergency-stop")).toHaveLength(1);
+  });
+
+  it("disables Sign in again while the wallet signs", async () => {
+    cookieLive = true;
+    let release!: (signature: string) => void;
+    wallet.signMessageAsync.mockImplementationOnce(() => new Promise<string>((resolve) => { release = resolve; }));
+    await renderAt("/operator");
+    await vi.waitFor(() => expect(button("Sign in again")).toBeDefined());
+    await act(async () => button("Sign in again")!.click());
+    await vi.waitFor(() => expect(wallet.signMessageAsync).toHaveBeenCalledTimes(1));
+    expect(button("Sign in again")!.disabled).toBe(true);
+    await act(async () => button("Sign in again")!.click());
+    expect(seen("/api/auth/nonce")).toHaveLength(1);
+    await act(async () => release("signed"));
+    await vi.waitFor(() => expect(seen("/api/auth/session-key")).toHaveLength(1));
+    expect(seen("/api/auth/nonce")).toHaveLength(1);
+  });
+});
