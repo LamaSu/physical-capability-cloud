@@ -354,3 +354,20 @@ describe("re-sign while a machine is stopped", () => {
     expect(seen("/api/auth/nonce")).toHaveLength(1);
   });
 });
+
+describe("re-sign after a failed attempt", () => {
+  it("re-enables Sign in again after a refused signature, and the next click signs in", async () => {
+    cookieLive = true;
+    wallet.signMessageAsync.mockImplementationOnce(async () => { throw new Error("User rejected the request."); });
+    await renderAt("/operator");
+    await vi.waitFor(() => expect(button("Sign in again")).toBeDefined());
+    await act(async () => button("Sign in again")!.click());
+    await vi.waitFor(() => expect(useAuthStore.getState().error).toBe("User rejected the request."));
+    await vi.waitFor(() => expect(button("Sign in again")!.disabled).toBe(false));
+    expect(seen("/api/auth/session-key")).toHaveLength(0);
+    await act(async () => button("Sign in again")!.click());
+    await vi.waitFor(() => expect(seen("/api/auth/session-key")).toHaveLength(1));
+    expect(seen("/api/auth/nonce")).toHaveLength(2);
+    expect(hasStoredApiKey()).toBe(true);
+  });
+});
