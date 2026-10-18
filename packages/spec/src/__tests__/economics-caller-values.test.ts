@@ -279,6 +279,32 @@ describe("N188 R: simulateEconomics does not re-read refused agreements", () => 
     expect(first.refusals[0]).not.toBe(second.refusals[0]);
     expect(first.refusals).toEqual(second.refusals);
   });
+
+  it("R6: a schema-invalid copy is compiled from the copy in each scenario; the agreement is never read again", () => {
+    let versionReads = 0;
+    const agreement = new Proxy({ ...exampleGuildRepair() }, {
+      getOwnPropertyDescriptor(target, property) {
+        const descriptor = Reflect.getOwnPropertyDescriptor(target, property);
+        if (property !== "version" || descriptor === undefined) return descriptor;
+        versionReads++;
+        return versionReads === 1 ? { ...descriptor, value: -1 } : descriptor;
+      },
+    });
+    const compiled = compileEconomics({ ...exampleGuildRepair(), version: -1 });
+    if (compiled.ok) throw new Error("invalid fixture compiled");
+    expect(compiled.refusals.map((r) => [r.code, r.path])).toEqual([["SCHEMA_INVALID", []]]);
+
+    const results = simulateEconomics(agreement, [S("a"), S("b")]);
+    expect(results).toEqual([
+      { scenarioId: "a", label: "a", ok: false, refusals: compiled.refusals },
+      { scenarioId: "b", label: "b", ok: false, refusals: compiled.refusals },
+    ]);
+    expect(versionReads).toBe(1);
+    const [first, second] = results;
+    if (!first || !second || first.ok || second.ok) throw new Error("fixture must refuse both scenarios");
+    expect(first.refusals).not.toBe(second.refusals);
+    expect(first.refusals[0]).not.toBe(second.refusals[0]);
+  });
 });
 
 describe("N188 W: snapshotJson uses WeakSet methods bound at load", () => {
