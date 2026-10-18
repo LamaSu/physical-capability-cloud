@@ -1,13 +1,14 @@
 /** @vitest-environment jsdom */
 
-import React from "react";
+import React, { act } from "react";
 import type { ReactNode } from "react";
-import { act } from "react-dom/test-utils";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useOnboardWizardStore } from "../../../stores/onboard-wizard-store.js";
 import { apiPost } from "../../../lib/api.js";
 import { Step7_Review } from "../Step7_Review.js";
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 vi.mock("../../../lib/api.js", () => ({ apiPost: vi.fn() }));
 vi.mock("react-router-dom", () => ({ useNavigate: () => vi.fn() }));
@@ -59,6 +60,16 @@ function finalReply(status: string, passed: boolean, simulated: boolean) {
     duration: 12,
   };
 }
+
+// Before N59 (#450), the route's final reply had no ran, passed or simulated
+// field (packages/gateway/src/routes/setup.ts:863-869 at ac86a404).
+const preN59Reply = {
+  jobId: "job-1",
+  deviceId: "dev-mill-1",
+  status: "completed",
+  evidenceBundleId: null,
+  duration: 12,
+};
 
 const stoppedReply = {
   error: "emergency_stop",
@@ -188,6 +199,11 @@ describe("Step7_Review test-job result", () => {
     const panel = jobPanel(container);
     expectResult(panel, "No pass confirmed", status, "gold", false);
     expect(panel.textContent).not.toContain(reply.passReason);
+  });
+
+  it("a completed reply with no passed field (a gateway older than N59) reports no confirmed pass", async () => {
+    const container = await throughSubmitAndTestJob(preN59Reply);
+    expectResult(jobPanel(container), "No pass confirmed", "completed", "gold", false);
   });
 
   it("a 409 emergency stop keeps the existing thrown-error panel and message", async () => {
