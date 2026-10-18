@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { canonicalize, hashBundle, sha256, type EvidenceEvent } from "@pcc/spec";
+import { canonicalize, hashBundle, sha256, verifyEventHash, type EvidenceEvent } from "@pcc/spec";
 import { operatorRelayRoutes } from "../routes/operator-relay.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { kernelRoutes } from "../routes/kernels.js";
@@ -388,6 +388,88 @@ describe("operator evidence relay: event hash version follows source writer", ()
         bundleHash: v1Claim,
       },
       { error: "bundle_hash_mismatch" },
+    );
+  });
+
+  it("stored rows keep the source as hashed and reproduce their stored hashes", async () => {
+    const unmarked = vector("unmarked-v1").event;
+    const marked = vector("kernel-written-v2").event;
+
+    const response = await postEvidence({
+      events: [withoutHash(unmarked), withoutHash(marked)],
+    });
+    expect(response.statusCode).toBe(200);
+
+    const body = response.json();
+    const rows = getRepos().evidence.findEventsByBundle(body.bundleId);
+    expect(rows).toHaveLength(2);
+
+    for (const [index, event] of [unmarked, marked].entries()) {
+      const stored = storedEventAt(body.bundleId, index);
+      expect(stored.source).toEqual(event.source);
+      expect(
+        await verifyEventHash({
+          id: stored.id,
+          type: stored.type,
+          timestamp: stored.timestamp,
+          source: stored.source,
+          payload: stored.payload,
+          hash: stored.hash,
+        } as unknown as EvidenceEvent),
+      ).toBe(true);
+    }
+
+    expect(await hashBundle(rows as unknown as EvidenceEvent[])).toBe(
+      getRepos().evidence.findById(body.bundleId)!.bundleHash,
+    );
+  });
+
+  it("an inherited writer does not count: unmarked-v1 keeps its v1 hash", async () => {
+    const event = vector("unmarked-v1").event;
+
+    const response = await (async () => {
+      Object.defineProperty(Object.prototype, "writer", {
+        value: "kernel",
+        configurable: true,
+        writable: true,
+        enumerable: false,
+      });
+      try {
+        return await postEvidence({ events: [event] });
+      } finally {
+        Reflect.deleteProperty(Object.prototype, "writer");
+      }
+    })();
+
+    expect(Object.prototype.hasOwnProperty.call(Object.prototype, "writer")).toBe(false);
+    expect(response.statusCode).toBe(200);
+    expect(storedEventAt(response.json().bundleId, 0).hash).toBe(event.hash);
+  });
+
+  for (const writer of ["", 0, 1, {}, [], ["kernel"], "Kernel", "kernel "]) {
+    it(`an own ${JSON.stringify(writer)} writer is refused with and without a supplied hash`, async () => {
+      const event = structuredClone(vector("unmarked-v1").event);
+      event.source.writer = structuredClone(writer);
+
+      await expectRefused(
+        { events: [event] },
+        { error: "event_writer_invalid", eventIndex: 0 },
+      );
+
+      await expectRefused(
+        { events: [withoutHash(event)] },
+        { error: "event_writer_invalid", eventIndex: 0 },
+      );
+    });
+  }
+
+  it("the writer refusal comes before the job check", async () => {
+    const event = withoutHash(vector("adapter-writer").event);
+    event.payload.jobId = `${JOB}-other`;
+
+    await expectRefused(
+      { events: [event] },
+      { error: "event_writer_invalid", eventIndex: 0 },
     );
   });
 });
