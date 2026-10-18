@@ -70,6 +70,7 @@ async function buildApp(opts: {
   if (opts.provenWallet) {
     app.addHook("preHandler", async (req) => {
       (req as FastifyRequest & { provenWallet: string }).provenWallet = opts.provenWallet!;
+      req.provenWalletCarrier = "key";
     });
   }
   if (!opts.provisionBeforeGate) {
@@ -114,7 +115,7 @@ async function provision(app: FastifyInstance, walletAddress = ADDRESS) {
 
 async function mint(app: FastifyInstance, token: string, path: "cookie" | "bearer" = "bearer") {
   const response = await app.inject({
-    method: "POST", url: "/api/auth/session-key", headers: sessionHeaders(app, token, path),
+    method: "POST", url: "/api/auth/session-key", headers: { ...sessionHeaders(app, token, path), authorization: `Bearer ${token}` },
   });
   expect(response.statusCode).toBe(201);
   return response.json<{ api_key: string; key_id: string }>();

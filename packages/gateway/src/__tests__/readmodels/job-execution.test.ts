@@ -521,6 +521,7 @@ describe("GET /api/jobs/:jobId/execution", () => {
       if (typeof p === "string") (req as any).operatorId = p;
       const w = req.headers["x-test-proven-wallet"];
       (req as any).provenWallet = typeof w === "string" ? w.toLowerCase() : null;
+      req.provenWalletCarrier = "key";
       // Stand-in for tenant resolution from the key.
       const t = req.headers["x-test-tenant"];
       if (typeof t === "string") (req as any).tenantId = t;
@@ -862,7 +863,7 @@ describe("GET /api/jobs/:jobId/execution", () => {
     });
 
     it("jobReadCallerOf: a proven wallet comes only from the gate's provenWallet, never from an operator id", () => {
-      const req = (r: Record<string, unknown>) => ({ headers: {}, ...r });
+      const req = (r: Record<string, unknown>) => ({ headers: {}, provenWalletCarrier: "key", ...r });
       expect(jobReadCallerOf(req({ operatorId: OPERATOR_NYC }))).toEqual({ authenticated: true, provenWallet: null, adminKey: null });
       expect(jobReadCallerOf(req({ userId: OPERATOR_NYC }))).toMatchObject({ authenticated: true, provenWallet: null });
       expect(jobReadCallerOf(req({ operatorId: "x", provenWallet: OPERATOR_NYC.toUpperCase().replace("0X", "0x") })).provenWallet).toBe(OPERATOR_NYC);

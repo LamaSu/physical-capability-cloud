@@ -8,7 +8,8 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { hasSingleValidAdminKey } from "./relay-admin-gate.js";
 import { nonCanonicalTargetReason, NON_CANONICAL_REFUSAL } from "./canonical-request-target.js";
-import { resolveApiKey } from "../auth/api-key-auth.js";
+import { resolveApiKey, siweSessionKeyAddress } from "../auth/api-key-auth.js";
+import { ownerOf } from "../auth/kernel-authority.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 import { containsKeyMaterial } from "../services/wallet-links/guards.js";
 import { isWalletRequest } from "../services/telemetry-privacy.js";
@@ -165,6 +166,18 @@ function isPublicRoute(url: string, method?: string): boolean {
 }
 
 async function apiGateImpl(app: FastifyInstance) {
+  const proveSiweWallet = (req: FastifyRequest, address: string | null, carrier: NonNullable<FastifyRequest["provenWalletCarrier"]>) => {
+    // Defensive: in production nothing sets a proof before this onRequest hook.
+    // SSE routes live under /sse/, outside the gate; W1b's self-link hook is a later
+    // preHandler and also keeps an existing proof. Keep a proof an earlier hook set.
+    // A key supplies only its own stored SIWE identity, never a companion cookie's.
+    if (typeof req.provenWallet === "string" && req.provenWallet.length > 0) return;
+    const wallet = ownerOf(address);
+    if (wallet === null || !/^0x[0-9a-f]{40}$/.test(wallet)) return;
+    req.provenWallet = wallet;
+    req.provenWalletVia = "siwe-session";
+    req.provenWalletCarrier = carrier;
+  };
   const authenticate = async (req: FastifyRequest, reply: FastifyReply) => {
     // Only gate /api/* routes
     if (!req.url.startsWith("/api/")) return;
@@ -190,15 +203,22 @@ async function apiGateImpl(app: FastifyInstance) {
       req.apiKeyId = apiKey.id;
       req.operatorId = apiKey.operatorId;
       req.userId = apiKey.operatorId as `0x${string}`;
+      proveSiweWallet(req, siweSessionKeyAddress(apiKey), "key");
       return;
     }
 
     // Try SIWE session (dashboard users)
-    // A cookie must not turn an invalid presented key into anonymous creation.
+    // Preserve legacy cookie authentication after a failed key, but never lend it
+    // wallet proof. Public link creation still refuses that credential fallback.
+    const keyPresented = /^bearer\s+pcc_/i.test(req.headers.authorization ?? "") || req.headers["x-pcc-api-key"] !== undefined;
     const sessionRequest = optionalCreate ? Object.assign(Object.create(req), { cookies: {} }) as FastifyRequest : req;
     const session = resolveSession(sessionRequest);
     if (session) {
       req.userId = session.address;
+      // resolveSession is cookie-first. Only an explicit bearer of that same token
+      // can carry its proof; an unrelated/invalid Authorization header cannot upgrade it.
+      if (!keyPresented) proveSiweWallet(req, session.address,
+        req.headers.authorization === `Bearer ${session.token}` ? "bearer-session" : "cookie");
       return;
     }
 
