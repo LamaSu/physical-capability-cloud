@@ -56,6 +56,10 @@
  *   - Recording: a bound event the print could not record (its hash or its addEvent failed)
  *     fails the print once its chain has settled, and nothing is finalized: the bundle would
  *     lack that event. The same rule as JobRunner's.
+ *   - Input-proof integrity: a bound adapter method_loaded carrying an inputHash
+ *     key never reaches the emitter and fails the print without a bundle, including
+ *     device failures. Unbound events stay excluded. A post-settle writer scan
+ *     refuses late source mutations; kernel failures remain unmarked v1.
  *   - Quiesce, close, then finalize: once its device job has ended, the print waits, still
  *     recording, for the adapter's quiesceEvidence() (bounded), then stops accepting
  *     evidence, waits (bounded) for every bound event to be recorded, and finalizes.
@@ -388,6 +392,9 @@ async function printOnce(
   // chain then lacks that event, so once the chain has settled the print fails: success would
   // sign an incomplete record (astra pack 192). As JobRunner's.
   const unrecorded: { first: { type: string; error: string } | null } = { first: null };
+  // First bound adapter input proof. It cannot authorize a terminal verdict
+  // and must prevent signing even when a later device failure is reported.
+  let forbidden: EmittedEvidence | null = null;
 
   // This print's device job, and what the printer reported about it in the window. The id
   // is known once start returns it; what arrives before (inside start) waits in `early`,
@@ -429,7 +436,8 @@ async function printOnce(
    * only such an event can end the print (astra pack 192).
    */
   const admit = (event: EmittedEvidence): void => {
-    const named = (event.payload as Record<string, unknown> | undefined)?.ippJobId;
+    const payload = event.payload as Record<string, unknown> | undefined;
+    const named = payload?.ippJobId;
     if (named === undefined || named === null) {
       // It names no device job, so it says nothing about this print: excluded, never recorded
       // and never deciding. Failing the print on it would fail every print on a printer that
@@ -447,14 +455,25 @@ async function printOnce(
       decide();
       return;
     }
+    // Read type only once for bound events: an adapter accessor may throw on
+    // its second read. Use the captured value for the guard and dispatch (F1).
+    const type = event.type;
+    if (type === "method_loaded" &&
+        payload !== null &&
+        typeof payload === "object" &&
+        "inputHash" in payload) {
+      forbidden ??= event;
+      return;
+    }
+
     record(event);
-    if (event.type === "execution_progress") {
-      const tp = (event.payload as Record<string, unknown> | undefined)?.totalPages;
+    if (type === "execution_progress") {
+      const tp = payload?.totalPages;
       if (typeof tp === "number") deviceJob.pages = tp;
-    } else if (event.type === "execution_completed") {
+    } else if (type === "execution_completed") {
       deviceJob.completed ??= event;
       decide();
-    } else if (event.type === "execution_failed") {
+    } else if (type === "execution_failed") {
       deviceJob.failed ??= event;
       decide();
     }
@@ -648,6 +667,16 @@ async function printOnce(
     if (lost !== null) {
       return failure(`a ${lost.type} event of this job could not be recorded (${lost.error}), so its evidence is incomplete`);
     }
+    if (forbidden !== null) {
+      return failure("an adapter emitted method_loaded carrying inputHash");
+    }
+    if (emitter.getEvents(jobId, stepId).some((event) =>
+      event.source !== null &&
+      typeof event.source === "object" &&
+      Object.getOwnPropertyDescriptor(event.source, "writer") !== undefined)) {
+      return failure("the bundle would carry a kernel-written marker the kernel did not write");
+    }
+
     const completed = deviceJob.completed;
     const failed = deviceJob.failed;
     if (completed === null && failed === null) return failure("the printer reported no terminal event for this job");
