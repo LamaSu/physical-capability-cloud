@@ -12,8 +12,8 @@
  * activates the scope, so the record and the activation commit together or not at all. (The Stage-1
  * verifier may store one first; reconcilePaidScope then inserts nothing and only activates.)
  *
- * Production wiring: NONE. The table these records belong in (the parked escrow_funding DDL) is the
- * operator's decision (Q9), so no store exists outside a test process: fundingRecordStore() answers
+ * Production wiring: NONE. Q9 supplies the escrow_funding table and SQLite store, but S1.2 wires
+ * the production writer later: fundingRecordStore() answers
  * null there, and every reader fails closed. buyerFundingVerdict refuses every real escrow
  * (escrow_not_buyer_funded, exactly as before), and reconcilePaidScope refuses with
  * funding_record_store_unavailable. A test process may install a store; one installed is never
@@ -38,12 +38,20 @@ export interface FundingVerificationRecord {
   escrowAddress: string;
   /** The escrow's verified on-chain payer: the buyer's own wallet, a 0x address. */
   buyer: string;
+  /** The escrow's operator, as read on chain, a nonzero 0x address. */
+  operator: string;
   /** The chain the verifier read (EIP-155 id). */
   chainId: number;
   /** The finalized block the verifier read, as a decimal string (lossless for a uint64). */
   blockNumber: string;
   /** That block's hash, 0x and 64 hex digits: the read is pinned by hash, not by number. */
   blockHash: string;
+  /** The block holding fund()'s UnitFunded logs, as a lossless uint64 decimal string. */
+  fundingBlockNumber: string;
+  /** The hash of the funding block, 0x and 64 hex digits. */
+  fundingBlockHash: string;
+  /** The funding block's timestamp, in whole positive Unix seconds. */
+  fundedAt: number;
   /** The verifier build that made the checks. */
   verifierVersion: string;
   /** When the verifier verified, ISO-8601 UTC as Date#toISOString writes it. */
@@ -111,7 +119,7 @@ function normalised(store: FundingRecordStore): FundingRecordStore {
 
 /**
  * The store records are read from and written to, or null when there is none. Outside a test
- * process there is none (no table until Q9), whatever was installed. Every insert and escrow lookup
+ * process there is none (production wiring follows in S1.2), whatever was installed. Every insert and escrow lookup
  * through it is normalised (fundingEscrowKey).
  */
 export function fundingRecordStore(): FundingRecordStore | null {
@@ -128,6 +136,7 @@ export function __setFundingRecordStoreForTest(store: FundingRecordStore | null)
 }
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const BLOCK_HASH_RE = /^0x[0-9a-fA-F]{64}$/;
 /** A canonical decimal of at most 20 digits; with UINT64_MAX below, a uint64 (a chain's block number). */
 const BLOCK_NUMBER_RE = /^(0|[1-9][0-9]{0,19})$/;
@@ -152,11 +161,16 @@ export function isWellFormedFundingRecord(record: unknown): record is FundingVer
   if (typeof record !== "object" || record === null) return false;
   const r = record as Record<string, unknown>;
   return nonEmpty(r.scopeId, 200)
-    && typeof r.escrowAddress === "string" && ADDRESS_RE.test(r.escrowAddress)
-    && typeof r.buyer === "string" && ADDRESS_RE.test(r.buyer)
+    && typeof r.escrowAddress === "string" && ADDRESS_RE.test(r.escrowAddress) && r.escrowAddress !== ZERO_ADDRESS
+    && typeof r.buyer === "string" && ADDRESS_RE.test(r.buyer) && r.buyer !== ZERO_ADDRESS
+    && typeof r.operator === "string" && ADDRESS_RE.test(r.operator) && r.operator !== ZERO_ADDRESS
     && typeof r.chainId === "number" && Number.isSafeInteger(r.chainId) && r.chainId > 0
     && typeof r.blockNumber === "string" && BLOCK_NUMBER_RE.test(r.blockNumber) && BigInt(r.blockNumber) <= UINT64_MAX
     && typeof r.blockHash === "string" && BLOCK_HASH_RE.test(r.blockHash)
+    && typeof r.fundingBlockNumber === "string" && BLOCK_NUMBER_RE.test(r.fundingBlockNumber)
+    && BigInt(r.fundingBlockNumber) <= UINT64_MAX && BigInt(r.fundingBlockNumber) <= BigInt(r.blockNumber)
+    && typeof r.fundingBlockHash === "string" && BLOCK_HASH_RE.test(r.fundingBlockHash)
+    && typeof r.fundedAt === "number" && Number.isSafeInteger(r.fundedAt) && r.fundedAt > 0
     && nonEmpty(r.verifierVersion, 100)
     && typeof r.verifiedAt === "string" && !Number.isNaN(Date.parse(r.verifiedAt))
     && new Date(r.verifiedAt).toISOString() === r.verifiedAt

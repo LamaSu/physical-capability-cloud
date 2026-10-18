@@ -245,6 +245,51 @@ To check the effective policy:
 - The boot log prints `[jobs] Effective local dispatch policy` with `queueOnly`, `localDispatch` and, when local dispatch is off, the `reason`.
 - `GET /api/setup/detect` (API key required) returns `jobs: { queueOnly, localDispatch }`. Its `localDispatch` is true only when the checks above pass for the config's own kernel AND at least one machine device has a loaded runner.
 
+## Buyer-funding V-next record: operator-approved live window
+
+On production, keep all three variables **unset**: `PCC_VNEXT_RECORD_NETWORK`,
+`PCC_VNEXT_ALLOW_TESTNET_RECORD`, and `PCC_VNEXT_TESTNET_BUYERS`. Leaving them unset
+keeps testnet-record activation disabled; do not configure them as persistent production settings.
+
+For **one operator-approved live window**, with an explicit go, set all three:
+
+- `PCC_VNEXT_RECORD_NETWORK=base-sepolia` selects the pinned canonical deployment record.
+- `PCC_VNEXT_ALLOW_TESTNET_RECORD=1` opts into a testnet-only record; only exact `1` works.
+- `PCC_VNEXT_TESTNET_BUYERS=<list>` supplies the closed comma-separated buyer allow-list.
+
+List entries must be lowercase Ethereum addresses or correctly EIP-55 checksummed addresses:
+`0x` and 40 hex digits, written all in lowercase or exactly in the address's EIP-55 checksum case.
+Any other entry invalidates the **entire** list: a bad checksum, an all-uppercase entry (unless
+that spelling happens to be its checksum), an empty entry, whitespace, or an invalid address.
+An empty or unset list permits nobody. A testnet-only activation for a verified buyer the list
+does not allow is refused; once the record's own checks pass, the refusal is
+`testnet_buyer_not_allowed`. After the live window, **unset all three variables** again; do not
+leave the opt-in on production.
+
+Keep `PCC_VNEXT_RECORD_LABEL` unset as well. If it is set to anything, even an empty value, the
+reader refuses every record without a warning.
+
+When the reader refuses a record it has read, the gateway logs one warning for that read,
+`vnext_record_refused <code>`, naming the first rule the record fails. No funding then binds or
+activates, because the expected chain is unavailable:
+
+- `R-a`: the record's `specVersion` is not 2.
+- `R-b`: `scheduleTestnetOnly` is missing or not a boolean, or it is true on a chain other than
+  84532 or 31337.
+- `R-c`: the record is testnet-only and `PCC_VNEXT_ALLOW_TESTNET_RECORD` is not exactly `1`.
+- `R-d`: the file is not a JSON object; or a field the gateway reads fails its check (`mode`,
+  `label`, `canonical`, `doNotPin`, `broadcast`, `factory`, `implementation`, `usdc`, `chainId`,
+  `blockNumber`, or a `scheduleId` that does not match `scheduleTestnetOnly`); or `chainId` is not
+  the chain of the `PCC_VNEXT_RECORD_NETWORK` directory.
+
+The reader also refuses, with no warning, when `PCC_VNEXT_RECORD_NETWORK` is unset or is not
+`base`, `base-sepolia`, `anvil` or `chain-<id>`; when the gateway cannot find the `@pcc/contracts`
+package; or when the record file or one of its directories is missing, unreadable, a symlink, or
+not a regular file or directory.
+
+The `escrow_funding` and `funding_prepares` tables start empty. **Nothing activates** via this
+path until both S1.1 (prepared TTL terms) and S1.2 (the production funding-store wiring) land.
+
 ## What this does NOT yet include
 
 - **Canary / weighted rollout** — would require Cloudflare Workers or a Railway replica layer to split traffic. Skipped until capability.network has enough traffic to warrant it.
