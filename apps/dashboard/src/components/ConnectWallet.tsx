@@ -6,11 +6,26 @@ import { useAuthStore } from "../stores/auth-store.js";
 
 /** One wallet re-sign action, also used after a gateway quickstart refusal. */
 export function SignInAgainButton({ login, isVerifying }: { login: () => Promise<void>; isVerifying: boolean }) {
+  const inFlight = React.useRef(false);
+  const [pending, setPending] = React.useState(false);
+
+  const handleSignInAgain = async () => {
+    if (inFlight.current || isVerifying) return;
+    inFlight.current = true;
+    setPending(inFlight.current);
+    try {
+      await login();
+    } finally {
+      inFlight.current = false;
+      setPending(inFlight.current);
+    }
+  };
+
   return (
     <button
       type="button"
-      onClick={() => void login()}
-      disabled={isVerifying}
+      onClick={() => void handleSignInAgain()}
+      disabled={pending || isVerifying}
       className="px-3 py-1.5 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 text-xs hover:bg-yellow-500/15 transition-colors disabled:opacity-50"
     >
       Sign in again
