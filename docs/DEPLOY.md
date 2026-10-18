@@ -221,6 +221,30 @@ Ship to S3/Storacha on a daily cron. Whole-file size stays under 100 MB even wit
 
 Full rationale, growth math, vacuum guidance, and recovery semantics: [`docs/WORKFLOW_RUNTIME.md`](./WORKFLOW_RUNTIME.md) §5 (Operational notes). Public API: [`packages/workflow/README.md`](../packages/workflow/README.md).
 
+## Local job dispatch on the production image (self-hosted labs)
+
+The image sets `NODE_ENV=production` (Dockerfile). A gateway in production runs a submitted job on a device it hosts only when ALL of these hold. Every other submitted job is queued for a remote node, such as pcc-node, to claim.
+
+1. **`PCC_JOB_SUBMIT_QUEUE_ONLY=false`, exactly.** In production, an unset variable or any other value means queue-only. Outside production it's the reverse: only an exact `true` turns queue-only on.
+2. **An explicit kernel config:** `KERNEL_CONFIG` (the config JSON, inline) or `KERNEL_CONFIG_FILE` (a path to a JSON file). If both are set, `KERNEL_CONFIG` wins. With neither, the gateway generates a mock config, and a generated config never authorizes a local job.
+3. **The config's `kernelId` isn't the placeholder `kernel_dev_001`.**
+4. **The job is for that `kernelId`,** and that kernel's emergency stop reads clear. A stop that is engaged, or that can't be read, queues the job instead.
+
+A submit can also send `queueOnly: true` to queue a job that would otherwise run locally.
+
+`KERNEL_ID` names the generated mock config's kernel (default `kernel_dev_001`), and the setup routes use it when they generate or validate a config that names no kernel. It never turns local dispatch on by itself.
+
+A self-hosted lab that runs its devices in the gateway process sets, for example:
+
+```
+PCC_JOB_SUBMIT_QUEUE_ONLY=false
+KERNEL_CONFIG_FILE=/app/data/kernel-config.json
+```
+
+To check the effective policy:
+- The boot log prints `[jobs] Effective local dispatch policy` with `queueOnly`, `localDispatch` and, when local dispatch is off, the `reason`.
+- `GET /api/setup/detect` (API key required) returns `jobs: { queueOnly, localDispatch }`. Its `localDispatch` is true only when the checks above pass for the config's own kernel AND at least one machine device has a loaded runner.
+
 ## What this does NOT yet include
 
 - **Canary / weighted rollout** — would require Cloudflare Workers or a Railway replica layer to split traffic. Skipped until capability.network has enough traffic to warrant it.
