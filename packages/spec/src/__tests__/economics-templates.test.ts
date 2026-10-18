@@ -366,3 +366,105 @@ describe("instantiation, complete refusal vocabulary, and exact origin proof", (
     expect(canonicalize(params)).toBe(beforeParams);
   });
 });
+
+describe("review pins: row-exact unbinding, refusal order, each fixed-leaf rule, hostile catalogs", () => {
+  it("a swap of two party ids leaves neither row with its old address or label", () => {
+    const r = instantiateTemplate(byId("spare-printer").template, { buyer: "sam", printerOwner: "dana" });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.agreement.payer).toBe("sam");
+    expect(r.agreement.parties.slice(0, 2)).toEqual([
+      { partyId: "sam", label: "sam", kind: "person", payTo: null },
+      { partyId: "dana", label: "dana", kind: "person", payTo: null },
+    ]);
+  });
+  it("a valid template whose party slots are out of row order still unbinds the rebound row", () => {
+    const t = copyTemplate();
+    [t.slots[0], t.slots[1]] = [t.slots[1]!, t.slots[0]!];
+    expect(validateTemplate(t).ok).toBe(true);
+    const r = instantiateTemplate(t, { printerOwner: "dana", buyer: "dana-2" });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.agreement.parties.slice(0, 2)).toEqual([
+      { partyId: "dana-2", label: "dana-2", kind: "person", payTo: null },
+      { partyId: "dana", label: "dana", kind: "person", payTo: null },
+    ]);
+  });
+  it("refusals with one code sort by path, not in the order they were found", () => {
+    const t = copyTemplate();
+    t.slots.push(
+      { name: "zeta", kind: "bps", default: 235, paths: ["/fee/feeBps"] },
+      { name: "alpha", kind: "bps", default: 40, paths: ["/clauses/0/rule/bps"] },
+    );
+    const r = validateTemplate(t);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.refusals.map((x) => [x.code, x.path])).toEqual([
+      ["SLOT_PATH_FORBIDDEN", ["slots", "alpha", "/clauses/0/rule/bps"]],
+      ["SLOT_PATH_FORBIDDEN", ["slots", "zeta", "/fee/feeBps"]],
+    ]);
+  });
+  it("origin judges the key and the hash before it reads the params", () => {
+    const a = byId("spare-printer").template.body;
+    const bad = { printPrice: 30000000 };
+    expect(resultCodes(verifyTemplateOrigin(a, { ...origin("spare-printer", bad), templateHash: "wrong" }))).toEqual(["TEMPLATE_HASH_MISMATCH"]);
+    expect(resultCodes(verifyTemplateOrigin(a, { ...origin("spare-printer", bad), templateKey: "spare-printer@2" }))).toEqual(["TEMPLATE_UNKNOWN"]);
+  });
+  it("a license-bound rule leaf and a schedule-pinned rule leaf are each fixed on their own", () => {
+    const licensed = copyTemplate("lab-assay"); // clause 1: underLicense set, rateSource null
+    licensed.slots.push({ name: "modelBps", kind: "bps", default: 300, paths: ["/clauses/1/rule/bps"] });
+    expect(resultCodes(validateTemplate(licensed))).toEqual(["SLOT_PATH_FORBIDDEN"]);
+    const pinned = copyTemplate(); // clause 0 keeps its rateSource but loses its license
+    pinned.body.clauses[0]!.underLicense = null;
+    pinned.slots.push({ name: "pinnedRate", kind: "bps", default: 40, paths: ["/clauses/0/rule/bps"] });
+    expect(resultCodes(validateTemplate(pinned))).toEqual(["SLOT_PATH_FORBIDDEN"]);
+  });
+  it("a license distribution member cannot be a party slot", () => {
+    const t = copyTemplate("lab-assay");
+    t.slots.push({ name: "datasetA", kind: "party", default: "dataset-a", paths: ["/parties/3/partyId", "/splits/0/members/1/to/party"] });
+    const r = validateTemplate(t);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.refusals.map((x) => [x.code, x.path])).toEqual([["SLOT_PATH_FORBIDDEN", ["slots", "datasetA"]]]);
+  });
+  it("an unsorted or repeated pointer list is a schema refusal", () => {
+    const unsorted = tweak("spare-printer", 0, { name: "buyer", kind: "party", default: "dana", paths: ["/payer", "/parties/0/partyId"] });
+    expect(resultCodes(validateTemplate(unsorted))).toEqual(["TEMPLATE_SCHEMA_INVALID"]);
+    const repeated = tweak("spare-printer", 3, { name: "printPrice", kind: "amount", default: "25000000", paths: ["/units/0/gross", "/units/0/gross"] });
+    expect(resultCodes(validateTemplate(repeated))).toEqual(["TEMPLATE_SCHEMA_INVALID"]);
+  });
+  it("a caller-supplied catalog whose entry throws is refused, never thrown", () => {
+    const e = byId("spare-printer");
+    const getter = [{
+      get template() { return e.template; },
+      get templateHash(): `0x${string}` { throw new Error("hostile catalog"); },
+      compileOptions: e.compileOptions,
+    }];
+    expect(resultCodes(verifyTemplateOrigin(e.template.body, origin("spare-printer"), getter))).toEqual(["TEMPLATE_UNKNOWN"]);
+    const trap = [new Proxy({}, {
+      get(_t, k) { if (k === "template") return e.template; throw new Error("hostile catalog"); },
+    })] as unknown as Parameters<typeof verifyTemplateOrigin>[2];
+    expect(resultCodes(verifyTemplateOrigin(e.template.body, origin("spare-printer"), trap))).toEqual(["TEMPLATE_UNKNOWN"]);
+  });
+  it("section 11's schema, value and origin details hold exactly as stated", () => {
+    const badEscape = tweak("spare-printer", 3, { name: "printPrice", kind: "amount", default: "25000000", paths: ["/units/0~2gross"] });
+    expect(resultCodes(validateTemplate(badEscape))).toEqual(["TEMPLATE_SCHEMA_INVALID"]);
+    const badName = tweak("spare-printer", 3, { name: "Print-price", kind: "amount", default: "25000000", paths: ["/units/0/gross"] });
+    expect(resultCodes(validateTemplate(badName))).toEqual(["TEMPLATE_SCHEMA_INVALID"]);
+    expect(resultCodes(validateTemplate({ ...copyTemplate(), version: 2 ** 53 }))).toEqual(["TEMPLATE_SCHEMA_INVALID"]);
+    expect(resultCodes(instantiateTemplate(byId("guild-repair").template, { inspectionBps: 10001 }))).toEqual(["SLOT_VALUE_INVALID"]);
+    const extra = tweak("spare-printer", 1, { name: "printerOwner", kind: "party", default: "sam", paths: ["/clauses/0/to/party", "/clauses/1/to/party", "/parties/1/partyId"] });
+    const r = validateTemplate(extra);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.refusals.map((x) => [x.code, x.path])).toEqual([
+        ["SLOT_DEFAULT_MISMATCH", ["slots", "printerOwner", "/clauses/0/to/party"]],
+        ["SLOT_PATHS_INCOMPLETE", ["slots", "printerOwner"]],
+      ]);
+    }
+    const e = byId("spare-printer");
+    expect(verifyTemplateOrigin({ ...e.template.body, unread: undefined }, origin("spare-printer"))).toEqual({ ok: true });
+    expect(resultCodes(verifyTemplateOrigin(e.template.body, { ...origin("spare-printer"), templateHash: e.templateHash.toUpperCase().replace("0X", "0x") }))).toEqual(["TEMPLATE_HASH_MISMATCH"]);
+    const accessor = Object.defineProperty({ templateHash: e.templateHash, params: {} }, "templateKey", { enumerable: true, get: () => "spare-printer@1" });
+    expect(resultCodes(verifyTemplateOrigin(e.template.body, accessor as never))).toEqual(["TEMPLATE_UNKNOWN"]);
+  });
+});
