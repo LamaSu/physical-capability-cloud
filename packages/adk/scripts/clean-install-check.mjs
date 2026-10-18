@@ -183,6 +183,7 @@ function main() {
       forbidden: peers,
       root: realpathSync(project),
     });
+    const failuresBeforeGraph = failures.length;
     for (const problem of graph.problems) fail(problem);
     for (const kind of ["runtime", "types"]) {
       for (const name of ["@pcc/spec", "@pcc/kernel-sdk"]) {
@@ -194,7 +195,9 @@ function main() {
         if (graph[kind].packages.includes(peer)) fail(`@pcc/adk's ${kind} import graph reaches ${peer}`);
       }
     }
-    console.log(`ok: ${graph.runtime.files.length} modules and ${graph.types.files.length} declaration files reached from @pcc/adk's exports; none imports ${[...peers].join(", ")}`);
+    if (failures.length === failuresBeforeGraph) {
+      console.log(`ok: ${graph.runtime.files.length} modules and ${graph.types.files.length} declaration files reached from @pcc/adk's exports; none imports ${[...peers].join(", ")}`);
+    }
 
     // 6a. Import from plain Node ESM.
     writeFileSync(

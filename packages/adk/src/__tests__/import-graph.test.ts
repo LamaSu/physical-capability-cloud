@@ -186,6 +186,11 @@ describe("the import graph from a package's exports", () => {
           forbiddenAt(ADK_INDEX),
         ],
         [
+          "template literal",
+          append(base, ADK_INDEX, "export async function later() { return import(`viem`); }"),
+          forbiddenAt(ADK_INDEX),
+        ],
+        [
           "subpath",
           append(base, ADK_INDEX, 'import { privateKeyToAccount } from "viem/accounts";'),
           forbiddenAt(ADK_INDEX, "viem/accounts"),
@@ -267,6 +272,21 @@ describe("the import graph from a package's exports", () => {
         append(BASE_TREE, ADK_TYPES, 'export type { Hex } from "@pcc/spec/funding";'),
         forbiddenAt(SPEC_FUNDING_TYPES),
       ],
+      [
+        "declaration import-equals",
+        append(BASE_TREE, ADK_TYPES, 'import x = require("viem");'),
+        forbiddenAt(ADK_TYPES),
+      ],
+      [
+        "declaration reference types",
+        { ...BASE_TREE, [ADK_TYPES]: '/// <reference types="viem" />\n' + BASE_TREE[ADK_TYPES] },
+        forbiddenAt(ADK_TYPES),
+      ],
+      [
+        "declaration reference path",
+        { ...BASE_TREE, [ADK_TYPES]: '/// <reference path="../../spec/dist/funding/index.d.ts" />\n' + BASE_TREE[ADK_TYPES] },
+        forbiddenAt(SPEC_FUNDING_TYPES),
+      ],
     ];
 
     for (const [cell, files, problem] of cases) {
@@ -297,6 +317,11 @@ describe("the import graph from a package's exports", () => {
         "non-literal require",
         append(BASE_TREE, NACL_INDEX, "var impl = require(process.env.NACL_IMPL);"),
         `${NACL_INDEX}: an import() or require() whose specifier is not a string literal`,
+      ],
+      [
+        "non-literal import type",
+        append(BASE_TREE, ADK_TYPES, "export declare const t: import(Foo).X;"),
+        `${ADK_TYPES}: an import() or require() whose specifier is not a string literal`,
       ],
       [
         "unresolved package",

@@ -16,7 +16,11 @@
  *
  * Non-literal import() and require() calls fail closed. Static analysis cannot
  * see createRequire(...)(...), module.require, a require held in another
- * variable, eval or new Function, or Worker file paths.
+ * variable or called indirectly ((require)(...), (0, require)(...),
+ * require.call(...)), eval or new Function, or Worker file paths. In a
+ * dependency's exports map only the node, import, require, module-sync and
+ * default conditions are followed, so a target that only a bundler condition
+ * such as browser selects is not walked.
  */
 
 import { readFileSync, realpathSync, statSync } from "node:fs";
