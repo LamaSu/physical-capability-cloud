@@ -508,7 +508,7 @@
       <li>
         <p class="label">02</p>
         <h3>Independently owned capabilities compose into complete production systems.</h3>
-        <p>Agents assemble independent operators into multi-step production systems. Those compositions can be reused and offered as capabilities of their own.</p>
+        <p>Agents assemble independent operators into multi-step production systems. PCC is being built so compositions can be reused and offered as capabilities of their own.</p>
       </li>
       <li>
         <p class="label">03</p>
@@ -559,7 +559,7 @@
             <p class="label">Logistics</p><h3>Carrier</h3>
           </li>
         </ol>
-        <p class="composition-note composition-published">Published as a capability, consumed by a different owner. The improvement below propagates up.</p>
+        <p class="composition-note composition-published">Published as a capability, consumed by a different owner. An improvement below becomes available to everything built on it.</p>
         <p class="label composition-layer-label" id="composition-layer-one">Layer 1 · finished-parts capability · owned by a machine shop</p>
         <ol class="composition-nodes composition-lower" aria-labelledby="composition-layer-one">
           <li class="composition-node composition-result composition-parts">
@@ -578,26 +578,26 @@
             <p class="label">Anodizing</p><h3>Finishing shop</h3><p>Independently owned</p>
           </li>
           <li class="composition-node composition-inspection">
-            <p class="label">Inspection</p><h3>Metrology lab A</h3><p>Replaced</p>
+            <p class="label">Inspection</p><h3>Metrology lab A</h3><p>This order</p>
           </li>
           <li class="composition-node composition-alternate">
-            <p class="label">Inspection · alternate</p><h3>Metrology lab B</h3><p>Better quality, lower price</p>
+            <p class="label">Inspection · next order</p><h3>Metrology lab B</h3><p>Another qualified provider. Same requirements. Better quality, lower price.</p>
           </li>
         </ol>
-        <p class="composition-note composition-switch">The shop switches providers. Nothing else restructures; nobody changes owners.</p>
+        <p class="composition-note composition-switch">For the next order, the shop chooses another qualified inspection provider. Nothing else restructures; nobody changes owners.</p>
       </div>
-      <figcaption>Independent capabilities don’t just execute together. They can become new capabilities: owned, offered, and composed again. And when one provider is replaced by a better one, the gain travels up through everything built on it.</figcaption>
+      <figcaption>Independent capabilities don’t just execute together. They can become new capabilities: owned, offered, and composed again. And when a better provider wins the next order, the improvement becomes available to everything built on it. How much of it reaches each layer is set by terms and competition, not by the network.</figcaption>
     </figure>
   </section>
 
-  <!-- WHY THIS BEATS THE VERTICALLY INTEGRATED FIRM -->
+  <!-- THE ECONOMIC THESIS -->
   <section class="wrap flywheel" aria-labelledby="flywheel-heading" style="padding-top:0;">
     <div class="head reveal">
-      <div><p class="label">Why this beats the vertically integrated firm</p><h2 id="flywheel-heading">Build production systems without owning the supply chain.</h2></div>
+      <div><p class="label">Vertical efficiency should not require vertical ownership</p><h2 id="flywheel-heading">Build production systems without owning the supply chain.</h2></div>
     </div>
     <p class="label flywheel-kicker reveal">Vertical coordination without vertical consolidation of ownership</p>
-    <p class="flywheel-lead reveal">A traditional manufacturer bundles machines, people, management, procurement, scheduling, sales and logistics into one company, and most of what the customer pays goes to coordinating all of that rather than making the thing. PCC is building the market where agents do that coordination instead: they procure, contract, schedule and verify across independent owners. Take the overhead out and there is room for the customer to pay less and the operator to earn more, at the same time. The savings go to the people doing the work and the people buying it, not to a new middleman.</p>
-    <p class="flywheel-lead reveal">A company that owns its whole chain now has a structural problem: it is competing with a network of independent owners that charges customers less and pays producers more.</p>
+    <p class="flywheel-lead reveal">Work together without becoming one company. PCC’s thesis is that agents and competitive capability markets can remove coordination overhead that would otherwise be repeated across organizations. Independent owners can then combine their work into complete production systems. That creates room for customers to pay less and productive contributors to earn more. Existing companies can participate too: the competitive advantage comes from better coordination and execution, not from requiring a particular ownership structure.</p>
+    <p class="flywheel-lead reveal">Where that advantage is demonstrated, arrangements that depend on avoidable overhead or restrictive dependencies face pressure to adapt.</p>
     <p class="label flywheel-outcomes reveal">Lower costs for customers · higher earnings for operators · more productive assets · competition at every layer</p>
     <ol class="flywheel-cycle reveal" aria-label="The economic cycle">
       <li><p class="label">01</p><h3>Coordination overhead comes out</h3></li>
@@ -614,7 +614,7 @@
       </div>
       <div class="reveal">
         <h3>Contestable from the inside.</h3>
-        <p>A vertically integrated company can have competitive suppliers while shielding its production decisions from the market. Here every step is a market. A better machine, process, controller or carrier displaces a worse one, and the system does not have to restructure for it to happen.</p>
+        <p>A vertically integrated company can have competitive suppliers while shielding its production decisions from the market. Here every step is a market. Independent suppliers compete on price, quality, speed and reliability; better offers improve the economics available to the services composed from them; and competition between those services is what passes improvements through the network. A better machine, process, controller or carrier can win the next order, and the system does not have to restructure for it to happen.</p>
       </div>
       <div class="reveal">
         <h3>Inventions earn without a factory.</h3>
@@ -631,6 +631,7 @@
   <!-- THREE DOORS (image-backed) -->
   <section class="wrap" aria-labelledby="doors-heading" style="padding-top:0;">
     <div class="head reveal"><h2 id="doors-heading">Three doors. Pick the one that fits.</h2><p class="label">No terminal required</p></div>
+    <p class="flywheel-lead reveal" style="margin:0 0 var(--sp-m);">Keep your business, your systems, and your agent. Connect what you offer, and build on what others can do.</p>
     <div class="paths">
       <article class="path path--do reveal" id="do">
         <img class="pbg" src="/landing/robot.jpg" alt="" />
@@ -661,8 +662,8 @@
       </article>
       <article class="path path--build reveal" id="build">
         <span class="tag">Builders</span>
-        <h3>Compose it. Publish it. Build on it.</h3>
-        <p>Combine independently owned capabilities into complete services and publish them to the network as capabilities of their own.</p>
+        <h3>Build what others can build on.</h3>
+        <p>Work from the composition spec to develop reusable services. Publishing composite capabilities is in development.</p>
         <a class="btn btn--offer" href="/docs/csd-spec">Build on PCC <span class="arr" aria-hidden="true">&rarr;</span></a>
       </article>
     </div>
