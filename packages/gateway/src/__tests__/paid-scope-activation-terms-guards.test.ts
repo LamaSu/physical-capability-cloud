@@ -147,6 +147,13 @@ describe("configured V-next record guards", () => {
     expect(resolve({ ...committed, chainId: 11155111 }, vnextNetworkSlug(11155111))).toBeNull();
     expect(warnings).toEqual([["vnext_record_refused R-b"]]);
   });
+
+  // The reader hard-codes R-b's set (spec r3 :208), so pin it from outside the enum as well.
+  it.each([1, 10, 137, 8453, 17000, 42161, 84531, 421614, 11155420])("R-b refuses opted-in testnet-only chain %s, absent from the schema's testnet enum", (chainId) => {
+    expect(TESTNET_CHAINS).not.toContain(chainId);
+    expect(resolve({ ...committed, chainId }, vnextNetworkSlug(chainId))).toBeNull();
+    expect(warnings).toEqual([["vnext_record_refused R-b"]]);
+  });
 });
 
 interface NearMiss {
