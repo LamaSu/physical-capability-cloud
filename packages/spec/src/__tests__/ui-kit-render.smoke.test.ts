@@ -14,10 +14,11 @@
  * scope. In snapshot mode it performs NO fetch, so the render is fully offline.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { assertKitTextBeforeBoot, assertKitTextViolations, flushKitText, checkKitClicks } from "./ui-kit-text-counter.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const kitPath = path.resolve(
@@ -60,6 +61,7 @@ const SNAPSHOT = JSON.stringify({
 });
 
 function boot(manifestJson: string, snapshotJson?: string) {
+  assertKitTextBeforeBoot();
   document.documentElement.removeAttribute("data-theme");
   document.head.innerHTML = "";
   document.body.innerHTML = "";
@@ -91,10 +93,16 @@ function boot(manifestJson: string, snapshotJson?: string) {
   // runs mount() immediately because document.readyState is not 'loading'.
   // eslint-disable-next-line no-eval
   (0, eval)(kitSrc);
+  assertKitTextViolations();
 }
 
 // Let snapshot-mode Promise.resolve() bindings (metric/receipt) settle.
-const flush = () => new Promise((r) => setTimeout(r, 0));
+const flush = flushKitText;
+let clickCheck: ReturnType<typeof checkKitClicks>;
+beforeEach(() => { clickCheck = checkKitClicks(); });
+afterEach(async () => {
+  try { await flush(); } finally { clickCheck.mockRestore(); }
+});
 
 describe("pcc-ui kit renders a manifest in snapshot mode (offline, no gateway)", () => {
   beforeEach(() => boot(jobWatch, SNAPSHOT));
@@ -131,9 +139,10 @@ describe("pcc-ui kit renders a manifest in snapshot mode (offline, no gateway)",
     await flush();
     expect(document.querySelector(".pcc-metric-amount")!.textContent).toContain("21.99");
     expect(document.querySelector(".pcc-receipt-num")!.textContent).toContain("21.99");
-    // payer→payee + rail present
-    expect(document.body.textContent).toContain("kernel_dominos_7764");
-    expect(document.body.textContent).toContain("escrow-milestone");
+    // The snapshot's email and kernel id are not address/hash values.
+    expect(Array.from(document.querySelectorAll(".pcc-receipt-parties .pcc-mono")).map((node) => node.textContent))
+      .toEqual(["unrecognised value", "unrecognised value"]);
+    expect(document.querySelector(".pcc-receipt-rail")!.textContent).toContain("escrow-milestone");
   });
 
   it("injects the visual-system stylesheet (tokens present)", () => {

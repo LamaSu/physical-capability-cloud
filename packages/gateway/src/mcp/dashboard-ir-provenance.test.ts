@@ -1,3 +1,5 @@
+import { readText } from "./dashboard-ir.js";
+import { physicalTextElement } from "./dashboard-ir-physical-text.type-test.js";
 /**
  * PX-4 render-state provenance: the authority class of every rendered datum is DERIVED by
  * the trusted side (structure + the server-owned bind registry), never chosen by a manifest
@@ -12,7 +14,7 @@ import { dirname, resolve } from "node:path";
 import { TextDecoder as NodeTextDecoder, TextEncoder as NodeTextEncoder } from "node:util";
 import { JSDOM } from "jsdom";
 import { describe, it, expect } from "vitest";
-import { dashboardManifestToIr, validateIr, sourceClassOf, provenanceOf, RECORD_CLAIM_NOTE, RECORD_STATUS_NOTE, WITHHELD_FIELD, type IrNode } from "./dashboard-ir.js";
+import { kitText, dashboardManifestToIr, validateIr, sourceClassOf, provenanceOf, RECORD_CLAIM_NOTE, RECORD_STATUS_NOTE, WITHHELD_FIELD, type IrNode } from "./dashboard-ir.js";
 import { sourceAsOf, isStale, acceptsNewer, ASOF_MAX_SKEW_MS } from "./dashboard-ir-binder.js";
 import { renderIrDoc, applyFreshness, applyUnknownTime, applyUnavailable, type RElement, type RDocument } from "./dashboard-ir-renderer.js";
 
@@ -123,7 +125,7 @@ describe("PX-4 freshness primitives (binder)", () => {
 describe("PX-4 renderer markers (fake DOM)", () => {
   type FE = RElement & { attrs: Record<string, string> };
   const mk = (): FE => { const children: RElement[] = []; const attrs: Record<string, string> = {};
-    return { textContent: "", className: "", children, attrs, setAttr(n: string, v: string) { attrs[n] = v; }, removeAttr(n: string) { delete attrs[n]; }, appendChild(c: RElement) { children.push(c); return c; } } as FE; };
+    return physicalTextElement({ textContent: "", className: "", children, attrs, setAttr(n: string, v: string) { attrs[n] = v; }, removeAttr(n: string) { delete attrs[n]; }, appendChild(c: RElement) { children.push(c); return c; } }) as FE; };
   const doc: RDocument = { createElement: () => mk() };
   const walk = (e: RElement, out: FE[] = []): FE[] => { out.push(e as FE); e.children.forEach((c) => walk(c, out)); return out; };
 
@@ -157,7 +159,7 @@ describe("PX-4 renderer markers (fake DOM)", () => {
     expect(host.attrs["data-as-of"]).toBeUndefined();
     expect(meta.textContent).toBe("source time not reported · received 2026-09-24 10:13:00Z");
     expect(host.className).toContain("pcc-time-unknown");
-    applyUnavailable(host, meta, "HTTP 500");
+    applyUnavailable(host, meta, kitText("HTTP 500"));
     expect(host.className).toContain("pcc-unavail");
     expect(host.className).not.toContain("pcc-time-unknown");
     expect(meta.textContent).toBe("unavailable · HTTP 500");
@@ -235,7 +237,7 @@ function scene(replies: Reply[], nowMs: number, opts: { origin?: boolean } = {})
   const stat = () => q(".pcc-stat");
   const lineOf = (el: any) => el?.nextElementSibling as any;
   const fresh = () => lineOf(stat());
-  return { w, deliver, settle, nextPoll, advance, bumpClock, setHidden, q, stat, lineOf, fresh, fetchCalls: () => call, timerCount, close: () => w.close() };
+  return { w, deliver, settle, nextPoll, advance, bumpClock, setHidden, q, stat, lineOf, fresh, fetchCalls: () => call, timerCount, close: () => { expect(w.__PCC_UI_TEXT_VIOLATIONS__ ?? 0).toBe(0); w.close(); } };
 }
 const T0 = Date.parse("2026-09-24T12:00:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -381,10 +383,10 @@ describe("PX-4 review #2524, absence: every failed, off-schema, partial or empty
       { kind: "metric", label: "Status", select: "status", binding: { path: "/api/jobs/j1/status" } },
     ] }] };
     for (const [status, shown] of [
-      ["verified", "verified" + RECORD_CLAIM_NOTE], // a verification word is qualified, never bare
-      ["pagado", "pagado" + RECORD_CLAIM_NOTE],
-      ["settled", "settled" + RECORD_STATUS_NOTE], // a money state keeps #3013's wording
-      ["paid 5 USDC", WITHHELD_FIELD], // a status may not state an amount
+      ["verified", "verified" + readText(RECORD_CLAIM_NOTE).t], // a verification word is qualified, never bare
+      ["pagado", "pagado" + readText(RECORD_CLAIM_NOTE).t],
+      ["settled", "settled" + readText(RECORD_STATUS_NOTE).t], // a money state keeps #3013's wording
+      ["paid 5 USDC", readText(WITHHELD_FIELD).t], // a status may not state an amount
       ["running", "running"],
     ] as const) {
       const s = scene([{ status: 200, json: { status, asOf: iso(T0) } }], T0);
