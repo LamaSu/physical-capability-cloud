@@ -231,19 +231,29 @@ export function Step7_Review() {
             </div>
           )}
 
-          {testJob.status === "done" && testJob.result && (
-            <GlassPanel padding="md" glow="green" className="space-y-2">
-              <div className="flex items-center gap-2">
-                <span className="text-green-400 text-sm">&#10003;</span>
-                <span className="text-xs font-medium text-white/70">Test job completed</span>
-                <GlowBadge color="green">{testJob.result.status}</GlowBadge>
-              </div>
-              <div className="grid grid-cols-2 gap-2 text-xs text-white/40">
-                <span>Job: <span className="font-mono text-white/30 text-[10px]">{testJob.result.jobId.slice(0, 20)}...</span></span>
-                <span>Duration: {testJob.result.duration}ms</span>
-              </div>
-            </GlassPanel>
-          )}
+          {testJob.status === "done" && testJob.result && (() => {
+            const result = testJob.result;
+            if (!result) return null;
+            const confirmedPass = result.status === "completed" && result.passed === true;
+            const queued = result.status === "queued";
+            return (
+              <GlassPanel padding="md" glow={confirmedPass ? "green" : undefined} className="space-y-2">
+                <div className="flex items-center gap-2">
+                  {confirmedPass && <span className="text-green-400 text-sm">&#10003;</span>}
+                  <span className="text-xs font-medium text-white/70">
+                    {confirmedPass ? "Test job completed" : queued ? "Test job queued" : "No pass confirmed"}
+                  </span>
+                  <GlowBadge color={confirmedPass ? "green" : queued ? "gray" : "gold"}>
+                    {result.status}
+                  </GlowBadge>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-xs text-white/40">
+                  <span>Job: <span className="font-mono text-white/30 text-[10px]">{result.jobId.slice(0, 20)}...</span></span>
+                  <span>Duration: {result.duration}ms</span>
+                </div>
+              </GlassPanel>
+            );
+          })()}
 
           {testJob.status === "error" && (
             <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20">

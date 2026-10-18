@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { fetchWithKey, gatewayUrl } from "../lib/gateway-base.js";
 import { authorizedFetch, hasStoredApiKey, onStoredKeyChange, setStoredApiKey } from "../lib/authorized-fetch.js";
 import { configureSessionKeyRecovery } from "../lib/session-key-recovery.js";
+import { OPERATOR_SIGN_IN_NOTICE } from "../lib/auth-notices.js";
 
 /**
  * Sign-in state. The API key itself is not here, not in the state and not in
@@ -176,7 +177,7 @@ function mintSessionKey(checkSession: boolean): Promise<boolean> {
         const notice = data.error === "too_many_keys"
           ? "Your wallet is signed in. You have reached the active-key limit; remove an unused key to enable operator actions."
           : data.error === "session_required" || data.error === "api_key_required"
-            ? "Your wallet is signed in. Sign in again to enable operator actions."
+            ? `Your wallet is signed in. ${OPERATOR_SIGN_IN_NOTICE}`
             : "Your wallet is signed in. Operator access is temporarily unavailable; try again shortly.";
         useAuthStore.setState({ authNotice: notice });
         return false;
