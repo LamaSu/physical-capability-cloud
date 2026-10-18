@@ -42,7 +42,7 @@ export function AgentLandingHero() {
         </div>
 
         <div className="alh-hero">
-          <div className="alh-eyebrow">The cloud instance for the physical world</div>
+          <div className="alh-eyebrow">The capability network</div>
           <h1>
             Put any <span className="em">capability</span> on the network.
             <br />

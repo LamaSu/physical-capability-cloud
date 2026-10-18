@@ -18,6 +18,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createStore, type Store, type IRepositories } from "@pcc/store";
+import { applyWildcardKeyMigrationFromEnv } from "./services/wildcard-key-migration.js";
 
 let _store: Store | undefined;
 
@@ -47,6 +48,12 @@ export function initStore(options?: { seed?: boolean }): Store {
     dbPath,
     seed: options?.seed ?? true,
   });
+  try {
+    applyWildcardKeyMigrationFromEnv(_store);
+  } catch (error) {
+    closeStore();
+    throw error;
+  }
 
   console.log(`[db] Store initialised (${dbPath === ":memory:" ? "in-memory" : dbPath})`);
   return _store;

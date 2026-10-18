@@ -9,6 +9,7 @@ export interface IAuditLogRepository {
     eventType?: string;
     actor?: string;
     resourceType?: string;
+    resourceId?: string;
     since?: string;
     limit?: number;
   }): AuditLogRow[];

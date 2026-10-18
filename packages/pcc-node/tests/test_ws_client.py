@@ -7,6 +7,7 @@ from unittest import mock
 
 import pytest
 
+from pcc_node import http_util
 from pcc_node.ws_client import PCCGatewayClient, _http
 
 
@@ -29,6 +30,7 @@ def _make_client(on_job=None):
 # ---------------------------------------------------------------------------
 
 class TestHttpHelper:
+    # Gateway requests go through http_util's verified, no-redirect opener (68c).
     def test_returns_parsed_json(self):
         mock_resp = mock.MagicMock()
         mock_resp.status = 200
@@ -36,8 +38,8 @@ class TestHttpHelper:
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = mock.Mock(return_value=False)
 
-        with mock.patch("pcc_node.ws_client.urlopen", return_value=mock_resp):
-            status, data = _http("GET", "http://test/api")
+        with mock.patch.object(http_util._GATEWAY_OPENER, "open", return_value=mock_resp):
+            status, data = _http("GET", "https://test/api")
 
         assert status == 200
         assert data == {"ok": True}
@@ -49,8 +51,8 @@ class TestHttpHelper:
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = mock.Mock(return_value=False)
 
-        with mock.patch("pcc_node.ws_client.urlopen", return_value=mock_resp):
-            status, data = _http("GET", "http://test/api")
+        with mock.patch.object(http_util._GATEWAY_OPENER, "open", return_value=mock_resp):
+            status, data = _http("GET", "https://test/api")
 
         assert status == 200
         assert data == "hello world"
@@ -58,8 +60,8 @@ class TestHttpHelper:
     def test_returns_zero_on_connection_error(self):
         from urllib.error import URLError
 
-        with mock.patch("pcc_node.ws_client.urlopen", side_effect=URLError("refused")):
-            status, data = _http("GET", "http://test/api")
+        with mock.patch.object(http_util._GATEWAY_OPENER, "open", side_effect=URLError("refused")):
+            status, data = _http("GET", "https://test/api")
 
         assert status == 0
         assert "error" in data
@@ -73,8 +75,8 @@ class TestHttpHelper:
         )
         http_err.read = lambda: b'{"error": "not_found"}'
 
-        with mock.patch("pcc_node.ws_client.urlopen", side_effect=http_err):
-            status, data = _http("GET", "http://test/api")
+        with mock.patch.object(http_util._GATEWAY_OPENER, "open", side_effect=http_err):
+            status, data = _http("GET", "https://test/api")
 
         assert status == 404
         assert data.get("error") == "not_found"
@@ -200,7 +202,7 @@ class TestPushEvidence:
     def test_success(self):
         client = _make_client()
         with mock.patch("pcc_node.ws_client._http") as mock_h:
-            mock_h.return_value = (200, {"stored": True, "bundleId": "ev-1"})
+            mock_h.return_value = (200, {"stored": True, "jobId": "j1", "bundleId": "ev-1"})  # the relay's receipt shape
             result = client.push_evidence("j1", {"result": "printed"})
 
         assert result is True

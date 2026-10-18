@@ -1,14 +1,10 @@
 /**
- * Integration test for Ed25519 issuance at agent provision
- * (feat/ed25519-keys-and-kernel-ttl).
+ * Provisioning stores only caller-supplied Ed25519 public keys.
  *
- *   - POST /api/auth/provision without publicKey → mints a keypair, returns
- *     private key once.
- *   - The minted private key signs a known message; POST /api/agents/:id/verify
- *     returns valid:true.
+ *   - POST /api/auth/provision without publicKey → no signing key on file.
+ *   - BYOK signatures verify against the stored public key.
  *   - Tamper with the message → valid:false.
- *   - BYOK: provision with publicKey → response has source=byok, no private.
- *   - BYOK + verify against the supplied private key works.
+ *   - Provisioning never returns private signing material.
  *   - Invalid public key → 400.
  *   - Unknown agent id → 404.
  */
@@ -38,7 +34,7 @@ vi.mock("../middleware/security-hardening.js", () => ({
   canProvision: vi.fn(() => true),
 }));
 
-describe("POST /api/auth/provision — Ed25519 issuance + verify roundtrip", () => {
+describe("POST /api/auth/provision — Ed25519 BYOK + verify roundtrip", () => {
   let app: FastifyInstance;
 
   beforeAll(async () => {
@@ -54,7 +50,7 @@ describe("POST /api/auth/provision — Ed25519 issuance + verify roundtrip", () 
     closeStore();
   });
 
-  it("server-minted: provision returns a fresh keypair (once), sign/verify roundtrips", async () => {
+  it("without publicKey: provisions an API key with no signing key on file", async () => {
     const provRes = await app.inject({
       method: "POST",
       url: "/api/auth/provision",
@@ -62,48 +58,23 @@ describe("POST /api/auth/provision — Ed25519 issuance + verify roundtrip", () 
     });
     expect(provRes.statusCode).toBe(201);
     const provBody = JSON.parse(provRes.body) as {
+      api_key: string;
       key_id: string;
       ed25519: {
-        public_key: string;
-        private_key: string;
+        public_key: string | null;
         source: string;
-        warning: string;
       };
     };
-    expect(provBody.ed25519.source).toBe("server-minted");
-    expect(provBody.ed25519.public_key).toMatch(/^[0-9a-f]{64}$/);
-    expect(provBody.ed25519.private_key).toMatch(/^[0-9a-f]{64}$/);
-    expect(provBody.ed25519.warning).toContain("not be shown again");
-
-    // Sign a known message with the issued private key.
-    const message = "hello pcc agent provisioning";
-    const sigHex = signWithPrivateKeyHex(
-      provBody.ed25519.private_key,
-      Buffer.from(message, "utf-8"),
-    );
-    expect(sigHex).toMatch(/^[0-9a-f]{128}$/);
+    expect(provBody.api_key).toMatch(/^pcc_/);
+    expect(provBody.ed25519).toEqual({ public_key: null, source: "none" });
 
     const verifyRes = await app.inject({
       method: "POST",
       url: `/api/agents/${provBody.key_id}/verify`,
-      payload: { message, signature: sigHex },
+      payload: { message: "hello pcc agent provisioning", signature: "a".repeat(128) },
     });
-    expect(verifyRes.statusCode).toBe(200);
-    const verifyBody = JSON.parse(verifyRes.body) as {
-      valid: boolean;
-      key_id: string;
-    };
-    expect(verifyBody.valid).toBe(true);
-    expect(verifyBody.key_id).toBe(provBody.key_id);
-
-    // Tamper with the message → false.
-    const tamperRes = await app.inject({
-      method: "POST",
-      url: `/api/agents/${provBody.key_id}/verify`,
-      payload: { message: message + " tampered", signature: sigHex },
-    });
-    expect(tamperRes.statusCode).toBe(200);
-    expect(JSON.parse(tamperRes.body).valid).toBe(false);
+    expect(verifyRes.statusCode).toBe(404);
+    expect(JSON.parse(verifyRes.body).error).toBe("key_not_found");
   });
 
   it("BYOK: caller-supplied public key is stored AS-IS; no private leaks", async () => {
@@ -125,21 +96,31 @@ describe("POST /api/auth/provision — Ed25519 issuance + verify roundtrip", () 
         private_key?: string;
       };
     };
-    expect(provBody.ed25519.source).toBe("byok");
-    expect(provBody.ed25519.public_key).toBe(myKey.publicKeyHex);
+    expect(provBody.ed25519).toEqual({ public_key: myKey.publicKeyHex, source: "byok" });
     // CRITICAL: BYOK path NEVER returns private material.
     expect(provBody.ed25519.private_key).toBeUndefined();
 
     // Verify endpoint works: we sign locally with our own private key.
     const message = "byok signed message";
     const sigHex = signWithPrivateKeyHex(myKey.privateKeyHex, Buffer.from(message));
+    expect(sigHex).toMatch(/^[0-9a-f]{128}$/);
     const verifyRes = await app.inject({
       method: "POST",
       url: `/api/agents/${provBody.key_id}/verify`,
       payload: { message, signature: sigHex },
     });
     expect(verifyRes.statusCode).toBe(200);
-    expect(JSON.parse(verifyRes.body).valid).toBe(true);
+    const verifyBody = JSON.parse(verifyRes.body) as { valid: boolean; key_id: string };
+    expect(verifyBody.valid).toBe(true);
+    expect(verifyBody.key_id).toBe(provBody.key_id);
+
+    const tamperRes = await app.inject({
+      method: "POST",
+      url: `/api/agents/${provBody.key_id}/verify`,
+      payload: { message: message + " tampered", signature: sigHex },
+    });
+    expect(tamperRes.statusCode).toBe(200);
+    expect(JSON.parse(tamperRes.body).valid).toBe(false);
   });
 
   it("rejects invalid publicKey with 400", async () => {
@@ -182,17 +163,17 @@ describe("POST /api/auth/provision — Ed25519 issuance + verify roundtrip", () 
   });
 
   it("verify accepts base64-encoded message body", async () => {
+    const myKey = generateEd25519Keypair();
     const provRes = await app.inject({
       method: "POST",
       url: "/api/auth/provision",
-      payload: { email: `b64-${Date.now()}@example.com` },
+      payload: { email: `b64-${Date.now()}@example.com`, publicKey: myKey.publicKeyHex },
     });
     const provBody = JSON.parse(provRes.body) as {
       key_id: string;
-      ed25519: { private_key: string };
     };
     const messageBytes = Buffer.from([0x00, 0x01, 0xff, 0x10]);
-    const sigHex = signWithPrivateKeyHex(provBody.ed25519.private_key, messageBytes)!;
+    const sigHex = signWithPrivateKeyHex(myKey.privateKeyHex, messageBytes)!;
     const verifyRes = await app.inject({
       method: "POST",
       url: `/api/agents/${provBody.key_id}/verify`,

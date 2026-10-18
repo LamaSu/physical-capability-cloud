@@ -1,19 +1,22 @@
 /**
- * Minimal API client for the PCC gateway.
- * Vite proxy: /api routes → http://localhost:3200
+ * Minimal API client for the PCC gateway. Requests go to the configured
+ * gateway only (lib/authorized-fetch.ts); in dev, Vite proxies /api to it.
  */
 
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "./authorized-fetch.js";
+import { scopeErrorMessage } from "./scope-notice.js";
 
 const API_BASE = "/api";
 
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await authorizedFetch(`${API_BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
+    const notice = await scopeErrorMessage(res, path.startsWith("/api/") ? path : `${API_BASE}${path}`, "POST");
+    if (notice) throw new Error(notice);
     let message = `API error: ${res.status}`;
     try {
       const json = (await res.json()) as { error?: string; message?: string };
@@ -28,9 +31,7 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
 }
 
 export async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: { ...getAuthHeaders() },
-  });
+  const res = await authorizedFetch(`${API_BASE}${path}`);
   if (!res.ok) {
     let message = `API error: ${res.status}`;
     try {
@@ -85,8 +86,11 @@ export interface RegisterDeviceResponse {
 
 export interface TestJobResponse {
   jobId: string;
-  deviceId: string;
+  deviceId: string | null;
   status: string;
+  ran?: boolean;
+  passed?: boolean;
+  simulated?: boolean;
   evidenceBundleId: string | null;
   duration: number;
 }

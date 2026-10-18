@@ -4,8 +4,15 @@ import {
   appsHttpMcpRoutes,
   dispatchToolCall,
   httpMcpRoutes,
+  withoutMcpAppViewLink,
   type AgentPackageTool,
 } from "../mcp/http-mcp-server.js";
+import {
+  MCP_APP_GALLERY_URI,
+  MCP_APP_RENDER_URI,
+  MCP_APP_SAVED_URI,
+} from "../mcp/mcp-app-view.js";
+import { jobCancelPolicy, typedOperationToolFor } from "../mcp/operation-policy.js";
 
 // The server-enforced READ-ONLY /mcp/apps surface (the read-only gen-UI launch
 // piece). These tests assert the read-only guarantee at BOTH tools/list AND the
@@ -133,6 +140,7 @@ describe("read-only /mcp/apps surface (non-prod: surface active)", () => {
       "list_kernels",
       "pcc.op.capability.request_quote",
       "render_pcc_dashboard",
+      "render_pcc_dashboard_ir", // closed-IR render: effect review (1b) in http-mcp-server.ts
       "search_capabilities",
       "search_dashboards",
     ];
@@ -273,6 +281,297 @@ describe("read-only /mcp/apps prod domain gate (gates 5/6)", () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+describe("full /mcp prod domain gate on MCP App views (D14)", () => {
+  // The full surface serves the same ui:// views as /mcp/apps, so it obeys the same prod
+  // domain gate for them. Unlike /mcp/apps, its DATA tools stay up while the gate is closed.
+  const OLD: Record<string, string | undefined> = {
+    NODE_ENV: process.env.NODE_ENV,
+    PCC_MCP_APP_DOMAIN: process.env.PCC_MCP_APP_DOMAIN,
+    PCC_API_BASE_URL: process.env.PCC_API_BASE_URL,
+    PCC_DEPLOYMENT_ENV: process.env.PCC_DEPLOYMENT_ENV,
+  };
+
+  // A valid, isolated proxy base, so these tests exercise the DOMAIN gate (not the base gate).
+  beforeEach(() => {
+    process.env.PCC_DEPLOYMENT_ENV = "staging";
+    process.env.PCC_API_BASE_URL = "https://pcc-gateway-staging.up.railway.app";
+  });
+  afterEach(() => {
+    for (const [k, v] of Object.entries(OLD)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  const RENDER_ARGS = {
+    csd: "pcc://artifacts/dashboard/v1",
+    title: "Gated view",
+    sections: [{ windows: [{ kind: "note", text: "Live status." }] }],
+  };
+
+  /** The view link a host would follow: the nested `ui.resourceUri` or the deprecated flat key. */
+  const viewLink = (meta: any): unknown => meta?.ui?.resourceUri ?? meta?.["ui/resourceUri"];
+
+  async function fullSurfaceApp(): Promise<FastifyInstance> {
+    const app = Fastify({ logger: false });
+    await app.register(httpMcpRoutes);
+    await app.ready();
+    return app;
+  }
+
+  async function listedTools(): Promise<any[]> {
+    const app = await fullSurfaceApp();
+    try {
+      return await listTools(app, "/mcp", await initSession(app, "/mcp"));
+    } finally {
+      await app.close();
+    }
+  }
+
+  it("prod + placeholder domain: tools/list drops ONLY the render tool and every view link", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.PCC_MCP_APP_DOMAIN = "https://pcc-apps.example";
+    const open = await listedTools();
+    delete process.env.PCC_MCP_APP_DOMAIN; // resolveMcpAppDomain -> the .invalid placeholder
+    const gated = await listedTools();
+
+    // The data surface is otherwise exactly the same: writes and On-Ramp tools included.
+    // The view-only tools: render_pcc_dashboard, and #344's render_pcc_dashboard_ir (#344 x #495 merge-up).
+    const VIEW_ONLY = ["render_pcc_dashboard", "render_pcc_dashboard_ir"];
+    expect(toolNames(gated)).toEqual(toolNames(open).filter((n) => !VIEW_ONLY.includes(n)));
+    expect(toolNames(open)).toContain("render_pcc_dashboard");
+    expect(toolNames(gated)).toContain("save_dashboard");
+    // No descriptor links a ui:// view any more (the two render tools and the 5 On-Ramp tools did).
+    expect(toolNames(open.filter((t) => viewLink(t._meta) !== undefined)).sort()).toEqual([
+      "fork_dashboard",
+      "get_dashboard",
+      "render_pcc_dashboard",
+      "render_pcc_dashboard_ir",
+      "save_dashboard",
+      "search_dashboards",
+      "update_dashboard",
+    ]);
+    for (const tool of gated) expect(viewLink(tool._meta), tool.name).toBeUndefined();
+    // The On-Ramp data contract (outputSchema) is kept.
+    const gatedGet = gated.find((t) => t.name === "get_dashboard");
+    expect(gatedGet.outputSchema).toEqual(open.find((t) => t.name === "get_dashboard").outputSchema);
+  });
+
+  it("prod + placeholder domain: every ui:// read and the render tool are refused", async () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.PCC_MCP_APP_DOMAIN;
+
+    const app = await fullSurfaceApp();
+    try {
+      const session = await initSession(app, "/mcp");
+      const uris = [MCP_APP_RENDER_URI, MCP_APP_SAVED_URI, MCP_APP_GALLERY_URI, "ui://pcc/dashboard/a-dash-1111"];
+      for (const [i, uri] of uris.entries()) {
+        const read = await rpc(app, "/mcp", session, { id: 10 + i, method: "resources/read", params: { uri } });
+        expect(read.body.result, uri).toBeUndefined();
+        expect(read.body.error.message, uri).toContain("MCP App surface unavailable");
+      }
+
+      // A direct render call is a tool-level error (directive 8), never a view.
+      const call = await rpc(app, "/mcp", session, {
+        id: 20,
+        method: "tools/call",
+        params: { name: "render_pcc_dashboard", arguments: RENDER_ARGS },
+      });
+      expect(call.body.result.isError).toBe(true);
+      expect(call.body.result.content[0].text).toContain("MCP App surface unavailable");
+      expect(call.body.result.structuredContent).toBeUndefined();
+      expect(viewLink(call.body.result._meta)).toBeUndefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("prod + placeholder domain: an On-Ramp result keeps its data and links no view", async () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.PCC_MCP_APP_DOMAIN;
+    const payload = { entries: [{ slug: "a-dash-1111", name: "Alpha" }], total: 1 };
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    const app = await fullSurfaceApp();
+    try {
+      const session = await initSession(app, "/mcp");
+      const call = await rpc(app, "/mcp", session, {
+        id: 30,
+        method: "tools/call",
+        params: { name: "search_dashboards", arguments: {} },
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(call.body.result.isError).not.toBe(true);
+      expect(call.body.result.structuredContent).toEqual({
+        entries: [{ slug: "a-dash-1111", name: "Alpha", title: "Alpha" }],
+        total: 1,
+      });
+      expect(call.body.result.content[0].text).toContain("a-dash-1111");
+      expect(call.body.result._meta).toBeUndefined();
+    } finally {
+      fetchSpy.mockRestore();
+      await app.close();
+    }
+  });
+
+  it("prod + a configured unique domain: /mcp is unchanged (render listed and callable, views served, links kept)", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.PCC_MCP_APP_DOMAIN = "https://pcc-apps.example";
+    const payload = { entries: [{ slug: "a-dash-1111", name: "Alpha" }], total: 1 };
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    const app = await fullSurfaceApp();
+    try {
+      const session = await initSession(app, "/mcp");
+      const tools = await listTools(app, "/mcp", session);
+      const byName = new Map(tools.map((t) => [t.name, t]));
+      expect(byName.has("render_pcc_dashboard")).toBe(true);
+      expect(viewLink(byName.get("get_dashboard")._meta)).toBe(MCP_APP_SAVED_URI);
+      expect(viewLink(byName.get("search_dashboards")._meta)).toBe(MCP_APP_GALLERY_URI);
+
+      const read = await rpc(app, "/mcp", session, {
+        id: 3,
+        method: "resources/read",
+        params: { uri: MCP_APP_RENDER_URI },
+      });
+      expect(read.body.error).toBeUndefined();
+      expect(read.body.result.contents[0].uri).toBe(MCP_APP_RENDER_URI);
+
+      const render = await rpc(app, "/mcp", session, {
+        id: 4,
+        method: "tools/call",
+        params: { name: "render_pcc_dashboard", arguments: RENDER_ARGS },
+      });
+      expect(render.body.result.isError).not.toBe(true);
+      expect(render.body.result.structuredContent.manifest.title).toBe("Gated view");
+      expect(viewLink(render.body.result._meta)).toBe(MCP_APP_RENDER_URI);
+
+      const search = await rpc(app, "/mcp", session, {
+        id: 5,
+        method: "tools/call",
+        params: { name: "search_dashboards", arguments: {} },
+      });
+      expect(viewLink(search.body.result._meta)).toBe(MCP_APP_GALLERY_URI);
+    } finally {
+      fetchSpy.mockRestore();
+      await app.close();
+    }
+  });
+
+  // astra r1 on #495 (HIGH): the plain HTTP mirror, registered with /mcp, served the view HTML with no
+  // domain gate. In production it may serve only on the configured app domain's own host.
+  const MIRROR = "/mcp-apps/ui/dashboard";
+
+  it("prod + placeholder domain: the plain HTTP mirror serves no view HTML", async () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.PCC_MCP_APP_DOMAIN;
+    const app = await fullSurfaceApp();
+    try {
+      const res = await app.inject({ method: "GET", url: MIRROR, headers: { host: "capability.network" } });
+      expect(res.statusCode).toBe(503);
+      expect(res.body).toContain("MCP App surface unavailable");
+      expect(res.body).not.toMatch(/<html|<script/i);
+      expect(res.headers["content-security-policy"]).toBeUndefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("prod + a configured domain: the mirror serves only on that domain's host, never on a shared origin", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.PCC_MCP_APP_DOMAIN = "https://pcc-apps.example";
+    const app = await fullSurfaceApp();
+    try {
+      for (const host of ["capability.network", "pcc-apps.example.evil", "PCC-APPS.EXAMPLE:444"]) {
+        const shared = await app.inject({ method: "GET", url: MIRROR, headers: { host } });
+        expect(shared.statusCode, host).toBe(404);
+        expect(shared.body, host).not.toMatch(/<html|<script/i);
+      }
+      const own = await app.inject({ method: "GET", url: MIRROR, headers: { host: "pcc-apps.example" } });
+      expect(own.statusCode).toBe(200);
+      expect(String(own.headers["content-type"])).toContain("text/html");
+      expect(String(own.headers["content-security-policy"])).toContain("frame-ancestors");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("prod + placeholder domain: every view resources/list names is unreadable (listing alone serves nothing)", async () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.PCC_MCP_APP_DOMAIN;
+    const app = await fullSurfaceApp();
+    try {
+      const session = await initSession(app, "/mcp");
+      const listed = await rpc(app, "/mcp", session, { id: 40, method: "resources/list", params: {} });
+      const templates = await rpc(app, "/mcp", session, { id: 41, method: "resources/templates/list", params: {} });
+      const uris: string[] = listed.body.result.resources.map((r: { uri: string }) => r.uri);
+      for (const t of templates.body.result.resourceTemplates as { uriTemplate: string }[]) {
+        uris.push(t.uriTemplate.replace("{slug}", "a-dash-1111"));
+      }
+      expect(uris.length).toBeGreaterThanOrEqual(4);
+      for (const [i, uri] of uris.entries()) {
+        const read = await rpc(app, "/mcp", session, { id: 50 + i, method: "resources/read", params: { uri } });
+        expect(read.body.result, uri).toBeUndefined();
+        expect(read.body.error.message, uri).toContain("MCP App surface unavailable");
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("prod + placeholder domain: the IR render tool (render_pcc_dashboard_ir) is view-only too, and its view is unreadable", async () => {
+    // #344 x #495 merge-up: #344 adds render_pcc_dashboard_ir and its ui://pcc/dashboard/render-ir view.
+    process.env.NODE_ENV = "production";
+    delete process.env.PCC_MCP_APP_DOMAIN;
+    const app = await fullSurfaceApp();
+    try {
+      const session = await initSession(app, "/mcp");
+      const tools = await listTools(app, "/mcp", session);
+      expect(toolNames(tools)).not.toContain("render_pcc_dashboard_ir");
+      for (const tool of tools) expect(viewLink(tool._meta), tool.name).toBeUndefined();
+      const call = await rpc(app, "/mcp", session, {
+        id: 60,
+        method: "tools/call",
+        params: { name: "render_pcc_dashboard_ir", arguments: RENDER_ARGS },
+      });
+      expect(call.body.result.isError).toBe(true);
+      expect(call.body.result.content[0].text).toContain("MCP App surface unavailable");
+      const read = await rpc(app, "/mcp", session, { id: 61, method: "resources/read", params: { uri: "ui://pcc/dashboard/render-ir" } });
+      expect(read.body.result).toBeUndefined();
+      expect(read.body.error.message).toContain("MCP App surface unavailable");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("withoutMcpAppViewLink drops ONLY the view link: app-only visibility survives", () => {
+    // job.cancel is state-changing, so its descriptor is app-only (hidden from the model).
+    // Stripping must never make such an op model-visible.
+    const appOnly = typedOperationToolFor(jobCancelPolicy);
+    expect(appOnly._meta).toEqual({ ui: { visibility: ["app"] } });
+    expect(withoutMcpAppViewLink(appOnly)._meta).toEqual({ ui: { visibility: ["app"] } });
+
+    const linked = {
+      ...appOnly,
+      _meta: {
+        ui: { resourceUri: MCP_APP_SAVED_URI, visibility: ["app"] },
+        "ui/resourceUri": MCP_APP_SAVED_URI,
+        other: 1,
+      },
+    };
+    expect(withoutMcpAppViewLink(linked)._meta).toEqual({ ui: { visibility: ["app"] }, other: 1 });
+
+    // A link-only _meta disappears; the input is never mutated; no _meta -> the same object.
+    const linkOnly = { name: "x", _meta: { ui: { resourceUri: MCP_APP_SAVED_URI } } };
+    expect("_meta" in withoutMcpAppViewLink(linkOnly)).toBe(false);
+    expect(linkOnly._meta.ui.resourceUri).toBe(MCP_APP_SAVED_URI);
+    const bare = { name: "y" };
+    expect(withoutMcpAppViewLink(bare)).toBe(bare);
   });
 });
 

@@ -212,6 +212,19 @@ describe("storage — upload", () => {
     expect(rows.length).toBe(1);
   });
 
+  it("rejects a non-binary body with a message that says POST, not PUT", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/storage",
+      payload: { not: "binary" },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.error).toBe("invalid_body");
+    expect(body.message).toContain("POST");
+    expect(body.message).not.toContain("PUT raw bytes");
+  });
+
   it("rejects empty upload with 400", async () => {
     const res = await app.inject({
       method: "POST",

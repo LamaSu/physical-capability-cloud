@@ -579,3 +579,39 @@ describe("LicensingEngine", () => {
     });
   });
 });
+
+// ── pcc-economics N10b: licensing terms are versioned and append-only ──
+
+describe("LicensingEngine terms are versioned and append-only", () => {
+  it("different terms append a version; every earlier version stays readable", () => {
+    const engine = new LicensingEngine();
+    const v1 = makeLicensingTerms({ ipId: "ip-a", defaultRevShare: 5 });
+    const v2 = makeLicensingTerms({ ipId: "ip-a", defaultRevShare: 9 });
+    expect(engine.setTerms("ip-a", v1)).toBe(1);
+    expect(engine.setTerms("ip-a", v2)).toBe(2);
+    expect(engine.getTermsVersionCount("ip-a")).toBe(2);
+    expect(engine.getTerms("ip-a")!.defaultRevShare).toBe(9);
+    // Before: setTerms overwrote, and the terms version 1 was agreed under were gone without a trace.
+    expect(engine.getTermsVersion("ip-a", 1)!.defaultRevShare).toBe(5);
+    expect(engine.getTermsVersion("ip-a", 3)).toBeUndefined();
+  });
+
+  it("identical terms do not create a version", () => {
+    const engine = new LicensingEngine();
+    const t = makeLicensingTerms({ ipId: "ip-b" });
+    expect(engine.setTerms("ip-b", t)).toBe(1);
+    expect(engine.setTerms("ip-b", structuredClone(t))).toBe(1);
+    expect(engine.getTermsVersionCount("ip-b")).toBe(1);
+  });
+
+  it("neither the caller's object nor a read copy can edit the record", () => {
+    const engine = new LicensingEngine();
+    const t = makeLicensingTerms({ ipId: "ip-c", defaultRevShare: 5 });
+    engine.setTerms("ip-c", t);
+    t.defaultRevShare = 50;
+    const read = engine.getTerms("ip-c")!;
+    read.defaultRevShare = 60;
+    expect(engine.getTerms("ip-c")!.defaultRevShare).toBe(5);
+    expect(engine.getTermsVersion("ip-c", 1)!.defaultRevShare).toBe(5);
+  });
+});

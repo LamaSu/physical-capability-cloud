@@ -8,6 +8,7 @@
 import type { Capability, ShopKernel } from "@pcc/spec";
 import type { CapabilityDTO, PopulationContext } from "../types.js";
 import { isKernelStale } from "./staleness.js";
+import { locationVisibilityOf, publicLocation } from "./public-location.js";
 
 /**
  * Populate a single Capability model into a CapabilityDTO.
@@ -29,6 +30,9 @@ export function populateCapabilityDTO(
     ? ctx.reputationCache?.get(model.kernelId) ?? kernel?.reputation
     : undefined;
 
+  // N68: the capability's site reads coarse unless its kernel's operator opted in.
+  const place = publicLocation(model.location, locationVisibilityOf(kernel?.location));
+
   return {
     id: model.id,
     kernelId: model.kernelId,
@@ -40,7 +44,9 @@ export function populateCapabilityDTO(
     envelope: model.envelope,
     assuranceTiers: model.assuranceTiers,
     pricing: model.pricing,
-    location: model.location,
+    location: place.location,
+    locationPrecision: place.locationPrecision,
+    locationCell: place.locationCell,
     tags: model.tags,
     // Enrichment
     reputation,

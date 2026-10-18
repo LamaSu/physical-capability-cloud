@@ -16,8 +16,10 @@
  * Security invariants (kit-owned; On-Ramp spec §6.2 + §4.2):
  *   1. textContent ONLY. No innerHTML, no eval, no new Function, no outerHTML=.
  *   2. No action fires on load, EVER. Render is passive; execution is a click.
- *   3. Money verbs (fund/release/dispute/commit/approve) go through the kit's
- *      Approval surface; only its Approve button POSTs.
+ *   3. Every write passes the kit's Approval surface unless it is on the kit-owned
+ *      NON_MONEY_WRITES allowlist (fail closed). One validated request descriptor
+ *      drives the gate, the "This will send" display and the transport; only a
+ *      kit-labelled Approve sends it, exactly as displayed.
  *   4. `idempotencyKey` on every offer-posting action (a button can be
  *      double-clicked; the pack teaches the fix).
  *   5. The person's key lives in sessionStorage only — stripped from the URL
@@ -51,7 +53,100 @@
   // may never select it. Parsed origin (protocol+host+port), never a string/suffix compare.
   var API_ORIGIN = (function () { try { return new URL(API_DEFAULT).origin; } catch (e) { return API_DEFAULT; } })();
   var POLL_DEFAULT_MS = 30000; // the system_prompt's own recommended cadence
-  var MONEY_VERB = /(?:^|[\/_.-])(fund|release|dispute|commit|approve)(?:[\/_.-]|$)/i;
+  // Money detection is FAIL-CLOSED BY CONSTRUCTION: every manifest-authored WRITE is money (the
+  // Approval gate; "submitted", never "done") unless it is one of the few writes KNOWN to move no
+  // money. A new or unrecognised route therefore cannot slip through as "not money": being unlisted
+  // already gates it (a new non-money route is merely over-gated until listed). Entries are exact
+  // route templates (":" = one id segment) matched against the path the wire carries (canonicalPath).
+  // The paid x402 routes (capabilities quote/simulate/route) are money and stay OFF this list. So do
+  // artifact create/fork: they PUBLISH under the viewer's identity (visibility comes from the body),
+  // so they pass the Approval gate, which shows exactly what would be published.
+  var NON_MONEY_WRITES = [
+    'POST /api/csd/validate',          // validate a CSD document
+    'POST /api/csd/resolve',           // resolve a CSD by canonical URL
+    'POST /api/feedback',              // product feedback
+    'POST /api/feedback/agent-report', // an agent's feedback report
+    // chain Plan (astra r5 F3 on #342). Effect review: routes/compose.ts POST /api/compose validates the
+    // request, plans it (planComposition) and stores the proposal row (status "proposed"); it moves no
+    // money and is not payment-gated. Only POST /api/compose/:id/execute acts, and that stays money.
+    'POST /api/compose'
+  ];
+  // Kit-owned per-action EXECUTION state (ruling 5). It lives in a WeakMap keyed by the action
+  // object, never ON the action: an action is untrusted manifest JSON, and a manifest must not be
+  // able to pre-seed a key, strip the header, mark itself done, or make an action inert.
+  //   posting a request (or hosted typed operation) for this action is in flight
+  //   done    a MONEY write for this action was accepted (2xx): one-shot for this render
+  //   gate    the identity of the ONE open Approval gate for this action (null when none)
+  var ACTION_STATE = new WeakMap();
+  function actionState(action) {
+    var st = ACTION_STATE.get(action);
+    if (!st) {
+      st = { posting: false, done: false, gate: null };
+      ACTION_STATE.set(action, st);
+    }
+    return st;
+  }
+  // Kit-owned per-REQUEST-INTENT state (astra r2 on #342, F1). An intent is the exact request the
+  // wire would carry: method, pinned URL (query included) and body. Every action object describing
+  // that request -- a cloned manifest entry, an approval window, a button -- shares ONE open gate, ONE
+  // unresolved Idempotency-Key and ONE money one-shot, so a manifest cannot duplicate a money action
+  // into independent approvals with different keys. The per-object state above still applies; the
+  // stricter of the two wins.
+  //   key     the Idempotency-Key while this intent's outcome is UNRESOLVED (A/B/A reuses A's key)
+  //   posting / done / gate: as above, for the intent
+  var INTENT_STATE = Object.create(null);
+  // What the kit can and cannot know (astra r4 F1 on #342): a request's SPELLING is never its business
+  // effect. Two differently spelled requests -- /release/0 vs /release/00, /api/settlement/release vs
+  // /api/escrow/chain/:addr/release/:n, a method change -- can move the exact same money, and the kit
+  // has no general way to tell. So the kit stops pretending endpoint identity IS effect identity: EVERY
+  // money request, to ANY endpoint, shares ONE intent per view (per render):
+  //   - accepted (2xx): the intent is done. Every further money request this render is refused --
+  //     reload to make another. (A NON-money write is unaffected: a 2xx only consumes THAT write's own
+  //     key, exactly as before.)
+  //   - sent but not accepted (any other status, a throw, a network error): every further money request
+  //     is refused, INCLUDING an identical retry, until a reload (astra r5 F1, F2 on #342). No status
+  //     code proves "no effect": a route can mutate state and still answer 400. And no money route is
+  //     durably idempotent today: the gateway's Idempotency-Key middleware is not registered in
+  //     production, is in-memory, and re-runs a 5xx.
+  // So one view sends at most ONE money request. Effect-level identity and idempotency are the SERVER's
+  // to enforce; the kit cannot see past the wire, only guard it. A reload is the user's checkpoint:
+  // check the earlier request's outcome, then decide.
+  // A NON-money write (the allowlist) keeps the exact canonical request as its intent, UNCHANGED: object
+  // keys sorted at every depth; the decoded pathname the gateway routes (desc.canonical) plus the
+  // decoded query parameters, sorted by NAME only, so repeated values keep their order (?r=A&r=B is not
+  // ?r=B&r=A; astra r3 F2).
+  function canonicalJson(v) {
+    if (v === null || typeof v !== 'object') return JSON.stringify(v);
+    var i, out = [];
+    if (Array.isArray(v)) {
+      for (i = 0; i < v.length; i++) out.push(v[i] === undefined ? 'null' : canonicalJson(v[i]));
+      return '[' + out.join(',') + ']';
+    }
+    var ks = Object.keys(v).sort();
+    for (i = 0; i < ks.length; i++) { if (v[ks[i]] !== undefined) out.push(JSON.stringify(ks[i]) + ':' + canonicalJson(v[ks[i]])); }
+    return '{' + out.join(',') + '}';
+  }
+  function canonicalTarget(desc) {
+    var q = [];
+    try { new URL(desc.url).searchParams.forEach(function (val, key) { q.push([key, val]); }); } catch (e) { q = []; }
+    q.sort(function (x, y) { return x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0; }); // stable: equal names keep their order
+    var qs = q.map(function (p) { return encodeURIComponent(p[0]) + '=' + encodeURIComponent(p[1]); }).join('&');
+    return desc.canonical + (qs ? '?' + qs : '');
+  }
+  function requestFingerprint(desc) { return desc.method + ' ' + canonicalTarget(desc) + '\n' + canonicalJson(desc.body); }
+  // One shared intent for EVERY money request this render, regardless of endpoint (astra r4 F1 on
+  // #342): the kit cannot tell a genuinely new payment from an aliased retry of the same one, so it
+  // fails closed over the whole view instead of trusting endpoint spelling. A NON-money write keeps
+  // its own per-canonical-request intent in INTENT_STATE, exactly as before.
+  var MONEY_INTENT = { key: null, request: null, posting: false, done: false, gate: null };
+  function intentState(desc) {
+    if (desc.money) return MONEY_INTENT;
+    var k = requestFingerprint(desc);
+    var it = INTENT_STATE[k];
+    // request: the fingerprint of the request that holds the unresolved key (only it may retry with it)
+    if (!it) { it = { key: null, request: null, posting: false, done: false, gate: null }; INTENT_STATE[k] = it; }
+    return it;
+  }
 
   // ═══════════════════════════════════════════════════════════════════════
   // DOM helpers (verbatim shape from control-plane bus.js) — textContent only
@@ -219,10 +314,18 @@
 
   function safeApiPath(path, isHost) {
     if (typeof path !== 'string' || !path) return null;
+    // The URL parser silently strips TAB/LF/CR anywhere, trims edge spaces and control characters,
+    // and drops a '#fragment', so "/api/comp\tose" would be SENT as /api/compose. Refuse them (and
+    // the C1 controls): the path we classify must be the path we send.
+    if (/[\s#\u0000-\u001f\u007f-\u009f]/.test(path)) return null;
     if (isAbsoluteOrSchemeUrl(path)) return null;   // no absolute / scheme / //host
     if (path.charAt(0) !== '/') return null;         // must be root-relative
     if (path.indexOf('\\') !== -1) return null;      // backslash escape
     var pathPart = path.split('?')[0];
+    // Ambiguous encodings have no single meaning, so they are refused outright (fail closed, no
+    // request): %25 decodes to ANOTHER escape (double encoding: %252F -> %2F -> '/'), and an encoded
+    // / \ ? # splits the path differently at each layer (URL parser, edge, gateway router).
+    if (/%(25|2f|5c|3f|23)/i.test(pathPart)) return null;
     var decoded;
     try { decoded = decodeURIComponent(pathPart); } catch (e) { return null; } // malformed %-escape
     if (decoded.indexOf('\\') !== -1) return null;
@@ -235,24 +338,125 @@
     return path; // original path (query preserved) — safe against the fixed base
   }
 
-  // The kit-derived TRUTH about the request an action will actually send —
-  // method, resolved destination, amount/asset, and job/escrow ref — computed
-  // from the REAL request (never manifest-supplied confirmation text, which can
-  // differ from what is sent). `destination === null` means the path was refused.
+  // ═══════════════════════════════════════════════════════════════════════
+  // The ONE canonical request descriptor (ruling 3). A write is validated ONCE,
+  // here, into the exact request the wire will carry, and that same object
+  // drives everything downstream: the money decision (the Approval gate), button
+  // styling, the "This will send" display, rebindApproval, the idempotency
+  // intent, and the transport (Transport.send fetches desc.url with desc.method
+  // and re-derives neither). A refusal fails closed: ok:false, nothing can be
+  // sent, money stays true, and `reason` says why.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // Only the two write kinds the schema defines, matched EXACTLY: "post" -> POST, "patch" -> PATCH.
+  // Anything else ("PATCH", "put", "delete", "get", missing) is refused; it never becomes a POST.
+  function actionMethod(action) {
+    var k = action ? action.kind : null;
+    return k === 'post' ? 'POST' : (k === 'patch' ? 'PATCH' : null);
+  }
+  // The canonical form of the pathname the wire carries, %-decoded the way the gateway routes it.
+  // An ambiguous escape has no single canonical form: null (fail closed; safeApiPath refuses them
+  // first, this keeps the classifier closed on its own).
+  function canonicalPath(pathname) {
+    var p = String(pathname == null ? '' : pathname);
+    if (/%(25|2f|5c|3f|23)/i.test(p)) return null;
+    try { return decodeURIComponent(p); } catch (e) { return null; }
+  }
+  function matchesWriteTemplate(template, method, path) {
+    var sp = template.indexOf(' ');
+    if (template.slice(0, sp) !== method) return false;
+    var t = template.slice(sp + 1).split('/'), p = path.split('/');
+    if (t.length !== p.length) return false;
+    for (var i = 0; i < t.length; i++) {
+      if (t[i] === ':') { if (!/^[A-Za-z0-9_.~-]+$/.test(p[i])) return false; }
+      else if (t[i] !== p[i]) return false;
+    }
+    return true;
+  }
+  // True only for an EXACT allowlisted (method, route) carrying no query string; every other write
+  // is money (the Approval gate) until the kit's allowlist says otherwise.
+  function isNonMoneyWrite(method, canonical, search) {
+    if (search) return false;
+    for (var i = 0; i < NON_MONEY_WRITES.length; i++) {
+      if (matchesWriteTemplate(NON_MONEY_WRITES[i], method, canonical)) return true;
+    }
+    return false;
+  }
+  // The request body exactly as the kit displays AND sends it: a plain copy of the sources' OWN
+  // enumerable keys (overrides win). A "__proto__" key cannot be copied as data -- assigning it
+  // re-parents the copy instead -- so an inherited amount or ref would be DISPLAYED while the wire
+  // carries only the own keys. Such a body has no single meaning: null (the descriptor refuses it).
+  function plainBody(base, overrides) {
+    var out = {};
+    var srcs = [base, overrides];
+    for (var s = 0; s < srcs.length; s++) {
+      var src = srcs[s];
+      if (!src || typeof src !== 'object') continue;
+      var ks = Object.keys(src);
+      for (var i = 0; i < ks.length; i++) {
+        if (ks[i] === '__proto__') return null;
+        out[ks[i]] = src[ks[i]];
+      }
+    }
+    return out;
+  }
+  // [name, value] for each named field the body carries as its OWN key, in the given order.
+  function ownFields(b, names, truthy) {
+    var out = [];
+    for (var i = 0; i < names.length; i++) {
+      if (!Object.prototype.hasOwnProperty.call(b, names[i])) continue;
+      var v = b[names[i]];
+      if (truthy ? v : v != null) out.push([names[i], v]);
+    }
+    return out;
+  }
+  // -> { ok, method, path (the request-target the wire carries), canonical (decoded pathname),
+  //      url (the pinned absolute URL string fetch receives), money, destination (display === url),
+  //      reason (why refused), body (the kit's copy of the request body), amounts / refs (EVERY
+  //      amount- / reference-like field the body carries, as [name, value]), amount / asset / refId
+  //      (the first of each; assetField names the body field the asset came from, if any) }
+  function requestDescriptor(action, body, isHost, base, overrides) {
+    var b = plainBody(body, overrides);
+    // A POST's idempotencyKey is kit-owned (the kit sets it on send): a manifest value never reaches the
+    // intent, the display or the wire (astra r3 F1 on #342). A PATCH body's idempotencyKey stays plain
+    // data, shown and sent as is (review charlie F4: the kit keys a PATCH by header only).
+    if (b && actionMethod(action) === 'POST') delete b.idempotencyKey;
+    var own = b || {};
+    var amounts = ownFields(own, ['amount', 'totalAmount', 'value', 'priceUSD', 'budgetUSD'], false);
+    var refs = ownFields(own, ['jobId', 'escrowId', 'escrowAddress', 'offerId', 'compositionId', 'id'], true);
+    var assets = ownFields(own, ['currency', 'asset'], true);
+    var d = {
+      ok: false, method: actionMethod(action), path: null, canonical: null, url: null,
+      money: true, destination: null, reason: null, body: own, amounts: amounts, refs: refs,
+      amount: amounts.length ? amounts[0][1] : null,
+      asset: assets.length ? assets[0][1] : null,
+      assetField: assets.length ? assets[0][0] : null,
+      refId: refs.length ? refs[0][1] : null
+    };
+    if (!d.method) { d.reason = 'unsupported action kind (only "post" and "patch" can write)'; return d; }
+    if (b === null) { d.reason = 'the request body has a "__proto__" key, so what it shows and what it sends would differ'; return d; }
+    var safe = safeApiPath(action.path, isHost);
+    if (safe === null) { d.reason = 'unsafe or ambiguous request path'; return d; }
+    var u = pinnedUrl(base, safe);
+    if (u === null) { d.reason = 'request resolves outside the PCC API origin'; return d; }
+    var canon = canonicalPath(u.pathname);
+    if (canon === null) { d.reason = 'ambiguous path encoding'; return d; }
+    d.ok = true;
+    d.url = u.toString();
+    d.path = u.pathname + u.search;
+    d.canonical = canon;
+    d.destination = d.url;
+    d.money = action.confirm === 'approval' || !isNonMoneyWrite(d.method, canon, u.search);
+    return d;
+  }
+
+  // The display facts of that descriptor -- exactly the fields realRequestNode renders in "This will
+  // send": method, the exact destination URL, amount/asset and job/escrow ref. The REAL request, never
+  // manifest confirmation text (directive 10); `destination === null` means it was refused. Kept as
+  // the pure surface the gateway's directive-10 tests pin.
   function describeRealRequest(apiBase, action, body, isHost) {
-    var method = (action && action.kind === 'patch') ? 'PATCH' : 'POST';
-    var safe = safeApiPath(action ? action.path : '', isHost);
-    var destination = safe === null ? null : ((apiBase || '') + safe);
-    var b = body || {};
-    var amount = b.amount != null ? b.amount
-      : (b.totalAmount != null ? b.totalAmount
-      : (b.value != null ? b.value
-      : (b.priceUSD != null ? b.priceUSD
-      : (b.budgetUSD != null ? b.budgetUSD : null))));
-    var asset = b.currency || b.asset || (amount != null ? 'USDC' : null);
-    var refId = b.jobId || b.escrowId || b.escrowAddress || b.offerId
-      || b.compositionId || b.id || null;
-    return { method: method, destination: destination, amount: amount, asset: asset, refId: refId };
+    var d = requestDescriptor(action, body, isHost, apiBase);
+    return { method: d.method, destination: d.destination, amount: d.amount, asset: d.asset, refId: d.refId };
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -271,6 +475,20 @@
     return cur;
   }
 
+  // A settlement record's economics.amount is a raw integer in the token's BASE units (read-surface
+  // contract rule 14). It becomes a display amount only with the record's own tokenDecimals (exact
+  // string arithmetic, no float); without them it is shown as labelled base units, because
+  // 1000000 base units of a 6-decimal token is 1, not 1,000,000.00. Anything else: null.
+  function baseUnitsText(raw, decimals) {
+    var s = typeof raw === 'number' && isFinite(raw) && raw % 1 === 0 && raw >= 0 ? String(raw) : raw;
+    if (typeof s !== 'string' || !/^\d+$/.test(s)) return null;
+    if (typeof decimals !== 'number' || decimals % 1 !== 0 || decimals < 0 || decimals > 36) {
+      return s.replace(/^0+(?=\d)/, '') + ' base units (decimals not reported)';
+    }
+    while (s.length <= decimals) s = '0' + s;
+    var ip = s.slice(0, s.length - decimals).replace(/^0+(?=\d)/, ''), fp = s.slice(s.length - decimals).replace(/0+$/, '');
+    return ip.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (fp ? '.' + fp : '');
+  }
   function fmtUsd(v) {
     var n = Number(v);
     if (!isFinite(n)) return String(v == null ? '' : v);
@@ -293,15 +511,263 @@
     }
   }
 
-  // Status → semantic pill class (hue = meaning only).
-  function statusClass(s) {
-    var t = String(s == null ? '' : s).toLowerCase();
-    if (/(settl|releas|complet|done|paid|funded|success|approved|active)/.test(t)) return 'st-settled';
-    if (/(fail|error|denied|dispute|cancel|reject)/.test(t)) return 'st-failed';
-    if (/(wait|pending|queued|paused|review|created|needs)/.test(t)) return 'st-waiting';
-    if (/(run|progress|stream|building|in_progress)/.test(t)) return 'st-running';
-    return '';
+  // Status -> semantic pill class (hue = meaning only).
+  // MONEY HONESTY (read-route contract sec A + rule 1): money state is mapped by EXACT
+  // normalized key, NEVER by substring -- "funded" must not green "refunded"/"underfunded",
+  // "releas" must not green "unreleased", "complet" must not green "incomplete". A refund is a
+  // FINAL settlement where the operator was NOT paid -> never green. Allocated-not-final and any
+  // unmapped/unknown status FAIL CLOSED to a neutral pill, never "settled".
+  // MONEY_STATUS mirrors the canonical @pcc/spec table (packages/spec/src/money/money-status.ts)
+  // VERBATIM: this vanilla asset has no bundler, so it cannot import it. The CI conformance test
+  // packages/spec/src/__tests__/money-status.conformance.test.ts proves the two tables agree key
+  // for key (same keys, same tone, same label). Edit both, or CI fails.
+  // <status-map v2> -- extracted verbatim by money-status.conformance.test.ts; keep the markers.
+  // Only a plain status word is classified: a non-string, or punctuation / control / non-ASCII
+  // characters ("RELEASED?", "releaſed", ["RELEASED"]) are REJECTED to '' -> unknown, never green.
+  function normStatus(s) {
+    if (typeof s !== 'string') return '';
+    var t = s.trim();
+    if (!/^[A-Za-z0-9 _-]+$/.test(t)) return '';
+    return t.toUpperCase().replace(/[ _-]+/g, '_').replace(/^_+|_+$/g, '');
   }
+  function freezeTable(t) {
+    for (var k in t) { if (Object.prototype.hasOwnProperty.call(t, k)) Object.freeze(t[k]); }
+    return Object.freeze(t);
+  }
+  // Flat table for BARE words: key -> [pillClass, honest label]. It has NO st-settled entry: a bare
+  // word is never authoritative settlement state (steward #2490). Green comes only from a V-next
+  // settlement read model whose fields agree (settlementRecordClass). SETTLED, COMPLETED and
+  // RELEASED take the conservative reading; AWAITING_FUNDING (state 0) is a read error.
+  var MONEY_STATUS = freezeTable({
+    // V-next UnitState names, as bare words
+    FUNDED_ACTIVE:     ['st-running',  'active - funds committed, no outcome yet'],
+    PRIMARY_ASSERTED:  ['st-waiting',  'primary assertion accepted - not final'],
+    CHALLENGED:        ['st-waiting',  'challenged - not final'],
+    BACKUP_PENDING:    ['st-waiting',  'escalated to backup - not final'],
+    BACKUP_ASSERTED:   ['st-waiting',  'backup assertion accepted - not final'],
+    RELEASE_ALLOCATED: ['st-waiting',  'release decided - payout outstanding'],
+    REFUND_ALLOCATED:  ['st-waiting',  'refund decided - payer not yet refunded'],
+    SETTLED_RELEASED:  ['st-waiting',  'reported released - not confirmed by a settlement read'],
+    SETTLED_REFUNDED:  ['st-refunded', 'payer refunded - payees NOT paid'],
+    // Escrow.status (spec types/settlement.ts)
+    CREATED:    ['st-waiting',  'escrow created - unfunded'],
+    FUNDED:     ['st-waiting',  'funds held - not released'],
+    ACTIVE:     ['st-running',  'active'],
+    COMPLETING: ['st-waiting',  'completing - not yet final'],
+    COMPLETED:  ['st-waiting',  'completed - settlement not confirmed'],
+    DISPUTED:   ['st-failed',   'disputed'],
+    REFUNDED:   ['st-refunded', 'payer refunded - operator NOT paid'],
+    // EscrowStatus (spec types/common.ts)
+    UNFUNDED:  ['st-waiting',  'unfunded'],
+    LOCKED:    ['st-running',  'funds locked - step in progress'],
+    RELEASING: ['st-waiting',  'releasing - challenge window open, not yet paid'],
+    RELEASED:  ['st-waiting',  'released - not confirmed by a settlement read'],
+    SLASHED:   ['st-failed',   'bond slashed'],
+    // Dashboard escrow DTO (apps/dashboard/src/types/dto.ts)
+    PENDING: ['st-waiting', 'pending - not yet funded'],
+    EXPIRED: ['st-failed',  'expired - not released'],
+    // Context-pack escrow summary (gateway routes/context-pack.ts)
+    MILESTONE_MET: ['st-waiting', 'milestone met - release pending']
+  });
+  // V-next unit states by ordinal: enum UnitState in packages/contracts/src/libraries/VNextSettlementLib.sol.
+  var VNEXT_UNIT_STATES = Object.freeze(['AWAITING_FUNDING', 'FUNDED_ACTIVE', 'PRIMARY_ASSERTED', 'CHALLENGED', 'BACKUP_PENDING',
+    'BACKUP_ASSERTED', 'RELEASE_ALLOCATED', 'REFUND_ALLOCATED', 'SETTLED_RELEASED', 'SETTLED_REFUNDED']);
+  // Presentation of each reachable V-next state read from a CONSISTENT read model (the only green).
+  var VNEXT_STATE_PRESENTATION = freezeTable({
+    FUNDED_ACTIVE:     ['st-running',  'active - funds committed, no outcome yet'],
+    PRIMARY_ASSERTED:  ['st-waiting',  'primary assertion accepted - not final'],
+    CHALLENGED:        ['st-waiting',  'challenged - not final'],
+    BACKUP_PENDING:    ['st-waiting',  'escalated to backup - not final'],
+    BACKUP_ASSERTED:   ['st-waiting',  'backup assertion accepted - not final'],
+    RELEASE_ALLOCATED: ['st-waiting',  'release decided - payout outstanding'],
+    REFUND_ALLOCATED:  ['st-waiting',  'refund decided - payer not yet refunded'],
+    SETTLED_RELEASED:  ['st-settled',  'released - payout distribution discharged'],
+    SETTLED_REFUNDED:  ['st-refunded', 'refunded - payer refunded, payees NOT paid']
+  });
+  // The read models' `phase` per reachable state (gateway unit-state-mapper PHASE_BY_STATE).
+  var VNEXT_PHASE = Object.freeze({
+    FUNDED_ACTIVE: 'active', PRIMARY_ASSERTED: 'contest', CHALLENGED: 'contest',
+    BACKUP_PENDING: 'escalation', BACKUP_ASSERTED: 'escalation',
+    RELEASE_ALLOCATED: 'allocated', REFUND_ALLOCATED: 'allocated',
+    SETTLED_RELEASED: 'settled', SETTLED_REFUNDED: 'settled'
+  });
+  // Generic (non-money) run/action states. NEVER consulted for money data (see dataStatusClass). Green
+  // means money finally reached the payee and nothing else is ever green, so a generic success word is a
+  // NEUTRAL acknowledgement (st-ack): whatever the routing heuristic decides, it cannot paint money green
+  // (astra r2 on #313, F2).
+  var GENERIC_STATES = Object.freeze({
+    RUNNING: 'st-running', IN_PROGRESS: 'st-running', PROGRESS: 'st-running', STREAMING: 'st-running', BUILDING: 'st-running', CONNECTING: 'st-running',
+    PENDING: 'st-waiting', QUEUED: 'st-waiting', WAITING: 'st-waiting', PAUSED: 'st-waiting', REVIEW: 'st-waiting', CONFIRM: 'st-waiting', NEEDS_INPUT: 'st-waiting', NEEDS_YOU: 'st-waiting',
+    ERROR: 'st-failed', FAILED: 'st-failed', DENIED: 'st-failed', CANCELLED: 'st-failed', CANCELED: 'st-failed', REJECTED: 'st-failed',
+    DONE: 'st-ack', COMPLETE: 'st-ack', COMPLETED: 'st-ack', OK: 'st-ack', SUCCESS: 'st-ack', SUCCEEDED: 'st-ack', RESOLVED: 'st-ack', READY: 'st-ack'
+  });
+  // NON-money data only (a job, a kernel): generic run/action states first, then the flat money
+  // table (which has no green). Callers route money data away from here (dataStatusClass).
+  function statusClass(s) {
+    var k = normStatus(s);
+    if (k !== '' && Object.prototype.hasOwnProperty.call(GENERIC_STATES, k)) return GENERIC_STATES[k];
+    if (k !== '' && Object.prototype.hasOwnProperty.call(MONEY_STATUS, k)) return MONEY_STATUS[k][0];
+    return 'st-unknown'; // fail closed -- an unmapped status is NEVER rendered as settled/green
+  }
+  // A BARE money word: the flat table only (never green). A generic success word ("done",
+  // "success", "ok") is not a money state.
+  function moneyStatusClass(s) {
+    var k = normStatus(s);
+    return (k !== '' && Object.prototype.hasOwnProperty.call(MONEY_STATUS, k)) ? MONEY_STATUS[k][0] : 'st-unknown';
+  }
+  // Honest direction label for a bare money word; null for non-money/unknown.
+  function settlementLabel(s) {
+    var k = normStatus(s);
+    return (k !== '' && Object.prototype.hasOwnProperty.call(MONEY_STATUS, k)) ? MONEY_STATUS[k][1] : null;
+  }
+  // The V-next state NAME for a wire value: an integer 1..9 or its exact name. 0 is a read error
+  // (unitState() reverts for a missing unit); anything else is null.
+  function vnextUnitStateName(v) {
+    var i = -1;
+    if (typeof v === 'number' && Math.floor(v) === v) i = v;
+    else if (typeof v === 'string') i = VNEXT_UNIT_STATES.indexOf(v);
+    return (i >= 1 && i <= 9) ? VNEXT_UNIT_STATES[i] : null;
+  }
+  function ownKey(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+  function isVNextRecord(o) { return !!o && typeof o === 'object' && !Array.isArray(o) && (ownKey(o, 'unitState') || ownKey(o, 'finalState')); }
+  // A record classified by its SOURCE SCHEMA -> [pillClass, label or null, pill text]. Mirrors
+  // classifySettlementRecord in @pcc/spec (the conformance test compares them over wire fixtures).
+  // The read models' own field semantics (gateway unit-state-mapper): isTerminal is true for 8/9
+  // only; isAllocated means "outcome decided, money NOT fully moved" (6/7 ONLY), so a settled
+  // record says isAllocated:false; finalState names 8/9, else null; phase follows VNEXT_PHASE.
+  // Every field present must agree, and a FINAL state needs them all (mirrors the spec).
+  function settlementRecordClass(o) {
+    if (!o || typeof o !== 'object' || Array.isArray(o)) return ['st-unknown', 'not a settlement record', 'no settlement state'];
+    var DISAGREE = 'settlement fields disagree - not shown as final', INCOMPLETE = 'incomplete settlement record - not shown as final';
+    if (ownKey(o, 'unitState')) {
+      var name = vnextUnitStateName(o.unitState);
+      if (name === null) return ['st-unknown', 'unreadable unit state', String(o.unitState)];
+      var ord = VNEXT_UNIT_STATES.indexOf(name), terminal = ord >= 8, allocated = ord === 6 || ord === 7;
+      var fs = o.finalState === undefined ? null : o.finalState;
+      if ((ownKey(o, 'finalState') && fs !== (terminal ? name : null)) ||
+          (ownKey(o, 'isAllocated') && o.isAllocated !== allocated) ||
+          (ownKey(o, 'isTerminal') && o.isTerminal !== terminal) ||
+          (ownKey(o, 'phase') && o.phase !== VNEXT_PHASE[name])) {
+        return ['st-unknown', DISAGREE, name];
+      }
+      // A FINAL state needs unitState, finalState, isAllocated and phase present: absence is not
+      // corroboration. isTerminal is cross-checked above when present; /receipt (which gains
+      // unitState, escrow #3163) does not carry it. The 6-vs-7 direction comes from unitState.
+      if (terminal && !(ownKey(o, 'finalState') && ownKey(o, 'isAllocated') && ownKey(o, 'phase'))) {
+        return ['st-unknown', INCOMPLETE, name];
+      }
+      return [VNEXT_STATE_PRESENTATION[name][0], VNEXT_STATE_PRESENTATION[name][1], name];
+    }
+    // A /receipt carries finalState, phase and isAllocated (no unitState, no isTerminal).
+    if (ownKey(o, 'finalState')) {
+      var f = o.finalState, final = f === 'SETTLED_RELEASED' || f === 'SETTLED_REFUNDED';
+      if (ownKey(o, 'isTerminal') && o.isTerminal !== final) return ['st-unknown', DISAGREE, String(f)];
+      if (final) {
+        if (!ownKey(o, 'isAllocated') || !ownKey(o, 'phase')) return ['st-unknown', INCOMPLETE, f];
+        if (o.isAllocated !== false || o.phase !== 'settled') return ['st-unknown', DISAGREE, f];
+        return [VNEXT_STATE_PRESENTATION[f][0], VNEXT_STATE_PRESENTATION[f][1], f];
+      }
+      if (f === null && o.isAllocated === true) {
+        if (ownKey(o, 'phase') && o.phase !== 'allocated') return ['st-unknown', DISAGREE, String(o.phase)];
+        return ['st-waiting', 'outcome decided - not yet paid out', String(o.phase || 'allocated')];
+      }
+      if (f === null && o.isAllocated === false) {
+        if (ownKey(o, 'phase') && !(o.phase === 'active' || o.phase === 'contest' || o.phase === 'escalation')) return ['st-unknown', DISAGREE, String(o.phase)];
+        return ['st-waiting', 'in progress - no outcome decided', String(o.phase || 'in progress')];
+      }
+      return ['st-unknown', 'unreadable final state', String(f)];
+    }
+    if (typeof o.status === 'string' && (ownKey(o, 'contractAddress') || ownKey(o, 'escrowAddress') || Array.isArray(o.milestones) || ownKey(o, 'cwmId') || ownKey(o, 'totalAmount'))) {
+      return [moneyStatusClass(o.status), settlementLabel(o.status), o.status];
+    }
+    return ['st-unknown', 'not a settlement record', o.status != null ? String(o.status) : 'no settlement state'];
+  }
+  // Which table a DATA surface (list rows, run status) uses is decided by the DATA, not the window
+  // kind. Data is money unless its binding is a known NON-money read AND it carries no money field:
+  // fail closed, so an escrow row's "success" or "completed" is never shown as paid.
+  var NON_MONEY_READS = /^\/api\/(jobs|kernels|capabilities|agents|artifacts|csd|sensors|devices|skills)(\/|$)/;
+  var MONEY_FIELDS = Object.freeze(['amount', 'totalAmount', 'price', 'fee', 'payout', 'payer', 'payee', 'escrow', 'escrowId', 'escrowAddress', 'settlement', 'txHash', 'unitState', 'finalState']);
+  function isMoneyData(bindingPath, row) {
+    var p = typeof bindingPath === 'string' ? bindingPath.split('?')[0] : '';
+    if (!NON_MONEY_READS.test(p)) return true;
+    if (row && typeof row === 'object') {
+      for (var i = 0; i < MONEY_FIELDS.length; i++) {
+        if (ownKey(row, MONEY_FIELDS[i]) && row[MONEY_FIELDS[i]] != null) return true;
+      }
+    }
+    return false;
+  }
+  // The only routes whose LIVE reads may present a FINAL settlement state (mirrors the spec's
+  // SETTLEMENT_READ_ROUTE; the unit id is the route's own UNIT_ID_RE).
+  var SETTLEMENT_READ_ROUTE = /^\/api\/settlement\/units\/0x[0-9a-fA-F]{64}\/(receipt|lifecycle)$/;
+  // DISPLAY class of a settlement record given where it came from -> [pillClass, label, text]. Mirrors
+  // classifySettlementRead: a FINAL V-next state (settled 8, refunded 9) needs a LIVE read of an exact
+  // per-unit settlement route. Field shape is not provenance (astra r2 on #313, F1): a baked snapshot,
+  // a fallback, a stream event or a settled-shaped body from any other route is unknown.
+  function settlementReadClass(o, bindingPath, live) {
+    var rc = settlementRecordClass(o);
+    if (!isVNextRecord(o) || (rc[0] !== 'st-settled' && rc[0] !== 'st-refunded')) return rc;
+    var p = typeof bindingPath === 'string' ? bindingPath.split('?')[0] : '';
+    if (live === true && SETTLEMENT_READ_ROUTE.test(p)) return rc;
+    return ['st-unknown', 'final state not shown - not a live read of a settlement route', rc[2]];
+  }
+  function dataStatusClass(bindingPath, row, s, live) {
+    if (!isMoneyData(bindingPath, row)) return statusClass(s);
+    if (isVNextRecord(row)) return settlementReadClass(row, bindingPath, live)[0]; // a read model: schema AND source
+    return moneyStatusClass(s); // a bare money word: never green
+  }
+  // Pill TEXT (astra r4 on #313, F6; astra r5 on #313, F7-F9). The class decides the colour, and the text
+  // may not claim more. Fails CLOSED over a CLOSED safe vocabulary (no blacklist to miss a spelling, and
+  // no blacklist to over-qualify a non-money surface, astra r5 F7/F9): unverified text is shown as-is
+  // only when it normalizes to a word on the surface's OWN safe list; anything else is qualified, with a
+  // suffix that matches the surface (money: "settlement unconfirmed"; non-money: "status unverified").
+  // Mirrors the spec's statusPillText (the conformance test compares them).
+  var SAFE_STATUS_WORDS = Object.freeze({
+    RUNNING: true, IN_PROGRESS: true, PROGRESS: true, STREAMING: true, BUILDING: true, CONNECTING: true,
+    PENDING: true, QUEUED: true, WAITING: true, PAUSED: true, REVIEW: true, CONFIRM: true, NEEDS_INPUT: true, NEEDS_YOU: true,
+    ERROR: true, FAILED: true, DENIED: true, CANCELLED: true, CANCELED: true, REJECTED: true,
+    DONE: true, COMPLETE: true, COMPLETED: true, OK: true, SUCCESS: true, SUCCEEDED: true, RESOLVED: true, READY: true,
+    DISPATCHED: true, ACCEPTED: true, PREPARING: true, EXECUTING: true, COLLECTING_EVIDENCE: true, AWAITING_PICKUP: true, TIMED_OUT: true,
+    ONLINE: true, OFFLINE: true, MAINTENANCE: true, SUSPENDED: true, HEALTHY: true, DEGRADED: true, UNKNOWN: true,
+    BIDDING: true, ASSIGNED: true, PROPOSED: true, OVER_BUDGET: true, NO_PATH_FOUND: true, APPROVED: true, EXPIRED: true,
+    ACTIVE: true, INACTIVE: true, REVOKED: true, IDLE: true, BUSY: true, DRAFT: true, DEPRECATED: true, RESERVED: true, LIVE: true, STUB: true, PLANNED: true
+  });
+  var SAFE_MONEY_STATUS_WORDS = Object.freeze({
+    RUNNING: true, IN_PROGRESS: true, PROGRESS: true, PENDING: true, QUEUED: true, WAITING: true, PAUSED: true, REVIEW: true,
+    ERROR: true, FAILED: true, DENIED: true, CANCELLED: true, CANCELED: true, REJECTED: true, EXPIRED: true, UNKNOWN: true
+  });
+  var UNCONFIRMED_SUFFIX = ' - settlement unconfirmed';
+  var UNVERIFIED_SUFFIX = ' - status unverified';
+  function statusPillText(raw, verified, money) {
+    var t = raw == null ? '' : String(raw);
+    if (verified || t === '') return t;
+    var k = normStatus(t);
+    var safe = money ? SAFE_MONEY_STATUS_WORDS : SAFE_STATUS_WORDS;
+    if (k !== '' && ownKey(safe, k)) return t;
+    return 'reported status: ' + t + (money ? UNCONFIRMED_SUFFIX : UNVERIFIED_SUFFIX);
+  }
+  // A free-text server MESSAGE outside a pill (astra r6 F12): never PCC's own claim, so it is attributed
+  // to its source, and on money data it says the settlement is unconfirmed. Callers pass `verified` only
+  // for a VERIFIED PAYEE PAYMENT, never a verified refund (astra r6 F10). Mirrors the spec's reportedText.
+  function reportedText(raw, verified, money) {
+    var t = raw == null ? '' : String(raw);
+    if (verified || t === '') return t;
+    return 'reported: ' + t + (money ? UNCONFIRMED_SUFFIX : '');
+  }
+  // The TEXT of a data status pill (list rows, run windows), paired with dataStatusClass. Money data shows
+  // the classifier's honest label, and a VERIFIED final (a live read of an exact settlement route) keeps
+  // its plain name. Anything else is the value itself, qualified when it claims money moved.
+  function dataStatusText(bindingPath, row, s, live) {
+    if (isMoneyData(bindingPath, row)) {
+      var vnext = isVNextRecord(row);
+      var rc = vnext ? settlementReadClass(row, bindingPath, live) : [moneyStatusClass(s), settlementLabel(s), s];
+      if (vnext && (rc[0] === 'st-settled' || rc[0] === 'st-refunded')) return String(rc[2]);
+      if (rc[1]) return rc[1];
+      return statusPillText(s, false, true);
+    }
+    return statusPillText(s, false, false);
+  }
+  // </status-map v2>
 
   // Pull the first array out of a response (for list windows without a select).
   function firstArray(resp) {
@@ -337,6 +803,16 @@
     this.isHost = !!isHost;
     this.lastTrace = null;
   }
+  // sol#1 (#288) origin pin, ONE implementation: resolve against the transport base and REFUSE (null)
+  // anything outside the fixed PCC API origin or carrying embedded credentials. Parsed-origin compare
+  // subsumes the https pin. Reads/SSE reach it through Transport._pin; writes through
+  // requestDescriptor, whose url Transport.send re-CHECKS here before any Bearer is attached.
+  function pinnedUrl(base, target) {
+    var u;
+    try { u = new URL(target, base || location.origin); } catch (e) { return null; }
+    if (u.origin !== API_ORIGIN || u.username || u.password) return null;
+    return u;
+  }
   Transport.prototype._headers = function (extra) {
     var h = extra || {};
     var k = getKey();
@@ -351,12 +827,8 @@
   // streamSSE reject; send returns a structured {ok:false} refusal).
   Transport.prototype._pin = function (safe, query) {
     var u;
-    try {
-      var base = this.base || location.origin;
-      u = new URL(safe + this.qs(query), base);
-    } catch (e) { return null; }
-    if (u.origin !== API_ORIGIN || u.username || u.password) return null;
-    return u.toString();
+    try { u = pinnedUrl(this.base, safe + this.qs(query)); } catch (e) { return null; }
+    return u === null ? null : u.toString();
   };
   Transport.prototype._trace = function (res) {
     try { var t = res.headers.get('x-pcc-trace-id'); if (t) this.lastTrace = t; } catch (e) {}
@@ -385,15 +857,26 @@
         return r.json();
       });
   };
-  Transport.prototype.send = function (method, path, body) {
+  // A write sends EXACTLY its validated request descriptor (ruling 3): desc.url with desc.method.
+  // Nothing here re-derives the destination or the method. The #288 pin is re-CHECKED on that exact
+  // string before any Bearer is attached: a descriptor that is not ok, not POST/PATCH, or not already
+  // a pinned PCC URL in canonical serialization is refused ({refused:true}: nothing was sent).
+  Transport.prototype.send = function (desc, body, idempotencyKey) {
     var self = this;
-    var safe = safeApiPath(path, this.isHost);
-    if (safe === null) return Promise.resolve({ ok: false, status: 0, body: { message: 'Refused: unsafe or non-PCC request path.' } });
-    var url = this._pin(safe);
-    if (url === null) return Promise.resolve({ ok: false, status: 0, body: { message: 'Refused: request resolves outside the PCC API origin.' } });
-    return fetch(url, {
-      method: method,
-      headers: this._headers({ 'Content-Type': 'application/json', Accept: 'application/json' }),
+    function refuse(msg) { return Promise.resolve({ ok: false, status: 0, refused: true, body: { message: msg } }); }
+    if (!desc || desc.ok !== true || typeof desc.url !== 'string') {
+      return refuse('Refused: ' + ((desc && desc.reason) || 'no validated request') + ' - nothing was sent.');
+    }
+    if (desc.method !== 'POST' && desc.method !== 'PATCH') return refuse('Refused: unsupported method - nothing was sent.');
+    var pinned = pinnedUrl(this.base, desc.url);
+    if (pinned === null || pinned.toString() !== desc.url) return refuse('Refused: request resolves outside the PCC API origin.');
+    var headers = this._headers({ 'Content-Type': 'application/json', Accept: 'application/json' });
+    // A real Idempotency-Key HEADER: the gateway's idempotency middleware and the escrow money
+    // routes read the header, never a body field. The caller owns key stability (see doPost).
+    if (idempotencyKey) headers['Idempotency-Key'] = String(idempotencyKey);
+    return fetch(desc.url, {
+      method: desc.method,
+      headers: headers,
       body: body != null ? JSON.stringify(body) : undefined,
       credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store'
     }).then(function (r) {
@@ -475,15 +958,15 @@
       return r.json;
     });
   };
-  HostTransport.prototype.send = function (method, path, body) {
+  HostTransport.prototype.send = function (desc, body, idempotencyKey) {
     // R4 PR1 lockdown (D10): manifest-authored writes are DISABLED in MCP-App/
     // host mode. No mutating request is ever issued from a hosted view — write
     // controls render disabled and the action layer refuses; this transport-level
     // backstop holds even if a caller reaches send() directly (e.g. a compose
     // POST from renderChain). PR2 reintroduces writes via a typed, server-
-    // authorized operation allowlist. (method/path/body intentionally unused.)
-    void method; void path; void body;
-    return Promise.resolve({ ok: false, status: 0, body: { message: 'Actions are unavailable in this host view.' } });
+    // authorized operation allowlist. (desc/body/key intentionally unused.)
+    void desc; void body; void idempotencyKey;
+    return Promise.resolve({ ok: false, status: 0, refused: true, body: { message: 'Actions are unavailable in this host view.' } });
   };
   // No defined host-bridge equivalent for streaming yet; always use the
   // direct fetch-SSE reader (same Bearer-header contract as every live mode).
@@ -546,10 +1029,12 @@
     wrap.appendChild(body);
     wrap._body = body;
     wrap._setFoot = function (traceId, stale) {
-      var old = wrap.querySelector('.pcc-win-foot');
+      // Only ever replace the kit's own trace/stale META footer. Action bars also carry
+      // .pcc-win-foot for styling and must never be removed by a footer refresh.
+      var old = wrap.querySelector('.pcc-win-foot.pcc-foot-meta');
       if (old) old.parentNode.removeChild(old);
       if (!traceId && !stale) return;
-      var foot = el('div', 'pcc-win-foot');
+      var foot = el('div', 'pcc-win-foot pcc-foot-meta');
       if (stale) foot.appendChild(el('span', 'pcc-foot-stale', 'snapshot'));
       if (traceId) foot.appendChild(el('span', 'pcc-mono pcc-foot-trace', 'trace ' + traceId));
       wrap.appendChild(foot);
@@ -565,8 +1050,61 @@
   }
 
   // ═══════════════════════════════════════════════════════════════════════
+  // Kit-owned labels (ruling 4). A manifest label is UNTRUSTED text: it can say
+  // "Deny" or "Cancel" on a control that writes. One rule, everywhere:
+  //  1. A control that EXECUTES a gated write (the approval window's Approve, the
+  //     Approval gate's Approve) and every control that declines or closes
+  //     (Deny, Cancel) carries KIT text only. The manifest's own label is shown
+  //     beside them as quoted, attributed text -- never as a control's label.
+  //  2. A manifest-labelled control that STARTS a write (actions bar, form
+  //     submit, chain Plan/execute) keeps the manifest label (it names the task)
+  //     but always ends in a kit-owned tag saying what the click really does:
+  //     "needs approval" (opens the gate; this click sends nothing), "asks to
+  //     confirm", "sends now" (an allowlisted non-money write, or a registered
+  //     host operation), "blocked" (refused: nothing can be sent), "unavailable"
+  //     (host lockdown) or "via assistant" (snapshot). So a manifest can never
+  //     present a write as a harmless "Deny"/"Cancel": the kit's words follow it.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  function writeTag(ctx, action, desc) {
+    if (ctx.mode === 'snapshot') return 'via assistant';
+    if (ctx.mode === 'host') return hostActionEnabled(action) ? 'sends now' : 'unavailable';
+    if (!desc.ok) return 'blocked';
+    if (desc.money) return 'needs approval';
+    return action.confirm === 'inline' ? 'asks to confirm' : 'sends now';
+  }
+  // Styling comes from the SAME descriptor the gate uses: a money write can never look non-money.
+  function writeButton(ctx, action, desc, fallbackLabel) {
+    var b = el('button', 'pcc-btn ' + (desc.money ? 'pcc-btn-primary' : 'pcc-btn-quiet'));
+    b.type = 'button';
+    b.appendChild(el('span', 'pcc-btn-label', String((action && action.label) || fallbackLabel)));
+    b.appendChild(el('span', 'pcc-btn-tag', ' · ' + writeTag(ctx, action, desc)));
+    return b;
+  }
+  // A manifest label shown as what it is: quoted, attributed, untrusted text.
+  function untrustedLabel(label) {
+    var p = el('p', 'pcc-untrusted-label');
+    p.appendChild(el('span', 'pcc-untrusted-k', 'The dashboard calls this: '));
+    p.appendChild(el('span', 'pcc-untrusted-v', '“' + String(label) + '”'));
+    return p;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
   // Window renderers — one per manifest window kind (schema-closed set)
   // ═══════════════════════════════════════════════════════════════════════
+
+  // A binding path whose last segment names a status field (status, state, phase): its value is a status
+  // LABEL, so it takes the closed-vocabulary text rule wherever it is shown (astra r6).
+  function isStatusPath(p) {
+    return typeof p === 'string' && /status|state|phase/i.test(p.split('.').pop() || '');
+  }
+  // A bound value shown as plain text (a list title or meta field, a metric): a status field takes the
+  // closed-vocabulary rule (astra r6, the F8/F11 class); anything else (a name, an id, an amount) is shown
+  // as sent. Never verified: these windows read collections, snapshots or single values, not a live
+  // settlement read model.
+  function boundText(path, v, money) {
+    return isStatusPath(path) ? statusPillText(v, false, money) : String(v);
+  }
 
   // note — prose; split on double newline into <p>, textContent only.
   function renderNote(ctx, w) {
@@ -589,7 +1127,8 @@
     resolveBinding(ctx, w.binding).then(function (r) {
       var raw = sel != null ? dot(r.data, sel) : r.data;
       if (r.error) { clear(wrap._body); wrap._body.appendChild(errorLine(r.error)); }
-      else val.textContent = fmtVal(raw, w.format);
+      else val.textContent = isStatusPath(sel) && raw != null && typeof raw !== 'object'
+        ? boundText(sel, raw, isMoneyData(w.binding && w.binding.path, r.data)) : fmtVal(raw, w.format);
       wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale);
     });
     return wrap;
@@ -641,18 +1180,22 @@
         var row = rows[i];
         var li = el('li', 'pcc-list-row');
         var main = el('div', 'pcc-list-main');
-        main.appendChild(el('span', 'pcc-list-title', String(dot(row, w.item.title) != null ? dot(row, w.item.title) : (w.item.title || ''))));
+        var rowMoney = isMoneyData(w.binding && w.binding.path, row);
+        var tv = dot(row, w.item.title);
+        main.appendChild(el('span', 'pcc-list-title', tv != null ? boundText(w.item.title, tv, rowMoney) : String(w.item.title || '')));
         var metaVals = [];
         var metaKeys = (w.item.meta || []);
         for (var j = 0; j < metaKeys.length; j++) {
           var mv = dot(row, metaKeys[j]);
-          if (mv != null && mv !== '') metaVals.push(String(mv));
+          if (mv != null && mv !== '') metaVals.push(boundText(metaKeys[j], mv, rowMoney));
         }
         if (metaVals.length) main.appendChild(el('span', 'pcc-list-meta', metaVals.join(' · ')));
         li.appendChild(main);
         if (w.item.statusFrom) {
           var st = dot(row, w.item.statusFrom);
-          if (st != null) li.appendChild(el('span', 'pcc-pill ' + statusClass(st), String(st)));
+          // A row is an element of a collection, never the top-level record a settlement route returns, so
+          // it is never a verified read, however live the fetch (astra r7 F13).
+          if (st != null) li.appendChild(el('span', 'pcc-pill ' + dataStatusClass(w.binding && w.binding.path, row, st, false), dataStatusText(w.binding && w.binding.path, row, st, false)));
         }
         listNode.appendChild(li);
       }
@@ -747,14 +1290,15 @@
     var form = buildForm(w.schema || {});
     wrap._body.appendChild(form.node);
     var foot = el('div', 'pcc-win-foot pcc-actionbar');
-    var submit = el('button', 'pcc-btn pcc-btn-primary', (w.submit && w.submit.label) || 'Submit');
-    submit.type = 'button';
+    // Styling + tag from the descriptor policy (classification never depends on the form values;
+    // the click builds the descriptor that is actually sent, from the collected values).
+    var submit = writeButton(ctx, w.submit, requestDescriptor(w.submit, (w.submit && w.submit.body) || {}, ctx.mode === 'host', ctx.apiBase), 'Submit');
     var status = el('span', 'pcc-action-status');
     submit.onclick = function () {
       var values;
       try { values = collectForm(form); }
       catch (e) { status.className = 'pcc-action-status st-failed'; status.textContent = e.message; return; }
-      dispatchAction(ctx, w.submit, { formValues: values, status: status, rebind: null });
+      dispatchAction(ctx, w.submit, { formValues: values, status: status });
     };
     foot.appendChild(submit);
     foot.appendChild(status);
@@ -783,9 +1327,48 @@
       elapsed.textContent = Math.floor((Date.now() - started) / 1000) + 's elapsed';
     }, 1000);
 
-    function apply(statusVal, latestVal) {
-      if (statusVal != null) { pill.textContent = String(statusVal); pill.className = 'pcc-pill ' + statusClass(statusVal); }
-      if (latestVal != null && latestVal !== '') latest.textContent = String(latestVal);
+    // Secondary text is HELD raw and repainted under each read's verification (astra r7 F10): a later
+    // read that is not a verified payee payment, or a failed read, requalifies what an earlier verified
+    // read left plain. held.latest = { raw, isStatus, money }; held.feed = { lines: [{ ts, label }], money }.
+    var held = { latest: null, feed: null };
+    function paintLatest(verified) {
+      var h = held.latest;
+      if (h) latest.textContent = h.isStatus ? statusPillText(h.raw, verified, h.money) : reportedText(h.raw, verified, h.money);
+    }
+    function paintFeed(verified) {
+      var f = held.feed;
+      if (!f) return;
+      clear(feed);
+      for (var i = 0; i < f.lines.length; i++) feedLine(f.lines[i].ts + statusPillText(f.lines[i].label, verified, f.money));
+    }
+
+    // `live` is true only for a successful poll of the binding (never a snapshot or a stream event).
+    function apply(statusVal, latestVal, data, full, live) {
+      var bpath = w.binding && w.binding.path;
+      var cls = null; // this read's pill class, when it sets one
+      if (full && isVNextRecord(data) && isMoneyData(bpath, data)) {
+        cls = settlementReadClass(data, bpath, live)[0]; // a settlement read model: by its schema AND source
+        pill.textContent = dataStatusText(bpath, data, statusVal, live); pill.className = 'pcc-pill ' + cls;
+      } else if (statusVal != null) {
+        cls = dataStatusClass(bpath, data, statusVal, live);
+        pill.textContent = dataStatusText(bpath, data, statusVal, live); pill.className = 'pcc-pill ' + cls;
+      } else if (full) {
+        // A full snapshot WITHOUT a status: the earlier status is no longer known (never kept green).
+        pill.textContent = 'unknown'; pill.className = 'pcc-pill st-unknown';
+      }
+      // Secondary text (the latest line, timeline and feed lines) is plain only on a VERIFIED PAYEE
+      // PAYMENT: a V-next record whose live exact read is st-settled. A verified refund proves the payees
+      // were NOT paid, so it vouches for no other claim (astra r6 F10).
+      var payeeVerified = isVNextRecord(data) && cls === 'st-settled';
+      if (latestVal != null && latestVal !== '') {
+        // The latest line, on every surface (astra r5 F8, r6 F12). Status-sourced text (the status path
+        // itself, or a status/state/phase field) is a label, so it takes the closed vocabulary; anything
+        // else is a free-text message, attributed to its source.
+        var latestIsStatus = typeof w.latestFrom === 'string' && (w.latestFrom === w.statusFrom || isStatusPath(w.latestFrom));
+        held.latest = { raw: latestVal, isStatus: latestIsStatus, money: isMoneyData(bpath, data) };
+      }
+      paintLatest(payeeVerified); // this read decides, even when it carries no new latest value
+      return payeeVerified;
     }
     function feedLine(txt) {
       var line = el('div', 'pcc-mono pcc-feed-line', txt);
@@ -795,13 +1378,18 @@
 
     if (ctx.mode === 'snapshot') {
       var snap = ctx.snapshot[w.binding.path];
-      apply(dot(snap, w.statusFrom), dot(snap, w.latestFrom));
+      apply(dot(snap, w.statusFrom), dot(snap, w.latestFrom), snap, true, false);
       var stat = dot(snap, w.statusFrom);
-      pill.textContent = String(stat != null ? stat : 'snapshot');
+      // apply() has set the honest text (F6: never the raw word); only a status-less, non-read-model
+      // snapshot keeps the plain 'snapshot' marker.
+      if (stat == null && !isVNextRecord(snap)) pill.textContent = 'snapshot';
       var tl = dot(snap, 'job.timeline') || dot(snap, 'timeline');
       if (Array.isArray(tl) && tl.length) {
-        for (var ti = 0; ti < tl.length; ti++) feedLine((tl[ti].timestamp ? fmtTs(tl[ti].timestamp) + ' · ' : '') + (tl[ti].type || ''));
-        latest.textContent = String(tl[tl.length - 1].type || latest.textContent); // last event = latest truth
+        // Timeline entries are labels (astra r6 F11): the closed vocabulary, never verified in a snapshot.
+        var snapMoney = isMoneyData(w.binding.path, snap);
+        for (var ti = 0; ti < tl.length; ti++) feedLine((tl[ti].timestamp ? fmtTs(tl[ti].timestamp) + ' \u00b7 ' : '') + statusPillText(tl[ti].type || '', false, snapMoney));
+        var lastType = tl[tl.length - 1].type; // last event = latest truth
+        if (lastType != null && lastType !== '') latest.textContent = statusPillText(lastType, false, snapMoney);
       }
       wrap._setFoot(null, true);
       clearInterval(tick); elapsed.textContent = '';
@@ -813,14 +1401,24 @@
     function poll(delay) {
       if (stopped) return;
       ctx.tx.getJSON(w.binding.path, w.binding.query).then(function (d) {
-        apply(dot(d, w.statusFrom), dot(d, w.latestFrom));
-        // timeline feed if the response carries one
+        var payeeVerified = apply(dot(d, w.statusFrom), dot(d, w.latestFrom), d, true, true);
+        // Timeline feed, if the response carries one. Each entry (its type, or the raw entry) is a label:
+        // the closed vocabulary, plain only on a verified payee payment (astra r6 F10, F11). It is held,
+        // so a later unverified read requalifies it (astra r7 F10).
         var tl = dot(d, 'timeline') || dot(d, 'job.timeline');
-        if (Array.isArray(tl)) { clear(feed); for (var i = 0; i < tl.length; i++) feedLine((tl[i].timestamp ? fmtTs(tl[i].timestamp) + ' · ' : '') + (tl[i].type || JSON.stringify(tl[i]))); }
+        if (Array.isArray(tl)) {
+          var lines = [];
+          for (var i = 0; i < tl.length; i++) lines.push({ ts: tl[i].timestamp ? fmtTs(tl[i].timestamp) + ' \u00b7 ' : '', label: tl[i].type || JSON.stringify(tl[i]) });
+          held.feed = { lines: lines, money: isMoneyData(w.binding.path, d) };
+        }
+        paintFeed(payeeVerified);
         wrap._setFoot(ctx.tx.lastTrace, false);
         setTimeout(function () { poll(w.binding.pollMs || POLL_DEFAULT_MS); }, w.binding.pollMs || POLL_DEFAULT_MS);
       }, function () {
         var next = Math.min((delay || POLL_DEFAULT_MS) * 2, 120000); // backoff
+        // A failed read never keeps an earlier state, least of all a final one (astra r2 on #313, F3).
+        pill.textContent = 'unknown · read failed'; pill.className = 'pcc-pill st-unknown';
+        paintLatest(false); paintFeed(false); // nothing earlier stays vouched for (astra r7 F10)
         wrap._setFoot(ctx.tx.lastTrace, true);
         setTimeout(function () { poll(next); }, next);
       });
@@ -829,8 +1427,12 @@
     if (w.binding.sse) {
       ctx.tx.streamSSE(w.binding.sse, function (ev) {
         apply(dot(ev, w.statusFrom) != null ? dot(ev, w.statusFrom) : ev.status,
-              dot(ev, w.latestFrom) != null ? dot(ev, w.latestFrom) : (ev.message || ev.type));
-        feedLine((ev.timestamp ? fmtTs(ev.timestamp) + ' · ' : '') + (ev.type || ev.status || JSON.stringify(ev)));
+              dot(ev, w.latestFrom) != null ? dot(ev, w.latestFrom) : (ev.message || ev.type), ev, false, false);
+        // The feed line (astra r5 F8, r6 F12). Every label (the event's type, its status or the raw
+        // event) takes the closed vocabulary on every surface. A stream event is never a verified read.
+        var feedMoney = isMoneyData(w.binding && w.binding.path, ev);
+        var label = ev.type || ev.status || JSON.stringify(ev);
+        feedLine((ev.timestamp ? fmtTs(ev.timestamp) + ' \u00b7 ' : '') + statusPillText(label, false, feedMoney));
         wrap._setFoot(ctx.tx.lastTrace, false);
       }).catch(function () { poll(w.binding.pollMs || POLL_DEFAULT_MS); }); // stream dropped → poll
     } else {
@@ -839,51 +1441,109 @@
     return wrap;
   }
 
-  // approval — the what/who/cost block; only Approve fires the POST.
+  // approval — the what/who/cost block. Its Approve and Deny are KIT-owned (ruling 4): the manifest's
+  // approve label is shown only as quoted, untrusted text. Only Approve sends, and it sends exactly
+  // the descriptor displayed in "This will send".
   function renderApproval(ctx, w) {
     var wrap = winShell('Approval', 'needs you', 'st-waiting');
     wrap._body.appendChild(loadingLine());
     resolveBinding(ctx, w.binding).then(function (r) {
       clear(wrap._body);
-      var info = r.data || {};
-      wrap._body.appendChild(approvalDetails(info));
-      // Kit-derived TRUTH about the request the Approve button actually sends
-      // (directive 10) — computed from w.approve, never manifest confirmation text.
-      var realBody = Object.assign({}, (w.approve && w.approve.body) || {});
-      var desc = describeRealRequest(ctx.apiBase, w.approve, realBody, ctx.mode === 'host');
+      if (w.approve && w.approve.label) wrap._body.appendChild(untrustedLabel(w.approve.label));
+      // The ONE descriptor for this approval (directive 10, ruling 3) comes FIRST: it is exactly what
+      // Approve sends -- never manifest confirmation text. The bound record follows as attributed
+      // context (review charlie F1): the manifest chose its path, and a PCC read can carry user text.
+      var desc = requestDescriptor(w.approve, (w.approve && w.approve.body) || {}, ctx.mode === 'host', ctx.apiBase);
       wrap._body.appendChild(realRequestNode(desc));
+      var mismatch = recordAmountMismatch(r.data, desc);
+      if (mismatch) wrap._body.appendChild(el('p', 'pcc-action-status st-failed pcc-mismatch', mismatch));
+      wrap._body.appendChild(recordNode(r, desc));
       var foot = el('div', 'pcc-win-foot pcc-actionbar');
       var status = el('span', 'pcc-action-status');
-      var approve = el('button', 'pcc-btn pcc-btn-primary', (w.approve && w.approve.label) || 'Approve');
+      var approve = el('button', 'pcc-btn pcc-btn-primary', 'Approve'); // kit text, never w.approve.label
       approve.type = 'button';
+      var deny = null;
+      var submitted = false; // a request may have left: Deny must never again say "nothing was sent"
       approve.onclick = function () {
-        if (desc.destination === null) {
-          status.className = 'pcc-action-status st-failed';
-          status.textContent = 'Refused: unsafe or non-PCC destination.';
-          return;
-        }
-        // The approval WINDOW is itself the confirmation surface: fire directly.
-        dispatchAction(ctx, w.approve, { status: status, viaApproval: true, rebind: function () { rebindApproval(ctx, w, wrap); } });
+        if (!desc.ok) { refuseStatus(status, desc); return; }
+        if (ctx.mode === 'snapshot') { dispatchAction(ctx, w.approve, { status: status }); return; } // intent chip only
+        // Submission starts: lock BOTH controls at once, so Deny can never report "nothing was sent"
+        // while this request is in flight. The approval WINDOW is itself the confirmation surface.
+        submitted = true;
+        approve.disabled = true; if (deny) deny.disabled = true;
+        var sent = dispatchAction(ctx, w.approve, { status: status, viaApproval: true, desc: desc,
+          onSuccess: function () { rebindApproval(wrap, desc); } });
+        if (!sent || typeof sent.then !== 'function') return;
+        sent.then(function (outcome) {
+          if (outcome && outcome.ok) return; // consumed: one effect per approval, controls stay locked
+          // Failed or unknown: Approve may retry (the same body resends the same Idempotency-Key).
+          // Deny stays locked because a request was sent -- unless the kit refused before sending.
+          approve.disabled = false;
+          if (outcome && outcome.sent === false) { submitted = false; if (deny) deny.disabled = false; }
+        });
       };
       foot.appendChild(approve);
       if (w.deny) {
-        var deny = el('button', 'pcc-btn pcc-btn-quiet', w.deny.label || 'Deny');
+        deny = el('button', 'pcc-btn pcc-btn-quiet', 'Deny'); // kit text, never w.deny.label
         deny.type = 'button';
-        deny.onclick = function () { dispatchAction(ctx, w.deny, { status: status, viaApproval: true }); };
+        // Deny is UI-ONLY: it never dispatches a manifest-authored action. A hostile manifest could
+        // set w.deny to a money POST, and dispatching it with viaApproval would SKIP the money gate,
+        // turning "Deny" into a one-click unapproved payment. Deny closes the surface; nothing is
+        // sent. (A real server-side deny needs a separately registered typed deny operation.)
+        deny.onclick = function () {
+          if (submitted) return; // a request already left: there is nothing to "deny" here
+          status.className = 'pcc-action-status';
+          status.textContent = 'Closed here - nothing was sent. This does not decline it on the network.';
+          approve.disabled = true; deny.disabled = true;
+          var pill = wrap.querySelector('.pcc-win-head .pcc-pill');
+          if (pill) { pill.textContent = 'not approved here'; pill.className = 'pcc-pill st-unknown'; }
+        };
         foot.appendChild(deny);
       }
       foot.appendChild(status);
       hostLockActionBar(foot); // host lockdown: disable Approve/Deny + show the note
-      wrap.appendChild(foot);
+      // Footer first, action bar last (defense in depth: _setFoot only touches its own meta footer).
       wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale);
+      wrap.appendChild(foot);
     });
     return wrap;
   }
-  function rebindApproval(ctx, w, wrap) {
-    var pill = wrap.querySelector('.pcc-pill');
-    if (pill) { pill.textContent = 'resolved'; pill.className = 'pcc-pill st-settled'; }
+  function rebindApproval(wrap, desc) {
+    var pill = wrap.querySelector('.pcc-win-head .pcc-pill');
+    if (!pill) return;
+    // A 2xx is an ACKNOWLEDGEMENT, never settlement (ruling 2; astra r3 F5 on #313): a money approval reads "submitted"
+    // (waiting); anything else a NEUTRAL "resolved". Settled-green comes only from a read model.
+    if (desc.money) { pill.textContent = 'submitted'; pill.className = 'pcc-pill st-waiting'; }
+    else { pill.textContent = 'resolved'; pill.className = 'pcc-pill st-ack'; }
   }
-  function approvalDetails(info) {
+  // What the BOUND RECORD says about an approval: attributed context, never the request. Its amount
+  // line is dropped whenever the request carries an amount (the request's amount is what is sent),
+  // and a failed or empty read says so instead of showing nothing (review charlie F1, N5).
+  function recordNode(r, desc) {
+    var box = el('div', 'pcc-approval-record');
+    box.appendChild(el('div', 'pcc-untrusted-k', 'The bound record says (context, not what will be sent):'));
+    if (r.error || !r.data || typeof r.data !== 'object') {
+      box.appendChild(el('p', 'pcc-muted', 'Details unavailable' + (r.error ? ': ' + String(r.error) : '.')));
+      return box;
+    }
+    box.appendChild(approvalDetails(r.data, { noCost: !!(desc.amounts && desc.amounts.length) }));
+    return box;
+  }
+  // A kit warning when the bound record states an amount that no amount in the request matches.
+  function recordAmountMismatch(data, desc) {
+    if (!data || typeof data !== 'object' || !desc.amounts || !desc.amounts.length) return null;
+    var ra = data.amount != null ? data.amount
+      : (data.totalAmount != null ? data.totalAmount
+      : (data.price && typeof data.price === 'object' ? (data.price.base != null ? data.price.base : data.price.amount) : null));
+    if (ra == null) return null;
+    var sent = [];
+    for (var i = 0; i < desc.amounts.length; i++) {
+      if (sameAmount(ra, desc.amounts[i][1])) return null;
+      sent.push(amountText(desc.amounts[i][1]));
+    }
+    return 'The bound record says ' + amountText(ra) + ', but the request sends ' + sent.join(' / ') + '. Approve sends the request, not the record.';
+  }
+  function approvalDetails(info, opts) {
     var box = el('div', 'pcc-approval');
     // what
     var summary = info.summary || info.name || info.description;
@@ -893,8 +1553,8 @@
     var payee = info.payee || (info.provider && (info.provider.id || info.provider.name)) || info.operatorAddress;
     if (payee) line.appendChild(el('span', 'pcc-mono', 'to ' + payee));
     var amount = info.amount || info.totalAmount || (info.price && (info.price.base || info.price.amount));
-    var currency = info.currency || (info.price && info.price.currency) || 'USDC';
-    if (amount != null) line.appendChild(el('span', 'pcc-approval-cost pcc-tnum', fmtUsd(amount) + ' ' + currency));
+    var currency = info.currency || (info.price && info.price.currency) || '';
+    if (amount != null && !(opts && opts.noCost)) line.appendChild(el('span', 'pcc-approval-cost pcc-tnum', amountText(amount) + (currency ? ' ' + wireText(currency) : '')));
     if (line.childNodes.length) box.appendChild(line);
     if (info.rationale) box.appendChild(el('p', 'pcc-approval-rationale', String(info.rationale)));
     // args table (ui.summaryKeys when present)
@@ -923,21 +1583,43 @@
       clear(wrap._body);
       var e = r.data;
       if (r.error || !e) { wrap._body.appendChild(errorLine(r.error || 'No settlement data.')); wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale); return; }
+      // Nothing is invented: an amount, currency, payer, payee or rail the record does not carry is
+      // shown as not reported, never defaulted ("USDC", "payer", "escrow-milestone").
+      var econ = (e.economics && typeof e.economics === 'object') ? e.economics : {};
       var amount = e.totalAmount != null ? e.totalAmount : e.amount;
-      var currency = e.currency || 'USDC';
       var amtRow = el('div', 'pcc-receipt-amount pcc-tnum');
-      amtRow.appendChild(el('span', 'pcc-receipt-num', fmtUsd(amount)));
-      amtRow.appendChild(el('span', 'pcc-receipt-cur', ' ' + currency));
+      var econText = (amount == null || amount === '') && econ.amount != null ? baseUnitsText(econ.amount, econ.tokenDecimals) : null;
+      if (amount != null && amount !== '') {
+        amtRow.appendChild(el('span', 'pcc-receipt-num', fmtUsd(amount)));
+        if (typeof e.currency === 'string' && e.currency) amtRow.appendChild(el('span', 'pcc-receipt-cur', ' ' + e.currency));
+      } else if (econText !== null) {
+        // economics.amount is in the token's BASE units: never through fmtUsd, never with an invented currency.
+        amtRow.appendChild(el('span', 'pcc-receipt-num', econText));
+      } else {
+        amtRow.appendChild(el('span', 'pcc-receipt-num pcc-muted', 'amount not reported'));
+      }
       wrap._body.appendChild(amtRow);
-      var status = e.status || (e.releasedCount ? 'settled' : 'pending');
+      var payer = e.payer || e.funder, payee = e.payee || e.provider;
       var pay = el('div', 'pcc-receipt-parties');
-      pay.appendChild(el('span', 'pcc-mono', String(e.payer || e.funder || 'payer')));
+      pay.appendChild(el('span', 'pcc-mono', payer ? String(payer) : 'payer not reported'));
       pay.appendChild(el('span', 'pcc-arrow', '→'));
-      pay.appendChild(el('span', 'pcc-mono', String(e.payee || e.provider || 'payee')));
+      pay.appendChild(el('span', 'pcc-mono', payee ? String(payee) : 'payee not reported'));
       wrap._body.appendChild(pay);
+      // Settlement state by SOURCE SCHEMA (V-next /lifecycle or /receipt, a legacy escrow record,
+      // or "not a settlement record"), never by a bare status word. Never inferred from a count or
+      // from the receipt's existence (contract rule 12).
+      // Authority needs the UNPROJECTED top-level response of the exact route: a binding.select projection
+      // (or any nested object) never inherits the route's provenance (astra r7 F13).
+      var recTopLevel = r.raw !== undefined && e === r.raw;
+      var rec = settlementReadClass(e, w.binding && w.binding.path, !r.stale && ctx.mode !== 'snapshot' && recTopLevel);
       var railRow = el('div', 'pcc-receipt-rail');
-      railRow.appendChild(el('span', 'pcc-pill ' + statusClass(status), String(status)));
-      railRow.appendChild(el('span', 'pcc-muted', ' · ' + (e.rail || 'escrow-milestone')));
+      // The pill text may not claim more than the class (F6): only a verified final keeps its plain name;
+      // "no settlement state" is PCC's own text.
+      var recVerified = isVNextRecord(e) && (rec[0] === 'st-settled' || rec[0] === 'st-refunded');
+      var payeePaid = isVNextRecord(e) && rec[0] === 'st-settled'; // secondary text: payee payment only
+      railRow.appendChild(el('span', 'pcc-pill ' + rec[0], statusPillText(rec[2], recVerified || (!isVNextRecord(e) && e.status == null), true)));
+      if (rec[1]) railRow.appendChild(el('span', 'pcc-muted pcc-settle-label', ' ' + rec[1]));
+      if (e.rail) railRow.appendChild(el('span', 'pcc-muted', ' · ' + String(e.rail)));
       wrap._body.appendChild(railRow);
       // timeline of pcc.* / escrow events
       var events = e.events || e.timeline || (e.milestones);
@@ -946,7 +1628,12 @@
         for (var i = 0; i < events.length; i++) {
           var ev = events[i];
           var li = el('li', 'pcc-timeline-row');
-          li.appendChild(el('span', 'pcc-timeline-type', String(ev.type || ev.name || ev.status || 'event')));
+          // Each entry is a server claim about this money record (astra r5 F8). Its label (type, name or
+          // status) takes the closed vocabulary, plain only on a VERIFIED PAYEE PAYMENT: a verified refund
+          // keeps its own pill text but vouches for no entry (astra r6 F10). 'event' is PCC's own placeholder.
+          var evRaw = ev.type || ev.name || ev.status;
+          var evTxt = evRaw != null && evRaw !== '' ? statusPillText(evRaw, payeePaid, true) : 'event';
+          li.appendChild(el('span', 'pcc-timeline-type', evTxt));
           if (ev.timestamp) li.appendChild(el('span', 'pcc-mono pcc-timeline-ts', fmtTs(ev.timestamp)));
           tl.appendChild(li);
         }
@@ -959,7 +1646,10 @@
     return wrap;
   }
 
-  // chain — the pinned re-plannable ComposeRequest; Plan re-POSTs it.
+  // chain — the pinned re-plannable ComposeRequest. Plan is a WRITE (POST /api/compose) and takes the
+  // SAME path as every other write (r1 finding 4): a kit-synthesized action (kit-owned label) through
+  // dispatchAction, so it gets the descriptor, the Approval gate (an unlisted write is money), an
+  // Idempotency-Key and the busy guard. It is created ONCE per window, so its kit state is stable.
   function renderChain(ctx, w) {
     var wrap = winShell('Value chain', null, null);
     var cr = w.composeRef || {};
@@ -980,33 +1670,30 @@
 
     var foot = el('div', 'pcc-win-foot pcc-actionbar');
     var status = el('span', 'pcc-action-status');
-    var plan = el('button', 'pcc-btn pcc-btn-primary', 'Plan');
-    plan.type = 'button';
+    var planAction = { id: 'pcc-chain-plan', label: 'Plan', kind: 'post', path: '/api/compose', body: cr,
+      intentText: 'pcc: plan ' + (cr.outcomeType || 'chain') };
+    var plan = writeButton(ctx, planAction, requestDescriptor(planAction, cr, ctx.mode === 'host', ctx.apiBase), 'Plan');
+    function showPlan(body) {
+      clear(result);
+      var steps = body.steps || [];
+      var box = el('ol', 'pcc-plan');
+      for (var i = 0; i < steps.length; i++) {
+        var s = steps[i];
+        var li = el('li', 'pcc-plan-row');
+        li.appendChild(el('span', 'pcc-plan-type', String(s.capabilityType || s.outcomeType || ('step ' + (i + 1)))));
+        if (s.estimatedPriceUSD != null) li.appendChild(el('span', 'pcc-mono pcc-tnum', fmtUsd(s.estimatedPriceUSD) + ' USDC'));
+        box.appendChild(li);
+      }
+      result.appendChild(box);
+      if (body.totalPriceUSD != null) result.appendChild(el('div', 'pcc-plan-total pcc-tnum', 'total ' + fmtUsd(body.totalPriceUSD) + ' USDC'));
+      if (w.execute) {
+        var execBtn = writeButton(ctx, w.execute, requestDescriptor(w.execute, w.execute.body || {}, ctx.mode === 'host', ctx.apiBase), 'Execute');
+        execBtn.onclick = function () { dispatchAction(ctx, w.execute, { status: status }); };
+        result.appendChild(execBtn);
+      }
+    }
     plan.onclick = function () {
-      if (ctx.mode === 'snapshot') { intentChip(status, 'pcc: plan ' + (cr.outcomeType || 'chain')); return; }
-      status.className = 'pcc-action-status'; status.textContent = 'Planning…';
-      ctx.tx.send('POST', '/api/compose', cr).then(function (res) {
-        clear(result);
-        if (!res.ok) { status.className = 'pcc-action-status st-failed'; status.textContent = 'Plan failed (HTTP ' + res.status + ')'; return; }
-        status.textContent = '';
-        var steps = res.body.steps || [];
-        var box = el('ol', 'pcc-plan');
-        for (var i = 0; i < steps.length; i++) {
-          var s = steps[i];
-          var li = el('li', 'pcc-plan-row');
-          li.appendChild(el('span', 'pcc-plan-type', String(s.capabilityType || s.outcomeType || ('step ' + (i + 1)))));
-          if (s.estimatedPriceUSD != null) li.appendChild(el('span', 'pcc-mono pcc-tnum', fmtUsd(s.estimatedPriceUSD) + ' USDC'));
-          box.appendChild(li);
-        }
-        result.appendChild(box);
-        if (res.body.totalPriceUSD != null) result.appendChild(el('div', 'pcc-plan-total pcc-tnum', 'total ' + fmtUsd(res.body.totalPriceUSD) + ' USDC'));
-        if (w.execute) {
-          var execBtn = el('button', 'pcc-btn pcc-btn-primary', w.execute.label || 'Execute');
-          execBtn.type = 'button';
-          execBtn.onclick = function () { dispatchAction(ctx, w.execute, { status: status }); };
-          result.appendChild(execBtn);
-        }
-      }, function (err) { status.className = 'pcc-action-status st-failed'; status.textContent = String(err && err.message || 'Plan failed'); });
+      dispatchAction(ctx, planAction, { status: status, onSuccess: function (res) { showPlan((res && res.body) || {}); } });
     };
     foot.appendChild(plan);
     foot.appendChild(status);
@@ -1021,16 +1708,15 @@
     var bar = el('div', 'pcc-actionbar');
     var status = el('span', 'pcc-action-status');
     (w.actions || []).forEach(function (a) {
-      // NOTE: an MCP-App projected action carries no `path` (raw-HTTP fields are
-      // stripped; it acts only via operation_id) — read money intent from the
-      // fields the projection keeps (label/id), coercing a missing path to ''.
-      var isMoney = a.confirm === 'approval' || MONEY_VERB.test(String(a.path || '') + ' ' + String(a.label || '') + ' ' + String(a.id || ''));
-      var btn = el('button', 'pcc-btn ' + (isMoney ? 'pcc-btn-primary' : 'pcc-btn-quiet'), a.label);
-      btn.type = 'button';
+      // An actions-bar body is static, so ONE descriptor serves the button's styling + kit tag and
+      // the click itself (the gate displays it and the transport sends it). A projected MCP-App
+      // action with no `path` has no raw request: refused, styled as money, and host-routed.
+      var desc = requestDescriptor(a, (a && a.body) || {}, ctx.mode === 'host', ctx.apiBase);
+      var btn = writeButton(ctx, a, desc, 'Action');
       // PR2: a button wired to a registered typed operation stays live under the
       // host lockdown (hostLockActionBar skips the pcc-host-op-enabled class).
       if (hostActionEnabled(a)) btn.className += ' pcc-host-op-enabled';
-      btn.onclick = function () { dispatchAction(ctx, a, { status: status }); };
+      btn.onclick = function () { dispatchAction(ctx, a, { status: status, desc: desc }); };
       bar.appendChild(btn);
     });
     hostLockActionBar(bar); // host lockdown: disable non-typed action buttons + note
@@ -1040,14 +1726,23 @@
   }
 
   // ═══════════════════════════════════════════════════════════════════════
-  // Action layer — NOTHING fires on load; execution is a click. Money verbs go
-  // through the Approval surface; snapshot mode emits copyable intent chips.
+  // Action layer — NOTHING fires on load; execution is a click. Every write is
+  // validated into ONE request descriptor (requestDescriptor); every write that
+  // is not on the kit's non-money allowlist passes the Approval surface; snapshot
+  // mode emits copyable intent chips; host mode runs registered typed operations.
   // ═══════════════════════════════════════════════════════════════════════
 
-  function isMoneyAction(action) {
-    // Tolerate a projected action with no `path` (MCP-App host mode): a missing
-    // path coerces to '' rather than the literal 'undefined'.
-    return action.confirm === 'approval' || MONEY_VERB.test(String(action.path || '') + ' ' + String(action.label || '') + ' ' + String(action.id || ''));
+  // 53-bit string hash (cyrb53) for a deterministic idempotency key. Not a security primitive.
+  function hash53(str) {
+    var h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (var i = 0; i < str.length; i++) {
+      var ch = str.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
   }
 
   // Pull the first text line out of an MCP tool-error result (server-authored,
@@ -1071,76 +1766,185 @@
   // Unregistered/unknown ops (or no bridge) stay inert (the PR1 read-only state).
   function dispatchHostOperation(ctx, action, status) {
     if (!hostActionEnabled(action)) { markWriteUnavailable(status); return; }
+    var st = actionState(action);
+    // One in-flight call per action (r1 finding 4): a double-click never runs a typed operation twice.
+    // (Money approval / dedupe for a typed operation is the trusted server operation's job.)
+    if (st.posting) { alreadySubmitted(status, st); return; }
+    st.posting = true;
     status.className = 'pcc-action-status'; status.textContent = 'Working…';
-    window.__PCC_HOST_BRIDGE__.callOperation(action.operation_id, action.arguments || {}).then(function (result) {
+    function fail(err) {
+      st.posting = false;
+      status.className = 'pcc-action-status st-failed';
+      status.textContent = String((err && err.message) || 'Operation failed');
+    }
+    var call;
+    try { call = window.__PCC_HOST_BRIDGE__.callOperation(action.operation_id, action.arguments || {}); }
+    catch (e) { fail(e); return; }
+    Promise.resolve(call).then(function (result) {
+      st.posting = false;
       if (result && result.isError) {
         status.className = 'pcc-action-status st-failed';
         status.textContent = hostOpErrorText(result) || 'Operation failed';
       } else {
-        status.className = 'pcc-action-status st-settled';
+        // An acknowledgement, never settlement (ruling 2; astra r3 F5 on #313): NEUTRAL, not green.
+        status.className = 'pcc-action-status st-ack';
         status.textContent = 'Done' + (ctx && ctx.tx && ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '');
       }
-    }, function (err) {
-      status.className = 'pcc-action-status st-failed';
-      status.textContent = String((err && err.message) || 'Operation failed');
-    });
+    }, fail);
   }
 
+  // Returns the write's settle promise ({ ok, sent }) when a request starts, else null.
   function dispatchAction(ctx, action, opts) {
     opts = opts || {};
     var status = opts.status || el('span', 'pcc-action-status');
-    if (!action) return;
+    if (!action) return null;
 
     // Snapshot: never POST. Hand the LLM a copyable intent chip.
-    if (ctx.mode === 'snapshot') { intentChip(status, action.intentText || ('pcc: ' + action.label)); return; }
+    if (ctx.mode === 'snapshot') { intentChip(status, action.intentText || ('pcc: ' + action.label)); return null; }
 
     // R4 PR2: in MCP-App/host mode a manifest still cannot author a RAW write,
     // but it MAY name a REGISTERED typed operation, executed via the host bridge
     // (a server-authorized tools/call). An unregistered/unknown operation, or no
     // bridge, stays inert exactly as PR1 shipped.
-    if (ctx.mode === 'host') { dispatchHostOperation(ctx, action, status); return; }
+    if (ctx.mode === 'host') { dispatchHostOperation(ctx, action, status); return null; }
 
-    // Money verbs MUST pass through the Approval gate (unless we ARE that gate).
-    if (isMoneyAction(action) && !opts.viaApproval) {
-      openApprovalGate(ctx, action, opts);
-      return;
-    }
+    // One effect per intent: while a request is in flight, or once a MONEY write was accepted in
+    // this render (one-shot; a new intent needs a reload), a click says so and sends nothing.
+    var st = actionState(action);
+    if (st.posting || st.done) { alreadySubmitted(status, st); return null; }
 
-    // Ordinary write with inline confirm: two-step, in place. (Not for money.)
+    // Validate ONCE into the canonical descriptor; every step below uses this same object.
+    var desc = opts.desc || requestDescriptor(action, action.body, false, ctx.apiBase, opts.formValues);
+    if (!desc.ok) { refuseStatus(status, desc); return null; }
+    var it = intentState(desc); // the same request from ANY action object (clone, window, button)
+    if (it.posting || it.done) { alreadySubmitted(status, it); return null; }
+
+    // Every write the kit's allowlist does not know is money: it passes the Approval gate first
+    // (unless we ARE that gate -- the approval window, or the gate's own Approve).
+    if (desc.money && !opts.viaApproval) { openApprovalGate(ctx, action, desc, opts); return null; }
+
+    // An allowlisted non-money write with inline confirm: two-step, in place.
     if (action.confirm === 'inline' && !opts.viaApproval && !opts.confirmed) {
       inlineConfirm(status, action, function () {
-        dispatchAction(ctx, action, Object.assign({}, opts, { confirmed: true }));
+        dispatchAction(ctx, action, Object.assign({}, opts, { confirmed: true, desc: desc }));
       });
-      return;
+      return null;
     }
 
-    doPost(ctx, action, opts, status);
+    return doPost(ctx, action, desc, opts, status);
   }
 
-  function doPost(ctx, action, opts, status) {
-    var body = Object.assign({}, action.body || {}, opts.formValues || {});
-    // idempotencyKey on every offer-posting action (a button can be double-clicked).
-    if (action.kind === 'post') {
-      var idem = action.idempotencyFrom && opts.formValues ? opts.formValues[action.idempotencyFrom] : null;
-      if (!idem) idem = 'idem-' + uuid();
-      body.idempotencyKey = idem;
-    }
-    status.className = 'pcc-action-status'; status.textContent = 'Working…';
-    var method = (action.kind === 'patch') ? 'PATCH' : 'POST';
-    var idemHeader = body.idempotencyKey;
-    ctx.tx.send(method, action.path, body, idemHeader).then(function (res) {
-      if (res.ok) {
-        status.className = 'pcc-action-status st-settled';
-        status.textContent = 'Done' + (ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '');
-        if (typeof opts.rebind === 'function') opts.rebind();
-      } else {
-        status.className = 'pcc-action-status st-failed';
-        status.textContent = (res.body && (res.body.message || res.body.error)) || ('Failed (HTTP ' + res.status + ')');
+  // Honest status for a write the kit REFUSED at validation: nothing was sent, and why.
+  function refuseStatus(status, desc) {
+    if (!status) return;
+    status.className = 'pcc-action-status st-failed';
+    status.textContent = 'Refused: ' + ((desc && desc.reason) || 'no valid request') + ' - nothing was sent.';
+  }
+  function alreadySubmitted(status, st) {
+    if (!status) return;
+    status.className = 'pcc-action-status st-waiting';
+    status.textContent = st.posting
+      ? 'Already submitted - waiting for the response.'
+      // st.done / it.done is set true only once a MONEY write was accepted (astra r4 F1 on #342: the
+      // intent is now the whole view, not just this endpoint), so this is always that case.
+      : 'Already submitted - a money request from this view was accepted. Reload the page to make another.';
+  }
+
+  function doPost(ctx, action, desc, opts, status) {
+    var st = actionState(action);
+    // Belt and braces: the busy guard and the money one-shot hold even for a direct caller.
+    if (st.posting || st.done) { alreadySubmitted(status, st); return null; }
+    if (!desc || !desc.ok) { refuseStatus(status, desc); return null; }
+    var it = intentState(desc);
+    if (it.posting || it.done) { alreadySubmitted(status, it); return null; }
+    // Idempotency INTENTS (r1 finding 5; astra r2 F1/F3; astra r4 F1), kit-owned: one key per intent
+    // while its outcome is UNRESOLVED. For a NON-money write the intent is its own canonical request
+    // (method, decoded route + sorted query, sorted-key body), so A (unknown outcome) -> B -> retry A
+    // resends A's key and the server dedupes instead of double-charging, and a CLONED action for the
+    // same request reuses it too. For a MONEY write the intent is the WHOLE VIEW (see INTENT_STATE):
+    // once a money request was sent, every further one is refused, an identical retry included. A 2xx
+    // consumes the key (a non-money write may then re-send under a new key; an accepted MONEY write is
+    // one-shot for the whole view). A form reference
+    // (idempotencyFrom) DERIVES the key from (method, canonical target with its query, reference,
+    // body): the same logical intent dedupes even across a reload, and never shares a key with another
+    // target or body.
+    var fp = canonicalJson(desc.body);
+    var request = requestFingerprint(desc);
+    if (it.key && it.request !== null) {
+      var sameRequest = it.request === request;
+      if (desc.money) {
+        // a money request from this view was already sent and not accepted (astra r5 F1, F2)
+        show('pcc-action-status st-failed', "Refused: a money request from this view was already sent and its outcome is not confirmed. Reload and check it before sending another - nothing was sent.");
+        return null;
+      } else if (!sameRequest) {
+        // a DIFFERENT request to this endpoint whose earlier request has an unknown outcome
+        show('pcc-action-status st-failed', 'Refused: an earlier request to this endpoint has an unknown outcome. Reload to check it before sending a different one - nothing was sent.');
+        return null;
       }
+    }
+    var key = it.key;
+    if (!key) {
+      var ref = (action.idempotencyFrom && opts.formValues) ? opts.formValues[action.idempotencyFrom] : null;
+      key = (ref != null && ref !== '')
+        ? 'idem-' + hash53(desc.method + ' ' + canonicalTarget(desc) + '|' + String(ref) + '|' + fp)
+        : 'idem-' + uuid();
+      it.key = key; it.request = request;
+    }
+    var sendBody = Object.assign({}, desc.body);
+    if (desc.method === 'POST') sendBody.idempotencyKey = key; // legacy body field (kind "post"), preserved
+    function show(cls, text) {
+      status.className = cls; status.textContent = text;
+      // The approval GATE closes after a moment; mirror the final outcome to the caller's status
+      // line so it never stays at a stale "Working...".
+      if (opts.mirror && opts.mirror !== status) { opts.mirror.className = cls; opts.mirror.textContent = text; }
+    }
+    st.posting = true; it.posting = true;
+    show('pcc-action-status', 'Working…');
+    var sending;
+    try { sending = ctx.tx.send(desc, sendBody, key); }
+    catch (e) { // the request never started (review charlie F6): release the guard, say so honestly
+      st.posting = false; it.posting = false;
+      show('pcc-action-status st-failed', 'Refused: the request could not be started - nothing was sent.');
+      return Promise.resolve({ ok: false, sent: false });
+    }
+    return sending.then(function (res) {
+      st.posting = false; it.posting = false;
+      if (res.ok) {
+        it.key = null; it.request = null; // this intent is resolved
+        var trace = ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '';
+        // An HTTP 2xx is an ACKNOWLEDGEMENT, never settlement (ruling 2; astra r3 F5 on #313). A money write reads
+        // "submitted" (waiting) and is one-shot for this render; anything else a NEUTRAL "Done".
+        // Settled-green comes only from a read model (a receipt window).
+        if (desc.money) { st.done = true; it.done = true; show('pcc-action-status st-waiting', 'Submitted - awaiting network confirmation' + trace); }
+        else show('pcc-action-status st-ack', 'Done' + trace);
+        if (typeof opts.onSuccess === 'function') opts.onSuccess(res, desc);
+      } else {
+        // Not accepted: the key is KEPT. No status proves the request had no effect (astra r5 F2), so
+        // a money intent stays locked and every further money request from this view is refused.
+        show('pcc-action-status st-failed', postErrorText(res, desc));
+      }
+      return { ok: !!res.ok, sent: !res.refused };
     }, function (err) {
-      status.className = 'pcc-action-status st-failed';
-      status.textContent = String(err && err.message || 'Request failed');
+      st.posting = false; it.posting = false;
+      // A throw/network error is an UNKNOWN outcome (the request may have reached the server): the
+      // key is kept, same as any other unresolved outcome.
+      show('pcc-action-status st-failed', String(err && err.message || 'Request failed'));
+      return { ok: false, sent: true };
     });
+  }
+
+  // Honest message for a failed write. Prefers the server's own message; otherwise explains the
+  // C-03 endpoint changes instead of a bare status code.
+  function postErrorText(res, desc) {
+    var msg = res.body && (res.body.message || res.body.error);
+    if (msg) return typeof msg === 'string' ? msg : JSON.stringify(msg).slice(0, 300);
+    var canon = (desc && desc.canonical) || '';
+    if (res.status === 410) return 'This action is no longer available - the endpoint was removed. Nothing was executed.';
+    if (res.status === 404 && /^\/api\/escrow\/chain\/[^\/]+\/fund$/.test(canon)) return 'Funding was refused: this escrow is not recognised by the protocol.';
+    // A 5xx can come from the edge AFTER the gateway executed the write. The kit cannot know the
+    // outcome, so it never claims that nothing was charged.
+    if (res.status >= 500) return 'Failed (HTTP ' + res.status + ') - the outcome is unknown. Check the receipt before retrying.';
+    return 'Failed (HTTP ' + res.status + ')';
   }
 
   function inlineConfirm(status, action, onConfirm) {
@@ -1157,65 +1961,129 @@
   }
 
   // Kit-derived, textContent-only "This will send" block — the honest summary of
-  // the REAL request (method + resolved destination + amount/asset + job/escrow
-  // ref) that the money action fires. Rendered ALONGSIDE the manifest label so a
-  // misleading label can never hide the true destination/amount (directive 10).
+  // the REAL request (method + the exact destination URL + amount/asset +
+  // job/escrow ref) the action fires, rendered from the SAME descriptor the
+  // transport sends. Shown ALONGSIDE the manifest label so a misleading label can
+  // never hide the true destination/amount (directive 10).
   function realRequestNode(desc) {
     var box = el('div', 'pcc-realreq');
     box.appendChild(el('div', 'pcc-realreq-title', 'This will send'));
     var line = el('div', 'pcc-realreq-line');
-    if (desc.destination === null) {
-      line.appendChild(el('span', 'pcc-realreq-blocked', 'BLOCKED — unsafe or non-PCC destination'));
+    if (!desc.ok || desc.destination === null) {
+      line.appendChild(el('span', 'pcc-realreq-blocked', 'BLOCKED — ' + (desc.reason || 'unsafe or non-PCC destination')));
     } else {
       line.appendChild(el('span', 'pcc-realreq-method', desc.method));
       line.appendChild(el('span', 'pcc-realreq-dest pcc-mono', desc.destination));
     }
     box.appendChild(line);
-    if (desc.amount != null) {
-      box.appendChild(el('div', 'pcc-realreq-amt pcc-tnum', 'Amount ' + fmtUsd(desc.amount) + (desc.asset ? ' ' + desc.asset : '')));
+    // EVERY amount- and reference-like field the body carries. With more than one, each line names
+    // its field, so a small first "amount" can never stand in for a larger "totalAmount" that is also
+    // sent. A value that is not a plain decimal is shown as sent (JSON), never coerced into a sum.
+    var amts = desc.amounts || [], refs = desc.refs || [], shown = {};
+    // The unit is shown only when the request states one; the kit never supplies a currency.
+    var asset = desc.asset != null ? ' ' + wireText(desc.asset) : ' (no currency in the request)';
+    for (var i = 0; i < amts.length; i++) {
+      shown[amts[i][0]] = true;
+      box.appendChild(el('div', 'pcc-realreq-amt pcc-tnum',
+        (amts.length > 1 ? amts[i][0] : 'Amount') + ' ' + amountText(amts[i][1]) + asset));
     }
-    if (desc.refId != null) {
-      box.appendChild(el('div', 'pcc-realreq-ref pcc-mono', 'ref ' + String(desc.refId)));
+    if (amts.length && desc.assetField) shown[desc.assetField] = true;
+    for (var j = 0; j < refs.length; j++) {
+      shown[refs[j][0]] = true;
+      box.appendChild(el('div', 'pcc-realreq-ref pcc-mono', (refs.length > 1 ? refs[j][0] : 'ref') + ' ' + wireText(refs[j][1])));
+    }
+    // ...and every OTHER field of the body, exactly as the wire carries it. A POST's idempotencyKey
+    // is the KIT's (one per request intent; it replaces any value the body names), so it is shown
+    // as that, never with the body's value. Nothing the request sends is left off this block.
+    var post = desc.ok && desc.method === 'POST';
+    var rest = Object.keys(desc.body || {}).filter(function (k) { return !shown[k] && !(post && k === 'idempotencyKey'); });
+    if (rest.length || post) {
+      var tbl = el('div', 'pcc-args pcc-realreq-body');
+      for (var r = 0; r < rest.length; r++) {
+        var kv = el('div', 'pcc-args-row');
+        kv.appendChild(el('span', 'pcc-args-k', rest[r]));
+        kv.appendChild(el('span', 'pcc-args-v pcc-mono', JSON.stringify(desc.body[rest[r]])));
+        tbl.appendChild(kv);
+      }
+      if (post) {
+        var kr = el('div', 'pcc-args-row pcc-args-kit');
+        kr.appendChild(el('span', 'pcc-args-k', 'idempotencyKey'));
+        kr.appendChild(el('span', 'pcc-args-v pcc-muted', 'set by the kit when sent'));
+        tbl.appendChild(kr);
+      }
+      box.appendChild(tbl);
     }
     return box;
   }
+  // A string as itself; anything else as its JSON (what the wire carries).
+  function wireText(v) { return typeof v === 'string' ? v : JSON.stringify(v); }
+  // An amount is formatted as a sum only when the formatting is EXACT: a number whose 2-decimal form
+  // round-trips, or a decimal string with at most 2 decimals (and a safe integer part). Anything else
+  // (0.0049, "1234.5678", true, [1000], "0x0F4240", an object) is shown exactly as sent, so the display
+  // never rounds, coerces or invents an amount.
+  function amountText(v) {
+    if (typeof v === 'number' && isFinite(v)) {
+      var f = fmtUsd(v);
+      return Number(f.replace(/,/g, '')) === v ? f : String(v);
+    }
+    if (typeof v === 'string' && /^-?\d{1,15}(\.\d{1,2})?$/.test(v)) return fmtUsd(v);
+    return JSON.stringify(v);
+  }
+  // Do two wire amounts denote the same number? (Both must be numbers or numeric strings.)
+  function sameAmount(a, b) {
+    var ok = function (v) { return (typeof v === 'number' && isFinite(v)) || (typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v)); };
+    return ok(a) && ok(b) && Number(a) === Number(b);
+  }
 
-  // The kit's Approval window as a floating modal — only Approve POSTs.
-  function openApprovalGate(ctx, action, opts) {
+  // The kit's Approval window as a floating modal — only its kit-labelled Approve sends, and it sends
+  // exactly the descriptor it displays.
+  function openApprovalGate(ctx, action, desc, opts) {
     // Host lockdown: writes are disabled in a hosted view — never open the gate.
     // (dispatchAction already returns before here in host mode; belt-and-suspenders.)
     if (isHostEmbed()) { markWriteUnavailable(opts && opts.status); return; }
+    var st = actionState(action), it = intentState(desc);
+    // An intent in flight or already accepted: say so, never open a gate whose Approve would be inert.
+    if (st.posting || st.done) { alreadySubmitted(opts && opts.status, st); return; }
+    if (it.posting || it.done) { alreadySubmitted(opts && opts.status, it); return; }
+    // One approval modal per action AND per request intent: neither a rapid second click nor a
+    // cloned action for the same request can stack a second gate (astra r2 F1), and it says so.
+    if (st.gate || it.gate) {
+      if (opts && opts.status) { opts.status.className = 'pcc-action-status st-waiting'; opts.status.textContent = 'An approval window for this is already open.'; }
+      return;
+    }
+    var gate = {}; // THIS opening's identity: only it may release the one-gate guards
+    st.gate = gate; it.gate = gate;
     var overlay = el('div', 'pcc-overlay');
     var card = el('div', 'pcc-modal');
     var head = el('div', 'pcc-win-head');
     head.appendChild(el('span', 'pcc-win-title', 'Approve'));
     head.appendChild(el('span', 'pcc-pill st-waiting', 'confirm'));
     card.appendChild(head);
-    // Manifest-supplied label (may mislead) — shown, but NOT authoritative.
-    card.appendChild(el('p', 'pcc-approval-what', action.label));
-    // Kit-derived TRUTH about the request that will actually be sent.
-    var realBody = Object.assign({}, action.body || {}, opts.formValues || {});
-    var desc = describeRealRequest(ctx.apiBase, action, realBody, ctx.mode === 'host');
+    // The manifest's label is untrusted: quoted text only. The gate's controls are kit-owned.
+    if (action.label) card.appendChild(untrustedLabel(action.label));
+    // The ONE descriptor the Approve below sends, displayed verbatim (method + exact URL + every
+    // body field: realRequestNode leaves nothing the wire carries off the block).
     card.appendChild(realRequestNode(desc));
-    var info = { args: realBody };
-    card.appendChild(approvalDetails(info));
     var foot = el('div', 'pcc-actionbar');
     var status = el('span', 'pcc-action-status');
     var approve = el('button', 'pcc-btn pcc-btn-primary', 'Approve');
     approve.type = 'button';
     var cancel = el('button', 'pcc-btn pcc-btn-quiet', 'Cancel');
     cancel.type = 'button';
-    function close() { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
+    // Instance-specific cleanup (r1 finding 5): a stale close() -- e.g. this gate's delayed
+    // auto-close firing after it was cancelled and a NEWER gate opened -- removes only its own
+    // overlay and never releases the newer gate's guard.
+    function close() {
+      if (st.gate === gate) st.gate = null;
+      if (it.gate === gate) it.gate = null;
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    }
     approve.onclick = function () {
-      if (desc.destination === null) {
-        status.className = 'pcc-action-status st-failed';
-        status.textContent = 'Refused: unsafe or non-PCC destination.';
-        if (opts.status) { opts.status.className = status.className; opts.status.textContent = status.textContent; }
-        return;
-      }
-      doPost(ctx, action, Object.assign({}, opts, { viaApproval: true }), status);
-      setTimeout(close, 1200);
-      if (opts.status) { opts.status.className = status.className; opts.status.textContent = status.textContent; }
+      approve.disabled = true; // one Approve per gate opening
+      var sent = doPost(ctx, action, desc, Object.assign({}, opts, { viaApproval: true, mirror: opts.status }), status);
+      // Keep the gate (and its one-gate guard) until the request settles, then show the outcome briefly.
+      var later = function () { setTimeout(close, 1200); };
+      if (sent && typeof sent.then === 'function') sent.then(later, later); else later();
     };
     cancel.onclick = close;
     overlay.onclick = function (e) { if (e.target === overlay) close(); };
@@ -1436,6 +2304,10 @@
       '.pcc-pill.st-waiting{background:var(--wait-dim);color:var(--wait);}',
       '.pcc-pill.st-failed{background:var(--deny-dim);color:var(--deny);}',
       '.pcc-pill.st-running{background:var(--info-dim);color:var(--info);}',
+      '.pcc-pill.st-refunded{background:var(--wait-dim);color:var(--wait);}',
+      '.pcc-pill.st-unknown{background:var(--surface-3);color:var(--ink-3);}',
+      /* neutral acknowledgement: an HTTP 2xx is never settlement (ruling 2) -- no hue */
+      '.pcc-pill.st-ack{background:var(--surface-3);color:var(--ink-2);}',
       /* type helpers */
       '.pcc-muted{color:var(--ink-3);font:400 13px/18px var(--font);}',
       '.pcc-mono{font-family:var(--mono);font-size:12px;color:var(--ink-3);}',
@@ -1488,7 +2360,12 @@
       '.pcc-actionbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}',
       '.pcc-action-status{font:400 13px/18px var(--font);color:var(--ink-2);display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap;}',
       '.pcc-action-status.st-settled{color:var(--signal);}',
+      '.pcc-action-status.st-ack{color:var(--ink-2);}',
       '.pcc-action-status.st-failed{color:var(--deny);}',
+      /* kit-owned labels (ruling 4): the tag after a manifest label, and quoted untrusted text */
+      '.pcc-btn-tag{font-weight:400;opacity:.72;}',
+      '.pcc-untrusted-label{margin:0;font:400 13px/18px var(--font);color:var(--ink-3);}',
+      '.pcc-untrusted-v{color:var(--ink-2);}',
       '.pcc-confirm-q{color:var(--ink-2);}',
       /* run */
       '.pcc-run-latest{font:450 15px/22px var(--font);color:var(--ink);}',
@@ -1511,7 +2388,13 @@
       '.pcc-realreq-line{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;}',
       '.pcc-realreq-method{font:650 12px/18px var(--font);color:var(--ink);}',
       '.pcc-realreq-dest{color:var(--ink-2);word-break:break-all;}',
-      '.pcc-realreq-amt{font:650 14px/20px var(--font);color:var(--ink);}',
+      '.pcc-realreq-amt{font:650 16px/22px var(--font);color:var(--ink);}',
+      /* the bound record is attributed context under the request (review charlie F1) */
+      '.pcc-approval-record{display:flex;flex-direction:column;gap:6px;border-top:1px dashed var(--hairline-strong);padding-top:8px;}',
+      '.pcc-approval-record .pcc-approval-what{font:450 13px/19px var(--font);color:var(--ink-2);}',
+      '.pcc-approval-record .pcc-approval-cost{font:450 13px/19px var(--font);color:var(--ink-2);}',
+      '.pcc-mismatch{margin:0;}',
+      '.pcc-args-kit .pcc-args-v{font-style:italic;}',
       '.pcc-realreq-ref{color:var(--ink-3);}',
       '.pcc-realreq-blocked{color:var(--deny);font:650 12px/18px var(--font);}',
       /* receipt */

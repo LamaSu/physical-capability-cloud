@@ -255,6 +255,14 @@ export class MyOpentronAdapter implements MachineAdapter {
   }
 
   onEvidence(cb: (e: Omit<EvidenceEvent, "id" | "hash">) => void) { this.callbacks.push(cb); }
+  // REQUIRED: the kernel refuses an adapter without it. Resolve once every evidence event of
+  // the work this adapter was given has been emitted, and never while that work can still
+  // emit (a poll loop that may still report the completion or a failure, a command or
+  // callback in flight); called again with no new work, resolve at once. The kernel keeps
+  // the device from the next job until it resolves. This skeleton emits nothing, so it
+  // resolves at once; once yours emits, count what is outstanding (OutstandingWork from
+  // @pcc/kernel) and return its idle().
+  async quiesceEvidence(): Promise<void> {}
   async dispose() { /* cleanup */ }
 }`,
 
@@ -330,6 +338,14 @@ export class MyOctoPrintAdapter implements MachineAdapter {
   }
 
   onEvidence(cb: (e: Omit<EvidenceEvent, "id" | "hash">) => void) { this.callbacks.push(cb); }
+  // REQUIRED: the kernel refuses an adapter without it. Resolve once every evidence event of
+  // the work this adapter was given has been emitted, and never while that work can still
+  // emit (a poll loop that may still report the completion or a failure, a command or
+  // callback in flight); called again with no new work, resolve at once. The kernel keeps
+  // the device from the next job until it resolves. This skeleton emits nothing, so it
+  // resolves at once; once yours emits, count what is outstanding (OutstandingWork from
+  // @pcc/kernel) and return its idle().
+  async quiesceEvidence(): Promise<void> {}
   async dispose() { /* cleanup */ }
 }`,
 
@@ -386,6 +402,14 @@ export class MyOPCUAAdapter implements MachineAdapter {
   }
 
   onEvidence(cb: (e: Omit<EvidenceEvent, "id" | "hash">) => void) { this.callbacks.push(cb); }
+  // REQUIRED: the kernel refuses an adapter without it. Resolve once every evidence event of
+  // the work this adapter was given has been emitted, and never while that work can still
+  // emit (a poll loop that may still report the completion or a failure, a command or
+  // callback in flight); called again with no new work, resolve at once. The kernel keeps
+  // the device from the next job until it resolves. This skeleton emits nothing, so it
+  // resolves at once; once yours emits, count what is outstanding (OutstandingWork from
+  // @pcc/kernel) and return its idle().
+  async quiesceEvidence(): Promise<void> {}
   async dispose() { /* Disconnect OPC-UA client */ }
 }`,
 
@@ -427,6 +451,14 @@ export class MySiLAAdapter implements MachineAdapter {
 
   async getProgress(): Promise<number> { return 0; }
   onEvidence(cb: (e: Omit<EvidenceEvent, "id" | "hash">) => void) { this.callbacks.push(cb); }
+  // REQUIRED: the kernel refuses an adapter without it. Resolve once every evidence event of
+  // the work this adapter was given has been emitted, and never while that work can still
+  // emit (a poll loop that may still report the completion or a failure, a command or
+  // callback in flight); called again with no new work, resolve at once. The kernel keeps
+  // the device from the next job until it resolves. This skeleton emits nothing, so it
+  // resolves at once; once yours emits, count what is outstanding (OutstandingWork from
+  // @pcc/kernel) and return its idle().
+  async quiesceEvidence(): Promise<void> {}
   async dispose() { /* cleanup */ }
 }`,
 
@@ -488,6 +520,14 @@ export class MyGenericHTTPAdapter implements MachineAdapter {
   }
 
   onEvidence(cb: (e: Omit<EvidenceEvent, "id" | "hash">) => void) { this.callbacks.push(cb); }
+  // REQUIRED: the kernel refuses an adapter without it. Resolve once every evidence event of
+  // the work this adapter was given has been emitted, and never while that work can still
+  // emit (a poll loop that may still report the completion or a failure, a command or
+  // callback in flight); called again with no new work, resolve at once. The kernel keeps
+  // the device from the next job until it resolves. This skeleton emits nothing, so it
+  // resolves at once; once yours emits, count what is outstanding (OutstandingWork from
+  // @pcc/kernel) and return its idle().
+  async quiesceEvidence(): Promise<void> {}
   async dispose() { /* cleanup */ }
 }`,
 };

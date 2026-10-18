@@ -6,9 +6,9 @@ import { deepFreeze } from "../deep-freeze.js";
 
 export const AGENT_PACKAGE_PIN = deepFreeze({
   schema: "pcc-agent-package/2.0",
-  version: "2.19.1",
+  version: "2.19.3",
   toolCount: 253,
-  sha256: "sha256:7e941fc11ebdc2c675242c4e61bf44bea04a61e58dd3569cdfb012bc655d2f77",
+  sha256: "sha256:a93b6fab5a8a325daafb456917b722efa1823dfe6585acecd7d65029a67d4ec9",
 } as const);
 
 export const AGENT_TOOLS = deepFreeze({
@@ -171,7 +171,6 @@ export const AGENT_TOOLS = deepFreeze({
   "pcc_dht_metrics": { method: "GET", path: "/api/dht/metrics", required: [] },
   "pcc_dht_peers": { method: "GET", path: "/api/dht/peers", required: [] },
   "pcc_dht_query": { method: "POST", path: "/api/dht/query", required: [] },
-  "pcc_generate_ui": { method: "POST", path: "http://localhost:3200/api/generate", required: ["template"] },
   "pcc_get_request": { method: "GET", path: "/api/requests/{requestId}", required: ["requestId"] },
   "pcc_get_request_critical_path": { method: "GET", path: "/api/requests/{requestId}/critical-path", required: ["requestId"] },
   "pcc_get_request_dag": { method: "GET", path: "/api/requests/{requestId}/dag", required: ["requestId"] },
@@ -196,6 +195,7 @@ export const AGENT_TOOLS = deepFreeze({
   "pcc_relay_generic_tool_call": { method: "POST", path: "/api/relay/{kernelId}/tool-call", required: ["kernelId","toolName"] },
   "pcc_relay_tool_call": { method: "POST", path: "/api/ot2/tool-call", required: ["kernelId","toolArgs","toolName"] },
   "pcc_report": { method: "POST", path: "/api/feedback", required: ["summary"] },
+  "pcc_report_attempt": { method: "POST", path: "/api/feedback", required: ["kind","outcome","phase","seq","sessionId"] },
   "pcc_revoke_scope": { method: "POST", path: "/api/ot2/scope/{scopeId}/revoke", required: ["scopeId"] },
   "pcc_schedule_evaluate": { method: "POST", path: "/api/contributors/schedules/{scheduleHash}/evaluate", required: ["now","scheduleHash"] },
   "pcc_schedule_get": { method: "GET", path: "/api/contributors/schedules/{scheduleHash}", required: ["scheduleHash"] },
@@ -244,7 +244,7 @@ export const AGENT_TOOLS = deepFreeze({
   "send_support_message": { method: "POST", path: "/api/operator/support", required: ["kernelId","message"] },
   "setup_detect": { method: "GET", path: "/api/setup/detect", required: [] },
   "setup_generate_config": { method: "POST", path: "/api/setup/generate-config", required: ["devices"] },
-  "setup_register_device": { method: "POST", path: "/api/setup/register-device", required: ["kernelId","model","type"] },
+  "setup_register_device": { method: "POST", path: "/api/setup/register-device", required: ["adapterType","deviceId","kernelId","type"] },
   "setup_status": { method: "GET", path: "/api/setup/status", required: [] },
   "setup_test_job": { method: "POST", path: "/api/setup/test-job", required: ["kernelId"] },
   "setup_validate": { method: "POST", path: "/api/setup/validate", required: ["config"] },

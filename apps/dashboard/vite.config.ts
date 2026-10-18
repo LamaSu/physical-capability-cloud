@@ -29,6 +29,10 @@ export default defineConfig({
       // can bundle the runtime helpers (computeScheduleHash,
       // evaluateRateSchedule) used by RateSchedule pages.
       "node:crypto": path.resolve(__dirname, "./src/lib/node-crypto-shim.ts"),
+      // @pcc/spec's plain-data boundary takes Node's trap-free proxy check from
+      // node:util. The browser has none, so this shim offers none, and the
+      // boundary refuses every object here rather than copy one unchecked.
+      "node:util": path.resolve(__dirname, "./src/lib/node-util-shim.ts"),
     },
   },
   build: {

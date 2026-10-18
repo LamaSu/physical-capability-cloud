@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import {
   AGENT_PACKAGE_PIN,
@@ -19,6 +19,28 @@ function errorCode(fn: () => unknown): string | undefined {
     return e instanceof AdkToolError ? e.code : `not-AdkToolError: ${String(e)}`;
   }
   return undefined;
+}
+
+async function withPinnedTools(
+  tools: Record<string, { method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; path: string; required: string[] }>,
+  check: (fresh: typeof import("../agent-package.js")) => void | Promise<void>,
+): Promise<void> {
+  vi.resetModules();
+  vi.doMock("../generated/agent-pin.js", () => ({
+    AGENT_TOOLS: tools,
+    AGENT_PACKAGE_PIN: {
+      schema: null,
+      version: "fixture",
+      toolCount: Object.keys(tools).length,
+      sha256: `sha256:${"0".repeat(64)}`,
+    },
+  }));
+  try {
+    await check(await import("../agent-package.js"));
+  } finally {
+    vi.doUnmock("../generated/agent-pin.js");
+    vi.resetModules();
+  }
 }
 
 describe("the pinned agent package", () => {
@@ -71,9 +93,23 @@ describe("resolveToolRequest", () => {
   });
 
   it("refuses a tool whose endpoint is not a gateway path (the localhost class, N50)", () => {
-    expect(AGENT_TOOLS.pcc_generate_ui.path).toMatch(/^http:\/\/localhost/);
-    expect(errorCode(() => resolveToolRequest("pcc_generate_ui", { template: "x" }, { baseUrl: GW }))).toBe(
-      "not_a_gateway_path",
+    return withPinnedTools(
+      {
+        local_ui: { method: "POST", path: "http://localhost:3200/api/generate", required: [] },
+        remote_ui: { method: "GET", path: "https://tools.example.test/api/generate", required: [] },
+      },
+      (fresh) => {
+        for (const name of ["local_ui", "remote_ui"]) {
+          let failure: unknown;
+          try {
+            fresh.resolveToolRequest(name, {}, { baseUrl: GW });
+          } catch (e) {
+            failure = e;
+          }
+          expect(failure, name).toBeInstanceOf(fresh.AdkToolError);
+          expect((failure as InstanceType<typeof fresh.AdkToolError>).code, name).toBe("not_a_gateway_path");
+        }
+      },
     );
   });
 

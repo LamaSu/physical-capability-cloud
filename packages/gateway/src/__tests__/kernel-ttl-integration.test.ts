@@ -20,6 +20,22 @@ import { capabilityRoutes } from "../routes/capabilities.js";
 import { initStore, closeStore, getRepos } from "../db.js";
 import { runOneSweep } from "../services/kernel-ttl-sweeper.js";
 
+// N31b (#575 stacked; the steward's ruling #6508): every relay route and the kernel heartbeat now
+// take the kernel-ownership guard. These tests exercise the routes' own logic, so their apps act
+// with the admin key unless a test sets its own identity; the guard itself is tested in
+// n31-relay-and-heartbeat-ownership.test.ts.
+const N31_ADMIN = "n31b-test-admin-secret";
+const PREV_N31_ADMIN = process.env.PCC_ADMIN_KEY;
+process.env.PCC_ADMIN_KEY = N31_ADMIN;
+afterAll(() => {
+  if (PREV_N31_ADMIN === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = PREV_N31_ADMIN;
+});
+const asN31Admin = async (req: { headers: Record<string, unknown> }) => {
+  if (req.headers["x-admin-key"] === undefined) req.headers["x-admin-key"] = N31_ADMIN;
+};
+
+
 // Mock telemetry (used by BaseFacade.execute) — matches the canonical
 // pattern in capability-facade.test.ts.
 vi.mock("../telemetry.js", () => ({
@@ -36,6 +52,7 @@ describe("kernel + capability TTL — end-to-end", () => {
     delete process.env.KERNEL_TTL_HOURS;
     initStore({ seed: false });
     app = Fastify({ logger: false });
+    app.addHook("onRequest", asN31Admin);
     await app.register(kernelRoutes);
     await app.register(capabilityRoutes);
     await app.ready();

@@ -34,7 +34,15 @@ import type {
 } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS, computeCompositionSignature, budgetToBand } from "@pcc/spec";
 import { createJobFromSession, isMockSettlement } from "./paid-job-flow.js";
+import { authorityOf } from "../auth/kernel-authority.js";
+import { bindBuyer } from "../auth/buyer-identity.js";
 import { getEventBus } from "../services/event-bus.js";
+import {
+  captureUnmetThenEmit,
+  capturePrincipal,
+  intentActor,
+  isUnmetCaptureEnabled,
+} from "../services/unmet-capture.js";
 import {
   getCapabilityDescriptor,
   checkKernelOffersCapability,
@@ -146,12 +154,18 @@ export async function negotiationRoutes(app: FastifyInstance) {
 
   /** POST /api/negotiate/session — Create a new negotiation session */
   app.post("/api/negotiate/session", async (req, reply) => {
-    const body = req.body as CreateSessionRequest;
+    const body = { ...(req.body as CreateSessionRequest) };
     if (!body.userAgentId || !body.kernelId || !body.capabilityType) {
       return reply.status(400).send({
         error: "userAgentId, kernelId, and capabilityType are required",
       });
     }
+    // N133 rule 1: the session's buyer is the caller's proven identity, or the admin acts for it.
+    // Its commit mints the buyer's write scope, so a claim or a mismatch is refused here, before
+    // the session exists.
+    const binding = bindBuyer(authorityOf(req), body.userAgentId);
+    if (!binding.ok) return reply.status(binding.status).send(binding.body);
+    body.userAgentId = binding.buyer;
 
     // ── Up-front validation (4xx, not 500) ─────────────────────────
     // Wrong-kernel check: refuse if the chosen kernel doesn't actually
@@ -294,15 +308,25 @@ export async function negotiationRoutes(app: FastifyInstance) {
           originAgentId: body.userAgentId,
           createdAt: now.toISOString(),
         };
-        getEventBus().publish({
-          eventType: "intent.atomic_session",
-          category: "intent",
-          actorId: body.userAgentId,
-          actorType: "agent",
-          resourceType: "intent",
-          resourceId: envelope.id,
-          payload: envelope as unknown as Record<string, unknown>,
-        });
+        // R44 D2 (flag-gated, default OFF): server-computed unmet types, off
+        // the response path, and the authenticated principal instead of the
+        // body's userAgentId.
+        const actor = intentActor(capturePrincipal(req), { actorId: body.userAgentId, actorType: "agent" });
+        const publish = (env: DemandEnvelope) =>
+          getEventBus().publish({
+            eventType: "intent.atomic_session",
+            category: "intent",
+            actorId: actor.actorId,
+            actorType: actor.actorType,
+            resourceType: "intent",
+            resourceId: env.id,
+            payload: env as unknown as Record<string, unknown>,
+          });
+        if (isUnmetCaptureEnabled()) {
+          void captureUnmetThenEmit(envelope, publish);
+        } else {
+          publish(envelope);
+        }
       } catch {
         // best-effort
       }
@@ -623,6 +647,10 @@ export async function negotiationRoutes(app: FastifyInstance) {
           .get();
 
         if (!row) return reply.status(404).send({ error: "Session not found" });
+        // N133: only the session's buyer (proven) or the admin commits it: the commit mints the
+        // buyer's escrow and write scope.
+        const committer = bindBuyer(authorityOf(req), row.userAgentId);
+        if (!committer.ok) return reply.status(committer.status).send(committer.body);
         const violation = assertLive(db, row);
         if (violation) return reply.status(violation.status).send(violation.body);
         if (!row.contractTerms) return reply.status(400).send({ error: "Must review contract terms first" });
@@ -657,13 +685,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
           .run();
 
         // ── Wire: COMMITTED -> create escrow + job + scope ────────────
-        let paidJobResult: {
-          jobId: string;
-          scopeId: string;
-          escrowId: string;
-          escrowAddress: string;
-          escrowStatus: string;
-        } | null = null;
+        let paidJobResult: Awaited<ReturnType<typeof createJobFromSession>> | null = null;
         let settlementError: string | null = null;
 
         try {
@@ -729,6 +751,8 @@ export async function negotiationRoutes(app: FastifyInstance) {
           jobId: paidJobResult?.jobId ?? jobId,
           cwmId,
           scopeId: paidJobResult?.scopeId ?? null,
+          // N133: the scope is live only once the kernel's operator accepted it and the buyer funded it.
+          scopeStatus: paidJobResult?.scopeStatus ?? null,
           escrowId: paidJobResult?.escrowId ?? null,
           escrowAddress: paidJobResult?.escrowAddress ?? null,
           escrowStatus: paidJobResult?.escrowStatus ?? null,
@@ -764,6 +788,9 @@ export async function negotiationRoutes(app: FastifyInstance) {
           .get();
 
         if (!row) return reply.status(404).send({ error: "Session not found" });
+        // N133: the retry re-runs the commit's minting, so the same rule: the buyer or the admin.
+        const committer = bindBuyer(authorityOf(req), row.userAgentId);
+        if (!committer.ok) return reply.status(committer.status).send(committer.body);
         if (row.status !== "settlement_failed") {
           return reply.status(409).send({
             error: `Session is ${row.status}, not settlement_failed — nothing to retry`,
@@ -871,6 +898,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
           jobId: paidJobResult?.jobId ?? jobId,
           cwmId,
           scopeId: paidJobResult?.scopeId ?? null,
+          scopeStatus: paidJobResult?.scopeStatus ?? null,
           escrowId: paidJobResult?.escrowId ?? null,
           escrowAddress: paidJobResult?.escrowAddress ?? null,
           escrowStatus: paidJobResult?.escrowStatus ?? null,

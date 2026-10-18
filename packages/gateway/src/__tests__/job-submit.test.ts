@@ -15,6 +15,7 @@ import { jobRoutes } from "../routes/jobs.js";
 import { initStore, closeStore } from "../db.js";
 import { initKernelService, resetKernelService } from "../services/kernel-service.js";
 import type { KernelConfig } from "@pcc/kernel";
+import { actAsJobParty } from "./helpers/job-read-party.js";
 
 // ---------------------------------------------------------------------------
 // Minimal mock KernelConfig — forces mock mode so no real hardware needed
@@ -58,6 +59,8 @@ async function buildApp(): Promise<FastifyInstance> {
   initKernelService(mockConfig);
 
   const app = Fastify({ logger: false });
+
+  actAsJobParty(app); // job reads are object-authorized (F3)
   await app.register(jobSubmitRoutes);
   await app.register(kernelRoutes);
   await app.register(jobRoutes);

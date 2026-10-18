@@ -36,6 +36,7 @@ import type {
   DemandEnvelope,
   IntentSource,
   DecompositionResult,
+  AnalyticsEvent,
 } from "@pcc/spec";
 import { computeCompositionSignature, budgetToBand, commitmentReportForRequest, normalizeCapabilityNodeConventions } from "@pcc/spec";
 import { decomposeRequest, decomposeDirectMatch } from "../services/request-decomposer.js";
@@ -50,7 +51,14 @@ import {
 } from "../services/agentic-decomposer.js";
 import { getRepos, getStore } from "../db.js";
 import { getEventBus } from "../services/event-bus.js";
+import {
+  captureUnmetThenEmit,
+  capturePrincipal,
+  intentActor,
+  isUnmetCaptureEnabled,
+} from "../services/unmet-capture.js";
 import { schema } from "@pcc/store";
+import { shouldSeedDemoData } from "../config/seed-policy.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -232,7 +240,7 @@ function buildEnvelopeFromRequest(
   };
 }
 
-function emitIntent(envelope: DemandEnvelope, actor: string, actorType: "requestor" | "agent") {
+function emitIntent(envelope: DemandEnvelope, actor: string, actorType: AnalyticsEvent["actorType"]) {
   try {
     getEventBus().publish({
       eventType:
@@ -326,9 +334,11 @@ export function resetRequestsStore(): void {
 // ---------------------------------------------------------------------------
 
 export async function requestRoutes(app: FastifyInstance) {
-  // Ensure seed on registration (idempotent; safe if called repeatedly)
+  // Preserve this demo's existing always-on default; explicit false opts out.
   try {
-    seedRequests();
+    if (shouldSeedDemoData(process.env.PCC_SEED_DATA, process.env.NODE_ENV, true)) {
+      seedRequests();
+    }
   } catch (err) {
     // If repos aren't initialized yet in some test paths, skip silently.
     // The route handlers will fail loudly if the DB is truly missing.
@@ -450,9 +460,19 @@ export async function requestRoutes(app: FastifyInstance) {
     });
 
     // ── Demand-intel capture point A — composite request ───────────
+    // With PCC_UNMET_CAPTURE_ENABLED (R44 D2) the server records which types
+    // no live supply serves, off the response path, and the authenticated
+    // principal instead of the body-supplied requester. Off: unchanged.
     const envelope = buildEnvelopeFromRequest(request, "requests_api");
-    const actor = request.requesterEmail ?? request.requesterWallet ?? "anonymous";
-    emitIntent(envelope, actor, "requestor");
+    const actor = intentActor(capturePrincipal(req), {
+      actorId: request.requesterEmail ?? request.requesterWallet ?? "anonymous",
+      actorType: "requestor",
+    });
+    if (isUnmetCaptureEnabled()) {
+      void captureUnmetThenEmit(envelope, (env) => emitIntent(env, actor.actorId, actor.actorType));
+    } else {
+      emitIntent(envelope, actor.actorId, actor.actorType);
+    }
 
     // ── Bridge (coord #1276) ────────────────────────────────────────
     // Direct-match requests publish immediately: the buyer already named an

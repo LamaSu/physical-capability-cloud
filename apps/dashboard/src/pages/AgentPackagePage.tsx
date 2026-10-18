@@ -1,7 +1,7 @@
 import React from "react";
 import { GlassPanel, GlowBadge, DataCell, EmptyState } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 
 const API = import.meta.env.VITE_PCC_URL ?? "";
 
@@ -68,9 +68,7 @@ function SDKSnippets({ kernelId }: { kernelId: string }) {
     const langs = ["python", "javascript", "curl"] as const;
     Promise.all(
       langs.map((lang) =>
-        fetch(`${API}/api/kernels/${kernelId}/sdk/${lang}`, {
-          headers: { ...getAuthHeaders() },
-        })
+        authorizedFetch(`/api/kernels/${kernelId}/sdk/${lang}`)
           .then((r) => (r.ok ? r.text() : `# Failed to load ${lang} snippet`))
           .then((text) => [lang, text] as const)
           .catch(() => [lang, `# Error loading ${lang} snippet`] as const),
@@ -145,9 +143,7 @@ export function AgentPackagePage() {
   // Fetch kernels list
   React.useEffect(() => {
     setKernelsLoading(true);
-    fetch(`${API}/api/kernels`, {
-      headers: { ...getAuthHeaders() },
-    })
+    authorizedFetch("/api/kernels")
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
@@ -168,9 +164,7 @@ export function AgentPackagePage() {
     setLoading(true);
     setError(null);
     setAgentPackage(null);
-    fetch(`${API}/api/kernels/${selectedKernelId}/agent-package`, {
-      headers: { ...getAuthHeaders() },
-    })
+    authorizedFetch(`/api/kernels/${selectedKernelId}/agent-package`)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
@@ -194,9 +188,7 @@ export function AgentPackagePage() {
   // Fetch wizard prompt
   function fetchWizardPrompt() {
     setWizardLoading(true);
-    fetch(`${API}/api/onboard/wizard-prompt`, {
-      headers: { ...getAuthHeaders() },
-    })
+    authorizedFetch("/api/onboard/wizard-prompt")
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.text();

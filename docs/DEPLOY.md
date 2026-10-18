@@ -73,6 +73,45 @@ merge to master
 
 The **same Docker manifest** flows through every stage. `:sha`, `:staging`, and `:prod` are aliases for the same underlying layers — no rebuild, no drift between environments.
 
+## Verifying what is served
+
+`GET /api/health` (and its bare alias `GET /health`) reports which source the running gateway was built from:
+
+```bash
+curl -s https://capability.network/api/health
+# {"status":"ok","timestamp":"…","version":"0.1.0","commit":"<40-char sha>","commitSource":"build_argument",
+#  "buildArg":"PCC_BUILD_SHA","sourceDigest":"sha256:<64 hex>","sourceDigestSpec":"pcc.source-digest/v1",
+#  "deployMetadata":{"railwayGitCommitSha":null}}
+# commit and buildArg are JSON null when commitSource is "unknown"
+```
+
+Every field except `deployMetadata` comes **only** from `/app/BUILD_INFO.json`, a file the Dockerfile writes into the image at build time. No runtime variable can change it.
+
+| Field | Meaning |
+|---|---|
+| `commit`, `commitSource: "build_argument"` | The full 40-hex SHA a **build argument** named: `PCC_BUILD_SHA` (CI's `build-image` job passes `github.sha`; `:staging` and `:prod` are retags of that image) or `RAILWAY_GIT_COMMIT_SHA` (Railway passes it when it builds the Dockerfile). `buildArg` says which. Whoever runs a build chooses its arguments, so on its own this is a **claim**. |
+| `commitSource: "unknown"` | No build argument named a commit (for example a local build without one). `commit` and `buildArg` are `null`; the gateway never guesses. |
+| `sourceDigest` | `sha256:` digest of the source the image was built from, computed inside the build right after `COPY . .` and before anything is built (`scripts/source-digest.sh`, spec `pcc.source-digest/v1`: `packages/`, `apps/`, `docs/` and the root build files including `Dockerfile` and `.dockerignore`, without `node_modules`, `dist`, `.git` or the contract build directories). This is what binds `commit` to the code. |
+| `deployMetadata.railwayGitCommitSha` | Railway's **runtime** `RAILWAY_GIT_COMMIT_SHA`, if set. Deploy metadata, not proof of the code served; never reported as `commit`. |
+
+**How `commit` is bound to the code:**
+- **CI (every image in GHCR):** `build-image` builds the image once, reads its `BUILD_INFO.json`, and fails unless it records `github.sha` **and** the digest of its own checkout of `github.sha`. Only then does it push that same image. An image whose `/api/health` would misreport its source never reaches GHCR.
+- **Any served gateway, any time:** from a clone that has the commit, run `sh scripts/verify-build-source.sh <commit> https://capability.network`. It rebuilds the digested tree with `git archive <commit>` and compares both the digest and the recorded commit. `source MATCHES` means the image was built from exactly that commit's source, in the digest's scope. A Railway Dockerfile build of a commit verifies the same way.
+- A build from a working tree with local or ignored files in scope (for example `.turbo` logs) gets a different digest. That is intended: its source is not exactly the commit's.
+
+**What this cannot prove.**
+- Whoever controls the deployment (the container's files, mounts or image) can serve different code and a different `BUILD_INFO.json`, including a copied digest. `/api/health` reports what the image's build recorded; it is not proof against the deployment operator.
+- `sourceDigest` says which source files entered the build, not what the build then did with them. CI builds with the commit's own `Dockerfile` (which is inside the digest), but a build run with a different recipe (for example `docker build -f other.Dockerfile`) could record a matching digest and still change the code it builds.
+- Trust therefore rests on the CI pipeline above and on who can build and deploy.
+
+Build rules (Dockerfile, tested by `dockerfile-build-info.test.ts`):
+- A **non-empty** build argument that is not a full 40-hex SHA **fails the build**, whether or not the other argument is valid. A 7-character prefix could be ambiguous, and anything else is not a commit.
+- If both arguments are given and differ, **the build fails** rather than bake a stale commit.
+- With no argument, `commit` is `null`. `BUILD_INFO.json` is always written (it always carries `sourceDigest`), after any earlier copy is removed. A missing or malformed source digest fails the build.
+- `version` is a static literal (`"0.1.0"`; release-please does not bump it) and does not identify a deploy.
+
+Once Railway serves the GHCR `:prod` image, `commit` after a Deploy to Prod run should equal the SHA you promoted, and `verify-build-source.sh` against production should report `MATCHES` for it.
+
 ## Semver + CHANGELOG automation
 
 `release-please` watches Conventional Commits on `master` and maintains a rolling release PR. Merging it:
@@ -181,6 +220,30 @@ Ship to S3/Storacha on a daily cron. Whole-file size stays under 100 MB even wit
 ### Reference
 
 Full rationale, growth math, vacuum guidance, and recovery semantics: [`docs/WORKFLOW_RUNTIME.md`](./WORKFLOW_RUNTIME.md) §5 (Operational notes). Public API: [`packages/workflow/README.md`](../packages/workflow/README.md).
+
+## Local job dispatch on the production image (self-hosted labs)
+
+The image sets `NODE_ENV=production` (Dockerfile). A gateway in production runs a submitted job on a device it hosts only when ALL of these hold. Every other submitted job is queued for a remote node, such as pcc-node, to claim.
+
+1. **`PCC_JOB_SUBMIT_QUEUE_ONLY=false`, exactly.** In production, an unset variable or any other value means queue-only. Outside production it's the reverse: only an exact `true` turns queue-only on.
+2. **An explicit kernel config:** `KERNEL_CONFIG` (the config JSON, inline) or `KERNEL_CONFIG_FILE` (a path to a JSON file). If both are set, `KERNEL_CONFIG` wins. With neither, the gateway generates a mock config, and a generated config never authorizes a local job.
+3. **The config's `kernelId` isn't the placeholder `kernel_dev_001`.**
+4. **The job is for that `kernelId`,** and that kernel's emergency stop reads clear. A stop that is engaged, or that can't be read, queues the job instead.
+
+A submit can also send `queueOnly: true` to queue a job that would otherwise run locally.
+
+`KERNEL_ID` names the generated mock config's kernel (default `kernel_dev_001`), and the setup routes use it when they generate or validate a config that names no kernel. It never turns local dispatch on by itself.
+
+A self-hosted lab that runs its devices in the gateway process sets, for example:
+
+```
+PCC_JOB_SUBMIT_QUEUE_ONLY=false
+KERNEL_CONFIG_FILE=/app/data/kernel-config.json
+```
+
+To check the effective policy:
+- The boot log prints `[jobs] Effective local dispatch policy` with `queueOnly`, `localDispatch` and, when local dispatch is off, the `reason`.
+- `GET /api/setup/detect` (API key required) returns `jobs: { queueOnly, localDispatch }`. Its `localDispatch` is true only when the checks above pass for the config's own kernel AND at least one machine device has a loaded runner.
 
 ## What this does NOT yet include
 

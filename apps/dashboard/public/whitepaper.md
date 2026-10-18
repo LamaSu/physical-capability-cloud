@@ -2,6 +2,8 @@
 
 **Version**: 3.0 | **Date**: June 13, 2026
 
+**Status (September 2026)**: public beta. Settlement runs on test networks. Sections marked *Roadmap* describe designs that are not yet deployed.
+
 ---
 
 > *The internet made information programmable. Cloud computing made compute programmable. We never did the same for the rest of the economy.*
@@ -20,7 +22,7 @@ Coordination is the expensive part of every value chain. A pizza shop pays 30% t
 
 The Physical Capability Cloud (PCC) is the substrate that lets agents compose verifiable primitives directly — so the rent-extracting middle becomes unnecessary. Any capability that can be expressed as a typed contract — *I will make a pizza*, *I will mill aluminum to ±0.01mm*, *I will run an HPLC*, *I will drive a same-day route* — becomes a node any agent in the network can discover, negotiate, escrow, execute, verify, and settle against.
 
-The substrate is the moat. Every UX surface that talks to PCC — voice, forms, mobile apps, chat, autonomous-asset agents — is an early adapter on top of the substrate. They will evolve. The substrate underneath does not need to.
+Every UX surface that talks to PCC — voice, forms, mobile apps, chat, autonomous-asset agents — is an early adapter on top of the substrate. They will evolve. The substrate underneath does not need to.
 
 Three structural goals, conventionally treated as a two-of-three trade-off in economic theory, become simultaneously achievable when coordination is a protocol:
 
@@ -452,7 +454,7 @@ The escrow lifecycle creates a sealed, time-boxed settlement window that removes
 
 This structure means the economic risk is symmetric and clearly allocated before work begins — a significant improvement over traditional manufacturing contracts where payment disputes can extend for months.
 
-### 7.3 DePIN Reward Epochs
+### 7.3 DePIN Reward Epochs (*Roadmap*)
 
 Operators who consistently execute verified work earn additional rewards from the network treasury through DePIN epoch scoring. The `RewardEngine` evaluates operators on three axes:
 
@@ -496,7 +498,7 @@ The vision is radical accessibility: a person with any networked device — a 3D
 
 The test for the onboarding experience is not "can a DevOps engineer configure this" — it is "can my 70-year-old dad in Florida get his Canon inkjet printer earning money on the PCC network." This standard forces radical simplification.
 
-The flow:
+The target flow (not yet end to end in the beta):
 
 1. Dad installs the PCC agent (npm package or standalone binary)
 2. Agent scans the local network via mDNS, finds Canon PIXMA TR8620a at `192.168.1.50`
@@ -504,7 +506,7 @@ The flow:
 4. Dad says yes
 5. Agent generates a wallet, requests testnet funds from the faucet, and registers the device
 6. Agent prints a test page to verify the pipeline: submit → IPP Print-Job → evidence collected → settlement
-7. Done. The printer is live on PCC
+7. Done. The printer can take jobs on PCC
 
 The full onboarding requires exactly three decisions from the operator: confirm the detected device is correct, approve the generated config, and optionally fund the wallet if on-chain settlement is needed. Everything else is automated.
 
@@ -592,11 +594,11 @@ For complex operations (especially those requiring LLM reasoning), PCC implement
 
 This split is critical for lab instruments on private networks. An OT-2 robot on a lab's internal network cannot be directly reached by a cloud LLM. Instead:
 
-1. Brain posts `POST /api/ot2/tool-call` to PCC with tool name and arguments
-2. Executor polls `GET /api/ot2/tool-call/pending` from PCC
+1. Brain posts `POST /api/relay/:kernelId/tool-call` to PCC with tool name, arguments and its scope
+2. Executor polls `GET /api/relay/:kernelId/tool-call/pending` from PCC with the kernel operator's key
 3. Executor runs the tool call locally against the OT-2
-4. Executor posts result via `POST /api/ot2/tool-result`
-5. Brain retrieves result via `GET /api/ot2/tool-result/:id`
+4. Executor posts result via `POST /api/relay/:kernelId/tool-result`
+5. Brain retrieves result via `GET /api/relay/:kernelId/tool-result/:id`
 
 PCC is a relay, not a controller. The relay stores nothing permanently — tool calls and results have a TTL and are garbage-collected.
 
@@ -606,8 +608,8 @@ Operators can stream camera frames from their equipment to the PCC dashboard for
 
 1. Auto-detects V4L2 capture devices on Linux
 2. Captures JPEG frames via `v4l2-ctl`, `ffmpeg`, or `dd` (automatic fallback)
-3. Pushes base64-encoded frames to `POST /api/ot2/camera/frame`
-4. Dashboard users view frames via `GET /api/ot2/camera/latest` (raw JPEG) or subscribe to `GET /api/ot2/camera/stream` (SSE notifications)
+3. Pushes base64-encoded frames to `POST /api/relay/:kernelId/camera/frame` (kernel operator only)
+4. The kernel operator, or an agent holding an active scope on that kernel, views frames via `GET /api/relay/:kernelId/camera/latest` (raw JPEG) or subscribes to `GET /api/relay/:kernelId/camera/stream` (SSE notifications)
 
 Only the latest 5 frames per kernel are retained to avoid database bloat.
 
@@ -686,7 +688,7 @@ PCC classifies every tool call into one of four security classes:
 | **SCOPED WRITE** | Requires active execution scope | Upload protocol, create run, play/pause/stop run |
 | **PRIVILEGED** | Requires explicit operator approval | Shell commands, self-update |
 
-This classification is enforced at the gateway. Every `POST /api/ot2/tool-call` is validated before relay:
+This classification is enforced at the gateway. Every `POST /api/relay/:kernelId/tool-call` is validated before relay:
 
 1. Class 1/2 tools pass immediately
 2. Class 3 tools require a `scopeId` in the request body. The gateway checks: is the scope active? Has it expired? Is this tool in the scope's `allowedTools`? Has the command budget been exhausted?
@@ -700,7 +702,7 @@ An execution scope moves through a defined state machine:
 PROPOSED → ACTIVE → COMPLETED / EXPIRED / REVOKED
 ```
 
-**Creation** (`POST /api/ot2/scope`): The user agent proposes a scope specifying which tools are needed, which pipettes and deck slots will be used, a command budget, a retry budget, a time limit, and optionally a protocol hash (SHA-256 of the protocol file content). The operator (or an auto-approve policy) activates the scope.
+**Creation**: A scope specifies which tools are needed, which pipettes and deck slots will be used, a command budget, a retry budget, a time limit, and optionally a protocol hash (SHA-256 of the protocol file content). Only the kernel's operator can mint one over HTTP (`POST /api/relay/:kernelId/scope`), for itself or for the agent it grants; a paid job's scope is minted by the gateway when the job is created. An agent cannot mint its own.
 
 **Validation**: On every Class 3 tool call, the gateway increments the scope's `commandCount`, checks it against `maxCommands`, and verifies tool membership. Protocol uploads are hash-verified: the SHA-256 of the uploaded content must match the scope's `protocolHash`, preventing the brain from uploading a different protocol than what was approved.
 
@@ -717,11 +719,11 @@ Physical operations fail routinely. A tip pickup misses. A well plate is offset.
 
 ### 11.5 Audit Trail
 
-Every tool call is logged with scope ID, tool name, arguments (hashed for sensitive data), validation result (allowed/rejected with reason), execution result, timestamp, and requestor identity. The audit trail is queryable via `GET /api/ot2/scope/:id/audit`.
+Every tool call is logged with scope ID, tool name, arguments (hashed for sensitive data), validation result (allowed/rejected with reason), execution result, timestamp, and requestor identity. The audit trail is queryable by the kernel operator or the scope's holder via `GET /api/relay/:kernelId/scope/:scopeId/audit`.
 
 ### 11.6 Chat Relay
 
-Operators and agents can communicate in real-time through the chat relay (`/api/ot2/chat`). This provides a human-in-the-loop communication channel for escalation, status updates, and manual override coordination. Messages are persisted per-kernel and queryable by role.
+Operators and agents holding a scope on the kernel can communicate in real-time through the chat relay (`/api/relay/:kernelId/chat`). This provides a human-in-the-loop communication channel for escalation, status updates, and manual override coordination. Messages are persisted per-kernel and queryable by role.
 
 ---
 
@@ -786,11 +788,11 @@ The OT-2 integration demonstrates the complete PCC stack:
 ```
 Claude (Brain, on DGX Spark)
     |
-    | POST /api/ot2/tool-call
+    | POST /api/relay/:kernelId/tool-call
     v
 PCC Gateway (capability.network)
     |
-    | GET /api/ot2/tool-call/pending
+    | GET /api/relay/:kernelId/tool-call/pending
     v
 pcc-node (on OT-2's Raspberry Pi)
     |
@@ -914,7 +916,7 @@ PCC operates across four chains with distinct roles:
 
 **Arkhai / Alkahest**: Conditional peer-to-peer escrow with EAS (Ethereum Attestation Service) attestations. PCC maps each milestone to an Alkahest obligation — the buyer locks tokens with a demand (evidence requirements for that assurance tier), the operator fulfills by producing an evidence attestation, and the arbiter (PCC's verification layer) validates the result. If valid, escrow releases to the operator. If expired, funds return to the buyer. This provides a second escrow primitive alongside the native `MilestoneEscrow`, with boolean-native settlement semantics built on attestations rather than contract state.
 
-x402 (HTTP 402 Payment Required) handles per-request micropayments for lightweight digital services — API access, data feeds, computation — without requiring full escrow setup.
+*Roadmap:* x402 (HTTP 402 Payment Required) per-request micropayments for lightweight digital services — API access, data feeds, computation — without requiring full escrow setup. The payment gate is not yet active on the gateway's routes.
 
 ### 15.4 Dashboard
 
@@ -993,7 +995,7 @@ Templates can be free (the default — pure substrate primitive) or monetized th
 
 ### What the substrate's existence implies
 
-With the March 2026 session, PCC crossed from prototype to working distributed system. Operators can join the network with `pip install pcc-node && pcc-node start`. Hardware is auto-detected. Capabilities are announced with Ed25519 signatures and discoverable via a gossip DHT. Agent-to-agent messages are encrypted end-to-end with NaCl box. Execution scopes enforce a four-class security model that allows AI agents to control physical equipment while bounding the blast radius of errors. A real Opentrons OT-2 liquid handler has run jobs through the complete pipeline: brain reasoning on DGX Spark, tool calls relayed through PCC, execution on the device, camera frames streaming back to the dashboard.
+In March 2026, PCC's distributed pieces ran end to end in testing. Operators can join the network with `pip install pcc-node && pcc-node start`. Hardware is auto-detected. Capabilities are announced with Ed25519 signatures and discoverable via a gossip DHT. Agent-to-agent messages are encrypted end-to-end with NaCl box. Execution scopes enforce a four-class security model that allows AI agents to control physical equipment while bounding the blast radius of errors. A real Opentrons OT-2 liquid handler has run jobs through the complete pipeline: brain reasoning on DGX Spark, tool calls relayed through PCC, execution on the device, camera frames streaming back to the dashboard.
 
 The result is a network where a machinist in Detroit and a biologist in Boston can form a trustless workflow without a broker, a marketplace, or a negotiated contract. Where the intellectual property embedded in a manufacturing process earns royalties for its designer forever. Where verified physical work builds permanent on-chain credentials. Where any AI agent can discover, book, and settle a physical capability through a typed API, the same way it calls any other microservice.
 

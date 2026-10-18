@@ -1,10 +1,10 @@
 import React, { Suspense, lazy } from "react";
-import { BrowserRouter, Routes, Route, useNavigate, useLocation } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AppShell, Sidebar, TopBar, StatusBar, ParticleBackground } from "@pcc/ui";
 import { navGroups } from "./components/nav-config.js";
 import { useUIStore } from "./stores/ui-store.js";
-import { useAuthStore } from "./stores/auth-store.js";
+import { useAuthStore, onIdentityChange } from "./stores/auth-store.js";
 import { LoginPage } from "./pages/LoginPage.js";
 import { PageTransition } from "./components/PageTransition.js";
 import { NotificationToasts } from "./components/NotificationToasts.js";
@@ -33,6 +33,7 @@ const BuilderPage = lazy(() => import("./pages/BuilderPage.js").then(m => ({ def
 const WorkflowPage = lazy(() => import("./pages/WorkflowPage.js").then(m => ({ default: m.WorkflowPage })));
 const JobsPage = lazy(() => import("./pages/JobsPage.js").then(m => ({ default: m.JobsPage })));
 const JobDetailPage = lazy(() => import("./pages/JobDetailPage.js").then(m => ({ default: m.JobDetailPage })));
+const JobFlowPage = lazy(() => import("./pages/JobFlowPage.js").then(m => ({ default: m.JobFlowPage })));
 const KernelsPage = lazy(() => import("./pages/KernelsPage.js").then(m => ({ default: m.KernelsPage })));
 const KernelDetailPage = lazy(() => import("./pages/KernelDetailPage.js").then(m => ({ default: m.KernelDetailPage })));
 const EscrowPage = lazy(() => import("./pages/EscrowPage.js").then(m => ({ default: m.EscrowPage })));
@@ -67,17 +68,15 @@ const ProtocolDetailPage = lazy(() => import("./pages/ProtocolDetailPage.js").th
 const ProtocolBuilderPage = lazy(() => import("./pages/ProtocolBuilderPage.js").then(m => ({ default: m.ProtocolBuilderPage })));
 const ProtocolRunPage = lazy(() => import("./pages/ProtocolRunPage.js").then(m => ({ default: m.ProtocolRunPage })));
 const SubnetStatusPage = lazy(() => import("./pages/SubnetStatusPage.js").then(m => ({ default: m.SubnetStatusPage })));
-const DePINDashboardPage = lazy(() => import("./pages/DePINDashboardPage.js").then(m => ({ default: m.DePINDashboardPage })));
 const SettlementPage = lazy(() => import("./pages/SettlementPage.js").then(m => ({ default: m.SettlementPage })));
 const OnboardKitPage = lazy(() => import("./pages/OnboardKitPage.js").then(m => ({ default: m.OnboardKitPage })));
 const TelemetryPage = lazy(() => import("./pages/TelemetryPage.js").then(m => ({ default: m.TelemetryPage })));
 const TracesPage = lazy(() => import("./pages/TracesPage.js").then(m => ({ default: m.TracesPage })));
 const NegotiationPage = lazy(() => import("./pages/NegotiationPage.js").then(m => ({ default: m.NegotiationPage })));
 const OperatorMobilePage = lazy(() => import("./pages/OperatorMobilePage.js").then(m => ({ default: m.OperatorMobilePage })));
-const SWFDashboardPage = lazy(() => import("./pages/SWFDashboardPage.js").then(m => ({ default: m.SWFDashboardPage })));
-const SWFGovernancePage = lazy(() => import("./pages/SWFGovernancePage.js").then(m => ({ default: m.SWFGovernancePage })));
-const IPRevenuePage = lazy(() => import("./pages/IPRevenuePage.js").then(m => ({ default: m.IPRevenuePage })));
+const EconomicAgreementsPage = lazy(() => import("./pages/EconomicAgreementsPage.js").then(m => ({ default: m.EconomicAgreementsPage })));
 const WalletPage = lazy(() => import("./pages/WalletPage.js").then(m => ({ default: m.WalletPage })));
+const WalletLinkPage = lazy(() => import("./pages/WalletLinkPage.js").then(m => ({ default: m.WalletLinkPage })));
 const WhitepaperPage = lazy(() => import("./pages/WhitepaperPage.js").then(m => ({ default: m.WhitepaperPage })));
 const BatchBoardPage = lazy(() => import("./pages/BatchBoardPage.js").then(m => ({ default: m.BatchBoardPage })));
 const NegotiationSessionPage = lazy(() => import("./pages/NegotiationSessionPage.js").then(m => ({ default: m.NegotiationSessionPage })));
@@ -113,6 +112,10 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+// A cached read belongs to the identity that made it: clear the cache whenever the signed-in
+// identity changes, so the next identity never sees the previous one's jobs or money.
+onIdentityChange(() => queryClient.clear());
 
 // ---------------------------------------------------------------------------
 // Agent Chat Shell — full-height chat, no sidebar
@@ -153,10 +156,10 @@ function AgentShell() {
 // ---------------------------------------------------------------------------
 
 function LogoutButton() {
-  const logout = useAuthStore((s) => s.logout);
+  const logout = useAuthStore((s) => s.signOutWallet);
   return (
     <button
-      onClick={logout}
+      onClick={() => void logout()}
       className="w-full px-3 py-2 text-[10px] text-white/25 hover:text-red-400/70 hover:bg-white/[0.03] rounded-lg transition-all text-left tracking-wide uppercase"
     >
       Disconnect
@@ -252,9 +255,11 @@ function DashboardShell() {
               <Route path="/protocol-runs" element={<ProtocolRunPage />} />
               <Route path="/protocol-runs/:runId" element={<ProtocolRunPage />} />
               <Route path="/subnet" element={<SubnetStatusPage />} />
-              <Route path="/depin" element={<DePINDashboardPage />} />
-              <Route path="/swf" element={<SWFDashboardPage />} />
-              <Route path="/swf/governance/:proposalId" element={<SWFGovernancePage />} />
+              {/* DePIN rewards and the Sovereign Wealth Fund pages rendered hard-coded treasuries, epochs,
+                  claims and proposals with no API behind them (PX-12, product-steward #2559). Retired; the
+                  real money surface is the agreements page. */}
+              <Route path="/depin" element={<Navigate to="/economics" replace />} />
+              <Route path="/swf/*" element={<Navigate to="/economics" replace />} />
               <Route path="/telemetry" element={<TelemetryPage />} />
               <Route path="/traces" element={<TracesPage />} />
               <Route path="/setup" element={<SetupWizardPage />} />
@@ -263,7 +268,9 @@ function DashboardShell() {
               <Route path="/negotiate/session" element={<NegotiationSessionPage />} />
               <Route path="/batch-board" element={<BatchBoardPage />} />
               <Route path="/agent-package" element={<AgentPackagePage />} />
-              <Route path="/ip" element={<IPRevenuePage />} />
+              <Route path="/economics" element={<EconomicAgreementsPage />} />
+              {/* The IP revenue page showed fabricated revenue beside a live Claim button (PX-12, N10). */}
+              <Route path="/ip" element={<Navigate to="/economics" replace />} />
               <Route path="/sponsors" element={<SponsorTelemetryPage />} />
               <Route path="/system" element={<SystemDashboardPage />} />
               <Route path="/analytics" element={<AnalyticsDashboardPage />} />
@@ -304,6 +311,17 @@ function Shell() {
   // Auth gate — redirect to login for non-public pages
   if (!isAuthenticated && !isPublicPage) {
     return <LoginPage />;
+  }
+
+  if (location.pathname === "/link") {
+    return (
+      <Suspense fallback={<PageLoader />}>
+        <WalletLinkPage />
+      </Suspense>
+    );
+  }
+  if (location.pathname === "/jobs/flow") {
+    return <Suspense fallback={<PageLoader />}><JobFlowPage /></Suspense>;
   }
 
   // Landing page — agent-first (root)
