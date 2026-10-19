@@ -25,6 +25,15 @@ function operatorPrincipal(state: ReturnType<typeof useAuthStore.getState>): str
     : JSON.stringify(["key", state.keyEpoch, state.sessionEpoch, state.address?.toLowerCase()]);
 }
 
+function stopPanelPrincipal(state: ReturnType<typeof useAuthStore.getState>): string {
+  const address = state.address?.toLowerCase();
+  // A wallet retains its stop panel through sign-in and session-key renewal.
+  // A held key without session-key metadata instead identifies a separate key.
+  return state.sessionToken !== null && (!state.isAuthenticated || state.sessionKeyId !== null)
+    ? JSON.stringify(["wallet", address])
+    : JSON.stringify(["key", state.keyEpoch, address]);
+}
+
 function EmergencyStopPanel({ kernels, loading }: { kernels: ReturnType<typeof kernelsOf>; loading: boolean }) {
   const [outcomes, setOutcomes] = React.useState<Record<string, {
     stopped: boolean;
@@ -167,6 +176,7 @@ export function OperatorDashboardPage() {
   // restores sessionKeyId synchronously after adopting the key; React batches
   // those store updates. Pasted-key changes still require a fresh panel.
   const identity = useAuthStore(operatorPrincipal);
+  const stopPanelIdentity = useAuthStore(stopPanelPrincipal);
   const machines = useQuery({
     queryKey: ["operator-machines", keyEpoch, sessionEpoch, address],
     queryFn: async ({ signal }) => {
@@ -250,7 +260,7 @@ export function OperatorDashboardPage() {
 
       {/* Keep confirmed outcomes across tabs; a different identity gets a fresh panel. */}
       <div hidden={activeTab !== "overview"}>
-        <EmergencyStopPanel key={identity} kernels={machines.isError ? "unavailable" : machines.data ?? "unavailable"} loading={machines.isPending} />
+        <EmergencyStopPanel key={stopPanelIdentity} kernels={machines.isError ? "unavailable" : machines.data ?? "unavailable"} loading={machines.isPending} />
       </div>
 
       {/* Overview Tab */}
