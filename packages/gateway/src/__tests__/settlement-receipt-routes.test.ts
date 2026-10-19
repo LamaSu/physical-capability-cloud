@@ -72,7 +72,10 @@ describe("durable settlement receipts through the gateway app", () => {
     // binding test; ordinary route tests authenticate with the admin secret.
     app.addHook("onRequest", async (req) => {
       const wallet = req.headers["x-test-proven-wallet"];
-      if (typeof wallet === "string") req.provenWallet = wallet;
+      if (typeof wallet === "string") {
+        req.provenWallet = wallet;
+        req.provenWalletCarrier = "key";
+      }
       if (req.headers["x-test-duplicate-admin"] === "true") req.raw.rawHeaders.push("X-Admin-Key", ADMIN);
     });
     await app.ready();

@@ -47,7 +47,10 @@ beforeAll(async () => {
     const principal = req.headers["x-test-principal"];
     if (typeof principal === "string") (req as unknown as { operatorId: string }).operatorId = principal;
     const proven = req.headers["x-test-proven-wallet"];
-    if (typeof proven === "string") (req as unknown as { provenWallet: string }).provenWallet = proven;
+    if (typeof proven === "string") {
+      (req as unknown as { provenWallet: string }).provenWallet = proven;
+      req.provenWalletCarrier = "key";
+    }
   });
   await app.register(cookie);
   await app.register(capabilityRoutes);

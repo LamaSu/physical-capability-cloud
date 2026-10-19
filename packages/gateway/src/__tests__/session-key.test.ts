@@ -150,7 +150,7 @@ describe("session keys are bound to the session address and self-service scope s
     const mintStart = Date.now();
     const response = await app.inject({
       method: "POST", url: "/api/auth/session-key",
-      headers: { cookie: `pcc_session=${app.signCookie(session.token)}` },
+      headers: { cookie: `pcc_session=${app.signCookie(session.token)}`, authorization: `Bearer ${session.token}` },
       payload: { operatorId: "unrelated", scopes: ["*"], expiresInDays: 30 },
     });
     expect(response.statusCode).toBe(201);
@@ -376,7 +376,7 @@ describe("session-key authentication and scope checks hold in server registratio
     const session = issueSession();
     const response = await app.inject({
       method: "POST", url: "/api/auth/session-key",
-      headers: { cookie: `pcc_session=${app.signCookie(session.token)}` },
+      headers: { cookie: `pcc_session=${app.signCookie(session.token)}`, authorization: `Bearer ${session.token}` },
     });
     expect(response.statusCode).toBe(201);
     expect(response.json().scopes).toEqual(sc.SELF_SERVICE_KEY_SCOPES);
@@ -391,7 +391,7 @@ describe("session-key authentication and scope checks hold in server registratio
     expect(sessionResponse.statusCode).toBe(403);
     expect(sessionResponse.json().error).toBe("insufficient_scope");
 
-    const minted = await app.inject({ method: "POST", url: "/api/auth/session-key", headers });
+    const minted = await app.inject({ method: "POST", url: "/api/auth/session-key", headers: { ...headers, authorization: `Bearer ${session.token}` } });
     expect(minted.statusCode).toBe(201);
     expect(minted.json().scopes).toEqual(sc.SELF_SERVICE_KEY_SCOPES);
     const keyResponse = await app.inject({
