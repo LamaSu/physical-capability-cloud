@@ -234,6 +234,8 @@ A submit can also send `queueOnly: true` to queue a job that would otherwise run
 
 `KERNEL_ID` names the generated mock config's kernel (default `kernel_dev_001`), and the setup routes use it when they generate or validate a config that names no kernel. It never turns local dispatch on by itself.
 
+Enable local dispatch only on a gateway that untrusted callers can't reach.
+
 A self-hosted lab that runs its devices in the gateway process sets, for example:
 
 ```
