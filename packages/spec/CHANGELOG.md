@@ -1,0 +1,64 @@
+# Changelog
+
+## [0.2.0](https://github.com/LamaSu/physical-capability-cloud/compare/spec-v0.1.0...spec-v0.2.0) (2026-10-20)
+
+
+### Features
+
+* **spec:** a public authorizedTuplesRoot producer and Thursday's subject-block vectors (S2b) ([38e6742](https://github.com/LamaSu/physical-capability-cloud/commit/38e674271cffc55231a7aa8365fc908a9f7d93d7))
+* **spec:** a public computeTermsHash (termsHash v2.1, the ratified derivation) (S2b) ([a9892ff](https://github.com/LamaSu/physical-capability-cloud/commit/a9892ff42d9961414d69f6b162009d4b8d35d73e))
+* **spec:** add an exact compositionSchemaVersion expectation; first RPC after every local check ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r4, step 2, Sol) ([7bc8c71](https://github.com/LamaSu/physical-capability-cloud/commit/7bc8c71ee9947d42eb5f94762975c40f4a9d1ac0))
+* **spec:** add the Thursday PRINT-unit buyer builder and its pins ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r4, step 1, Sol) ([3ff329a](https://github.com/LamaSu/physical-capability-cloud/commit/3ff329af44f15b9e5d1bc0031e501623ded4b16f))
+* **spec:** bind exact unit count, gross, payouts and reclaim floor; refuse E3 zero-fee args locally ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r4, step 3, Sol) ([38a4866](https://github.com/LamaSu/physical-capability-cloud/commit/38a486698194adc5e135ad3aaa16ea17cafbea42))
+* **spec:** buyer-funding SDK @pcc/spec/funding for V-next escrows (plan S3.1) ([c3b79cc](https://github.com/LamaSu/physical-capability-cloud/commit/c3b79cc8e9ecd29b2f577c7f5c7ebc9ef8c4fea4))
+* **spec:** carry the ratified v2.1 termsHash producer, pinned to the Aug-6 golden ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r4c, step 1, Sol) ([ae66e2f](https://github.com/LamaSu/physical-capability-cloud/commit/ae66e2f544adac7490b3d7610f90e60ba0a040c9))
+* **spec:** committed programs per CSD tier and the pre-funding assurance gate (must-close 6) ([a8060c2](https://github.com/LamaSu/physical-capability-cloud/commit/a8060c29a6d38de2a1642350f535509d649158e5))
+* **spec:** export the PRINT builder from @pcc/spec/funding; never read a settlement-address getter ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r4, step 5, Sol) ([9ada03b](https://github.com/LamaSu/physical-capability-cloud/commit/9ada03b371150cde044df58959fd04d81d76214f))
+* **spec:** per-(CSD, tier) evidence ladders compiled from the CSD (N19, for N33) ([a61b752](https://github.com/LamaSu/physical-capability-cloud/commit/a61b75217d459199f6455cf457177fda763f440b))
+* **spec:** S2, the Thursday PRINT unit's print-leg CSD, committed program, tier ladder and goldens ([71dcd24](https://github.com/LamaSu/physical-capability-cloud/commit/71dcd24995d26667c1b224a96af6262a8eab57b4))
+* **spec:** S2b, public authorizedTuplesRoot and termsHash producers + Thursday vectors ([873dfae](https://github.com/LamaSu/physical-capability-cloud/commit/873dfae7642bc44e9328266fa37a6acbe24df20a))
+* **spec:** the buyer derives termsHash v2.1 from the configs it funds ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r4c, step 2, Sol) ([c440351](https://github.com/LamaSu/physical-capability-cloud/commit/c440351ba28ff5e5c7b635ecbb1188e4c40262a0))
+* **spec:** the funded input commitment check for input.hash_bound: LO-EV-9 inputHash, the inputHash&lt;-&gt;recipeRef bridge with vectors, and its bind restriction (G1, Q-E5b) ([f96818f](https://github.com/LamaSu/physical-capability-cloud/commit/f96818fd108f0051ad92ad191c15835e7db575a1))
+* **spec:** the input.hash_bound evidence primitive (fail-closed stub) and the method_loaded payload contract (G1, Q-E5a) ([b6f41d5](https://github.com/LamaSu/physical-capability-cloud/commit/b6f41d52bb4878bb8521ca378b4de25734d215c7))
+* **spec:** the input.hash_bound evidence primitive (fail-closed stub) and the method_loaded payload contract (G1, Q-E5a) ([e2cfd69](https://github.com/LamaSu/physical-capability-cloud/commit/e2cfd6907cbbebd52a9389d17da0221a06508584))
+* **spec:** the kernel-writer marker and event hash v2 for method_loaded, the device-job binding in LO-EV-9 step 8, and Q-E5a's review fixes (G1, Q-E5b r2) ([4cdd11c](https://github.com/LamaSu/physical-capability-cloud/commit/4cdd11c9b6e988427c10c86bf3e10cb921ad834b))
+* **spec:** the PRINT builder derives termsHash v2.1 instead of pinning the terms-file keccak ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r4c, step 3, Sol) ([13ffe5f](https://github.com/LamaSu/physical-capability-cloud/commit/13ffe5f9d5fec154e6b47fd6e5add330fbe7f4e6))
+* **spec:** the Thursday PRINT unit's print-leg CSD, committed program, tier ladder and goldens (S2) ([ba99216](https://github.com/LamaSu/physical-capability-cloud/commit/ba9921670344c2b8fcef4f0f9f52094a88642ff6))
+
+
+### Bug Fixes
+
+* **pcc-node:** close E17b's DO-NOT-SHIP findings and E17's required fixes in the key store ([#374](https://github.com/LamaSu/physical-capability-cloud/issues/374), N35b) ([47cf087](https://github.com/LamaSu/physical-capability-cloud/commit/47cf0876aa3d171aff2a3df2b9c57144e45c27fe))
+* **pcc-node:** verify_signature fails closed; never default to a key file in the checkout (N35b) ([ac1add8](https://github.com/LamaSu/physical-capability-cloud/commit/ac1add85bb13eeb460517bd553718330cf5cf229))
+* **spec,verifier:** tier ladders compile from one owned, frozen snapshot and fail closed on malformed input (E15, E15b) ([f5dd9fc](https://github.com/LamaSu/physical-capability-cloud/commit/f5dd9fc275f4d5ecbc79536c055789063d4b5430))
+* **spec:** an approve with an unknown outcome is indeterminate ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r2, Finding 2) ([68981ad](https://github.com/LamaSu/physical-capability-cloud/commit/68981adfc5a6a29de1a8d40cfa921a140dc761ce))
+* **spec:** bind each funding send to the prepared chain ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r2, I1) ([7d308ae](https://github.com/LamaSu/physical-capability-cloud/commit/7d308ae7ecdb3a9288d2544e8de6d309c22dd391))
+* **spec:** bind local-account funding sends to the prepared chain, target and calldata ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r3, F2, Sol) ([7e991fd](https://github.com/LamaSu/physical-capability-cloud/commit/7e991fd32ce205ea152965cad9f90e2f152dccc0))
+* **spec:** bind the buyer's own intent in prepareFunding ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r2, Finding 1) ([b149ad4](https://github.com/LamaSu/physical-capability-cloud/commit/b149ad46d5717e6509b6f33356dbb904e23607aa))
+* **spec:** keep the raw job id out of the jobId INTENT_MISMATCH message ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r3, F5, Sol) ([599af70](https://github.com/LamaSu/physical-capability-cloud/commit/599af702c1718ed6e263456be0c5c93dd0db2631))
+* **spec:** point buyers at their own pins, not the CANONICAL record; reword the MVP refusal ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r4, step 4, Sol) ([aff2a44](https://github.com/LamaSu/physical-capability-cloud/commit/aff2a44720481d973120364c0233104e567d87ce))
+* **spec:** PRINT binds the subject's payer word to the paying wallet with an exact payer expectation ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r6, LOW-C, Sol) ([738c910](https://github.com/LamaSu/physical-capability-cloud/commit/738c910c86f7291ec8801afff300c4a557084671))
+* **spec:** Q-E5b r3 review fixes: the PR-1a JSDoc, canonicalize for event hashing, the writer-accessor pin and step-8 rule vectors (G1, Q-E5b r4) ([c55259c](https://github.com/LamaSu/physical-capability-cloud/commit/c55259c1cdaacfca8749e31b85b73a998ad8dd04))
+* **spec:** Q-E5b review fixes F1-F8 (recipeRef canonicalization, zero subject inputHash, hasOwn pin, mirror vectors) and the PR-1d wording (G1, Q-E5b r3) ([dcd71dd](https://github.com/LamaSu/physical-capability-cloud/commit/dcd71dd85037de268f9d4c297ab8b3615f3918d6))
+* **spec:** read allowUnchecked once, from an own property only ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r4d, step 4, I-6/I-7, Sol) ([22265f1](https://github.com/LamaSu/physical-capability-cloud/commit/22265f19f1b5673a4d8b0b0c81262fe172ecb27e))
+* **spec:** refuse empty compositionRoots before any RPC; INFO docs ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r3, I-3, I-5, I-6, Sol) ([834243a](https://github.com/LamaSu/physical-capability-cloud/commit/834243a99344193fe32df1ef4b94f9c3bbe88470))
+* **spec:** require an explicit allowUnchecked opt-in for funding waivers ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r3, F1, Sol) ([4c4a0c2](https://github.com/LamaSu/physical-capability-cloud/commit/4c4a0c2454e1f3a574891c41ce5bf052d751f7b8))
+* **spec:** simulate fund() at the approve's block ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r2, I3) ([f0780b9](https://github.com/LamaSu/physical-capability-cloud/commit/f0780b9bf528311ffba55f6235afba17eeee278b))
+* **spec:** snapshotJson refuses, never throws, when a trap throws a proxy ([42ad1b7](https://github.com/LamaSu/physical-capability-cloud/commit/42ad1b7dd0e6d8e4577e6beb14992fc8c7f95a97))
+* **spec:** snapshotJson refuses, never throws, when a trap throws a proxy ([b6eaf3c](https://github.com/LamaSu/physical-capability-cloud/commit/b6eaf3ca744a4683dc897b77ac6cce4501e76db9))
+
+
+### Documentation
+
+* **spec:** a PRINT buyer's termsHash is the v2.1 hash of the configs it funds ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r4c, step 5, Sol) ([8de42ed](https://github.com/LamaSu/physical-capability-cloud/commit/8de42edb2a172e11ecd8f66cf321a83e36994bb4))
+* **spec:** document the nonce gap after a local refusal and the returned not_sent approve ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r4d, step 5, I-1/I-2, Sol) ([5d128cf](https://github.com/LamaSu/physical-capability-cloud/commit/5d128cfc548bd95343faba1d55db5972ec31762a))
+* **spec:** every funding pin comes from the caller's own configuration ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r2, I4) ([e56ed4a](https://github.com/LamaSu/physical-capability-cloud/commit/e56ed4a106d6e1115d6e1d46e1bf5cf2bcfd2139))
+* **spec:** list feeBps, fee recipient and compositionRoot among the payload author's choices ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r4d, step 3, LOW-3, Sol) ([80d3e26](https://github.com/LamaSu/physical-capability-cloud/commit/80d3e2609f81ba04357ac13c093c8b1571797dbe))
+* **spec:** list what the funding payload's author still chooses ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r3, F3, Sol) ([2f230b2](https://github.com/LamaSu/physical-capability-cloud/commit/2f230b218cbb16fbd95446d97cf0237ebfaa78b7))
+* **spec:** MVP units bind all three commitments; jobPolicyHash is in addition ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r4d, step 2, LOW-2, Sol) ([a6e03d2](https://github.com/LamaSu/physical-capability-cloud/commit/a6e03d254add53386c3f9f9546e1d75903718e46))
+* **spec:** name the oracle's Thursday-shape vector test, which now exists ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r5, LOW-B, Sol) ([c410701](https://github.com/LamaSu/physical-capability-cloud/commit/c410701ab8a097e8804491e76eacf7549fecf3ef))
+* **spec:** restore the explicit author-choice list for unpinned optional expectations ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r6, I-5, Sol) ([1112c8d](https://github.com/LamaSu/physical-capability-cloud/commit/1112c8dac578380def6382729688ebe37bbb427d))
+* **spec:** say that deriving termsHash pins each unit's tiers to assuranceTier ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r5, INFO, Sol) ([2e6670d](https://github.com/LamaSu/physical-capability-cloud/commit/2e6670da8ff40cb0ffa7798f2f8c9f0273db8f16))
+* **spec:** say when to take latestBlockTimestamp and what a stale or ahead value does ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r6, I-8, Sol) ([68075c9](https://github.com/LamaSu/physical-capability-cloud/commit/68075c95a7c2bae9dbd46e90b4b5b9b18b6a73cb))
+* **spec:** state the tier-1+ release authority exactly ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r4d, step 1, LOW-1, Sol) ([32d4ed9](https://github.com/LamaSu/physical-capability-cloud/commit/32d4ed970136ed36e3fa68c80693101d8b932de4))
+* **spec:** state the util.types.isProxy runtime need and each path's refusal code ([#611](https://github.com/LamaSu/physical-capability-cloud/issues/611) r6, I-7, Sol) ([293b957](https://github.com/LamaSu/physical-capability-cloud/commit/293b9570ba92482951e9d4ce053c2807b9945100))
