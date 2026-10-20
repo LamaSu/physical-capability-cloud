@@ -246,6 +246,7 @@
     .hero .sub { font-size: var(--t-sub); color: var(--cream); max-width: 58ch; margin-top: var(--sp-m); line-height: 1.55; text-shadow: 0 2px 24px rgba(0,0,0,.7); }
     .hero .support { font-size: var(--t-body); color: var(--muted); max-width: 66ch; margin-top: var(--sp-s); text-shadow: 0 2px 24px rgba(0,0,0,.7); }
     .doors { display: flex; gap: var(--sp-s); margin-top: var(--sp-l); flex-wrap: wrap; }
+    .path p a { color: inherit; text-decoration: underline; text-underline-offset: .15em; }
     .btn { font-family: var(--mono); font-size: .9rem; font-weight: 700; letter-spacing: .02em; padding: 1em 1.7em; border-radius: 100px; cursor: pointer;
       text-decoration: none; display: inline-flex; align-items: center; gap: .55em; transition: all .35s var(--ease); border: 1px solid transparent; }
     .btn .arr { transition: transform .35s var(--ease); } .btn:hover .arr { transform: translateX(5px); }
@@ -566,7 +567,7 @@
             <p class="label">Composite capability</p>
             <h3>Finished parts</h3>
             <p>The shop procures design, anodizing and inspection itself, then publishes the result.</p>
-            <span class="tag">Lower cost · shorter lead time <span aria-hidden="true">↑</span></span>
+            <span class="tag">Lower cost · better quality <span aria-hidden="true">↑</span></span>
           </li>
           <li class="composition-node composition-design">
             <p class="label">Design</p><h3>Engineer</h3><p>Independently owned</p>
@@ -601,7 +602,7 @@
     <p class="label flywheel-outcomes reveal">Lower costs for customers · higher earnings for operators · more productive assets · competition at every layer</p>
     <ol class="flywheel-cycle reveal" aria-label="The economic cycle">
       <li><p class="label">01</p><h3>Coordination overhead comes out</h3></li>
-      <li><p class="label">02</p><h3>Customers pay less, operators earn more</h3></li>
+      <li><p class="label">02</p><h3>Room to pay less and earn more</h3></li>
       <li><p class="label">03</p><h3>Demand and capacity flow in</h3></li>
       <li><p class="label">04</p><h3>More capabilities, better compositions</h3></li>
       <li><p class="label">05</p><h3>Competition replaces the weak link</h3></li>
@@ -663,7 +664,7 @@
       <article class="path path--build reveal" id="build">
         <span class="tag">Builders</span>
         <h3>Build what others can build on.</h3>
-        <p>Work from the composition spec to develop reusable services. Publishing composite capabilities is in development.</p>
+        <p>Build from the <a href="/docs/csd-spec">capability spec</a> and the <a href="https://github.com/LamaSu/physical-capability-cloud/blob/master/packages/spec/src/csd/composition.ts" target="_blank" rel="noopener">composition contract</a>. Capabilities and compositions are different things, and both can nest. Publishing composite capabilities is in development.</p>
         <a class="btn btn--offer" href="/docs/csd-spec">Build on PCC <span class="arr" aria-hidden="true">&rarr;</span></a>
       </article>
     </div>
@@ -801,8 +802,8 @@
           logistics: `M${logistics.left},${logistics.y} H${assembly.right}`,
           design: across(design, machining), machining: across(machining, anodizing), anodizing: across(anodizing, inspection),
           inputs: [
-            ...[design, machining, anodizing, alternate].map(node => `M${node.x},${node.top} V${busY}`),
-            `M${design.x},${busY} H${alternate.x}`, `M${parts.x},${busY} V${parts.bottom}`,
+            ...[design, machining, anodizing, inspection].map(node => `M${node.x},${node.top} V${busY}`),
+            `M${design.x},${busY} H${inspection.x}`, `M${parts.x},${busY} V${parts.bottom}`,
           ].join(' '),
         };
         published = `M${parts.x},${parts.top} V${assembly.bottom}`;
