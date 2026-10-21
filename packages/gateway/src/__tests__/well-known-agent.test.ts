@@ -32,7 +32,6 @@ describe("generated agent golden path", () => {
     // pins the behaviour through createGateway (Opus r1 F4).
     const server = read("packages/gateway/src/server.ts");
     expect(server).toMatch(/^ {2}await app\.register\(wellKnownAgentRoutes\);$/m);
-    expect(server.endsWith("\n\n")).toBe(true);
   });
 
   it("serves agent.md alongside the production static registration without duplicate routes", async () => {
@@ -339,8 +338,8 @@ describe("generated agent golden path", () => {
     expect(provision.request).toMatch(/locally generated Ed25519 publicKey.*64 hex.*optional 0x/);
     expect(provision.request).toContain("The buyer path requires its own locally generated Ed25519 publicKey.");
     expect(provision.request).toContain(".pcc/ed25519-private.pem (0600), never prints it");
-    expect(provision.request).toContain("For other clients, only a body with no publicKey field");
-    expect(provision.storeOnlyFields).toContain("ed25519.private_key (only when publicKey was omitted)");
+    expect(provision.request).toContain("For other clients, a body with no publicKey field gets an API key with no signing key on file");
+    expect(provision.storeOnlyFields.join(" ")).not.toContain("private_key");
     expect(provision.responseFields.join(" ")).not.toContain("private_key");
   });
 

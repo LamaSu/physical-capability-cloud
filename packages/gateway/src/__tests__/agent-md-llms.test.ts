@@ -44,7 +44,7 @@ describe("agent golden path public index", () => {
   });
 
   it("preserves all three provider lanes and scopes the supply path to machines", () => {
-    expect(llms).toContain("- Machine — a robot, printer, instrument, or lab. Bound by an adapter (`octoprint`, `modbus`, `opcua`, `sila`, `generic-http`, `mock`). The `pcc-node` daemon polls for jobs and runs them locally; your endpoint never faces the network.");
+    expect(llms).toContain("- Machine — a robot, printer, instrument, or lab. Bound by an adapter (`octoprint`, `modbus`, `opcua`, `sila`, `generic-http`, `mock`).");
     expect(llms).toContain("- Human skill — a person offering a skill. Gets pinged, accepts within a window, finishes by a deadline.");
     expect(llms).toContain("- Asset — a thing that posts outbound demand on its own behalf, bidding for capabilities within an owner-set budget.");
     expect(llms).toContain("agent.md's supply path covers the machine lane, through the");

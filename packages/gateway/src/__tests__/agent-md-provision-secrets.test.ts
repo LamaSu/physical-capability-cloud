@@ -97,12 +97,12 @@ const names = (fields: string[] | undefined, path: string) =>
 const API_KEY_PATHS = ["api_key", "usage.header", "usage.example"];
 
 /**
- * Opus r1 F1: a tool call returns the 201 body (API key, private keys) into the conversation, and
+ * Opus r1 F1: a tool call returns the 201 body (including an API key) into the conversation, and
  * returns the upstream body. Its response must stay out of the conversation; publicKey transport is not blocked.
  */
 const NO_TOOL =
   "Do not call the `provision_api_key` tool, or any tool that hands this response back to you: " +
-  "its response includes the API key and any returned private key, and a tool result enters the conversation.";
+  "its response includes the API key, and a tool result enters the conversation.";
 
 const STORE_ENV = ["DATABASE_URL", "RAILWAY_VOLUME_MOUNT_PATH", "PCC_DB_PATH"] as const;
 let savedStoreEnv: Array<[typeof STORE_ENV[number], string | undefined]> | undefined;
@@ -208,23 +208,44 @@ function expectEveryLeafClassified(body: Record<string, unknown>): void {
   }
 }
 
-/** Every credential-bearing path a 201 can carry: the API key, its two copies, and the three private keys. */
-const SECRET_PATHS = [...API_KEY_PATHS, "ed25519.private_key", "ed25519.private_key_pkcs8_base64", "operator_wallet.private_key"];
+/** Only these three leaves carry API-key material in the merged provisioning response. */
+const SECRET_PATHS = [...API_KEY_PATHS];
 /** The supply runbook's step 4, where it describes the provision response. */
 const supplyStep4 = () => {
   const runbook = read("starter/runbook/00-prerequisites.md");
   return runbook.slice(runbook.indexOf("## 4. "), runbook.indexOf("## 5. "));
 };
-/** ChatGPT r1 L1: the supply runbook names the API key's copies and the Ed25519 keys, word for word. */
+/** Exact sentences from the supply guide, buyer path, and credential-recovery guidance. */
 const SUPPLY_API_KEY =
   "The response contains your **API key** three times: in `api_key`, and again inside `usage.header` and `usage.example`.";
-const SUPPLY_ED25519 =
-  "A request without a `publicKey` would also get back a server-made Ed25519 private key, twice " +
-  "(`ed25519.private_key` and `ed25519.private_key_pkcs8_base64`); the request below always sends your node's public key, " +
-  "so this response carries neither.";
-/** Raw diagnostics stay private; the only printed status is a fixed classification. */
+const SUPPLY_NO_PRIVATE_KEY =
+  'It never contains a private key: `ed25519` holds only the public key you sent, and `operator_wallet` is `{"source": "none"}`.';
+const BUYER_NO_PRIVATE_KEY =
+  "The response never contains a private key: provisioning never generates or assigns a wallet, and operator_wallet.source is always none.";
+const BUYER_OTHER_CLIENTS =
+  "For other clients, a body with no publicKey field gets an API key with no signing key on file (ed25519.source none); the gateway never generates or returns a private key.";
+const BUYER_ORPHAN =
+  "A new key cannot revoke the lost one; only the gateway admin can, or, if you provisioned with walletAddress, a Sign-In with Ethereum session for that address. Tell the human.";
+const SUPPLY_ORPHAN =
+  "A new key cannot revoke the lost one; only the gateway admin can. Tell the human.";
+const FORBIDDEN_CLAIMS = [
+  "ed25519.private_key", "operator_wallet.private_key", "server-minted", "server-made",
+  "wallet assignment", "onchain_error", "authenticated session",
+] as const;
+
+/** A regression guard for published buyer/supply guidance, not hostile-response fixtures. */
+function expectNoForbiddenClaims(text: string): void {
+  for (const claim of FORBIDDEN_CLAIMS) {
+    expect(text.toLowerCase(), `obsolete provisioning claim: ${claim}`).not.toContain(claim.toLowerCase());
+  }
+}
+
+/** Raw diagnostics stay private; the only printed status is fixed. */
 const ERROR_FIELDS = ["provision_status"];
-const DIAGNOSTIC_STORE_ONLY = ["operator_wallet.onchain_error (raw diagnostic; may contain secrets)", "message (raw server diagnostic; may contain secrets)", "error (raw error body; only fixed route codes are printed)"];
+const DIAGNOSTIC_STORE_ONLY = [
+  "message (raw server diagnostic; may contain secrets)",
+  "error (raw error body; only fixed route codes are printed)",
+];
 
 /** The value at a dotted path, or undefined. */
 const valueAt = (body: unknown, path: string): unknown => path.split(".").reduce<unknown>(
@@ -237,8 +258,7 @@ const carries = (body: unknown, path: string) => {
 
 /** One provisioning call: how the identity write went, and whether the request sent publicKey. */
 interface Variant { outcome: IdentityOutcome; publicKey: boolean }
-/** This call registered the identity and generated the wallet (provision.ts:190-234); the assignment may fail after. */
-const walletGenerated = ({ outcome }: Variant) => outcome === "assignment-rejected" || outcome === "assigned";
+/** Identity writes are best effort, and none of them generate a wallet. */
 type Condition = [entry: string, path: string, when: (variant: Variant) => boolean];
 /**
  * ChatGPT r1 L3: each buyer store-only entry word for word, with the condition it states as a predicate. Each
@@ -249,9 +269,6 @@ const STORE_ONLY_CONDITIONS: Condition[] = [
   ["api_key", "api_key", () => true],
   ["usage.header (holds api_key)", "usage.header", () => true],
   ["usage.example (holds api_key)", "usage.example", () => true],
-  ["ed25519.private_key (only when publicKey was omitted)", "ed25519.private_key", (variant) => !variant.publicKey],
-  ["ed25519.private_key_pkcs8_base64 (only when publicKey was omitted)", "ed25519.private_key_pkcs8_base64", (variant) => !variant.publicKey],
-  ["operator_wallet.private_key (when operator_wallet.source is server-minted)", "operator_wallet.private_key", walletGenerated],
 ];
 
 /** Throws unless the store-only entries are exactly the documented conditions, word for word and in order. */
@@ -265,14 +282,14 @@ function checkConditions(body: Record<string, any>, variant: Variant, conditions
   for (const [entry, path, when] of conditions) expect(carries(body, path), `${entry}, ${label}`).toBe(when(variant));
   expect(body.usage.header, "usage.header (holds api_key)").toContain(body.api_key);
   expect(body.usage.example, "usage.example (holds api_key)").toContain(body.api_key);
-  expect(body.operator_wallet.source === "server-minted", `operator_wallet.source, ${label}`)
-    .toBe(carries(body, "operator_wallet.private_key"));
+  expect(body.operator_wallet, `operator_wallet, ${label}`).toEqual({ source: "none" });
+  expect(privateKeyPaths(body), `private-key paths, ${label}`).toEqual([]);
 }
 
 /** Throws unless the supply runbook's step 4 names each secret path its own request got back, in its own words. */
 function checkSupplyNames(step: string, returned: string[]): void {
   for (const path of returned) expect(step, `00-prerequisites.md step 4 must name ${path}`).toContain("`" + path + "`");
-  for (const sentence of [SUPPLY_API_KEY, SUPPLY_WALLET, SUPPLY_ED25519]) expect(step).toContain(sentence);
+  for (const sentence of [SUPPLY_API_KEY, SUPPLY_NO_PRIVATE_KEY]) expect(step).toContain(sentence);
 }
 
 /** Every emitted path must be a documented response field and named in the request prose. */
@@ -292,23 +309,21 @@ function expectDocumented(paths: string[]): void {
   }
 }
 
-/** How the mocked ERC-8004 identity write goes for one provisioning call (provision.ts:181-318). */
-type IdentityOutcome = "off" | "registration-rejected" | "wallet-rejected" | "assignment-rejected" | "assigned";
-const IDENTITY_OUTCOMES: IdentityOutcome[] = ["off", "registration-rejected", "wallet-rejected", "assignment-rejected", "assigned"];
+/** How the mocked ERC-8004 identity write goes for a provisioning call on master. */
+type IdentityOutcome = "off" | "registration-rejected" | "written";
+const IDENTITY_OUTCOMES: IdentityOutcome[] = ["off", "registration-rejected", "written"];
 const REGISTRY = "0x8004A818BFB912233c491871b3d84c89A494BD9e";
 
-/** Sets the identity-write mocks for one outcome; returns the fake operator wallet (built at runtime). */
-function mockIdentity(outcome: IdentityOutcome): { address: string; privateKey: string } {
-  const wallet = { address: "0x" + "cd".repeat(20), privateKey: "0x" + "ab".repeat(32) };
+/** Only the identity registration service is invoked by the merged route. */
+function mockIdentity(outcome: IdentityOutcome): void {
   mockIsIdentityWriteEnabled.mockReturnValue(outcome !== "off");
-  if (outcome === "registration-rejected") mockRegisterAgentOnChain.mockRejectedValue(new Error("registration rejected in tests"));
-  else mockRegisterAgentOnChain.mockResolvedValue({ agentId: 42n, txHash: "0x" + "de".repeat(32), registryAddress: REGISTRY, chainId: 84532 });
-  if (outcome === "wallet-rejected") mockGenerateOperatorWallet.mockRejectedValue(new Error("wallet generation rejected in tests"));
-  else mockGenerateOperatorWallet.mockResolvedValue(wallet);
-  if (outcome === "assigned") {
-    mockSetAgentWalletOnChain.mockResolvedValue({ txHash: "0x" + "ee".repeat(32), registryAddress: REGISTRY, chainId: 84532, agentWallet: wallet.address });
-  } else mockSetAgentWalletOnChain.mockRejectedValue(new Error("assignment rejected in tests"));
-  return wallet;
+  if (outcome === "registration-rejected") {
+    mockRegisterAgentOnChain.mockRejectedValue(new Error("registration rejected in tests"));
+  } else {
+    mockRegisterAgentOnChain.mockResolvedValue({
+      agentId: 42n, txHash: "0x" + "de".repeat(32), registryAddress: REGISTRY, chainId: 84532,
+    });
+  }
 }
 
 let lastAddress = 0;
@@ -317,17 +332,6 @@ function provisionFrom(app: FastifyInstance, payload: Record<string, unknown>) {
   lastAddress += 1;
   return app.inject({ method: "POST", url: "/api/auth/provision", payload, remoteAddress: `198.51.100.${lastAddress}` });
 }
-
-/** ChatGPT r1 L2: the wallet key's condition, word for word, in the supply runbook and the buyer path. */
-const SUPPLY_WALLET =
-  "It may also contain `operator_wallet.private_key`, a wallet key the gateway mints and keeps for the account: " +
-  "only when this call registers the account's on-chain identity and the gateway then generates the wallet. " +
-  "A failed on-chain assignment of that wallet afterwards does not remove the key. This runbook never uses it.";
-const BUYER_WALLET =
-  "Whether or not you send publicKey, the response may also carry operator_wallet.private_key, an EVM wallet key: " +
-  "only when this call registers an on-chain identity for you and the gateway then generates the wallet; " +
-  "a failed on-chain assignment of that wallet afterwards does not remove the key. " +
-  "operator_wallet.source reads server-minted exactly when the key is there. It stays in the same private 0600 file and is never printed.";
 
 describe("the buyer path documents the private-key fields of two provisioning responses, by name", () => {
   let app: FastifyInstance;
@@ -342,60 +346,44 @@ describe("the buyer path documents the private-key fields of two provisioning re
     finally { closeTestStore(); }
   });
 
-  it("identity write on, own publicKey sent: operator_wallet.private_key and no Ed25519 private key", async () => {
-    mockIsIdentityWriteEnabled.mockReturnValue(true);
-    mockRegisterAgentOnChain.mockResolvedValue({
-      agentId: 42n,
-      txHash: "0xdeadbeef" + "0".repeat(56),
-      registryAddress: "0x8004A818BFB912233c491871b3d84c89A494BD9e",
-      chainId: 84532,
-    });
-    // Fake wallet built at runtime: no key-shaped literal in this file.
-    const wallet = { address: "0x" + "cd".repeat(20), privateKey: "0x" + "ab".repeat(32) };
-    mockGenerateOperatorWallet.mockResolvedValue(wallet);
-    mockSetAgentWalletOnChain.mockRejectedValue(new Error("no chain in tests"));
-
+  it("AT1 identity write on, own publicKey sent: 201 holds no private keys", async () => {
+    mockIdentity("written");
+    const sentKey = localEd25519PublicKeyHex();
     const res = await app.inject({
-      method: "POST",
-      url: "/api/auth/provision",
-      payload: { email: "byok-identity@example.com", publicKey: localEd25519PublicKeyHex() },
+      method: "POST", url: "/api/auth/provision",
+      payload: { email: "byok-identity@example.com", publicKey: sentKey },
     });
 
     expect(res.statusCode).toBe(201);
     const body = res.json();
-    expect(body.ed25519.source).toBe("byok");
-    expect(body.operator_wallet.private_key).toBe(wallet.privateKey);
-    const paths = privateKeyPaths(body);
-    expect(paths).toContain("operator_wallet.private_key");
-    expect(paths.filter((path) => /^ed25519\..*private_key/.test(path))).toEqual([]);
-    expectDocumented(paths);
-    expect(expectSecretValuesStoreOnly(body)).toEqual(expect.arrayContaining(["api_key", "usage.header", "usage.example", ...paths]));
+    expect(body.ed25519).toEqual({ public_key: sentKey, source: "byok" });
+    expect(body.operator_wallet).toEqual({ source: "none" });
+    expect(privateKeyPaths(body)).toEqual([]);
+    expect(mockGenerateOperatorWallet).not.toHaveBeenCalled();
+    expect(mockSetAgentWalletOnChain).not.toHaveBeenCalled();
+    expect(expectSecretValuesStoreOnly(body)).toEqual(API_KEY_PATHS);
   });
 
-  it("identity write off, no publicKey: both encodings of the minted Ed25519 private key", async () => {
-    mockIsIdentityWriteEnabled.mockReturnValue(false);
-
+  it("AT2 identity write off, no publicKey: 201 holds no signing key", async () => {
+    mockIdentity("off");
     const res = await app.inject({
-      method: "POST",
-      url: "/api/auth/provision",
-      payload: { email: "minted-ed25519@example.com" },
+      method: "POST", url: "/api/auth/provision",
+      payload: { email: "no-publickey@example.com" },
     });
 
     expect(res.statusCode).toBe(201);
     const body = res.json();
-    expect(body.ed25519.source).toBe("server-minted");
+    expect(body.ed25519).toEqual({ public_key: null, source: "none" });
+    expect(body.operator_wallet).toEqual({ source: "none" });
+    expect(privateKeyPaths(body)).toEqual([]);
     expect(mockRegisterAgentOnChain).not.toHaveBeenCalled();
-    // The raw API key comes back twice more, in usage.header and usage.example (Opus r1 F2).
-    expect(body.usage.header).toContain(body.api_key);
-    expect(body.usage.example).toContain(body.api_key);
-    const paths = privateKeyPaths(body);
-    expect(paths).toEqual(expect.arrayContaining(["ed25519.private_key", "ed25519.private_key_pkcs8_base64"]));
-    expectDocumented(paths);
-    expect(expectSecretValuesStoreOnly(body)).toEqual(expect.arrayContaining(["api_key", "usage.header", "usage.example", ...paths]));
+    expect(mockGenerateOperatorWallet).not.toHaveBeenCalled();
+    expect(mockSetAgentWalletOnChain).not.toHaveBeenCalled();
+    expect(expectSecretValuesStoreOnly(body)).toEqual(API_KEY_PATHS);
   });
 });
 
-describe("the wallet key comes back only when this call registered the identity and generated the wallet (ChatGPT r1 L2)", () => {
+describe("no identity outcome generates or assigns a wallet", () => {
   let app: FastifyInstance;
 
   beforeEach(async () => {
@@ -408,49 +396,27 @@ describe("the wallet key comes back only when this call registered the identity 
     finally { closeTestStore(); }
   });
 
-  it("registration rejected: a 201 with no wallet key and the identity still pending", async () => {
-    mockIdentity("registration-rejected");
-    const res = await provisionFrom(app, { email: "registration-rejected@example.com", publicKey: localEd25519PublicKeyHex() });
-    expect(res.statusCode).toBe(201);
-    const body = res.json();
-    expect(mockRegisterAgentOnChain).toHaveBeenCalledTimes(1);
-    expect(mockGenerateOperatorWallet).not.toHaveBeenCalled();
-    expect(body.onchain.status).toBe("pending");
-    expect(body.operator_wallet).toEqual({ source: "none" });
-  });
-
-  it("wallet generation rejected after the registration: a 201 with no wallet key", async () => {
-    mockIdentity("wallet-rejected");
-    const res = await provisionFrom(app, { email: "wallet-rejected@example.com" });
-    expect(res.statusCode).toBe(201);
-    const body = res.json();
-    expect(body.onchain.status).toBe("written");
-    expect(mockGenerateOperatorWallet).toHaveBeenCalledTimes(1);
-    expect(mockSetAgentWalletOnChain).not.toHaveBeenCalled();
-    expect(body.operator_wallet).toEqual({ source: "none" });
-  });
-
-  it("assignment rejected after both: the generated wallet key still comes back", async () => {
-    const wallet = mockIdentity("assignment-rejected");
-    const res = await provisionFrom(app, { email: "assignment-rejected@example.com", publicKey: localEd25519PublicKeyHex() });
-    expect(res.statusCode).toBe(201);
-    expect(res.json().operator_wallet).toMatchObject({ source: "server-minted", private_key: wallet.privateKey, onchain_status: "failed" });
-  });
-
-  it("assignment written: the wallet key comes back as well", async () => {
-    const wallet = mockIdentity("assigned");
-    const res = await provisionFrom(app, { email: "assigned@example.com" });
-    expect(res.statusCode).toBe(201);
-    expect(res.json().operator_wallet).toMatchObject({ source: "server-minted", private_key: wallet.privateKey, onchain_status: "written" });
-  });
-
-  it("the supply runbook and the buyer path say the wallet key may come back, on exactly that condition", () => {
-    const runbook = read("starter/runbook/00-prerequisites.md");
-    expect(runbook).toContain(SUPPLY_WALLET);
-    expect(runbook).not.toMatch(/also contains `operator_wallet\.private_key`/);
-    expect(provisionAction().request).toContain(BUYER_WALLET);
-    expect(provisionAction().request).not.toContain("the gateway mints when it writes an on-chain identity");
-  });
+  it.each(IDENTITY_OUTCOMES.flatMap((outcome) => [false, true].map((publicKey) => ({ outcome, publicKey }))))(
+    "AT3 identity $outcome, publicKey $publicKey: never creates or assigns a wallet",
+    async ({ outcome, publicKey }) => {
+      mockIdentity(outcome);
+      const res = await provisionFrom(app, {
+        email: `no-wallet-${outcome}-${publicKey ? "sent" : "omitted"}@example.com`,
+        ...(publicKey ? { publicKey: localEd25519PublicKeyHex() } : {}),
+      });
+      expect(res.statusCode).toBe(201);
+      const body = res.json();
+      expect(body.operator_wallet).toEqual({ source: "none" });
+      expect(body.onchain.status).toBe(
+        outcome === "off" ? "disabled" : outcome === "registration-rejected" ? "pending" : "written",
+      );
+      if (outcome === "off") expect(mockRegisterAgentOnChain).not.toHaveBeenCalled();
+      else expect(mockRegisterAgentOnChain).toHaveBeenCalledTimes(1);
+      expect(mockGenerateOperatorWallet).not.toHaveBeenCalled();
+      expect(mockSetAgentWalletOnChain).not.toHaveBeenCalled();
+      expect(privateKeyPaths(body)).toEqual([]);
+    },
+  );
 });
 
 /** CI images carry all four; elsewhere the run-it-as-written case needs them on PATH. */
@@ -490,6 +456,43 @@ describe.runIf(captureToolsRequired)("every leaf of every 201 the route returns 
     }
   }
 
+  it("AT4 published guides and buyer events carry no obsolete provisioning claims", () => {
+    const buyer = JSON.parse(read("starter/buyer/buyer-path.json"));
+    const key = buyer.steps[0];
+    const provision = key.actions[0];
+    for (const [label, text] of [
+      ["get-key request", provision.request],
+      ["get-key recipe", (provision.recipe ?? []).join("\n")],
+      ["get-key responseFields", provision.responseFields.join(" ")],
+      ["get-key storeOnlyFields", (provision.storeOnlyFields ?? []).join(" ")],
+      ["buyer events", JSON.stringify(buyer.events)],
+      ["supply step 4", supplyStep4()],
+      ["generated agent.md", read("apps/dashboard/public/.well-known/agent.md")],
+    ] as Array<[string, string]>) {
+      expect(() => expectNoForbiddenClaims(text), label).not.toThrow();
+    }
+  });
+
+  it("AT16 every advertised read field exists in a real 201; every response leaf is classified", async () => {
+    const observed = new Set<string>();
+    for (const outcome of IDENTITY_OUTCOMES) {
+      for (const publicKey of [false, true]) {
+        mockIdentity(outcome);
+        const res = await provisionFrom(app, {
+          email: `leaf-coverage-${outcome}-${publicKey ? "sent" : "omitted"}@example.com`,
+          ...(publicKey ? { publicKey: localEd25519PublicKeyHex() } : {}),
+        });
+        expect(res.statusCode).toBe(201);
+        const body = res.json();
+        expectEveryLeafClassified(body);
+        for (const path of leafPaths(body)) observed.add(path);
+      }
+    }
+    for (const field of provisionAction().responseFields) {
+      expect(observed.has(field), `responseFields advertises a missing 201 leaf: ${field}`).toBe(true);
+    }
+  });
+
   it("marks every secret path store-only and lists each field to read once", () => {
     const provision = provisionAction();
     for (const path of SECRET_PATHS) expect(names(provision.storeOnlyFields, path), path).toBe(true);
@@ -506,11 +509,11 @@ describe.runIf(captureToolsRequired)("every leaf of every 201 the route returns 
     } finally { f.cleanup(); }
   });
 
-  it("the supply runbook names every secret copy the route can return", () => {
+  it("AT25 the supply runbook names every secret copy the route can return", () => {
     const step = supplyStep4();
     for (const path of SECRET_PATHS) expect(step, `00-prerequisites.md step 4 must name ${path}`).toContain("`" + path + "`");
     expect(step).toContain(SUPPLY_API_KEY);
-    expect(step).toContain(SUPPLY_ED25519);
+    expect(step).toContain(SUPPLY_NO_PRIVATE_KEY);
   });
 });
 
@@ -527,13 +530,17 @@ describe("each documented secret condition holds on the real route, for the buye
     finally { closeTestStore(); }
   });
 
-  it("the buyer path's store-only entries state exactly these conditions, word for word", () => {
+  it("AT5 the buyer path's store-only entries are exactly the three key copies and two diagnostics", () => {
+    expect(provisionAction().storeOnlyFields).toEqual([
+      "api_key", "usage.header (holds api_key)", "usage.example (holds api_key)",
+      "message (raw server diagnostic; may contain secrets)",
+      "error (raw error body; only fixed route codes are printed)",
+    ]);
     checkStoreOnlyText(provisionAction().storeOnlyFields);
   });
 
   for (const outcome of IDENTITY_OUTCOMES) {
-    it(`identity ${outcome}: each secret comes back exactly when its condition holds, and the wallet key does not depend on publicKey`, async () => {
-      const walletKeys: boolean[] = [];
+    it(`AT6 identity ${outcome}: API-key copies always return; wallet and private keys never do`, async () => {
       for (const publicKey of [false, true]) {
         mockIdentity(outcome);
         const res = await provisionFrom(app, {
@@ -543,14 +550,14 @@ describe("each documented secret condition holds on the real route, for the buye
         expect(res.statusCode).toBe(201);
         const body = res.json();
         checkConditions(body, { outcome, publicKey });
-        walletKeys.push(carries(body, "operator_wallet.private_key"));
+        expect(body.operator_wallet).toEqual({ source: "none" });
+        expect(privateKeyPaths(body)).toEqual([]);
+        expect(SECRET_PATHS.filter((path) => carries(body, path))).toEqual(API_KEY_PATHS);
       }
-      // BUYER_WALLET says "Whether or not you send publicKey".
-      expect(walletKeys[0]).toBe(walletKeys[1]);
     });
   }
 
-  it("the supply runbook's own request gets back only the secrets its step 4 names, on the conditions it states", async () => {
+  it("AT7 the supply runbook request gets only the three named API-key copies", async () => {
     const step = supplyStep4();
     // Step 4 builds its request from the node's public key, the email and the name.
     expect(step).toContain('"publicKey": Path(".pcc/node-public-key").read_text().strip()');
@@ -563,34 +570,38 @@ describe("each documented secret condition holds on the real route, for the buye
       expect(res.statusCode).toBe(201);
       const body = res.json();
       const returned = SECRET_PATHS.filter((path) => carries(body, path));
-      // SUPPLY_API_KEY: three copies of the key; SUPPLY_WALLET: the wallet key on its condition; SUPPLY_ED25519: neither Ed25519 key.
-      expect(returned, outcome).toEqual([...API_KEY_PATHS, ...(walletGenerated({ outcome, publicKey: true }) ? ["operator_wallet.private_key"] : [])]);
+      // Exactly the three documented copies; no server-generated credentials.
+      expect(returned, outcome).toEqual(API_KEY_PATHS);
+      expect(privateKeyPaths(body)).toEqual([]);
+      expect(body.operator_wallet).toEqual({ source: "none" });
       for (const holder of expectSecretValuesStoreOnly(body)) expect(returned, `${holder} holds a secret value`).toContain(holder);
       checkSupplyNames(step, returned);
     }
   });
 
-  it("negative controls: a reversed condition, a reversed predicate and a secret dropped from the supply runbook all fail", async () => {
+  it("AT8 negative controls refuse an old wallet entry, a missing key copy, an obsolete claim and a reversed predicate", async () => {
     const entries = provisionAction().storeOnlyFields ?? [];
-    expect(() => checkStoreOnlyText(entries.map((entry) => entry.replace("publicKey was omitted", "publicKey was supplied")))).toThrow();
-    expect(() => checkStoreOnlyText(entries.map((entry) => (entry.startsWith("operator_wallet.private_key")
-      ? "operator_wallet.private_key (only when publicKey was omitted)" : entry)))).toThrow();
-
-    mockIdentity("assigned");
-    const res = await provisionFrom(app, { email: "negative-controls@example.com", publicKey: localEd25519PublicKeyHex() });
-    const body = res.json();
-    const variant: Variant = { outcome: "assigned", publicKey: true };
-    checkConditions(body, variant);
-    const reversed = (path: string, when: Condition[2]): Condition[] => STORE_ONLY_CONDITIONS
-      .map(([entry, candidate, original]): Condition => [entry, candidate, candidate === path ? when : original]);
-    expect(() => checkConditions(body, variant, reversed("ed25519.private_key_pkcs8_base64", (v) => v.publicKey))).toThrow();
-    expect(() => checkConditions(body, variant, reversed("operator_wallet.private_key", (v) => !v.publicKey))).toThrow();
+    expect(() => checkStoreOnlyText([
+      ...entries, "operator_wallet.private_key (when operator_wallet.source is server-minted)",
+    ])).toThrow();
 
     const step = supplyStep4();
-    const returned = [...API_KEY_PATHS, "operator_wallet.private_key"];
-    checkSupplyNames(step, returned);
-    expect(() => checkSupplyNames(step.replace(" and `usage.example`", ""), returned)).toThrow();
-    expect(() => checkSupplyNames(step.replace("`operator_wallet.private_key`", "the wallet key"), returned)).toThrow();
+    checkSupplyNames(step, API_KEY_PATHS);
+    expect(() => checkSupplyNames(step.replace(" and `usage.example`", ""), API_KEY_PATHS)).toThrow();
+    expect(() => expectNoForbiddenClaims(
+      step + " It may also contain `operator_wallet.private_key`, a wallet key the gateway mints.",
+    )).toThrow();
+
+    mockIdentity("written");
+    const res = await provisionFrom(app, { email: "negative-controls@example.com", publicKey: localEd25519PublicKeyHex() });
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    const variant: Variant = { outcome: "written", publicKey: true };
+    checkConditions(body, variant);
+    const reversed: Condition[] = STORE_ONLY_CONDITIONS.map(([entry, candidate, original]): Condition => [
+      entry, candidate, candidate === "api_key" ? () => false : original,
+    ]);
+    expect(() => checkConditions(body, variant, reversed)).toThrow();
   });
 });
 
@@ -618,8 +629,8 @@ describe("other clients: only a body with no publicKey field gets a minted Ed255
   const OMIT = Symbol("no publicKey field");
   const hex = localEd25519PublicKeyHex();
   const raw = Buffer.from(hex, "hex");
-  const cases: Array<[label: string, value: unknown, outcome: "minted" | "stored" | "invalid_type" | "invalid_public_key", storedAs?: string]> = [
-    ["omitted", OMIT, "minted"],
+  const cases: Array<[label: string, value: unknown, outcome: "none" | "stored" | "invalid_type" | "invalid_public_key", storedAs?: string]> = [
+    ["omitted", OMIT, "none"],
     ["null", null, "invalid_type"],
     ["a number", 64, "invalid_type"],
     ["an object", { hex }, "invalid_type"],
@@ -640,17 +651,17 @@ describe("other clients: only a body with no publicKey field gets a minted Ed255
   ];
 
   cases.forEach(([label, value, outcome, storedAs], index) => {
-    it(`publicKey ${label}: ${outcome}`, async () => {
+    it(`${label === "omitted" ? "AT9 " : ""}publicKey ${label}: ${outcome}`, async () => {
       mockIdentity("off");
       const email = `public-key-${index}@example.com`;
       const res = await provisionFrom(app, { email, ...(value === OMIT ? {} : { publicKey: value }) });
       const body = res.json();
       const stored = getRepos().apiKeys.findByOperator(email).map((row) => row.publicKey);
-      if (outcome === "minted") {
+      if (outcome === "none") {
         expect(res.statusCode).toBe(201);
-        expect(body.ed25519.source).toBe("server-minted");
-        expect(carries(body, "ed25519.private_key") && carries(body, "ed25519.private_key_pkcs8_base64")).toBe(true);
-        expect(stored).toEqual([body.ed25519.public_key]);
+        expect(body.ed25519).toEqual({ public_key: null, source: "none" });
+        expect(privateKeyPaths(body)).toEqual([]);
+        expect(stored).toEqual([null]);
       } else if (outcome === "stored") {
         expect(res.statusCode).toBe(201);
         expect(body.ed25519).toEqual({ public_key: storedAs, source: "byok" });
@@ -670,10 +681,12 @@ describe("other clients: only a body with no publicKey field gets a minted Ed255
 });
 
 describe("agent golden path provisions over direct HTTP, never through a tool (Opus r1 F1)", () => {
-  it("F7: explains that the tool response exposes credentials to the conversation", () => {
+  it("AT10 F7: explains that the tool response exposes credentials to the conversation", () => {
+    expectDocumented([]); // No server-returned private-key paths; still enforce the direct-HTTP rule.
     const request = provisionAction().request;
     expect(request).not.toContain("the tool cannot send publicKey");
-    expect(request).toContain("its response includes the API key and any returned private key");
+    expect(request).toContain("its response includes the API key, and a tool result enters the conversation");
+    expect(request).not.toContain("any returned private key");
     expect(request).toContain("a tool result enters the conversation");
   });
 
@@ -718,16 +731,20 @@ describe("agent golden path captures the provision response without leaking it (
     expect(getKey.doneWhen.join(" ")).toContain("(.pcc/ is 0700 and ignored by git when working in a repository), no key or private key was printed");
   });
 
-  it("agent.md renders both recipes as bash blocks, lists only non-secret fields to read, and marks the rest store-only", () => {
+  it("AT11 agent.md renders both recipes and exactly the five store-only fields", () => {
     const doc = read("apps/dashboard/public/.well-known/agent.md");
     expect(doc).toContain(["```bash", ...(provisionAction().recipe ?? []), "```"].join("\n"));
     expect(doc).toContain(["```bash", ...(validateAction().recipe ?? []), "```"].join("\n"));
     expect(doc).toContain(`Read response fields: ${provisionAction().responseFields.join(", ")}.`);
     expect(doc).toContain(
-      "Store only, never read into the conversation: api_key, usage.header (holds api_key), usage.example (holds api_key), " +
-      "ed25519.private_key (only when publicKey was omitted), ed25519.private_key_pkcs8_base64 (only when publicKey was omitted), " +
-      "operator_wallet.private_key (when operator_wallet.source is server-minted), " +
-      DIAGNOSTIC_STORE_ONLY.join(", ") + ".",
+      "Store only, never read into the conversation: " +
+      [
+        "api_key",
+        "usage.header (holds api_key)",
+        "usage.example (holds api_key)",
+        "message (raw server diagnostic; may contain secrets)",
+        "error (raw error body; only fixed route codes are printed)",
+      ].join(", ") + ".",
     );
     expect(doc).toContain("Keep API keys, private keys and transcripts out of logs, chat, reports and version control.");
   });
@@ -746,9 +763,9 @@ describe("agent golden path captures the provision response without leaking it (
     });
 
     it.runIf(recipeTools || process.env.CI === "true")(
-      "prints no secret, leaves .pcc 0700 and git-ignored with 0600 files, and its header validates",
+      "AT12 prints no secret, leaves .pcc 0700 and git-ignored with 0600 files, and its header validates",
       async () => {
-        // The recipe always sends its locally generated publicKey; the wallet key can still return.
+        // The recipe sends its locally generated publicKey; master returns no private key.
         mockIsIdentityWriteEnabled.mockReturnValue(true);
         mockRegisterAgentOnChain.mockResolvedValue({
           agentId: 7n,
@@ -772,12 +789,12 @@ describe("agent golden path captures the provision response without leaking it (
           const body = JSON.parse(readFileSync(join(dir, ".pcc/provision.json"), "utf8"));
           expectSecretValuesStoreOnly(body);
           const secrets: string[] = [
-            body.api_key, body.operator_wallet.private_key, readFileSync(join(dir, ".pcc/ed25519-private.pem"), "utf8"),
+            body.api_key, readFileSync(join(dir, ".pcc/ed25519-private.pem"), "utf8"),
           ];
           for (const secret of secrets) expect(typeof secret === "string" && secret.length >= 32).toBe(true);
           const printed = provision.stdout + provision.stderr + validate.stdout + validate.stderr;
           secrets.forEach((secret, index) => expect(printed.includes(secret), `secret #${index} was printed`).toBe(false));
-          expect(provision.stdout).toContain("provision_status: wallet assignment failed");
+          expect(provision.stdout).toContain("provision_status: provisioned");
           expect(provision.stdout).toContain(`key_id: ${JSON.stringify(body.key_id)}`);
           // One "name: value" line per field: the error fields, then exactly the fields to read (ChatGPT r1 L1).
           const printedNames = provision.stdout.trim().split("\n").map((line) => line.slice(0, line.indexOf(": ")));
@@ -800,7 +817,7 @@ describe("agent golden path captures the provision response without leaking it (
   });
 });
 
-describe("agent golden path drops the claims that no private key comes back", () => {
+describe("states that the response carries no private key", () => {
   it("L1: preserves compact buyer source formatting and literal punctuation", () => {
     const source = read("starter/buyer/buyer-path.json");
     expect(source).toMatch(/^    "buyer\.identifier-required": \{"phase": "get-key", "trigger": /m);
@@ -808,10 +825,11 @@ describe("agent golden path drops the claims that no private key comes back", ()
     expect(source).toContain("assurance tier (0–3)");
   });
 
-  it("buyer path request and supply runbook", () => {
-    expect(provisionAction().request).not.toContain("no private key comes back");
+  it("AT13 buyer path and supply runbook state no server-produced private key", () => {
+    expect(provisionAction().request).toContain(BUYER_NO_PRIVATE_KEY);
+    expect(provisionAction().request).toContain(BUYER_OTHER_CLIENTS);
     const runbook = read("starter/runbook/00-prerequisites.md");
-    expect(runbook).toContain("operator_wallet.private_key");
+    expect(supplyStep4()).toContain(SUPPLY_NO_PRIVATE_KEY);
     expect(runbook).not.toContain("no private key ever travels");
   });
 });
@@ -984,7 +1002,7 @@ describe.runIf(captureToolsRequired)("F2: capture fails closed and never overwri
     } finally { f.cleanup(); }
   });
 
-  it("L4: allows the on-chain path and treats curl timeout as possible issuance", () => {
+  it("AT15 L4: allows on-chain registration and correctly limits orphan revocation", () => {
     const f = captureFixture();
     try {
       const result = f.run({ FIXTURE_EXIT: "28", FIXTURE_HTTP: "000" });
@@ -992,9 +1010,10 @@ describe.runIf(captureToolsRequired)("F2: capture fails closed and never overwri
       const args = JSON.parse(readFileSync(join(f.dir, "curl-args.json"), "utf8")) as string[];
       expect(Number(args[args.indexOf("--max-time") + 1])).toBeGreaterThanOrEqual(600);
       expect(result.stdout + result.stderr).toContain("Provision request timed out; a key may have been issued and cannot be recovered;");
-      for (const advice of ["cannot be recovered", "counts toward the 5-key cap", "Report the failure once", "archive the capture with the archive command", "provision again at most once", "stop and report if that fails too", "Revoke the orphan key later from an authenticated session"])
+      for (const advice of ["cannot be recovered", "counts toward the 5-key cap", "Report the failure once", "archive the capture with the archive command", "provision again at most once", "stop and report if that fails too", "A new key cannot revoke the lost one", "only the gateway admin can", "Sign-In with Ethereum", "Tell the human"])
         expect(result.stderr).toContain(advice);
       expect(result.stdout + result.stderr).not.toContain(f.body.api_key);
+      expect(result.stderr).not.toContain("authenticated session");
       expect(readdirSync(join(f.dir, ".pcc")).some((name) => name.startsWith("capture."))).toBe(true);
     } finally { f.cleanup(); }
   });
@@ -1555,7 +1574,7 @@ describe.runIf(captureToolsRequired)("F3: diagnostics stay private and output us
     } finally { f.cleanup(); }
   });
 
-  it("never prints secret-bearing or multiline wallet diagnostics or a server message", () => {
+  it("AT14 never prints secret-bearing or multiline wallet diagnostics or a server message", () => {
     const f = captureFixture();
     try {
       const diagnostic = f.body.api_key + "\nsecond diagnostic line";
@@ -1566,12 +1585,21 @@ describe.runIf(captureToolsRequired)("F3: diagnostics stay private and output us
       expect(result.status).toBe(0);
       expect((result.stdout + result.stderr).includes(f.body.api_key), "diagnostic printed a secret").toBe(false);
       expect(result.stdout + result.stderr).not.toContain("second diagnostic line");
-      expect(result.stdout).toContain("provision_status: wallet assignment failed");
+      expect(result.stdout).toContain("provision_status: provisioned");
       const capture = JSON.parse(readFileSync(join(f.dir, ".pcc/provision.json"), "utf8"));
       expect(capture.message === diagnostic && capture.operator_wallet.onchain_error === diagnostic).toBe(true);
-      expect(names(provisionAction().storeOnlyFields, "operator_wallet.onchain_error")).toBe(true);
+      expect(names(provisionAction().storeOnlyFields, "operator_wallet.onchain_error")).toBe(false);
       expect(names(provisionAction().responseFields, "operator_wallet.onchain_error")).toBe(false);
     } finally { f.cleanup(); }
+  });
+
+  it("AT17 orphan-recovery guidance is present exactly three times per path and never delegates to a plain key", () => {
+    const buyer = read("starter/buyer/buyer-path.json");
+    const supply = read("starter/runbook/00-prerequisites.md");
+    expect(buyer.split(BUYER_ORPHAN).length - 1).toBe(3);
+    expect(supply.split(SUPPLY_ORPHAN).length - 1).toBe(3);
+    expect(buyer).not.toContain("authenticated session");
+    expect(supply).not.toContain("authenticated session");
   });
 
   it("keeps rejected-request exception text private", () => {

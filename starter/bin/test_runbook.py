@@ -120,8 +120,25 @@ class TestIndex(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "prerequisites.key-leaked must mention PCC_NODE_KEY_PATH"):
             self.assert_key_leak_guidance_covers_selected_path(guidance)
 
+    def test_signing_refused_names_the_selected_key_file(self):
+        # AT24: the incident path must select the same external key file as phase 0.
+        guidance = self.events["register.signing-refused"]["do"]
+        selections = ("PCC_NODE_KEY_PATH if set", "PCC_NODE_KEYS_FILE if set", "~/.pcc-node/keys.json")
+        positions = [guidance.index(selection) for selection in selections]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(guidance.count(".pcc/node-keys.json"), 1)
+        self.assertIn("folders onboarded earlier used .pcc/node-keys.json", guidance)
+
 
 class TestTruths(unittest.TestCase):
+    def test_step_4_names_the_api_key_header_once_for_node_calls(self):
+        # AT23: Step 1 kept the selected-key-file claim and the canonical call guidance.
+        phase = phase_text("00-prerequisites.md")
+        self.assertEqual(phase.count("Node calls that use the operator API key send it with"), 1)
+        self.assertEqual(phase.count("Every later call sends the key"), 0)
+        section3 = between(phase, "## 3.", "## 4.")
+        self.assertEqual(section3.count("the gateway never generates or returns a private signing key"), 1)
+
     def test_no_call_goes_to_production(self):
         for path, text in text_files():
             for line in text.splitlines():
@@ -803,12 +820,14 @@ os.link = record_link
     def test_transport_failure_has_actionable_possible_issuance_advice(self):
         result = self.run_capture(MOCK_CURL_EXIT="56")
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(result.stderr, "Provision request failed; a key may have been issued and cannot be recovered; it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. Revoke the orphan key later from an authenticated session.\n")
+        self.assertEqual(result.stderr, "Provision request failed; a key may have been issued and cannot be recovered; it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. A new key cannot revoke the lost one; only the gateway admin can. Tell the human.\n")
 
-    def test_capture_recovery_guidance_describes_one_retry_and_later_revoke(self):
+    def test_capture_recovery_guidance_describes_one_retry_and_who_can_revoke(self):
         step = phase_text("00-prerequisites.md").split("## 4. ", 1)[1].split("## 5. ", 1)[0]
-        prose = step.split("The recipe requires", 1)[1].split("Every later call", 1)[0]
-        for text in ("cannot be recovered", "5-key cap", "report the failure once", "archive command", "at most once", "stop and report", "authenticated session"):
+        # AT21: Step 1 moved the Node-call paragraph; do not silently consume the rest of the phase.
+        self.assertIn("Node calls that use the operator API key", step)
+        prose = step.split("The recipe requires", 1)[1].split("Node calls that use the operator API key", 1)[0]
+        for text in ("cannot be recovered", "5-key cap", "report the failure once", "archive command", "at most once", "stop and report", "only the gateway admin can"):
             self.assertIn(text, prose.lower())
         self.assertNotIn("find and validate the key", prose)
 
@@ -954,7 +973,7 @@ os.link = record_link
     def test_timeout_preserves_private_capture_and_explains_possible_issuance(self):
         result = self.run_capture(MOCK_CURL_EXIT="28")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(result.stderr, "Provision request timed out; a key may have been issued and cannot be recovered; it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. Revoke the orphan key later from an authenticated session.\n")
+        self.assertEqual(result.stderr, "Provision request timed out; a key may have been issued and cannot be recovered; it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. A new key cannot revoke the lost one; only the gateway admin can. Tell the human.\n")
         self.assert_not_published()
         captures = list(self.private.glob("capture.*"))
         self.assertEqual(len(captures), 1)
