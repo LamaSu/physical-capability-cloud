@@ -846,7 +846,9 @@ describe("evidence outcomes never imply a retry or a false store", () => {
   it.each([
     [500, "evidence_store_failed", "server_error"],
     [503, "scope_requirements_unavailable", "unavailable"],
+    [503, "wallet_link_unavailable", "unavailable"],
     [500, "read_failed", "indeterminate"],
+    [500, "wallet_link_unavailable", "indeterminate"],
     [500, "scope_requirements_unavailable", "indeterminate"],
     [503, "evidence_store_failed", "indeterminate"],
     [502, "evidence_store_failed", "indeterminate"],
@@ -954,6 +956,63 @@ describe("N149 receipt posting", () => {
     const result = await client.postReceipt(jobId, envelope);
     expect(result).toEqual({ ok: false, status, code });
     expectNoCanaries(result);
+  });
+
+  it.each([
+    [404, "job_not_found"],
+    [400, "invalid_package_body"],
+    [400, "invalid_settlement_unit"],
+    [422, "invalid_package_signatures"],
+    [422, "package_challenge_refused"],
+    [422, "package_registry_refused"],
+    [422, "package_operator_refused"],
+    [503, "receipt_storage_unavailable"],
+  ] as const)("maps the receipt route's %s %s to receipt_refused with that sub-code", async (status, error) => {
+    const { client } = fixture(json({ error, message: noiseString, reason: noiseString }, status));
+    const result = await client.postReceipt(jobId, envelope);
+    expect(result).toEqual({ ok: false, code: "receipt_refused", status, sub: error });
+    expectNoCanaries(result);
+  });
+
+  it("maps the receipt route's 409 kernel_mismatch to the terminal code receipt_kernel_mismatch", async () => {
+    const { client } = fixture(json({ error: "kernel_mismatch", message: noiseString, reason: noiseString }, 409));
+    const result = await client.postReceipt(jobId, envelope);
+    expect(result).toEqual({ ok: false, code: "receipt_kernel_mismatch", status: 409 });
+    expectNoCanaries(result);
+  });
+
+  it.each([
+    [400, "job_not_found", "bad_request"],
+    [404, "invalid_package_body", "route_unavailable"],
+    [422, "invalid_settlement_unit", "route_unavailable"],
+    [400, "invalid_package_signatures", "bad_request"],
+    [409, "package_challenge_refused", "route_unavailable"],
+    [500, "receipt_storage_unavailable", "server_error"],
+    [400, "kernel_mismatch", "bad_request"],
+    [422, "kernel_mismatch", "route_unavailable"],
+  ] as const)("a receipt constant under another status keeps today's code: %s %s gives %s", async (status, error, code) => {
+    const { client } = fixture(json({ error, message: noiseString, reason: noiseString }, status));
+    const result = await client.postReceipt(jobId, envelope);
+    expect(result).toEqual({ ok: false, code, status });
+    expectNoCanaries(result);
+  });
+
+  it("the receipt constants map only on postReceipt", async () => {
+    for (const [status, error, code] of [
+      [404, "job_not_found", "route_unavailable"],
+      [503, "receipt_storage_unavailable", "indeterminate"],
+    ] as const) {
+      const { client } = fixture(json({ error, message: noiseString }, status));
+      const result = await client.postRelayEvidence(jobId, bundle as Evidence);
+      expect(result).toEqual({ ok: false, code, status });
+      expectNoCanaries(result);
+    }
+    for (const [status, error] of [[422, "package_challenge_refused"], [409, "kernel_mismatch"]] as const) {
+      const { client } = fixture(json({ error, message: noiseString }, status));
+      const result = await client.pollJobs();
+      expect(result).toEqual({ ok: false, code: "route_unavailable", status });
+      expectNoCanaries(result);
+    }
   });
 
   it.each([

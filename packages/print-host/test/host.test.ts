@@ -1,5 +1,5 @@
 import { randomBytes, createPrivateKey, createPublicKey, verify } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
@@ -281,6 +281,23 @@ describe("print-host run loop", () => {
     expect(setup.gw.pollJobs).toHaveBeenCalledTimes(1);
     expect(setup.gw.reportInProgress).not.toHaveBeenCalled();
     expect(setup.inputSource).not.toHaveBeenCalled();
+  });
+
+  it("r5c F1 (T2 twin): a real-mode host with no adapter that is not poll-only halts adapter_simulated before any side effect", async () => {
+    const setup = await fixture();
+    const initialize = vi.spyOn(setup.journal, "initialize");
+    const host = createHost({ ...setup.deps, adapter: undefined });
+    const halted = { kind: "halted", waitMs: 5_000, code: "adapter_simulated" };
+    expect(await host.runOnce()).toEqual(halted);
+    expect(await host.runOnce()).toEqual(halted);
+    expect(setup.logs).toEqual(["adapter_simulated"]);
+    expect(initialize).not.toHaveBeenCalled();
+    expect(setup.gw.heartbeat).not.toHaveBeenCalled();
+    expect(setup.gw.pollJobs).not.toHaveBeenCalled();
+    expect(setup.gw.reportInProgress).not.toHaveBeenCalled();
+    expect(setup.inputSource).not.toHaveBeenCalled();
+    await expect(stat(join(setup.journal.directory, `.unit-${setup.unit.settlementUnitId.slice(2)}.used.json`)))
+      .rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it.each((["events", "bundle"] as const).flatMap((location) =>
@@ -1266,5 +1283,27 @@ describe("print-host run loop", () => {
     expect(waits.every((wait, index) => index === 0 || wait >= waits[index - 1]!)).toBe(true);
     setup.gw.pollJobs.mockResolvedValueOnce(failed("rate_limited", 45));
     expect((await setup.host.runOnce()).waitMs).toBeGreaterThanOrEqual(45_000);
+  });
+  it("R2 C2: a restart beside an older job's empty first session record still claims and prints", async () => {
+    const setup = await fixture();
+    await setup.journal.initialize();
+    await setup.journal.append(anotherJob, "claimed");
+    await setup.journal.append(anotherJob, "in_progress_reported");
+    await mkdir(setup.journal.sessionDirectory(anotherJob), { mode: 0o700 });
+    await writeFile(join(setup.journal.sessionDirectory(anotherJob), "00000000.json"), "", { mode: 0o600 });
+    await setup.journal.close();
+
+    const journal = createJobJournal(setup.dir, () => setup.timers.now);
+    const host = createHost({ ...setup.deps, journal });
+    await complete({ ...setup, journal, host });
+    expect((await journal.read(anotherJob)).map((entry) => entry.state))
+      .toEqual(["claimed", "in_progress_reported", "interrupted"]);
+    expect((await journal.read(jobId)).map((entry) => entry.state))
+      .toEqual(["claimed", "in_progress_reported", "printing", "printed", "bundle_saved", "evidence_stored"]);
+    expect(setup.adapter.commands.map((command) => command.type)).toEqual(["start"]);
+    expect(setup.gw.postRelayEvidence).toHaveBeenCalledTimes(1);
+    expect(setup.logs).toContain("interrupted");
+    expect(setup.logs).not.toContain("journal_failed");
+    await journal.close();
   });
 });

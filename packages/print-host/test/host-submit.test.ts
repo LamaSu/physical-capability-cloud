@@ -1,5 +1,5 @@
 import { createPublicKey, randomBytes, verify } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile, unlink } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
@@ -9,10 +9,11 @@ import {
   numberToHex, parseAbi, parseTransaction, toBytes, toHex, type Hex,
 } from "viem";
 import { settlementUnitId } from "@pcc/contracts/vnext";
+import { hashBundle } from "@pcc/spec";
 import { createEvidenceBroadcaster, type EvidenceBroadcaster, type EvidenceSubmission } from "../src/chain.js";
 import type { HostConfig } from "../src/config.js";
 import type { GwResult, PollJobsValue, RelayEvidenceBundle, ReceiptEnvelope } from "../src/gateway-client.js";
-import { createHost, HOST_LOG_CODES, type HostDeps, type HostLogCode } from "../src/host.js";
+import { createHost, HOST_LOG_CODES, type HostDeps, type HostLogCode, type HostTimers } from "../src/host.js";
 import type { JobInputs } from "../src/job-inputs.js";
 import { createJobJournal, type JournalRecord, type JournalState, type SignedMilestonePackage } from "../src/journal.js";
 import { generateHostKeys } from "../src/keygen.js";
@@ -238,6 +239,23 @@ function noSubmitSignatures(setup: Fixture) {
   expect(setup.operatorKey.signSubmitEvidenceTx).not.toHaveBeenCalled();
   expect(setup.broadcaster.submit).not.toHaveBeenCalled();
   expect(setup.calls.some(({ method }) => method === "eth_sendRawTransaction")).toBe(false);
+}
+
+function evidenceHoldTimers(setup: Fixture, options: { fire?: boolean; onWait?: () => void } = {}) {
+  const waits: number[] = [];
+  const timers: HostTimers = {
+    setTimeout(callback, ms) {
+      if (setup.gateway.postRelayEvidence.mock.calls.length === 0) return setTimeout(callback, ms);
+      waits.push(ms);
+      options.onWait?.();
+      if (options.fire === false) return undefined;
+      return setTimeout(callback, 0);
+    },
+    clearTimeout(handle) {
+      if (handle !== undefined) clearTimeout(handle as ReturnType<typeof setTimeout>);
+    },
+  };
+  return { waits, timers };
 }
 
 afterEach(async () => {
@@ -596,7 +614,7 @@ describe("pre-send retries and gateway receipts", () => {
     expect(setup.operatorKey.signSubmitEvidenceTx).not.toHaveBeenCalled();
     expect(setup.sentData).toHaveLength(0);
     expect(setup.logs).toContain("submit_rpc_unavailable");
-    expect(await setup.host.runOnce()).toMatchObject({ kind: "backoff", waitMs: 5_000 });
+    expect(await setup.host.runOnce()).toMatchObject({ kind: "idle", waitMs: 5_000 });
     if (point === "rpc_file") await writeFile(setup.config.chain.rpcUrlFile, `${setup.rpcUrl}\n`, { mode: 0o600 });
     setup.advance(5_000);
     expect(await setup.host.runOnce()).toMatchObject({ state: "submitted" });
@@ -668,7 +686,7 @@ describe("pre-send retries and gateway receipts", () => {
     expect(await finish(setup)).toMatchObject({ state: "receipt_stored", waitMs: 5_000 });
     setup.advance(5_000);
     expect(await setup.host.runOnce()).toMatchObject({ state: "receipt_stored", waitMs: 10_000 });
-    expect(await setup.host.runOnce()).toMatchObject({ kind: "backoff", waitMs: 10_000 });
+    expect(await setup.host.runOnce()).toMatchObject({ kind: "idle", waitMs: 5_000 });
     expect(await states(setup)).not.toContain("submit_attempted");
     expect(setup.operatorKey.signSubmitEvidenceTx).not.toHaveBeenCalled();
     expect(JSON.stringify(setup.logs)).not.toContain(setup.serverText);
@@ -726,7 +744,7 @@ describe("pre-send retries and gateway receipts", () => {
       expect(setup.operatorKey.signSubmitEvidenceTx).not.toHaveBeenCalled();
       expect(setup.sentData).toHaveLength(0);
       expect(setup.logs).toContain(code);
-      expect(await setup.host.runOnce()).toMatchObject({ kind: "backoff" });
+      expect(await setup.host.runOnce()).toMatchObject({ kind: "idle", waitMs: 5_000 });
       expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(1);
       const recovered = await restart(setup);
       expect(await recovered.host.runOnce()).toMatchObject({ state: "submitted" });
@@ -825,7 +843,7 @@ describe("pre-send retries and gateway receipts", () => {
     expect(await finish(setup)).toMatchObject({ state: "package_built" });
     expect((await setup.journal.read(jobId)).at(-1)).toMatchObject({ state: "package_built" });
     expect(setup.broadcaster.submit).not.toHaveBeenCalled();
-    expect(await setup.host.runOnce()).toMatchObject({ kind: "backoff" });
+    expect(await setup.host.runOnce()).toMatchObject({ kind: "idle", waitMs: 5_000 });
     setup.advance();
     expect(await setup.host.runOnce()).toMatchObject({ state: "submitted" });
     expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(2);
@@ -972,5 +990,339 @@ describe("restart artifact and recovery guards", () => {
     expect(await setup.diskRecords()).toEqual(before);
     expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
     expect(setup.sentData).toHaveLength(0);
+  });
+});
+
+describe("r5d evidence hold-and-retry (R3)", () => {
+  it("R3 probe H: one stored-nothing 503, then a stored 200, ends evidence_stored after exactly 2 POSTs and 1 print", async () => {
+    const setup = await fixture({ caps: false });
+    setup.gateway.postRelayEvidence.mockResolvedValueOnce({ ok: false, code: "unavailable", status: 503 });
+    const { waits, timers } = evidenceHoldTimers(setup);
+    setup.host = createHost({ ...setup.deps, timers });
+    expect(await finish(setup)).toMatchObject({ kind: "job", jobId, state: "evidence_stored" });
+    expect(setup.gateway.postRelayEvidence).toHaveBeenCalledTimes(2);
+    expect(setup.gateway.postRelayEvidence.mock.calls[0][1]).toBe(setup.gateway.postRelayEvidence.mock.calls[1][1]);
+    expect(waits).toEqual([5_000]);
+    expect(await states(setup)).toEqual(["claimed", "in_progress_reported", "printing", "printed", "bundle_saved", "evidence_stored"]);
+    expect((await setup.journal.read(jobId)).at(-1)).toMatchObject({ state: "evidence_stored", code: "submit_disabled" });
+    expect(setup.adapter.commands.map((command) => command.type)).toEqual(["start"]);
+    expect(setup.logs.filter((code) => code === "unavailable")).toHaveLength(1);
+  });
+
+  it("R3: five stored-nothing refusals post the same bundle five times on the 5, 20, 60 and 120 s schedule, then end evidence_refused with the last code", async () => {
+    const setup = await fixture();
+    setup.gateway.postRelayEvidence.mockResolvedValueOnce({ ok: false, code: "server_error", status: 500 })
+      .mockResolvedValueOnce({ ok: false, code: "server_error", status: 500 })
+      .mockResolvedValueOnce({ ok: false, code: "server_error", status: 500 })
+      .mockResolvedValueOnce({ ok: false, code: "server_error", status: 500 })
+      .mockResolvedValueOnce({ ok: false, code: "unavailable", status: 503 });
+    const { waits, timers } = evidenceHoldTimers(setup);
+    setup.host = createHost({ ...setup.deps, timers });
+    expect(await finish(setup)).toMatchObject({ kind: "job", jobId, state: "evidence_refused" });
+    expect(setup.gateway.postRelayEvidence).toHaveBeenCalledTimes(5);
+    const posted = setup.gateway.postRelayEvidence.mock.calls[0][1];
+    for (const [, bundle] of setup.gateway.postRelayEvidence.mock.calls) expect(bundle).toBe(posted);
+    expect(posted).toEqual(await setup.journal.readBundle(jobId));
+    expect(waits).toEqual([5_000, 20_000, 60_000, 120_000]);
+    expect((await setup.journal.read(jobId)).at(-1)).toMatchObject({ state: "evidence_refused", code: "unavailable" });
+    expect(await states(setup)).not.toContain("evidence_stored");
+    expect(setup.logs.filter((code) => code === "server_error")).toHaveLength(4);
+    expect(setup.logs.filter((code) => code === "unavailable")).toHaveLength(1);
+    noSubmitSignatures(setup);
+    const recovered = await restart(setup);
+    await recovered.host.runOnce();
+    expect(setup.gateway.postRelayEvidence).toHaveBeenCalledTimes(5);
+  });
+
+  it.each([[2, 5_000], [90, 90_000], [3_600, 300_000]] as const)(
+    "R3: a 429 with Retry-After %i s waits %i ms before the one re-post", async (retryAfterS, expected) => {
+      const setup = await fixture({ caps: false });
+      setup.gateway.postRelayEvidence.mockResolvedValueOnce({ ok: false, code: "rate_limited", status: 429, retryAfterS });
+      const { waits, timers } = evidenceHoldTimers(setup);
+      setup.host = createHost({ ...setup.deps, timers });
+      expect(await finish(setup)).toMatchObject({ state: "evidence_stored" });
+      expect(waits).toEqual([expected]);
+      expect(setup.gateway.postRelayEvidence).toHaveBeenCalledTimes(2);
+      expect(setup.logs.filter((code) => code === "rate_limited")).toHaveLength(1);
+    },
+  );
+
+  it.each(["run", "stopSignal"] as const)(
+    "R3: a host stop through %s ends the evidence hold with no new record, and a restart never re-posts", async (stopMode) => {
+      const setup = await fixture();
+      const stop = new AbortController();
+      setup.gateway.postRelayEvidence.mockResolvedValueOnce({ ok: false, code: "unavailable", status: 503 });
+      const { waits, timers } = evidenceHoldTimers(setup, { fire: false, onWait: () => stop.abort() });
+      setup.host = createHost({ ...setup.deps, timers, ...(stopMode === "stopSignal" ? { stopSignal: stop.signal } : {}) });
+      if (stopMode === "stopSignal") {
+        expect(await finish(setup)).toEqual({ kind: "blocked", jobId, waitMs: 5_000 });
+      } else {
+        setup.adapter.scriptStart({ outcome: "success", jobId: 101 });
+        const started = setup.adapter.started();
+        const running = setup.host.run(stop.signal);
+        await started;
+        setup.adapter.emit("execution_started", { ippJobId: 101 });
+        setup.adapter.emit("execution_completed", { ippJobId: 101, totalPages: 2 });
+        await running;
+      }
+      expect(waits).toEqual([5_000]);
+      expect(setup.gateway.postRelayEvidence).toHaveBeenCalledTimes(1);
+      expect((await setup.journal.read(jobId)).at(-1)?.state).toBe("bundle_saved");
+      const recovered = await restart(setup);
+      await recovered.host.runOnce();
+      await recovered.host.runOnce();
+      expect((await recovered.journal.read(jobId)).map((r) => r.state).slice(-2)).toEqual(["bundle_saved", "interrupted"]);
+      expect(setup.gateway.postRelayEvidence).toHaveBeenCalledTimes(1);
+      noSubmitSignatures(setup);
+    },
+  );
+
+  it.each([
+    ["indeterminate", 503, "evidence_indeterminate"],
+    ["operator_proof_required", 403, "evidence_refused"],
+    ["not_stored", 200, "evidence_refused"],
+  ] as const)("R3: a %s evidence reply is posted exactly once and never held", async (code, status, state) => {
+    const setup = await fixture();
+    setup.gateway.postRelayEvidence.mockResolvedValue({ ok: false, code, status });
+    const { waits, timers } = evidenceHoldTimers(setup);
+    setup.host = createHost({ ...setup.deps, timers });
+    expect(await finish(setup)).toMatchObject({ state });
+    expect(setup.gateway.postRelayEvidence).toHaveBeenCalledTimes(1);
+    expect(waits).toEqual([]);
+    expect((await setup.journal.read(jobId)).at(-1)?.state).toBe(state);
+  });
+});
+
+describe("r5d receipt refusals and non-blocking recovery (R4, A3)", () => {
+  it.each([
+    ["receipt_kernel_mismatch", 409, undefined, "receipt_kernel_mismatch"],
+    ["receipt_refused", 400, "invalid_package_body", "receipt_invalid_package_body"],
+    ["receipt_refused", 422, "invalid_package_signatures", "receipt_invalid_package_signatures"],
+    ["receipt_refused", 400, "invalid_settlement_unit", "receipt_invalid_settlement_unit"],
+  ] as const)("R4/A3: a receipt %s %s is terminal refused/%s, never submits, and the next tick polls", async (code, status, sub, journalCode) => {
+    const setup = await fixture();
+    setup.gateway.postReceipt.mockResolvedValueOnce({ ok: false, code, status, ...(sub === undefined ? {} : { sub }) });
+    expect(await finish(setup)).toMatchObject({ state: "refused" });
+    expect((await setup.journal.read(jobId)).at(-1)).toMatchObject({ state: "refused", code: journalCode });
+    const polls = setup.gateway.pollJobs.mock.calls.length;
+    setup.advance();
+    expect(await setup.host.runOnce()).toMatchObject({ kind: "idle", waitMs: 5_000 });
+    expect(setup.gateway.pollJobs).toHaveBeenCalledTimes(polls + 1);
+    const recovered = await restart(setup);
+    await recovered.host.runOnce();
+    expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(1);
+    expect(setup.broadcaster.submit).not.toHaveBeenCalled();
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+    expect(setup.sentData).toEqual([]);
+  });
+
+  it.each([
+    [404, "job_not_found"], [422, "package_challenge_refused"], [422, "package_registry_refused"],
+    [422, "package_operator_refused"], [503, "receipt_storage_unavailable"],
+  ] as const)("A3: a receipt %s %s keeps the package retryable under its own log code, then submits after a successful receipt", async (status, sub) => {
+    const setup = await fixture();
+    setup.gateway.postReceipt.mockResolvedValueOnce({ ok: false, code: "receipt_refused", status, sub });
+    expect(await finish(setup)).toMatchObject({ state: "package_built", waitMs: 5_000 });
+    expect(setup.logs).toContain(sub);
+    expect(setup.logs).not.toContain("route_unavailable");
+    expect(setup.logs).not.toContain("malformed_response");
+    expect(await states(setup)).not.toContain("refused");
+    expect(setup.broadcaster.submit).not.toHaveBeenCalled();
+    const recovered = await restart(setup);
+    expect(await recovered.host.runOnce()).toMatchObject({ state: "submitted" });
+    expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(2);
+    expect(setup.sentData).toHaveLength(1);
+    expect(await states(setup)).toEqual(completedStates);
+  });
+
+  it("A3 (r5a P2 flipped): a persistent 422 package_challenge_refused retries under its own code while every backing-off tick polls", async () => {
+    const setup = await fixture();
+    setup.gateway.postReceipt.mockResolvedValue({ ok: false, code: "receipt_refused", status: 422, sub: "package_challenge_refused" });
+    expect(await finish(setup)).toMatchObject({ state: "package_built" });
+    const before = await setup.diskRecords();
+    const polls = setup.gateway.pollJobs.mock.calls.length;
+    for (let tick = 0; tick < 20; tick++) {
+      setup.advance(1_000);
+      await setup.host.runOnce();
+    }
+    expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(3);
+    expect(setup.gateway.pollJobs.mock.calls.length - polls).toBe(18);
+    expect(setup.logs.filter((code) => code === "package_challenge_refused")).toHaveLength(3);
+    expect(setup.logs).not.toContain("route_unavailable");
+    expect(await setup.diskRecords()).toEqual(before);
+    expect(setup.broadcaster.submit).not.toHaveBeenCalled();
+    expect(setup.sentData).toEqual([]);
+  });
+
+  it("A3: a crash-window evidence_stored unit whose inputs are not found keeps retrying while every backing-off tick polls", async () => {
+    const setup = await fixture();
+    vi.spyOn(setup.journal, "savePackage").mockRejectedValueOnce(new Error("crash"));
+    expect(await finish(setup)).toMatchObject({ kind: "halted" });
+    expect((await setup.journal.read(jobId)).at(-1)).toMatchObject({ state: "evidence_stored" });
+    const inputSource = vi.fn<Parameters<HostDeps["inputSource"]>, ReturnType<HostDeps["inputSource"]>>(
+      async () => ({ ok: false, code: "job_inputs_not_found" }));
+    const recovered = await restart(setup, { inputSource });
+    const before = await setup.diskRecords();
+    const polls = setup.gateway.pollJobs.mock.calls.length;
+    for (let tick = 0; tick < 20; tick++) {
+      setup.advance(1_000);
+      await recovered.host.runOnce();
+    }
+    expect(inputSource).toHaveBeenCalledTimes(3);
+    expect(setup.gateway.pollJobs.mock.calls.length - polls).toBe(17);
+    expect(setup.logs.filter((code) => code === "job_inputs_not_found")).toHaveLength(3);
+    expect(await setup.diskRecords()).toEqual(before);
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+    expect(setup.sentData).toEqual([]);
+  });
+
+  it("A3: a submit_attempted unit still blocks polling and claiming on every tick", async () => {
+    const setup = await fixture();
+    const original = setup.journal.append.bind(setup.journal);
+    vi.spyOn(setup.journal, "append").mockImplementation(async (...args) => {
+      await original(...args);
+      if (args[1] === "submit_attempted") throw new Error("crash");
+    });
+    expect(await finish(setup)).toMatchObject({ kind: "halted" });
+    const recovered = await restart(setup);
+    const polls = setup.gateway.pollJobs.mock.calls.length;
+    for (let tick = 0; tick < 3; tick++) {
+      setup.advance(1_000);
+      expect(await recovered.host.runOnce()).toMatchObject({ kind: "job", jobId, state: "submit_indeterminate" });
+    }
+    expect(setup.gateway.pollJobs).toHaveBeenCalledTimes(polls);
+    expect(recovered.broadcaster.readBack).toHaveBeenCalledTimes(3);
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+  });
+
+  it("A3: a persistent caps_exceeded still stalls polling and claiming on every backing-off tick, and retries once per backoff", async () => {
+    const setup = await fixture();
+    setup.broadcaster.submit.mockResolvedValue({ code: "caps_exceeded", cap: "gasCap" });
+    expect(await finish(setup)).toMatchObject({ state: "receipt_stored", waitMs: 5_000 });
+    const before = await setup.diskRecords();
+    const polls = setup.gateway.pollJobs.mock.calls.length;
+    setup.advance(1_000);
+    expect(await setup.host.runOnce()).toEqual({ kind: "backoff", jobId, waitMs: 4_000 });
+    for (let tick = 0; tick < 19; tick++) {
+      setup.advance(1_000);
+      await setup.host.runOnce();
+    }
+    expect(setup.gateway.pollJobs).toHaveBeenCalledTimes(polls);
+    expect(setup.broadcaster.submit).toHaveBeenCalledTimes(3);
+    expect(setup.logs.filter((code) => code === "submit_caps_exceeded")).toHaveLength(3);
+    expect(await setup.diskRecords()).toEqual(before);
+    expect(setup.operatorKey.signSubmitEvidenceTx).not.toHaveBeenCalled();
+    expect(setup.sentData).toEqual([]);
+  });
+
+  it("A3: while the first recovered unit backs off on a refusal that never passes, the next ready unit gets its attempt and is submitted", async () => {
+    const setup = await fixture();
+    setup.gateway.postReceipt.mockResolvedValueOnce({ ok: false, code: "unavailable", status: 503 });
+    expect(await finish(setup)).toMatchObject({ state: "package_built" });
+    const otherJob = "a:package-built";
+    const pkg = await setup.diskPackage();
+    await setup.journal.append(otherJob, "evidence_stored");
+    await setup.journal.savePackage(otherJob, pkg);
+    await setup.journal.append(otherJob, "package_built", undefined, {
+      packageDigest: pkg.packageDigest, evidenceBlockHash: pkg.evidenceBlockHash });
+    const original = setup.gateway.postReceipt.getMockImplementation()!;
+    let mainRetries = 0;
+    setup.gateway.postReceipt.mockImplementation(async (...args) => {
+      const [id] = args;
+      if (id === otherJob) return { ok: false as const, code: "receipt_refused" as const, status: 422, sub: "package_challenge_refused" as const };
+      if (id === jobId && mainRetries++ === 0) return { ok: false as const, code: "unavailable" as const, status: 503 };
+      return original(...args);
+    });
+    const recovered = await restart(setup);
+    for (let tick = 0; tick < 10; tick++) {
+      setup.advance(1_000);
+      await recovered.host.runOnce();
+    }
+    expect(await states(setup)).toEqual(completedStates);
+    expect(setup.sentData).toHaveLength(1);
+    expect((await recovered.journal.read(otherJob)).map((entry) => entry.state)).toEqual(["evidence_stored", "package_built"]);
+    expect(setup.gateway.postReceipt.mock.calls.filter(([id]) => id === otherJob)).toHaveLength(2);
+    expect(setup.gateway.postReceipt.mock.calls.filter(([id]) => id === jobId)).toHaveLength(3);
+    expect(recovered.broadcaster.submit).toHaveBeenCalledTimes(1);
+    expect(setup.logs).toContain("package_challenge_refused");
+  });
+});
+
+describe("rehearsal envelope and restart promises (r5d F3)", () => {
+  it("P1 a rehearsal relays an unsigned tagged envelope, never delegates, and journals only a public open record", async () => {
+    const setup = await fixture({ simulated: true, realMode: false });
+    expect(await finish(setup)).toMatchObject({ state: "evidence_stored" });
+    const posted = setup.gateway.postRelayEvidence.mock.calls[0][1];
+    expect(Object.keys(posted).sort()).toEqual(["bundleHash", "events"]);
+    expect(posted.events.length).toBeGreaterThan(0);
+    expect(posted.events.every((event) => event.source.simulated === true)).toBe(true);
+    expect(posted.bundleHash).toBe(await hashBundle(posted.events));
+    expect(await setup.journal.readBundle(jobId)).toEqual(posted);
+    expect(setup.deviceKey.signDelegation).not.toHaveBeenCalled();
+    noSubmitSignatures(setup);
+    const dir = setup.journal.sessionDirectory(jobId);
+    const files = await readdir(dir);
+    expect(files).toEqual(["00000000.json"]);
+    const record = JSON.parse(await readFile(join(dir, files[0]), "utf8"));
+    expect(record.record.kind).toBe("open");
+    expect(Object.keys(record.record.binding).sort()).toEqual(
+      ["challengeNonce", "devicePublicKey", "expiresAt", "fundedAt", "jobId", "parentAgentId", "settlementUnitId"]);
+  });
+
+  it("P2 a later real-mode sending run never packages, posts a receipt for, reads back or submits the rehearsal unit", async () => {
+    const setup = await fixture({ simulated: true, realMode: false });
+    await finish(setup);
+    const before = await setup.journal.read(jobId);
+    expect(before.at(-1)).toMatchObject({ state: "evidence_stored", code: "submit_disabled" });
+    setup.adapter.source.simulated = false;
+    const recovered = await restart(setup, { realMode: true });
+    expect(await recovered.host.runOnce()).toMatchObject({ kind: "idle" });
+    expect(await recovered.host.runOnce()).toMatchObject({ kind: "idle" });
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+    expect(recovered.broadcaster.readBack).not.toHaveBeenCalled();
+    expect(setup.gateway.postReceipt).not.toHaveBeenCalled();
+    expect(setup.operatorKey.signD1).not.toHaveBeenCalled();
+    expect(setup.inputSource).toHaveBeenCalledTimes(1);
+    expect(setup.gateway.postRelayEvidence).toHaveBeenCalledTimes(1);
+    expect(await recovered.journal.read(jobId)).toEqual(before);
+  });
+
+  it("P2b an unfinalized rehearsal session does not block a later job on another unit in a real-mode restart", async () => {
+    const setup = await fixture({ simulated: true, realMode: false });
+    await finish(setup);
+    const before = await setup.journal.read(jobId);
+    const sessionFiles = await readdir(setup.journal.sessionDirectory(jobId));
+    const newJob = "job:after-rehearsal";
+    const newInputs = { ...setup.inputs, unit: { ...setup.inputs.unit, settlementUnitId: word() } };
+    setup.inputSource.mockResolvedValue({ ok: true, value: newInputs });
+    setup.gateway.pollJobs.mockResolvedValue({ ok: true, value: { jobs: [{ jobId: newJob, status: "queued" }], stop: { proceed: true }, foreignJobsDropped: 0, truncated: false } });
+    const print = vi.fn(async () => ({ success: false, events: [], durationMs: 0 }));
+    setup.adapter.source.simulated = false;
+    const recovered = await restart(setup, { realMode: true, print });
+    expect(await recovered.host.runOnce()).toMatchObject({ jobId: newJob, state: "print_failed" });
+    expect(print).toHaveBeenCalledTimes(1);
+    expect(await recovered.journal.read(jobId)).toEqual(before);
+    expect(await readdir(recovered.journal.sessionDirectory(jobId))).toEqual(sessionFiles);
+    expect((await readdir(recovered.journal.sessionDirectory(newJob))).length).toBe(1);
+  });
+
+  it.each([true, false])("P3 a rehearsal lost after bundle_saved is interrupted on restart (realMode %s) and never re-posted or submitted", async (realMode) => {
+    const setup = await fixture({ simulated: true, realMode: false });
+    const original = setup.journal.append.bind(setup.journal);
+    vi.spyOn(setup.journal, "append").mockImplementation(async (...args) => {
+      await original(...args);
+      if (args[1] === "bundle_saved") throw new Error("simulated process loss");
+    });
+    expect(await finish(setup)).toMatchObject({ kind: "halted" });
+    expect((await states(setup)).at(-1)).toBe("bundle_saved");
+    if (realMode) setup.adapter.source.simulated = false;
+    const recovered = await restart(setup, { realMode });
+    await recovered.host.runOnce();
+    await recovered.host.runOnce();
+    expect((await recovered.journal.read(jobId)).map((r) => r.state).slice(-2)).toEqual(["bundle_saved", "interrupted"]);
+    expect(setup.gateway.postRelayEvidence).not.toHaveBeenCalled();
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+    expect(recovered.broadcaster.readBack).not.toHaveBeenCalled();
+    expect(setup.operatorKey.signD1).not.toHaveBeenCalled();
   });
 });

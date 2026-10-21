@@ -123,6 +123,63 @@ describe("job journal", () => {
     },
   );
 
+  it.each([["empty", ""], ["torn", '{"record":{"kind":"open"']] as const)(
+    "R2 C1: another legacy job's %s first session record binds no unit, so a new unit is reserved and no journal changes", async (_kind, bytes) => {
+      const journal = createJobJournal(dir, time);
+      const unit = publicWord();
+      await journal.append("legacy-job", "interrupted");
+      await fs.mkdir(journal.sessionDirectory("legacy-job"), { mode: 0o700 });
+      await fs.writeFile(join(journal.sessionDirectory("legacy-job"), "00000000.json"), bytes, { mode: 0o600 });
+      const before = await fs.readFile(journal.journalPath("legacy-job"), "utf8");
+      expect(await journal.reserveUnit("new-job", unit)).toBe(true);
+      expect(await fs.readFile(journal.journalPath("legacy-job"), "utf8")).toBe(before);
+      expect(await journal.has("new-job")).toBe(false);
+      const marker = join(journal.directory, `.unit-${unit.slice(2)}.used.json`);
+      expect(JSON.parse(await fs.readFile(marker, "utf8")))
+        .toEqual({ version: 1, jobId: "new-job", settlementUnitId: unit });
+    },
+  );
+
+  it("R2: a job that a valid reservation marker names is never rescanned, so its corrupt artifact cannot block a new unit", async () => {
+    const journal = createJobJournal(dir, time);
+    expect(await journal.reserveUnit("marked-job", publicWord())).toBe(true);
+    await journal.append("marked-job", "bundle_saved");
+    await fs.writeFile(journal.bundlePath("marked-job"), '{"events":', { mode: 0o600 });
+    expect(await journal.reserveUnit("new-job", publicWord())).toBe(true);
+  });
+
+  it.each(["wrong-version", "extra-key", "other-unit"] as const)(
+    "R2: a %s marker names no job, so that job keeps the legacy check", async (kind) => {
+      const journal = createJobJournal(dir, time);
+      await journal.initialize();
+      const unit = publicWord();
+      const invalid = kind === "wrong-version" ? { version: 2, jobId: "marked-job", settlementUnitId: unit }
+        : kind === "extra-key" ? { version: 1, jobId: "marked-job", settlementUnitId: unit, extra: true }
+          : { version: 1, jobId: "marked-job", settlementUnitId: publicWord() };
+      await fs.writeFile(join(journal.directory, `.unit-${unit.slice(2)}.used.json`), JSON.stringify(invalid), { mode: 0o600 });
+      await journal.append("marked-job", "bundle_saved");
+      await fs.writeFile(journal.bundlePath("marked-job"), '{"events":', { mode: 0o600 });
+      const newUnit = publicWord();
+      await expect(journal.reserveUnit("new-job", newUnit)).rejects.toMatchObject({ code: "journal_invalid" });
+      await fs.writeFile(journal.bundlePath("marked-job"), JSON.stringify({ events: [] }));
+      expect(await journal.reserveUnit("new-job", newUnit)).toBe(true);
+    },
+  );
+
+  it.each(["0xBAD", `0x${"A".repeat(64)}`])(
+    "R2 X14: a legacy first session record that parses with the malformed unit id %s still fails closed", async (settlementUnitId) => {
+      const journal = createJobJournal(dir, time);
+      const unit = publicWord();
+      await journal.append("legacy-job", "interrupted");
+      await fs.mkdir(journal.sessionDirectory("legacy-job"), { mode: 0o700 });
+      await fs.writeFile(join(journal.sessionDirectory("legacy-job"), "00000000.json"),
+        JSON.stringify({ record: { kind: "open", binding: { settlementUnitId } } }), { mode: 0o600 });
+      await expect(journal.reserveUnit("new-job", unit)).rejects.toMatchObject({ code: "journal_invalid" });
+      await expect(fs.stat(join(journal.directory, `.unit-${unit.slice(2)}.used.json`)))
+        .rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
+
   it("rejects nonlowercase bytes32 unit ids with a closed code before publishing a marker", async () => {
     const journal = createJobJournal(dir, time);
     const unit = publicWord();
@@ -587,4 +644,25 @@ describe("job journal", () => {
     });
     await expect(createJobJournal(dir, time).initialize()).rejects.toMatchObject({ code: "data_dir_locked" });
   });
+  it.each([
+    "spend_not_approved", "idempotency_conflict", "reconciliation_required",
+    "kernel_unowned", "kernel_mismatch", "job_not_active",
+    "carrier_record_ownership_mismatch", "carrier_not_configured",
+    "missing_fields", "invalid_parcel", "invalid_document_hash",
+    "provider_mode_not_production", "weight_exceeds_ceiling", "rate_exceeds_ceiling",
+  ])("F5: refuses a record carrying the parked carrier code %s as journal_invalid", async (code) => {
+    const journal = createJobJournal(dir, time);
+    await journal.initialize();
+    await fs.writeFile(journal.journalPath(jobId), `${JSON.stringify({ at, jobId, state: "abandoned", code })}\n`, { mode: 0o600 });
+    await expect(journal.read(jobId)).rejects.toMatchObject({ code: "journal_invalid" });
+  });
+
+  it.each(["receipt_exists", "receipt_signer_unavailable", "kernel_emergency_stopped"])(
+    "F5: still reads a record carrying the live receipt code %s", async (code) => {
+      const journal = createJobJournal(dir, time);
+      await journal.initialize();
+      await fs.writeFile(journal.journalPath(jobId), `${JSON.stringify({ at, jobId, state: "abandoned", code })}\n`, { mode: 0o600 });
+      expect(await journal.read(jobId)).toEqual([{ at, jobId, state: "abandoned", code }]);
+    },
+  );
 });
