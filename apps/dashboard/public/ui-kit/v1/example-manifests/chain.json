@@ -20,14 +20,6 @@
             "minAssuranceTier": 1,
             "optimizeFor": "price",
             "description": "Hot pizza prepared, then delivered by courier."
-          },
-          "execute": {
-            "id": "exec-pizza-courier",
-            "label": "Execute chain",
-            "kind": "post",
-            "path": "/api/compose/execute",
-            "confirm": "approval",
-            "intentText": "pcc: execute the pizza + courier value chain"
           }
         }
       ]
