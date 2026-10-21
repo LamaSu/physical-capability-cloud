@@ -24,6 +24,7 @@
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { executionPhaseOf, type Result } from "@pcc/spec";
+import { and, asc, eq, schema } from "@pcc/store";
 import { getRepos, getStore } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
@@ -33,6 +34,11 @@ import { v4 as uuidv4 } from "uuid";
 import { writeJobStatusGuarded, SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
 import { authorityOf, isAnonymous, refuseKernelAction, AUTHENTICATION_REQUIRED, type KernelAction } from "../auth/kernel-authority.js";
 import { emergencyStopState } from "./device-relay.js";
+import { projectFundingStatus, type FundingStatusDTO } from "../readmodels/funding-status.js";
+import { fundingRecordStore } from "../services/funding-record-port.js";
+import { escrowForJob } from "../services/scope-acceptance.js";
+import { paidScopeActivationTerms } from "../services/paid-scope-activation-terms.js";
+import { testnetBuyerAllowance, type TestnetBuyerAllowance } from "../services/funding-binding.js";
 
 function isNonEmptyId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
@@ -89,6 +95,51 @@ interface JobStatusBody {
 }
 
 // ---------------------------------------------------------------------------
+// Job funding: synchronous readmodel, per listed job (never a chain query).
+// ---------------------------------------------------------------------------
+
+/** One listed job's buyer funding, to the extent the gateway could read it. */
+type OperatorJobFunding =
+  | { read: "ok"; scopes: FundingStatusDTO[] }
+  | { read: "failed" };
+
+/** Without a verification record there is no reason to read deployment terms or buyer config. */
+const NO_RECORD_ALLOWANCE: TestnetBuyerAllowance = { testnetOnly: true, buyers: undefined };
+
+/** Read only this kernel's scopes for this listed job; a failure does not affect other jobs. */
+function fundingForListedJob(jobId: string, kernelId: string, asOf: string): OperatorJobFunding {
+  try {
+    const db = getStore().db;
+    // One scoped query per listed job; order ties by id to make the answer deterministic.
+    const rows = db.select().from(schema.executionScopes).where(and(
+      eq(schema.executionScopes.kernelId, kernelId),
+      eq(schema.executionScopes.jobId, jobId),
+    )).orderBy(asc(schema.executionScopes.createdAt), asc(schema.executionScopes.id)).all();
+    const scopes = rows.map((scope) => {
+      const record = fundingRecordStore()?.findByScope(db, scope.id) ?? null;
+      if (record === null) {
+        // fundingBindingOf checks no_record first. No escrow, deployment, or opt-in read.
+        return projectFundingStatus(scope, null, null, null, asOf, NO_RECORD_ALLOWANCE);
+      }
+      const escrow = escrowForJob(jobId) ?? null;
+      const terms = paidScopeActivationTerms({ id: scope.id, jobId: scope.jobId, kernelId: scope.kernelId });
+      return projectFundingStatus(
+        scope,
+        record,
+        escrow ? { contractAddress: escrow.contractAddress, payer: escrow.payer, status: escrow.status } : null,
+        terms.expectedChainId,
+        asOf,
+        testnetBuyerAllowance(terms),
+      );
+    });
+    return { read: "ok", scopes };
+  } catch {
+    // Never report an invented time or state, and never log a job, scope or error value.
+    return { read: "failed" };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Route plugin
 // ---------------------------------------------------------------------------
 
@@ -102,7 +153,16 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
    *   kernelId  — filter by kernel (required)
    *   status    — filter by status (default: "queued")
    *
-   * Returns { jobs: Job[], emergencyStop: "clear" | "stopped" | "unavailable" }
+   * Returns { jobs: Job[], emergencyStop: "clear" | "stopped" | "unavailable" }.
+   * Each listed job gains funding: { read: "ok", scopes: FundingStatusDTO[] } or
+   * { read: "failed" } ONLY for a decide-strength caller (admin or a proven wallet
+   * matching this kernel's operator). Operate-only callers get the original job shape.
+   * A host takes fundedAt and operator only when funding.read is "ok" and exactly
+   * one scope is funded_verified with a non-null verification. It also checks that
+   * operator matches its operator wallet and escrowAddress/chainId match its own
+   * job-unit binding. Absent, failed or ambiguous funding means no fundedAt and
+   * no GAP-7 evidence session; the host never estimates a block timestamp.
+   * Funding does not authorize execution: the claim route decides whether a job runs.
    */
   app.get<{
     Querystring: { kernelId?: string; status?: string };
@@ -122,8 +182,15 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
     const result = await jobFacade.list({ kernelId, status });
     if (!result.success) return { jobs: [], emergencyStop };
     const jobs = result.data.items ?? [];
+    const listedJobs = emergencyStop === "clear" ? jobs : jobs.filter((job) => executionPhaseOf(job.status) !== "queued");
+    // The poll itself permits operate, but its funding details require decide.
+    // Do not read funding for claimed-only callers or for withheld queued jobs.
+    if (refuseKernelAction(req, authorityOf(req), kernelId, "decide") !== null) {
+      return { jobs: listedJobs, emergencyStop };
+    }
+    const asOf = new Date().toISOString(); // Once per successful poll, after the facade returns.
     return {
-      jobs: emergencyStop === "clear" ? jobs : jobs.filter((job) => executionPhaseOf(job.status) !== "queued"),
+      jobs: listedJobs.map((job) => ({ ...job, funding: fundingForListedJob(job.id, kernelId, asOf) })),
       emergencyStop,
     };
   });

@@ -27,12 +27,12 @@
  *     caller read the sources, not a change time.
  *   - No mock fallback: a scope that went live on a mock escrow has no record, so it is `unknown`.
  *
- * No route serves this yet (none sits next to an existing readmodels route trivially: a read needs
- * its own object authorization, the buyer, the kernel's operator or the admin), so it is the
- * projection only. A route that serves it supplies the same testnet-only flag and buyer allowance
- * as reconcile (TestnetBuyerAllowance), together with paidScopeActivationTerms(scope).expectedChainId as
- * the expected chain: the input the accept route gives reconcilePaidScope, so the two read the same
- * chain. It reads no clock, database or environment: the same inputs give the same DTO.
+ * GET /api/operator/jobs serves this projection only for a decide-strength caller (admin or
+ * proven wallet matching the polled kernel's operator), after the job and scope kernel filters.
+ * When a record exists, the route supplies the testnet-only flag and buyer allowance from
+ * reconcile's terms, and paidScopeActivationTerms(scope).expectedChainId for the expected chain.
+ * Without a record it supplies nulls and an empty allowance without reading those sources.
+ * This projection itself reads no clock, database or environment: equal inputs give equal DTOs.
  */
 import {
   activationRefusal,
@@ -205,9 +205,17 @@ export interface FundingStatusDTO {
    */
   verification: {
     escrowAddress: string;
+    /** The escrow's operator, as read on chain, a nonzero 0x address. */
+    operator: string;
     chainId: number;
     blockNumber: string;
     blockHash: string;
+    /** The block holding fund()'s UnitFunded logs, as a lossless uint64 decimal string. */
+    fundingBlockNumber: string;
+    /** The hash of the funding block, 0x and 64 hex digits. */
+    fundingBlockHash: string;
+    /** Evidence's fundedAt (#7537): the funding block's timestamp, in whole Unix seconds. */
+    fundedAt: number;
     verifierVersion: string;
     verifiedAt: string;
   } | null;
@@ -299,9 +307,13 @@ export function projectFundingStatus(
       binding === "bound" && record !== null
         ? {
             escrowAddress: record.escrowAddress,
+            operator: record.operator,
             chainId: record.chainId,
             blockNumber: record.blockNumber,
             blockHash: record.blockHash,
+            fundingBlockNumber: record.fundingBlockNumber,
+            fundingBlockHash: record.fundingBlockHash,
+            fundedAt: record.fundedAt,
             verifierVersion: record.verifierVersion,
             verifiedAt: record.verifiedAt,
           }
