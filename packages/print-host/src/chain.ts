@@ -68,6 +68,17 @@ const knownReverts = new Set<EvidenceRefusalCode>([
   "TooLateForEvidence", "ZeroEvidenceDigest", "UnitNotFound", "Reentrancy",
 ]);
 
+/**
+ * Decoded send-time errors that release the attempt's nonce. Each is permanent
+ * once observed, so a forwarded transaction can only revert. Any other decoded
+ * selector (EvidenceNotCommitted, ZeroEvidenceDigest, UnitNotFound or
+ * Reentrancy) proves no such thing: it reads back and keeps the nonce hold, as
+ * unknown_revert does.
+ */
+const sendTimeRefusals = new Set<EvidenceRefusalCode>([
+  "OnlyOperator", "NotActive", "TooLateForEvidence", "EvidenceAlreadyCommitted",
+]);
+
 /** Decode data, never messages/details or server-supplied error names. */
 function revertCode(error: unknown): EvidenceRefusalCode | undefined {
   try {
@@ -297,7 +308,7 @@ export function createEvidenceBroadcaster(
       if (sentHash.toLowerCase() !== transactionHash) return { code: "indeterminate", transactionHash };
     } catch (error) {
       const reason = revertCode(error);
-      if (reason !== undefined && knownReverts.has(reason)) {
+      if (reason !== undefined && sendTimeRefusals.has(reason)) {
         // A decoded refusal releases the nonce, but the unit remains one-shot.
         attempt.released = true;
         return reconcileRefusal(client, input, expected, transactionHash, reason);

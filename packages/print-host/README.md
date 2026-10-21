@@ -310,6 +310,8 @@ in the URI are refused. The defaults are a 2000 ms poll interval, a 20000 ms
 cancel-confirm deadline, a 15000 ms request timeout, a 120000 ms Print-Job
 timeout, a 32 MiB maximum document and the `application/pdf` document format.
 Printer initialization errors exit with the closed code `adapter_init_failed`.
+Use the printer's IP address or an ASCII (punycode) hostname; the port must be
+1-65535 and the canonical URI at most 1023 octets.
 
 Testnet-only is a policy enforced on the configuration's `chainId`. The operator
 EOA has the same address on every chain: never fund it on mainnet. The evidence
@@ -361,7 +363,8 @@ Real mode requires positive `maxFeePerGasCap`, `maxPriorityFeePerGasCap`, and
 `gasCap` before startup. Use `--no-submit` explicitly to print and relay without
 package submission. A unit first processed with sending disabled (`--no-submit`,
 missing caps, `realMode: false`, or no broadcaster or keys) ends
-`evidence_stored` with `submit_disabled` (or `package_inputs_missing` for an
+`evidence_stored` with `submit_disabled` (or, except under `--no-submit` or in a
+simulated `realMode: false` rehearsal, `package_inputs_missing` for an
 incomplete manifest); a later sending run never settles it.
 All run logs contain closed codes only.
 
@@ -761,16 +764,20 @@ The closed outcomes are `submitted`, `already_committed`, `conflict`,
 read-back means `already_committed`; a different stored commitment means
 `conflict`. After a send with no confirmed receipt in time, `indeterminate`
 requires caller reconciliation by read-back. Never automatically resend it.
-A send-time refusal requires a decoded escrow error. Undecoded hex data or a
-transport error is `indeterminate` with the transaction hash unless read-back
-shows a commitment. Every post-send refusal includes the transaction hash for
+A send-time refusal requires a decoded `OnlyOperator`, `NotActive`,
+`TooLateForEvidence` or `EvidenceAlreadyCommitted` escrow error. Any other
+decoded escrow error (`EvidenceNotCommitted`, `ZeroEvidenceDigest`,
+`UnitNotFound` or `Reentrancy`), undecoded hex data or a transport error is
+`indeterminate` with the transaction hash unless read-back shows a commitment.
+Every post-send refusal includes the transaction hash for
 journaling. Reconciliation returns `already_committed` or `conflict` for a
 committed unit, and an unreadable unit is `indeterminate`.
 The broadcaster serializes submissions within its instance for operator nonce
 safety and remembers sent units, including ambiguous sends. The run loop's
 durable `submit_attempted` record preserves the no-resend rule across process
 restarts.
-Within an instance, a decoded send-time escrow error releases that attempt's
+Within an instance, a decoded send-time `OnlyOperator`, `NotActive`,
+`TooLateForEvidence` or `EvidenceAlreadyCommitted` releases that attempt's
 nonce from both cross-unit checks, whatever its read-back outcome, while the
 unit's own latch remains. Otherwise, `submit` refuses another unit as
 `unreconciled_transaction` until each earlier transaction it sent has a receipt
@@ -814,11 +821,14 @@ a synthetic journal at least ten times the r8 reference's size.
 
 When a toolkit change makes a GAP test pass, the same PR changes that test's `gap(` to `it(`; the repro is then that fix's acceptance test.
 
+GAP-1 to GAP-6 and GAP-8 are fixed: each is a plain `it` (as of master 23bdab59),
+and only GAP-7 is still registered with `gap(`.
+
 Paths and line numbers below refer to the supplied toolkit HEAD, a57ca6e1.
 
 | Test name | What the host called | What it needs | Toolkit lines (path:line) |
 | --- | --- | --- | --- |
-| GAP-1 real mode never simulates | `createIppPrintKernel({mockMode:false, uri:"ipp://127.0.0.1:9/ipp/print", kernelId, deviceId}).print({documentData, ...})` | Refuse unavailable real printing, or record no simulated or mock events. Reporting a downgrade is not enough: simulated evidence cannot settle. The current repro fails on its own assertion only because the IPP mock finishes inside its 1 s timeout. | `packages/kernel/src/adapters/ipp-adapter.ts:130`, `:136`, `:143`, `:432`; `packages/kernel/src/printer-job.ts:352` |
+| GAP-1 real mode never simulates | `createIppPrintKernel({mockMode:false, uri:"ipp://127.0.0.1:9/ipp/print", kernelId, deviceId}).print({documentData, ...})` | Refuse unavailable real printing, or record no simulated or mock events. Reporting a downgrade is not enough: simulated evidence cannot settle. | `packages/kernel/src/adapters/ipp-adapter.ts:130`, `:136`, `:143`, `:432`; `packages/kernel/src/printer-job.ts:352` |
 | GAP-2 a print's evidence holds only its own job's events (N106) | Two sequential `runPrintJob` calls sharing one adapter and emitter; `emitter.getEvents(A.jobId, A.stepId)` after B | A holds exactly its three events, each with `ippJobId:101`, and contains none of B's events. | `packages/kernel/src/printer-job.ts:193`, `:208`; `packages/kernel/src/adapters/types.ts:59` |
 | GAP-3 a reported failure returns a SIGNED execution_failed bundle | `runPrintJob` followed by adapter `execution_failed {ippJobId, state:"canceled"}` | A bundle containing failure and no completion, with a verifiable Ed25519 signature over its bundle hash. | `packages/kernel/src/printer-job.ts:256`, `:269` |
 | GAP-4 a timeout cancels the device job and returns a SIGNED execution_failed bundle | `runPrintJob({timeoutMs:300, ...})`; advance exactly 300 ms, then await real async work; also use a silent printer | One or more cancels, all for the print's own id (never `"stop"`); return a signed failure bundle with no completion and exactly one `execution_failed` with `origin:"device"`. A reporting printer reaches state 7; the silent printer reports `reason:"cancel-unconfirmed"` at its deadline and permits a following print instead of a busy refusal with `reason:"quiescing"`. The result has `failure:{kind:"timeout", origin:"device"}` and truthy `cancelRequested`. Assumes a contract-honouring adapter: these GAPs do not test the real IppAdapter's own origin stamping or cancel-confirm deadline. | `packages/kernel/src/printer-job.ts:230`, `:240`, `:248`; `packages/kernel/src/adapters/ipp-adapter.ts:231`, `:477-481`, `:717-725` |
@@ -846,9 +856,10 @@ PRINT_HOST_SHOW_GAPS=1 pnpm --filter @pcc/print-host test
 pnpm --filter @pcc/print-host typecheck
 ```
 
-The default run has nine flipped expected-failure registrations; the SHOW run
-reports only GAP-1 and GAP-7 as actual unmet assertions. GAP-5 has two
-cancel/event orders, and GAP-4 and GAP-5 each have a silent-printer variant.
+The default run has one expected-failure registration, GAP-7, which passes as
+`it.fails` while the toolkit lacks the unit-session API; the SHOW run reports
+only GAP-7. GAP-5 has two cancel/event orders, and GAP-4 and GAP-5 each have a
+silent-printer variant.
 A root `pnpm test` may drop `PRINT_HOST_SHOW_GAPS` under turbo's strict environment
 mode; use the `--filter` commands above.
 Typecheck `test/` separately as well: the production tsconfig deliberately excludes

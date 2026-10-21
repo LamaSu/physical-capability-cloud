@@ -1,11 +1,11 @@
-import { randomBytes } from "node:crypto";
+import { createPublicKey, randomBytes, verify } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { verifyBundleSignature } from "@pcc/kernel-sdk";
-import type { EvidenceBundle } from "@pcc/spec";
+import { sessionKeyDelegationPreimage, type EvidenceBundle, type SessionAction } from "@pcc/spec";
 import {
   IPP_OPERATION, IPP_TAG, booleanValue, decodeIppMessage, encodeIppMessage,
   enumValue, integerValue, keywordValue, type IppGroup, type IppMessage,
@@ -129,6 +129,19 @@ describe("real IPP host loopback", () => {
       expect(posted!.kernelSignature?.algorithm).toBe("ed25519");
       const sessionKey = Buffer.from(posted!.sessionKeyAuthorization!.publicKey.replace(/^0x/, ""), "hex");
       expect(verifyBundleSignature(posted as EvidenceBundle, sessionKey)).toBe(true);
+      const deviceKey = Buffer.from(generated.identity.devicePublicKey.replace(/^0x/, ""), "hex");
+      expect(verifyBundleSignature(posted as EvidenceBundle, deviceKey),
+        "the device key never signs a bundle").toBe(false);
+      const devicePublicKey = createPublicKey({
+        key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), deviceKey]),
+        format: "der", type: "spki",
+      });
+      const authorization = posted!.sessionKeyAuthorization!;
+      const delegation = { ...authorization, publicKey: sessionKey,
+        parentAgentId: authorization.parentAgentId as Parameters<typeof sessionKeyDelegationPreimage>[0]["parentAgentId"],
+        scope: { ...authorization.scope, allowedActions: authorization.scope.allowedActions as SessionAction[] } };
+      expect(verify(null, sessionKeyDelegationPreimage(delegation), devicePublicKey,
+        Buffer.from(authorization.parentSignature.replace(/^0x/, ""), "hex"))).toBe(true);
       const records = (await readFile(join(dataDir, "journal", "loopback-job.jsonl"), "utf8"))
         .trim().split("\n").map(line => JSON.parse(line));
       expect(records.at(-1)).toMatchObject({ state: "evidence_stored", code: "submit_disabled" });
