@@ -1,0 +1,660 @@
+{
+  "_comment": "Version-1 template goldens for the five agreement examples. Hashes pin the four template identity fields and each non-default agreement; amounts are USDC base units.",
+  "templates": {
+    "spare-printer": {
+      "templateId": "spare-printer",
+      "version": 1,
+      "slots": [
+        {
+          "name": "buyer",
+          "kind": "party",
+          "default": "dana",
+          "paths": [
+            "/parties/0/partyId",
+            "/payer"
+          ]
+        },
+        {
+          "name": "printerOwner",
+          "kind": "party",
+          "default": "sam",
+          "paths": [
+            "/clauses/1/to/party",
+            "/parties/1/partyId"
+          ]
+        },
+        {
+          "name": "printUnit",
+          "kind": "unit",
+          "default": "print",
+          "paths": [
+            "/clauses/1/appliesTo/units/0",
+            "/units/0/unitRef"
+          ]
+        },
+        {
+          "name": "printPrice",
+          "kind": "amount",
+          "default": "25000000",
+          "paths": [
+            "/units/0/gross"
+          ]
+        }
+      ],
+      "templateHash": "0xd322bbf8ce4e002cc115e9d2727629256688a5c2be0d47588029161362479ec0",
+      "defaultAgreementHash": "0xe3441aee9bc6d4a3f313af5c316a9bdf1a55a737d54254fa1af79ecc29b6465f",
+      "nonDefault": {
+        "params": {
+          "printPrice": "30000000"
+        },
+        "agreementHash": "0xcaafb59c4dae8950172f99d1624262965551f339016bf4bd92cb861459100f60",
+        "units": {
+          "print": {
+            "gross": "30000000",
+            "fee": "705000",
+            "net": "29295000",
+            "payouts": [
+              [
+                "0x00000000000000000000000000000000005a0002",
+                "29175000"
+              ],
+              [
+                "0x00000000000000000000000000000000009a1a03",
+                "120000"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "print-and-mail": {
+      "templateId": "print-and-mail",
+      "version": 1,
+      "slots": [
+        {
+          "name": "buyer",
+          "kind": "party",
+          "default": "buyer",
+          "paths": [
+            "/parties/0/partyId",
+            "/payer"
+          ]
+        },
+        {
+          "name": "composer",
+          "kind": "party",
+          "default": "orbit",
+          "paths": [
+            "/clauses/4/to/party",
+            "/parties/1/partyId"
+          ]
+        },
+        {
+          "name": "printStep",
+          "kind": "unit",
+          "default": "a-print",
+          "paths": [
+            "/clauses/0/appliesTo/units/0",
+            "/units/0/unitRef"
+          ]
+        },
+        {
+          "name": "mailStep",
+          "kind": "unit",
+          "default": "b-mail",
+          "paths": [
+            "/clauses/1/appliesTo/units/0",
+            "/clauses/2/appliesTo/units/0",
+            "/units/1/unitRef"
+          ]
+        },
+        {
+          "name": "printGross",
+          "kind": "amount",
+          "default": "14000000",
+          "paths": [
+            "/units/0/gross"
+          ]
+        },
+        {
+          "name": "mailGross",
+          "kind": "amount",
+          "default": "8000000",
+          "paths": [
+            "/units/1/gross"
+          ]
+        },
+        {
+          "name": "shopPrice",
+          "kind": "amount",
+          "default": "12000000",
+          "paths": [
+            "/clauses/0/rule/amount"
+          ]
+        },
+        {
+          "name": "deliveryPrice",
+          "kind": "amount",
+          "default": "5000000",
+          "paths": [
+            "/clauses/1/rule/amount"
+          ]
+        },
+        {
+          "name": "postageCost",
+          "kind": "amount",
+          "default": "680000",
+          "paths": [
+            "/clauses/2/rule/cost"
+          ]
+        },
+        {
+          "name": "postageMarkupBps",
+          "kind": "bps",
+          "default": 0,
+          "paths": [
+            "/clauses/2/rule/markupBps"
+          ]
+        }
+      ],
+      "templateHash": "0x483945b60677679be1ff0864fe7a550ddd2bc84a983bfdeefbad7a09306e5353",
+      "defaultAgreementHash": "0x7b0314dfe34e3a760af43386aa3a9e6f943088bcf9e27c09b17355806870154e",
+      "nonDefault": {
+        "params": {
+          "mailGross": "9000000",
+          "postageMarkupBps": 500
+        },
+        "agreementHash": "0x6fb46cbaf6853af720cdbbbc635fd1745e0744c6c4dd82e26c95d523a6b9e32d",
+        "units": {
+          "a-print": {
+            "gross": "14000000",
+            "fee": "329000",
+            "net": "13671000",
+            "payouts": [
+              [
+                "0x0000000000000000000000000000000000b17002",
+                "1671000"
+              ],
+              [
+                "0x000000000000000000000000000000000c0a0003",
+                "12000000"
+              ]
+            ]
+          },
+          "b-mail": {
+            "gross": "9000000",
+            "fee": "211500",
+            "net": "8788500",
+            "payouts": [
+              [
+                "0x0000000000000000000000000000000000b17002",
+                "2824500"
+              ],
+              [
+                "0x0000000000000000000000000000000003e10005",
+                "250000"
+              ],
+              [
+                "0x000000000000000000000000000000000c0a1004",
+                "714000"
+              ],
+              [
+                "0x000000000000000000000000000000000c0a1004",
+                "5000000"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "guild-repair": {
+      "templateId": "guild-repair",
+      "version": 1,
+      "slots": [
+        {
+          "name": "homeowner",
+          "kind": "party",
+          "default": "homeowner",
+          "paths": [
+            "/parties/0/partyId",
+            "/payer"
+          ]
+        },
+        {
+          "name": "ana",
+          "kind": "party",
+          "default": "ana",
+          "paths": [
+            "/parties/2/partyId",
+            "/splits/1/members/0/to/party"
+          ]
+        },
+        {
+          "name": "ben",
+          "kind": "party",
+          "default": "ben",
+          "paths": [
+            "/parties/3/partyId",
+            "/splits/1/members/1/to/party"
+          ]
+        },
+        {
+          "name": "cy",
+          "kind": "party",
+          "default": "cy",
+          "paths": [
+            "/parties/4/partyId",
+            "/splits/1/members/2/to/party"
+          ]
+        },
+        {
+          "name": "partsBuyer",
+          "kind": "party",
+          "default": "lee",
+          "paths": [
+            "/clauses/0/to/party",
+            "/parties/5/partyId"
+          ]
+        },
+        {
+          "name": "inspector",
+          "kind": "party",
+          "default": "inspector",
+          "paths": [
+            "/clauses/1/to/party",
+            "/parties/6/partyId"
+          ]
+        },
+        {
+          "name": "repairUnit",
+          "kind": "unit",
+          "default": "repair",
+          "paths": [
+            "/clauses/0/appliesTo/units/0",
+            "/clauses/1/appliesTo/units/0",
+            "/clauses/2/appliesTo/units/0",
+            "/units/0/unitRef"
+          ]
+        },
+        {
+          "name": "repairGross",
+          "kind": "amount",
+          "default": "180010000",
+          "paths": [
+            "/units/0/gross"
+          ]
+        },
+        {
+          "name": "partsCost",
+          "kind": "amount",
+          "default": "42500000",
+          "paths": [
+            "/clauses/0/rule/cost"
+          ]
+        },
+        {
+          "name": "partsMarkupBps",
+          "kind": "bps",
+          "default": 0,
+          "paths": [
+            "/clauses/0/rule/markupBps"
+          ]
+        },
+        {
+          "name": "inspectionBps",
+          "kind": "bps",
+          "default": 150,
+          "paths": [
+            "/clauses/1/rule/bps"
+          ]
+        }
+      ],
+      "templateHash": "0x1060cc2fee576ff6b63692db839afab6f5a9acdf21a6f73c50e21007a84d74b5",
+      "defaultAgreementHash": "0x040c8258a7ff6874397ebebb435fa396de04810cff77262b6d8d08ff9861f248",
+      "nonDefault": {
+        "params": {
+          "repairGross": "200000000",
+          "inspectionBps": 200
+        },
+        "agreementHash": "0x73a2ea44d8f40130f233f27d21bc17c468bb729049b8ce5ead2900743799d583",
+        "units": {
+          "repair": {
+            "gross": "200000000",
+            "fee": "4700000",
+            "net": "195300000",
+            "payouts": [
+              [
+                "0x0000000000000000000000000000000000a0a003",
+                "74400000"
+              ],
+              [
+                "0x0000000000000000000000000000000000be0004",
+                "44640000"
+              ],
+              [
+                "0x0000000000000000000000000000000000c10005",
+                "14880000"
+              ],
+              [
+                "0x00000000000000000000000000000000015e0007",
+                "4000000"
+              ],
+              [
+                "0x0000000000000000000000000000000001ee0006",
+                "42500000"
+              ],
+              [
+                "0x0000000000000000000000000000000007ea5002",
+                "14880000"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "lab-assay": {
+      "templateId": "lab-assay",
+      "version": 1,
+      "slots": [
+        {
+          "name": "client",
+          "kind": "party",
+          "default": "client",
+          "paths": [
+            "/parties/0/partyId",
+            "/payer"
+          ]
+        },
+        {
+          "name": "lab",
+          "kind": "party",
+          "default": "lab",
+          "paths": [
+            "/clauses/0/to/party",
+            "/clauses/3/to/party",
+            "/parties/1/partyId"
+          ]
+        },
+        {
+          "name": "assayUnit",
+          "kind": "unit",
+          "default": "assay",
+          "paths": [
+            "/clauses/0/appliesTo/units/0",
+            "/clauses/3/appliesTo/units/0",
+            "/units/0/unitRef"
+          ]
+        },
+        {
+          "name": "assayGross",
+          "kind": "amount",
+          "default": "400000000",
+          "paths": [
+            "/units/0/gross"
+          ]
+        },
+        {
+          "name": "labRunPrice",
+          "kind": "amount",
+          "default": "320000000",
+          "paths": [
+            "/clauses/0/rule/amount"
+          ]
+        },
+        {
+          "name": "protocolBps",
+          "kind": "bps",
+          "default": 50,
+          "paths": [
+            "/clauses/2/rule/bps"
+          ]
+        }
+      ],
+      "templateHash": "0xedd83932c030c2b021e9539373496dc2cf1030aa3166e5767322c4bdb4ae2663",
+      "defaultAgreementHash": "0x9882e856ecc0ae27de73d047fbead3199b7832c82a1d9b348edc5eb8f2c56dcd",
+      "nonDefault": {
+        "params": {
+          "assayGross": "420000000",
+          "protocolBps": 100
+        },
+        "agreementHash": "0xa174c5fc0adf8d28c41e2c85c18af88368fd8924d2e1936aa6ef86fcceafe3d5",
+        "units": {
+          "assay": {
+            "gross": "420000000",
+            "fee": "9870000",
+            "net": "410130000",
+            "payouts": [
+              [
+                "0x00000000000000000000000000000000001e5006",
+                "4101300"
+              ],
+              [
+                "0x0000000000000000000000000000000001ab0002",
+                "71028700"
+              ],
+              [
+                "0x0000000000000000000000000000000001ab0002",
+                "320000000"
+              ],
+              [
+                "0x0000000000000000000000000000000003a10003",
+                "10500000"
+              ],
+              [
+                "0x000000000000000000000000000000000da7a004",
+                "2700000"
+              ],
+              [
+                "0x000000000000000000000000000000000da7b005",
+                "1800000"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "deck-milestones": {
+      "templateId": "deck-milestones",
+      "version": 1,
+      "slots": [
+        {
+          "name": "homeowner",
+          "kind": "party",
+          "default": "homeowner",
+          "paths": [
+            "/parties/0/partyId",
+            "/payer"
+          ]
+        },
+        {
+          "name": "contractor",
+          "kind": "party",
+          "default": "contractor",
+          "paths": [
+            "/clauses/4/to/party",
+            "/parties/1/partyId"
+          ]
+        },
+        {
+          "name": "lumberYard",
+          "kind": "party",
+          "default": "lumber",
+          "paths": [
+            "/clauses/1/to/party",
+            "/parties/3/partyId"
+          ]
+        },
+        {
+          "name": "insurer",
+          "kind": "party",
+          "default": "insurer",
+          "paths": [
+            "/clauses/2/to/party",
+            "/parties/4/partyId"
+          ]
+        },
+        {
+          "name": "inspector",
+          "kind": "party",
+          "default": "inspector",
+          "paths": [
+            "/clauses/3/to/party",
+            "/parties/5/partyId"
+          ]
+        },
+        {
+          "name": "designStep",
+          "kind": "unit",
+          "default": "m1-design",
+          "paths": [
+            "/clauses/0/appliesTo/units/0",
+            "/units/0/unitRef"
+          ]
+        },
+        {
+          "name": "buildStep",
+          "kind": "unit",
+          "default": "m2-build",
+          "paths": [
+            "/clauses/1/appliesTo/units/0",
+            "/clauses/2/appliesTo/units/0",
+            "/units/1/unitRef"
+          ]
+        },
+        {
+          "name": "inspectionStep",
+          "kind": "unit",
+          "default": "m3-inspect",
+          "paths": [
+            "/clauses/3/appliesTo/units/0",
+            "/units/2/unitRef"
+          ]
+        },
+        {
+          "name": "designGross",
+          "kind": "amount",
+          "default": "800000000",
+          "paths": [
+            "/units/0/gross"
+          ]
+        },
+        {
+          "name": "buildGross",
+          "kind": "amount",
+          "default": "6500000000",
+          "paths": [
+            "/units/1/gross"
+          ]
+        },
+        {
+          "name": "inspectionGross",
+          "kind": "amount",
+          "default": "700000000",
+          "paths": [
+            "/units/2/gross"
+          ]
+        },
+        {
+          "name": "designFee",
+          "kind": "amount",
+          "default": "600000000",
+          "paths": [
+            "/clauses/0/rule/amount"
+          ]
+        },
+        {
+          "name": "lumberCost",
+          "kind": "amount",
+          "default": "3210400000",
+          "paths": [
+            "/clauses/1/rule/cost"
+          ]
+        },
+        {
+          "name": "lumberMarkupBps",
+          "kind": "bps",
+          "default": 0,
+          "paths": [
+            "/clauses/1/rule/markupBps"
+          ]
+        },
+        {
+          "name": "insuranceBps",
+          "kind": "bps",
+          "default": 120,
+          "paths": [
+            "/clauses/2/rule/bps"
+          ]
+        },
+        {
+          "name": "inspectionFee",
+          "kind": "amount",
+          "default": "250000000",
+          "paths": [
+            "/clauses/3/rule/amount"
+          ]
+        }
+      ],
+      "templateHash": "0x71e9bbb72b41ae4414a0de8f52b62168669f4edabc891a3ec2d2896433ed7b75",
+      "defaultAgreementHash": "0x4e26705a390648b0c415945804fde58b3e90ff82f3893a0d76efb50a089362b8",
+      "nonDefault": {
+        "params": {
+          "buildGross": "7000000000",
+          "insuranceBps": 150
+        },
+        "agreementHash": "0x3a1a6d2c78c6fca0c3775ed3e8e4da1d6056e055982f23f80307dfefb1ca8c60",
+        "units": {
+          "m1-design": {
+            "gross": "800000000",
+            "fee": "18800000",
+            "net": "781200000",
+            "payouts": [
+              [
+                "0x000000000000000000000000000000000b1c0102",
+                "181200000"
+              ],
+              [
+                "0x000000000000000000000000000000000de50103",
+                "600000000"
+              ]
+            ]
+          },
+          "m2-build": {
+            "gross": "7000000000",
+            "fee": "164500000",
+            "net": "6835500000",
+            "payouts": [
+              [
+                "0x0000000000000000000000000000000001250105",
+                "105000000"
+              ],
+              [
+                "0x000000000000000000000000000000000b1c0102",
+                "3520100000"
+              ],
+              [
+                "0x000000000000000000000000000000000ced0104",
+                "3210400000"
+              ]
+            ]
+          },
+          "m3-inspect": {
+            "gross": "700000000",
+            "fee": "16450000",
+            "net": "683550000",
+            "payouts": [
+              [
+                "0x00000000000000000000000000000000015e0106",
+                "250000000"
+              ],
+              [
+                "0x000000000000000000000000000000000b1c0102",
+                "433550000"
+              ]
+            ]
+          }
+        }
+      }
+    }
+  }
+}
