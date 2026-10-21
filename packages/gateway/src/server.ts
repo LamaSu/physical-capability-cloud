@@ -400,12 +400,21 @@ export async function createGateway(port = 3200) {
       } as Record<string, unknown>),
     },
   });
-  await app.register(fastifySwaggerUi, {
-    routePrefix: "/docs/api",
-    uiConfig: {
-      docExpansion: "list",
-      deepLinking: true,
-    },
+  await app.register(async (swaggerApp) => {
+    // Swagger's static wildcard serves oauth2-redirect.html, which has inline
+    // JavaScript. The plugin exposes no route config option for its static files.
+    swaggerApp.addHook("onRoute", (route) => {
+      if (route.url === "/docs/api/static/*") {
+        route.config = { ...route.config, cspInlineScripts: true };
+      }
+    });
+    await swaggerApp.register(fastifySwaggerUi, {
+      routePrefix: "/docs/api",
+      uiConfig: {
+        docExpansion: "list",
+        deepLinking: true,
+      },
+    });
   });
 
   // Expose the raw OpenAPI JSON document. PUBLIC — referenced by directory
@@ -930,7 +939,9 @@ export async function createGateway(port = 3200) {
     } catch {
       landingHtml = null;
     }
-    app.get<{ Querystring: { mode?: string } }>("/", async (req, reply) => {
+    app.get<{ Querystring: { mode?: string } }>("/", {
+      config: { cspStaticHtmlPath: landingHtml !== null ? "/landing.html" : "/index.html" },
+    }, async (req, reply) => {
       if (req.query.mode === "agent") {
         reply.header("Cache-Control", "public, max-age=300");
         return reply.type("application/json").send({

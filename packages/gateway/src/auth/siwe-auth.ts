@@ -417,6 +417,12 @@ export async function siweAuthPlugin(app: FastifyInstance) {
           error: "session_required", message: "A valid SIWE session is required to mint a session key",
         });
       }
+      // Credential creation needs the resolved session's explicit bearer proof.
+      if (req.headers.authorization !== `Bearer ${session.token}`) {
+        return reply.status(401).send({
+          error: "session_required", message: "An explicitly carried SIWE session is required to mint a session key",
+        });
+      }
 
       const expiresAt = new Date(Math.min(sessionExpiry, now.getTime() + 12 * 60 * 60 * 1000)).toISOString();
       const { rawKey, record } = getStore().db.transaction((db) => {

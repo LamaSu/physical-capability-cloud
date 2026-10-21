@@ -2,6 +2,9 @@ import { create } from "zustand";
 import { fetchWithKey, gatewayUrl } from "../lib/gateway-base.js";
 import { authorizedFetch, hasStoredApiKey, onStoredKeyChange, setStoredApiKey } from "../lib/authorized-fetch.js";
 import { configureSessionKeyRecovery } from "../lib/session-key-recovery.js";
+import { OPERATOR_SIGN_IN_NOTICE } from "../lib/auth-notices.js";
+
+const walletSignInNotice = `Your wallet is signed in. ${OPERATOR_SIGN_IN_NOTICE}`;
 
 /**
  * Sign-in state. The API key itself is not here, not in the state and not in
@@ -127,7 +130,11 @@ function scheduleRenewal(expiresAt: string): void {
 
 function mintSessionKey(checkSession: boolean): Promise<boolean> {
   const state = useAuthStore.getState();
-  if (signingOut || !state.sessionToken || (hasStoredApiKey() && !state.sessionKeyId)) return Promise.resolve(false);
+  if (signingOut || (hasStoredApiKey() && !state.sessionKeyId)) return Promise.resolve(false);
+  if (!state.sessionToken || state.sessionToken === "cookie") {
+    useAuthStore.setState({ authNotice: walletSignInNotice });
+    return Promise.resolve(false);
+  }
   if (mintFlight && mintKeyEpoch === state.keyEpoch && mintSessionEpoch === state.sessionEpoch) return mintFlight;
   const epoch = state.keyEpoch;
   const session = state.sessionToken;
@@ -140,7 +147,7 @@ function mintSessionKey(checkSession: boolean): Promise<boolean> {
   const flight = (async () => {
     try {
       if (checkSession) {
-        const me = await fetch(gatewayUrl("/api/auth/me"), { credentials: "include" });
+        const me = await fetchWithKey("/api/auth/me", session, { credentials: "omit" });
         if (!current()) return false;
         const data = me.ok ? await me.json().catch(() => null) : null;
         if (!current()) return false;
@@ -155,14 +162,14 @@ function mintSessionKey(checkSession: boolean): Promise<boolean> {
         }
       }
       for (let attempt = 0; attempt < 2; attempt++) {
-        const response = await fetch(gatewayUrl("/api/auth/session-key"), {
+        const response = await fetchWithKey("/api/auth/session-key", session, {
           method: "POST",
-          credentials: "include",
+          credentials: "omit",
         });
         const data = await response.json().catch(() => ({}));
         if (!current()) {
           if (currentSession() && useAuthStore.getState().address !== address) {
-            useAuthStore.setState({ authNotice: "Your wallet is signed in. Sign in again to enable operator actions." });
+            useAuthStore.setState({ authNotice: walletSignInNotice });
           }
           return false;
         }
@@ -176,7 +183,7 @@ function mintSessionKey(checkSession: boolean): Promise<boolean> {
         const notice = data.error === "too_many_keys"
           ? "Your wallet is signed in. You have reached the active-key limit; remove an unused key to enable operator actions."
           : data.error === "session_required" || data.error === "api_key_required"
-            ? "Your wallet is signed in. Sign in again to enable operator actions."
+            ? walletSignInNotice
             : "Your wallet is signed in. Operator access is temporarily unavailable; try again shortly.";
         useAuthStore.setState({ authNotice: notice });
         return false;

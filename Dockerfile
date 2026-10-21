@@ -72,6 +72,7 @@ COPY packages/template-data-product/package.json packages/template-data-product/
 # master image build since #64).
 COPY packages/a2a-signing/package.json packages/a2a-signing/
 COPY packages/adapter-pylabrobot/package.json packages/adapter-pylabrobot/
+COPY packages/adk/package.json packages/adk/
 COPY packages/aggregator/package.json packages/aggregator/
 COPY packages/bridge-directory/package.json packages/bridge-directory/
 COPY packages/connectors-airbyte-bridge/package.json packages/connectors-airbyte-bridge/

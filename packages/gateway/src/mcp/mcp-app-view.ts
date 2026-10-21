@@ -1861,7 +1861,7 @@ export function mcpAppMirrorRefusal(host: string | undefined): { status: number;
 }
 
 export function registerMcpAppHttpRoute(app: FastifyInstance): void {
-  app.get(HTTP_MIRROR_PATH, async (request, reply) => {
+  app.get(HTTP_MIRROR_PATH, { config: { cspOwnPolicy: true } }, async (request, reply) => {
     const refusal = mcpAppMirrorRefusal(request.headers.host);
     if (refusal) {
       return reply.code(refusal.status).type("text/plain; charset=utf-8").send(refusal.message);

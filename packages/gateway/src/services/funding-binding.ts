@@ -10,6 +10,8 @@
  *      record_malformed;
  *   3. it was verified on the expected chain, or record_chain_mismatch;
  *   4. it names the scope, or record_scope_mismatch;
+ *   4a. for testnet-only terms, its buyer is on the explicitly supplied, wholly valid allow-list,
+ *      or testnet_buyer_not_allowed;
  *   5. its verified payer is the scope's buyer, or record_buyer_not_scope_buyer;
  *   6. the job has an escrow row, or escrow_missing;
  *   7. the row's payer label is the scope's buyer, or escrow_payer_not_buyer;
@@ -26,8 +28,10 @@
  * addresses (sameAddress), so a mock row ("mock-escrow-...") never binds to a record and never passes
  * activationRefusal (gateway's condition (iii), accepted in bulletin 7195).
  *
- * Pure: nothing here reads a clock, a database or the environment.
+ * The refusal predicates are pure: only testnetBuyerAllowance reads the environment to build their required input.
  */
+import { getAddress, isAddress } from "viem";
+import type { PaidScopeActivationTerms } from "./paid-scope-activation-terms.js";
 import { sameIdentity } from "../auth/buyer-identity.js";
 import { isWellFormedFundingRecord, sameAddress, type FundingVerificationRecord } from "./funding-record-port.js";
 
@@ -49,7 +53,42 @@ export interface BindingEscrowRow extends BindingEscrow {
 }
 
 export type RecordRefusal = "expected_chain_unavailable" | "record_malformed" | "record_chain_mismatch";
-export type RecordScopeRefusal = RecordRefusal | "record_scope_mismatch" | "record_buyer_not_scope_buyer";
+/** The caller supplies config so the shared binding rule stays pure, including for the DTO. */
+export interface TestnetBuyerAllowance {
+  testnetOnly: boolean;
+  buyers: string | undefined;
+}
+
+/** The one environment boundary for reconcile and any future funding-status route. */
+export function testnetBuyerAllowance(terms: Pick<PaidScopeActivationTerms, "testnetOnly">): TestnetBuyerAllowance {
+  return {
+    // An omitted or malformed runtime flag is NEVER a mainnet authorization.
+    testnetOnly: terms?.testnetOnly !== false,
+    buyers: process.env.PCC_VNEXT_TESTNET_BUYERS,
+  };
+}
+
+export type TestnetBuyerRefusal = "testnet_buyer_not_allowed";
+export type RecordScopeRefusal = RecordRefusal | "record_scope_mismatch" | TestnetBuyerRefusal | "record_buyer_not_scope_buyer";
+
+/**
+ * A closed comma-separated list: an invalid entry invalidates the whole list. No trimming, empty
+ * entries or whitespace is permitted. isAddress's strict checksum check precedes getAddress.
+ */
+export function testnetBuyerRefusal(
+  record: FundingVerificationRecord,
+  allowance: TestnetBuyerAllowance,
+): TestnetBuyerRefusal | null {
+  if (allowance?.testnetOnly === false) return null;
+  const raw = allowance?.buyers;
+  if (raw === undefined || raw === "") return "testnet_buyer_not_allowed";
+  const entries = raw.split(",");
+  if (entries.some((entry) => entry === "" || /\s/.test(entry) || !isAddress(entry, { strict: true }))) {
+    return "testnet_buyer_not_allowed";
+  }
+  const buyer = getAddress(record.buyer);
+  return entries.some((entry) => getAddress(entry) === buyer) ? null : "testnet_buyer_not_allowed";
+}
 export type EscrowLabelRefusal = "escrow_missing" | "escrow_payer_not_buyer";
 export type EscrowRowRefusal = EscrowLabelRefusal | "escrow_not_funded";
 export type RecordEscrowRefusal = "record_escrow_not_scope_escrow";
@@ -72,11 +111,18 @@ export function recordRefusal(record: unknown, expectedChainId: number | null): 
 }
 
 /** Checks 1 to 5: `record` is a well-formed record, on the expected chain, of `scope` and of its buyer, or why not. */
-export function recordScopeRefusal(record: unknown, scope: BindingScope, expectedChainId: number | null): RecordScopeRefusal | null {
+export function recordScopeRefusal(
+  record: unknown,
+  scope: BindingScope,
+  expectedChainId: number | null,
+  allowance: TestnetBuyerAllowance,
+): RecordScopeRefusal | null {
   const own = recordRefusal(record, expectedChainId);
   if (own !== null) return own;
   const r = record as FundingVerificationRecord;
   if (r.scopeId !== scope.id) return "record_scope_mismatch";
+  const testnet = testnetBuyerRefusal(r, allowance);
+  if (testnet !== null) return testnet;
   if (!sameIdentity(r.buyer, scope.createdBy)) return "record_buyer_not_scope_buyer";
   return null;
 }
@@ -118,8 +164,9 @@ export function fundingBindingRefusal(
   scope: BindingScope,
   escrow: BindingEscrow | null | undefined,
   expectedChainId: number | null,
+  allowance: TestnetBuyerAllowance,
 ): FundingBindingRefusal | null {
-  const own = recordScopeRefusal(record, scope, expectedChainId);
+  const own = recordScopeRefusal(record, scope, expectedChainId, allowance);
   if (own !== null) return own;
   const labelRefusal = escrowLabelRefusal(escrow, scope.createdBy);
   if (labelRefusal !== null || !escrow) return labelRefusal ?? "escrow_missing";
@@ -142,8 +189,9 @@ export function activationRefusal(
   scope: BindingScope,
   escrow: BindingEscrowRow | null | undefined,
   expectedChainId: number | null,
+  allowance: TestnetBuyerAllowance,
 ): ActivationRefusal | null {
-  const own = recordScopeRefusal(record, scope, expectedChainId);
+  const own = recordScopeRefusal(record, scope, expectedChainId, allowance);
   if (own !== null) return own;
   const rowRefusal = escrowRowRefusal(escrow, scope.createdBy);
   if (rowRefusal !== null || !escrow) return rowRefusal ?? "escrow_missing";

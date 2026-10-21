@@ -104,6 +104,7 @@ describe("F3: the job read family is object-authorized", () => {
       const p = req.headers["x-test-principal"];
       if (typeof p === "string") (req as any).operatorId = p;
       (req as any).provenWallet = provenWalletFor(req.headers["x-test-proven-wallet"], typeof p === "string" ? p : null);
+      req.provenWalletCarrier = "key";
       const t = req.headers["x-test-tenant"];
       if (typeof t === "string") (req as any).tenantId = t;
     });

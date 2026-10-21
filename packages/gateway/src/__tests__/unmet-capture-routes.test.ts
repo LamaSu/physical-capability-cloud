@@ -96,6 +96,7 @@ async function app(auth: Auth | null, plugin: (a: FastifyInstance) => Promise<vo
       const r = req as unknown as { operatorId: string | null; provenWallet: string | null };
       r.operatorId = auth.operatorId ?? null;
       r.provenWallet = auth.provenWallet ?? null;
+      req.provenWalletCarrier = "key";
     });
   }
   await a.register(plugin);

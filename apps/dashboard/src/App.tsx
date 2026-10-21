@@ -294,6 +294,9 @@ function Shell() {
   const interfaceMode = useUIStore((s) => s.interfaceMode);
   const location = useLocation();
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const sessionToken = useAuthStore((s) => s.sessionToken);
+  // A restored wallet session can still make cookie-authorized reads and stops.
+  const hasAccess = isAuthenticated || sessionToken !== null;
 
   // Public pages that don't require auth
   const publicPaths = ["/", "/start", "/whitepaper", "/go", "/earn", "/onboard/chat"];
@@ -301,7 +304,7 @@ function Shell() {
 
   // Login page at /login
   if (location.pathname === "/login") {
-    return isAuthenticated ? (
+    return hasAccess ? (
       <Suspense fallback={<PageLoader />}><LandingPage /></Suspense>
     ) : (
       <LoginPage />
@@ -309,7 +312,7 @@ function Shell() {
   }
 
   // Auth gate — redirect to login for non-public pages
-  if (!isAuthenticated && !isPublicPage) {
+  if (!hasAccess && !isPublicPage) {
     return <LoginPage />;
   }
 

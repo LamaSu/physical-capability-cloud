@@ -1,5 +1,9 @@
 // The fetch boundary asks the auth lifecycle to renew without reading a key.
-let recovery: { isActive: () => boolean; identity: () => number; renew: () => Promise<boolean> } | null = null;
+let recovery: {
+  isActive: () => boolean;
+  identity: () => number;
+  renew: () => Promise<boolean>;
+} | null = null;
 
 export function configureSessionKeyRecovery(next: NonNullable<typeof recovery>): void {
   recovery = next;

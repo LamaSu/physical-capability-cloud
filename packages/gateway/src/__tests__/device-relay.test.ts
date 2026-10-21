@@ -95,7 +95,10 @@ beforeAll(async () => {
     }
     // WP-A's proven wallet, simulated (DECISIONS 00:53): see asProven above.
     const proven = req.headers["x-test-proven-wallet"];
-    if (typeof proven === "string") (req as unknown as { provenWallet: string }).provenWallet = proven;
+    if (typeof proven === "string") {
+      (req as unknown as { provenWallet: string }).provenWallet = proven;
+      req.provenWalletCarrier = "key";
+    }
   });
 
   await app.register(deviceRelayRoutes);

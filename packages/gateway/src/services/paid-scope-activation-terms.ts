@@ -17,16 +17,19 @@
  *
  * The configured expectedChainId is non-null only when PCC_VNEXT_RECORD_NETWORK names a valid
  * CANONICAL.json under deployments/vnext/ (base-sepolia is the only committed record since #653,
- * chain 84532); there is no default. postActivationTtlMs stays null until S1.1 exists.
- * reconcilePaidScope refuses funding_record_store_unavailable before expected_chain_unavailable
- * or activation_ttl_unavailable. On the accept path, both inputs are read only with a funding-record
- * store (test processes only, Q9), so production answers exactly as before and never reads either.
- * A test process with a store and PCC_VNEXT_RECORD_NETWORK=base-sepolia and no installed test source
- * resolves the chain but is refused activation_ttl_unavailable.
+ * chain 84532); there is no default. A testnet-only record (scheduleTestnetOnly, as base-sepolia's
+ * is) resolves only with PCC_VNEXT_ALLOW_TESTNET_RECORD=1 (R-c), and its terms carry testnetOnly,
+ * so reconcile admits only a buyer on the PCC_VNEXT_TESTNET_BUYERS list. postActivationTtlMs stays
+ * null until S1.1 exists. reconcilePaidScope refuses funding_record_store_unavailable before
+ * expected_chain_unavailable or activation_ttl_unavailable. On the accept path, both inputs are
+ * read only with a funding-record store (test processes only, until S1.2), so production answers
+ * exactly as before and never reads either. A test process with a store,
+ * PCC_VNEXT_RECORD_NETWORK=base-sepolia, PCC_VNEXT_ALLOW_TESTNET_RECORD=1 and no installed test
+ * source resolves the chain but is refused activation_ttl_unavailable.
  *
  * A test process may install its own source (__setPaidScopeActivationTermsForTest); one installed is
- * never consulted outside a test process. Nothing here logs, and nothing it returns carries a request
- * value.
+ * never consulted outside a test process. The one logging exception is a fixed-code warning for a
+ * refused V-next record (R-a through R-d); nothing it returns carries a request value.
  */
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -39,6 +42,8 @@ export interface PaidScopeActivationTerms {
   expectedChainId: number | null;
   /** How long the scope stays live once activated, in milliseconds, or null. */
   postActivationTtlMs: number | null;
+  /** Whether the resolved deployment permits only the explicitly allowed testnet buyers. */
+  testnetOnly: boolean;
 }
 
 /** The scope fields a source may read. */
@@ -93,20 +98,42 @@ function readRegularFile(path: string): string | null {
   }
 }
 
+/** The fields this gateway reads from a schema-checked canonical deployment. */
+interface VNextRecordTerms {
+  chainId: number;
+  testnetOnly: boolean;
+}
+
+type RecordRule = "R-a" | "R-b" | "R-c" | "R-d";
+
+/** No request logger exists here: follow the services' console.warn convention, with fixed data only. */
+function recordRefused(rule: RecordRule): null {
+  console.warn(`vnext_record_refused ${rule}`);
+  return null;
+}
+
+const RECORD_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+
 /**
- * The chain id of the canonical record `<packageRoot>/deployments/vnext/<network>/CANONICAL.json`,
- * or null when anything is missing, unreadable or inconsistent (fail closed):
- *   - `network` is not a slug the deploy script writes, so no path is formed from it;
- *   - deployments, deployments/vnext or the network directory is a symlink or not a directory, or
- *     the record is a symlink or not a regular file (the directory README's rule), checked before
- *     the record is opened, so a FIFO there is refused, not waited on;
- *   - the record is not a JSON object with DeployVNextSettlement.s.sol's broadcast run() fields:
- *     `mode` "CANONICAL", `label` "", `canonical` true, `doNotPin` false, `broadcast` true.
- *     Provisional and DRYRUN- files are never selected, and no fallback is read;
- *   - its `chainId` is not a positive safe integer, or not the chain whose directory it sits in.
- * Not covered (as in the README): a link or a FIFO swapped in between the checks and the open.
+ * CANONICAL.schema.json's required, const, enum, pattern and numeric bounds for the fields read
+ * here. The structural agreement test pins these hand-written checks to the committed schema.
+ * The schedule's oneOf also pairs its id with scheduleTestnetOnly; its windows are not read here.
  */
-export function vnextRecordChainId(packageRoot: string, network: string): number | null {
+function hasCanonicalReadFields(r: Record<string, unknown>): boolean {
+  return r.canonical === true && r.doNotPin === false && r.mode === "CANONICAL"
+    && r.label === "" && r.broadcast === true
+    && [r.factory, r.implementation, r.usdc].every((v) => typeof v === "string" && RECORD_ADDRESS_RE.test(v))
+    && typeof r.chainId === "number" && Number.isSafeInteger(r.chainId) && r.chainId >= 1
+    && typeof r.blockNumber === "number" && Number.isSafeInteger(r.blockNumber) && r.blockNumber >= 0
+    && r.scheduleId === (r.scheduleTestnetOnly ? "vnext-testnet-short-v1" : "vnext-mainnet-v1");
+}
+
+/**
+ * Read the canonical record from real directories and a regular file (never a link or FIFO),
+ * retaining the existing path and explicit canonical-approval checks. R-a through R-d fail closed
+ * before the chain can be used. Unavailable paths have no record to diagnose and remain silent.
+ */
+function vnextRecordTerms(packageRoot: string, network: string): VNextRecordTerms | null {
   if (!NETWORK_RE.test(network)) return null;
   const deployments = join(packageRoot, "deployments");
   const vnext = join(deployments, "vnext");
@@ -118,14 +145,23 @@ export function vnextRecordChainId(packageRoot: string, network: string): number
   try {
     record = JSON.parse(text);
   } catch {
-    return null;
+    return recordRefused("R-d");
   }
-  if (typeof record !== "object" || record === null || Array.isArray(record)) return null;
+  if (typeof record !== "object" || record === null || Array.isArray(record)) return recordRefused("R-d");
   const r = record as Record<string, unknown>;
-  if (r.mode !== "CANONICAL" || r.label !== "" || r.canonical !== true || r.doNotPin !== false || r.broadcast !== true) return null;
-  const chainId = r.chainId;
-  if (typeof chainId !== "number" || !Number.isSafeInteger(chainId) || chainId <= 0) return null;
-  return vnextNetworkSlug(chainId) === network ? chainId : null;
+  if (r.specVersion !== 2) return recordRefused("R-a");
+  if (typeof r.scheduleTestnetOnly !== "boolean"
+    || (r.scheduleTestnetOnly && r.chainId !== 84532 && r.chainId !== 31337)) return recordRefused("R-b");
+  if (r.scheduleTestnetOnly && process.env.PCC_VNEXT_ALLOW_TESTNET_RECORD !== "1") return recordRefused("R-c");
+  if (!hasCanonicalReadFields(r)) return recordRefused("R-d");
+  const chainId = r.chainId as number;
+  if (vnextNetworkSlug(chainId) !== network) return recordRefused("R-d");
+  return { chainId, testnetOnly: r.scheduleTestnetOnly };
+}
+
+/** The chain of the one approved canonical record, or null on an unavailable or refused record. */
+export function vnextRecordChainId(packageRoot: string, network: string): number | null {
+  return vnextRecordTerms(packageRoot, network)?.chainId ?? null;
 }
 
 /** The @pcc/contracts package root (where deployments/ lives), found as Node resolves the package, or null. */
@@ -145,10 +181,14 @@ export function contractsPackageRoot(): string | null {
  * its own, so the no-default rule is checked against a record that exists.
  */
 export function configuredVNextChainId(packageRoot?: string | null): number | null {
+  return configuredVNextRecord(packageRoot)?.chainId ?? null;
+}
+
+function configuredVNextRecord(packageRoot?: string | null): VNextRecordTerms | null {
   const network = process.env.PCC_VNEXT_RECORD_NETWORK;
   if (typeof network !== "string" || process.env.PCC_VNEXT_RECORD_LABEL !== undefined) return null;
   const root = packageRoot === undefined ? contractsPackageRoot() : packageRoot;
-  return root === null ? null : vnextRecordChainId(root, network);
+  return root === null ? null : vnextRecordTerms(root, network);
 }
 
 /**
@@ -164,7 +204,12 @@ let testSource: PaidScopeActivationTermsSource | null = null;
 /** reconcilePaidScope's inputs for `scope`: a test process's installed source, else the configured ones. */
 export function paidScopeActivationTerms(scope: ActivationScope): PaidScopeActivationTerms {
   if (isTestProcess() && testSource) return testSource(scope);
-  return { expectedChainId: configuredVNextChainId(), postActivationTtlMs: preparedActivationTtlMs(scope) };
+  const record = configuredVNextRecord();
+  return {
+    expectedChainId: record?.chainId ?? null,
+    postActivationTtlMs: preparedActivationTtlMs(scope),
+    testnetOnly: record?.testnetOnly ?? false,
+  };
 }
 
 /**

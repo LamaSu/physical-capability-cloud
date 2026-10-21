@@ -177,6 +177,12 @@ async function walletCeremonyRoutes(app: FastifyInstance) {
     const config = walletLinkConfig();
     checkApprovalOrigin(req, config.publicOrigin);
     const input = approveSchema.parse(req.body);
+    if (input.decision === "approve" && !req.apiKeyId) {
+      const session = resolveSession(req);
+      if (!session || req.headers.authorization !== `Bearer ${session.token}`) {
+        throw new WalletLinkError(401, "session_required");
+      }
+    }
     const now = Date.now();
     limits.checkCodes(credential, now);
     const row = getLinkRequest(req.params.id);

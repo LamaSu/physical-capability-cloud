@@ -131,7 +131,7 @@ export async function docRoutes(app: FastifyInstance) {
   });
 
   // Index page
-  app.get("/docs", async (_req, reply) => {
+  app.get("/docs", { config: { cspInlineScripts: true } }, async (_req, reply) => {
     const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -216,7 +216,7 @@ export async function docRoutes(app: FastifyInstance) {
 
   // Individual doc routes
   for (const [slug, meta] of Object.entries(DOCS)) {
-    app.get(`/docs/${slug}`, async (req, reply) => {
+    app.get(`/docs/${slug}`, { config: { cspInlineScripts: true } }, async (req, reply) => {
       const content = loadDoc(meta.path);
       if (!content) {
         return reply.status(404).send({ error: "doc_not_found", path: meta.path });
