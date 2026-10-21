@@ -27,6 +27,25 @@ describe("siteLocationLabel", () => {
   it("a point without a precision says so rather than guessing", () => {
     expect(siteLocationLabel({ location: { lat: 1, lng: 2 } })).toBe("1.0000, 2.0000 (precision not reported)");
   });
+
+  // #352 and #408 drew coordinates only when both were finite numbers; their merge-up uses this
+  // label on both kernel pages. A malformed point must not crash the page or print NaN.
+  it("a point whose coordinates aren't finite numbers reads as unreadable, never NaN and never a crash", () => {
+    const malformed = [
+      { lat: Number.NaN, lng: 2 },
+      { lat: 1, lng: Number.POSITIVE_INFINITY },
+      { lat: "37.7", lng: -122.4 },
+      { lat: null, lng: 2 },
+      { lng: 2 },
+    ] as unknown as Array<{ lat: number; lng: number }>;
+    for (const location of malformed) {
+      for (const locationPrecision of ["exact", "approximate", undefined] as const) {
+        expect(siteLocationLabel({ location, locationPrecision }), JSON.stringify({ location, locationPrecision })).toBe(
+          "Location unreadable",
+        );
+      }
+    }
+  });
 });
 
 describe("siteAddressLabel", () => {
