@@ -457,7 +457,7 @@ async function printOnce(
     }
     // Read type only once for bound events: an adapter accessor may throw on
     // its second read. Use the captured value for the guard and dispatch (F1).
-    const type = event.type;
+    const type = eventType(event);
     if (type === "method_loaded" &&
         payload !== null &&
         typeof payload === "object" &&

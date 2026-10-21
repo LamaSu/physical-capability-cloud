@@ -250,7 +250,8 @@ export class EvidenceEmitter {
     // writer refusal, which takes a place and latches lost evidence (V2/EW5).
     // An unmarked refusal takes no place and cannot poison the step (V3/EW6).
     if (!kernelWritten && bound.type === "method_loaded" &&
-        Object.hasOwn(payload, "inputHash") && !Object.hasOwn(bound.source, "writer")) {
+        Object.hasOwn(payload, "inputHash") &&
+        (bound.source == null || !Object.hasOwn(bound.source, "writer"))) {
       throw new Error("a method_loaded carrying inputHash must be kernel-written");
     }
 
