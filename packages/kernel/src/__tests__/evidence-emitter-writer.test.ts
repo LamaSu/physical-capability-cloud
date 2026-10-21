@@ -219,6 +219,21 @@ describe("writer hash vectors and evidence authoring", () => {
     expect(bundle.events[0]).toStrictEqual(completion);
   });
 
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+  ])("EW6b an input proof whose source is %s is refused with E2 before taking a place", async (_name, eventSource) => {
+    const emitter = setup();
+    const event = { ...raw("method_loaded", { inputHash: H }), source: eventSource as unknown as EvidenceSource };
+    await expect(emitter.addEvent(JOB, STEP, event)).rejects.toThrow(
+      "a method_loaded carrying inputHash must be kernel-written",
+    );
+
+    const completion = await emitter.addEvent(JOB, STEP, raw("execution_completed"));
+    const bundle = await emitter.finalizeBundle(JOB, STEP);
+    expect(bundle.events).toStrictEqual([completion]);
+  });
+
   it("EW7 retains PyLabRobot's unmarked legacy method_loaded", async () => {
     const emitter = setup();
     const original = raw("method_loaded", { gcodeHash: H, mock: true });

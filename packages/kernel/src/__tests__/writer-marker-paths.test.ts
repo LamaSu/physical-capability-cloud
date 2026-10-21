@@ -757,4 +757,32 @@ describe("PS and RQ: the settled evidence is the final authoring boundary", () =
       "(a method_loaded carrying inputHash must be kernel-written), so its evidence is incomplete",
     );
   });
+
+  it("RT a bound event whose type cannot be read is still recorded, so the print fails", async () => {
+    const f = printFixture();
+    f.printer.onStart = () => {}; // No early evidence before start returns its job id.
+    const pending = f.run({ timeoutMs: 5_000 });
+    // As in RQ: start's continuation has set the device job id, so admit() runs inside the emit.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const odd = {
+      timestamp: new Date().toISOString(),
+      source: f.printer.source,
+      payload: { ippJobId: "dj-print", sample: 1 },
+    } as unknown as RawEvent;
+    Object.defineProperty(odd, "type", {
+      enumerable: true,
+      get: () => { throw new Error("no type"); },
+    });
+    // A tolerant adapter: a listener that throws does not stop its next event.
+    for (const listener of f.printer.listeners) {
+      try { listener(odd); } catch { /* the outcome below is what this row pins */ }
+    }
+    f.printer.emit("execution_completed");
+    const result = await pending;
+
+    expectNoPrintBundle(f, result);
+    expect(result.error).toBe(
+      "a (unreadable) event of this job could not be recorded (no type), so its evidence is incomplete",
+    );
+  });
 });
