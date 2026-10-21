@@ -258,9 +258,14 @@ export function instantiateTemplate(template: unknown, params: unknown): Templat
     if (value === s.default) continue;
     for (const pointer of s.paths) replaceAt(body, pointer, value);
     if (s.kind === "party") {
-      // The party row's label and payTo are not param slots: never inherit somebody else's wallet.
-      const party = body.parties.find((p) => p.partyId === value);
-      if (party) { party.payTo = null; party.label = value as string; }
+      // Unbind the row OWNED by this slot, not whichever row currently holds its new id.
+      // A valid slot covers every /parties/i/partyId leaf holding its default.
+      for (const pointer of s.paths) {
+        const row = /^\/parties\/(0|[1-9][0-9]*)\/partyId$/.exec(pointer);
+        if (row === null) continue;
+        const party = body.parties[Number(row[1])];
+        if (party) { party.payTo = null; party.label = value as string; }
+      }
     }
   }
   for (const kind of ["party", "unit"] as const) {
@@ -388,11 +393,23 @@ export function verifyTemplateOrigin(
   const key = own("templateKey");
   const hash = own("templateHash");
   const params = own("params");
-  let entry: AgreementTemplateCatalogEntry | undefined;
+  let entry: Pick<AgreementTemplateCatalogEntry, "template" | "templateHash"> | undefined;
   try {
-    entry = Array.isArray(catalog) && key.exists && typeof key.value === "string"
-      ? catalog.find((e) => `${e.template.templateId}@${e.template.version}` === key.value)
-      : undefined;
+    if (Array.isArray(catalog) && key.exists && typeof key.value === "string") {
+      for (const candidate of catalog) {
+        // Read both entry fields exactly once, under the guard. Snapshot the template
+        // before matching its key so a changing Proxy cannot select one body and
+        // instantiate another; subsequent work reads only this stable copy.
+        const candidateTemplate = candidate.template;
+        const candidateHash = candidate.templateHash;
+        const copiedTemplate = snapshot(candidateTemplate);
+        if (!copiedTemplate.ok) return failed("TEMPLATE_UNKNOWN", "the catalog could not be read", ["origin"]);
+        const template = copiedTemplate.value as AgreementTemplateV1;
+        if (entry === undefined && `${template.templateId}@${template.version}` === key.value) {
+          entry = { template, templateHash: candidateHash };
+        }
+      }
+    }
   } catch {
     return failed("TEMPLATE_UNKNOWN", "the catalog could not be read", ["origin"]);
   }
