@@ -129,7 +129,15 @@ function distributionOf(lineage: readonly string[]): Array<{ party: string; weig
 export function kitRoyaltyRequirement(input: { bps: number; lineage: readonly string[] }): PaymentRequirement | null {
   const bps = ownData(input, "bps");
   if (!bps.ok || typeof bps.value !== "number" || !Number.isInteger(bps.value) || bps.value < 0 || bps.value > 10_000) {
-    throw new RangeError(`a royalty is 0..10000 bps, not ${bps.ok ? String(bps.value) : "unreadable"}`);
+    const type = bps.ok ? typeof bps.value : "undefined";
+    const description = !bps.ok
+      ? "unreadable"
+      : type === "function"
+        ? "a function"
+        : type === "object" && bps.value !== null
+          ? "an object"
+          : String(bps.value);
+    throw new RangeError(`a royalty is 0..10000 bps, not ${description}`);
   }
   const raw = ownData(input, "lineage");
   const lineage = readLineage(raw.ok ? raw.value : undefined);
