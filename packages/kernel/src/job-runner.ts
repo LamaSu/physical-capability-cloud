@@ -179,7 +179,11 @@ export class JobRunner {
       payload !== null && typeof payload === "object" && "inputHash" in payload;
     const forbiddenAdapterMethod = (event: Omit<EvidenceEvent, "id" | "hash">): boolean =>
       event.type === "method_loaded" && (prepare || carriesInputHash(event.payload));
-    const record = (event: Omit<EvidenceEvent, "id" | "hash">, adapterOrigin = false): void => {
+    const record = (
+      event: Omit<EvidenceEvent, "id" | "hash">,
+      adapterOrigin = false,
+      kernelWritten = false,
+    ): void => {
       recorded = recorded.then(async () => {
         if (sealed) return;
         // A listener may mutate an adapter event while it waits in this queue.
@@ -188,7 +192,11 @@ export class JobRunner {
           return;
         }
         try {
-          await this.evidenceEmitter.addEvent(jobId, stepId, event);
+          if (kernelWritten) {
+            await this.evidenceEmitter.addKernelWrittenEvent(jobId, stepId, event);
+          } else {
+            await this.evidenceEmitter.addEvent(jobId, stepId, event);
+          }
         } catch (err) {
           unrecorded.first ??= { type: event.type, error: err instanceof Error ? err.message : String(err) };
           console.error(err);
@@ -318,7 +326,7 @@ export class JobRunner {
               timestamp: new Date().toISOString(),
               source: { ...this.machine.source },
               payload: { jobId, deviceJobId, inputHash: gcodeHash },
-            });
+            }, false, true);
           } else {
           const loadResult = await Sentry.startSpan(
             { name: "job.load_gcode", op: "job.phase", attributes: { "job.id": jobId } },
@@ -448,6 +456,26 @@ export class JobRunner {
           } else if (methods.some((event) => carriesInputHash(event.payload))) {
             return refuse("the bundle would carry a method_loaded the kernel did not record");
           }
+
+          // A signed bundle does not establish authorship of an individual event.
+          // Inspect the settled stored objects, including late source mutations.
+          const marked = events.filter((event) =>
+            event.source !== null &&
+            typeof event.source === "object" &&
+            Object.getOwnPropertyDescriptor(event.source, "writer") !== undefined);
+          if (prepare) {
+            const descriptor = marked.length === 1
+              ? Object.getOwnPropertyDescriptor(marked[0]!.source, "writer")
+              : undefined;
+            if (marked.length !== 1 || marked[0] !== methods[0] ||
+                descriptor === undefined || !Object.hasOwn(descriptor, "value") ||
+                descriptor.value !== "kernel") {
+              return refuse("the bundle would carry a kernel-written marker the kernel did not write");
+            }
+          } else if (marked.length !== 0) {
+            return refuse("the bundle would carry a kernel-written marker the kernel did not write");
+          }
+
           const check = this.evidenceEmitter.checkTierRequirements(events, assuranceTier, requirements, { jobId });
           if (!check.met) {
             // For tier >= 2, unmet requirements are a hard failure
