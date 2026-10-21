@@ -140,11 +140,10 @@ export function manifestProblems(name, pj, { packed, privateNames }) {
   return problems;
 }
 
-/** The package directories in one node_modules directory, scopes included: `[[dirent, dir]]`. */
+/** Every entry in a store's node_modules, expanding real scope directories but not symlinked ones. */
 function packageDirs(modules) {
   const out = [];
   for (const child of readdirSync(modules, { withFileTypes: true })) {
-    if (child.name.startsWith(".")) continue; // .bin, .pnpm, .modules.yaml
     const dir = join(modules, child.name);
     if (child.name.startsWith("@") && child.isDirectory()) {
       for (const scoped of readdirSync(dir, { withFileTypes: true })) out.push([scoped, join(dir, scoped.name)]);
@@ -171,24 +170,21 @@ function isDirectory(path) {
   }
 }
 
-// pnpm's own metadata under a node_modules. Every other name is a package to account for, so a
-// package cannot hide under an arbitrary dot-name like `.concealed` (verdict 101d).
-const PNPM_METADATA = new Set([".bin", ".pnpm", ".modules.yaml"]);
-
 /**
- * The entries in one node_modules directory as `[name, dir]`, scopes expanded. A scope directory
- * can be a symlink, so the directory test follows links; a package entry may itself be a symlink,
- * left for the caller to canonicalize.
+ * Entries in a bundled package's node_modules, with scopes expanded. Only a real .bin directory
+ * of regular command shims is harmless metadata. Any other dot-name or opaque entry is checked,
+ * including a symlinked .bin, directories hidden inside it, and .pnpm or .modules.yaml entries.
  */
 function moduleEntries(modules) {
   const out = [];
   for (const child of readdirSync(modules, { withFileTypes: true })) {
-    if (PNPM_METADATA.has(child.name)) continue; // only pnpm's own metadata, not any dot-name
     const dir = join(modules, child.name);
+    if (child.name === ".bin" && child.isDirectory()) {
+      const shims = readdirSync(dir, { withFileTypes: true });
+      if (shims.every((shim) => shim.isFile() && shim.name !== "package.json")) continue;
+    }
     if (child.name.startsWith("@") && isDirectory(dir)) {
-      // Inside a scope every entry is a package candidate: .bin/.pnpm/.modules.yaml are pnpm
-      // metadata only at the node_modules root, so nothing is skipped here, and a package cannot
-      // hide at @scope/.pnpm (verdict 101e).
+      // Inside a scope every entry, even a dot-prefixed entry, is a package candidate.
       for (const scoped of readdirSync(dir, { withFileTypes: true })) {
         out.push([`${child.name}/${scoped.name}`, join(dir, scoped.name)]);
       }
@@ -241,17 +237,48 @@ export function installedPackages(project) {
   if (!existsSync(store)) throw new Error(`${store} is missing; the consumer was not installed by pnpm`);
   const found = [];
   const seen = new Set();
+  const entries = [];
+  const recordedDirectories = new Set();
+
+  // Inventory real packages first: dependency links can point into store entries visited later.
   for (const entry of readdirSync(store, { withFileTypes: true })) {
     if (!entry.isDirectory() || entry.name === "node_modules") continue;
     const modules = join(store, entry.name, "node_modules");
     if (!existsSync(modules)) continue;
     for (const [dirent, dir] of packageDirs(modules)) {
-      if (!dirent.isDirectory()) continue; // a dependency, linked from its own .pnpm entry
-      const pkg = readPackage(dir, project);
-      if (!pkg) continue;
+      // No dot-name or symlinked scope is a legitimate store package.
+      const realPackage = dirent.isDirectory() && !dirent.name.startsWith(".") && !dirent.name.startsWith("@");
+      const pkg = realPackage ? readPackage(dir, project) : null;
+      if (pkg) recordedDirectories.add(realpathSync(dir));
+      entries.push({ dirent, dir, pkg });
+    }
+  }
+
+  for (const { dirent, dir, pkg } of entries) {
+    if (pkg) {
       found.push(pkg);
       bundledPackages(dir, pkg.name, project, found, seen);
+      continue;
     }
+    if (dirent.isSymbolicLink() && !dirent.name.startsWith(".") && !dirent.name.startsWith("@")) {
+      let target;
+      try {
+        target = realpathSync(dir);
+      } catch {
+        // Broken links are reported as opaque, not silently skipped.
+      }
+      if (target && recordedDirectories.has(target)) continue;
+    }
+    const reason = dirent.name.startsWith(".")
+      ? "is a dot-prefixed entry"
+      : dirent.name.startsWith("@")
+        ? "is not a real scope directory"
+        : dirent.isSymbolicLink()
+          ? "does not link to a recorded package directory"
+          : dirent.isDirectory()
+            ? "has no package.json"
+            : "is not a package directory";
+    found.push({ opaque: `${dirent.name} ${reason}`, dir: relative(project, dir) });
   }
   return found;
 }
@@ -263,7 +290,11 @@ export function installedProblems(installed, { packed }) {
     if (entry.opaque) {
       // The walk could not read into an entry under a package's own node_modules. Fail closed:
       // the public kit must not ship something the graph check cannot see into (verdict 101c).
-      problems.push(`installed graph has an opaque entry at ${entry.dir}, bundled inside ${entry.bundledIn}: ${entry.opaque}`);
+      if (entry.bundledIn) {
+        problems.push(`installed graph has an opaque entry at ${entry.dir}, bundled inside ${entry.bundledIn}: ${entry.opaque}`);
+      } else {
+        problems.push(`installed graph has an opaque store entry at ${entry.dir}: ${entry.opaque}`);
+      }
       continue;
     }
     const { name, version, dir, bundledIn } = entry;

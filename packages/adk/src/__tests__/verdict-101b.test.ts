@@ -63,6 +63,33 @@ describe("101b M2: the snapshot is bounded in breadth and bytes, not only depth"
     expect(errorCode(() => resolveToolRequest("get_kernel_jobs", { kernelId: "k", status: "s".repeat(9_000) }, base))).toBe("bad_input");
   });
 
+  it("refuses excess own keys even when all their values are undefined", () => {
+    const config = Object.fromEntries(Array.from({ length: 100_001 }, (_, i) => [`k${i}`, undefined]));
+    expect(errorCode(() => resolveToolRequest("setup_validate", { config }, base))).toBe("bad_input");
+  });
+
+  it("refuses an over-budget object before reading its property descriptors", () => {
+    const huge = Object.fromEntries(Array.from({ length: 100_001 }, (_, i) => [`k${i}`, undefined]));
+    const guarded = new Proxy(huge, {
+      getOwnPropertyDescriptor() {
+        throw new Error("an oversized object must not have its values examined");
+      },
+    });
+    expect(errorCode(() => resolveToolRequest("setup_validate", { config: guarded }, base))).toBe("bad_input");
+  });
+
+  it("charges omitted keys against the total budget across many small objects", () => {
+    const config = Array.from({ length: 125 }, () =>
+      Object.fromEntries(Array.from({ length: 1_000 }, (_, i) => [`k${i}`, undefined])),
+    );
+    expect(errorCode(() => resolveToolRequest("setup_validate", { config }, base))).toBe("bad_input");
+  });
+
+  it("still omits undefined object fields from the transmitted JSON", () => {
+    const req = resolveToolRequest("setup_validate", { config: { a: 1, b: undefined } }, base);
+    expect(req.body).toBe('{"config":{"a":1}}');
+  });
+
   it("still sends an ordinary request", () => {
     const req = resolveToolRequest("setup_validate", { config: { devices: new Array(100).fill({ id: "d" }) } }, base);
     expect(JSON.parse(req.body!).config.devices).toHaveLength(100);

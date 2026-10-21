@@ -171,6 +171,99 @@ describe("verdict 101c: the installed-graph walk fails closed, not open", () => 
     });
     expect(problems.some((p) => p.includes("viem") && p.includes("bundled inside wrapper"))).toBe(true);
   });
+
+  it("rejects bundled packages hidden beneath metadata-shaped directories", () => {
+    for (const name of [".pnpm", ".bin", ".modules.yaml"]) {
+      const { problems } = scan((root) => {
+        const wrapper = join(root, "node_modules/.pnpm/wrapper@1.0.0/node_modules/wrapper");
+        writePkg(wrapper, "wrapper");
+        writePkg(join(wrapper, "node_modules", name, "viem"), "viem");
+      });
+      expect(
+        problems.some((problem) => problem.includes("opaque") && problem.includes(`node_modules/${name}`) && problem.includes("bundled inside wrapper")),
+        name,
+      ).toBe(true);
+    }
+  });
+
+  it("rejects a symlinked shim directory or a shim directory containing a symlink", () => {
+    const linkedDirectory = scan((root) => {
+      const wrapper = join(root, "node_modules/.pnpm/wrapper@1.0.0/node_modules/wrapper");
+      writePkg(wrapper, "wrapper");
+      const external = join(root, "external/shims");
+      mkdirSync(external, { recursive: true });
+      writeFileSync(join(external, "command"), "#!/bin/sh\n");
+      mkdirSync(join(wrapper, "node_modules"), { recursive: true });
+      symlinkSync(external, join(wrapper, "node_modules/.bin"), "dir");
+    });
+    expect(linkedDirectory.problems.some((problem) => problem.includes("opaque") && problem.includes(".bin"))).toBe(true);
+
+    const linkedShim = scan((root) => {
+      const wrapper = join(root, "node_modules/.pnpm/wrapper@1.0.0/node_modules/wrapper");
+      writePkg(wrapper, "wrapper");
+      const external = join(root, "external/viem");
+      writePkg(external, "viem");
+      const bin = join(wrapper, "node_modules/.bin");
+      mkdirSync(bin, { recursive: true });
+      symlinkSync(external, join(bin, "viem"), "dir");
+    });
+    expect(linkedShim.problems.some((problem) => problem.includes("opaque") && problem.includes(".bin"))).toBe(true);
+  });
+
+  it("accepts a real bundled shim directory containing only regular files", () => {
+    const { installed, problems } = scan((root) => {
+      const wrapper = join(root, "node_modules/.pnpm/wrapper@1.0.0/node_modules/wrapper");
+      writePkg(wrapper, "wrapper");
+      const bin = join(wrapper, "node_modules/.bin");
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(join(bin, "tool"), "#!/bin/sh\n");
+      writeFileSync(join(bin, "other"), "#!/bin/sh\n");
+    });
+    expect(installed.map((entry: { name?: string }) => entry.name)).toEqual(["wrapper"]);
+    expect(problems).toEqual([]);
+  });
+
+  it("rejects concealed, unreadable or foreign entries in pnpm store modules", () => {
+    for (const kind of ["symlinked scope", "foreign symlink", "dot-name", "missing manifest"]) {
+      const { problems } = scan((root) => {
+        const modules = join(root, "node_modules/.pnpm/x@1.0.0/node_modules");
+        writePkg(join(modules, "x"), "x");
+        if (kind === "symlinked scope") {
+          const external = join(root, "external/scope");
+          writePkg(join(external, "secret"), "@pcc/secret");
+          symlinkSync(external, join(modules, "@pcc"), "dir");
+        } else if (kind === "foreign symlink") {
+          const external = join(root, "external/viem");
+          writePkg(external, "viem");
+          symlinkSync(external, join(modules, "viem"), "dir");
+        } else if (kind === "dot-name") {
+          writePkg(join(modules, ".hidden"), "viem");
+        } else {
+          const unreadable = join(modules, "y");
+          mkdirSync(unreadable, { recursive: true });
+          writeFileSync(join(unreadable, "index.js"), "module.exports = 1;\n");
+        }
+      });
+      expect(problems.some((problem) => problem.includes("opaque store entry")), kind).toBe(true);
+    }
+  });
+
+  it("accepts real scoped packages and dependency links to recorded store packages", () => {
+    const { installed, problems } = scan((root) => {
+      const store = join(root, "node_modules/.pnpm");
+      const early = join(store, "a@1.0.0/node_modules");
+      const late = join(store, "z@1.0.0/node_modules");
+      const scoped = join(store, "@scope+tool@1.0.0/node_modules/@scope/tool");
+      writePkg(join(early, "a"), "a");
+      writePkg(join(late, "z"), "z");
+      writePkg(scoped, "@scope/tool");
+      symlinkSync(join(late, "z"), join(early, "z"), "dir");
+      mkdirSync(join(early, "@scope"), { recursive: true });
+      symlinkSync(scoped, join(early, "@scope/tool"), "dir");
+    });
+    expect(installed.map((entry: { name?: string }) => entry.name).sort()).toEqual(["@scope/tool", "a", "z"]);
+    expect(problems).toEqual([]);
+  });
 });
 
 describe("verdict 101 F6: the payload is an allowlist of fresh build output", () => {

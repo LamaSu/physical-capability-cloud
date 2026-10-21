@@ -202,13 +202,20 @@ function dataProperty(target: object, key: string, where: string): unknown {
 function plainObject(value: object, where: string, depth: number, open: Set<object>, budget: Budget): { [key: string]: Json } {
   const proto = Object.getPrototypeOf(value);
   if (proto !== Object.prototype && proto !== null) bad(where, "is not a plain object");
+  const keys = Reflect.ownKeys(value);
+  // Every own key consumes at least one value, including an undefined value later omitted.
+  if (keys.length > MAX_NODES - budget.nodes) bad(where, "makes the input too large");
   const out: { [key: string]: Json } = Object.create(null);
-  for (const key of Reflect.ownKeys(value)) {
+  for (const key of keys) {
     if (typeof key !== "string") bad(where, "has a symbol key");
     checkText(key, `${where} (a key)`, budget);
     const at = `${where}.${key}`;
     const item = dataProperty(value, key, at);
-    if (item === undefined) continue; // dropped, as JSON.stringify drops it
+    if (item === undefined) {
+      budget.nodes += 1;
+      if (budget.nodes > MAX_NODES) bad(at, "makes the input too large");
+      continue; // dropped, as JSON.stringify drops it
+    }
     Object.defineProperty(out, key, {
       value: plain(item, at, depth + 1, open, budget),
       enumerable: true,
