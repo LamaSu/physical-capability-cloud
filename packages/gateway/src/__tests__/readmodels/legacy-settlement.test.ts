@@ -375,6 +375,7 @@ describe("the legacy settlement routes on a real store", () => {
       const proven = req.headers["x-test-proven-wallet"];
       if (typeof proven === "string") {
         (req as any).provenWallet = proven;
+        req.provenWalletCarrier = "bearer-session";
         (req as any).provenWalletVia = "siwe-session";
       }
     });

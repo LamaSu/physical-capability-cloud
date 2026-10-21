@@ -115,6 +115,22 @@ describe("inbox source reconciliation", () => {
 });
 
 describe("explicit decisions", () => {
+  // Every decision outcome must be classified here; a new ActOutcome fails the typecheck until it is.
+  const REREADS: Record<ActOutcome, boolean> = {
+    done: true, accepted_awaiting_funding: true, accepted_unknown: true,
+    already_decided: true, already_active: true, already_awaiting_funding: true, already_awaiting_acceptance: true,
+    already_approved: true, already_rejected: true, already_expired: true, already_revoked: true, already_completed: true,
+    expired: true, stopped: false, sign_in: false, sign_in_wallet: false, not_allowed: false, gone: false, unavailable: false, failed: false,
+  };
+  it.each(Object.entries(REREADS) as Array<[ActOutcome, boolean]>)("%s re-reads: %s", async (outcome, rereads) => {
+    const load = vi.fn(async () => ok([item()]));
+    const store = createInboxStore([{ id: "fake", load, act: async () => outcome }]);
+    await store.getState().refresh();
+    await store.getState().decideItem("one", "approve");
+    expect(load).toHaveBeenCalledTimes(rereads ? 2 : 1);
+    expect(store.getState().outcomes.one).toBe(outcome);
+  });
+
   it("locks a pending item against another decision and refreshes success without removing locally", async () => {
     const wait = deferred<ActOutcome>();
     const act = vi.fn(() => wait.promise);

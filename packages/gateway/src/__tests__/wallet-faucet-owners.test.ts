@@ -110,7 +110,7 @@ async function linked(headers: Headers) {
   const result = await create();
   const signature = await result.account.signMessage({ message: result.request.message });
   expect((await app.inject({ method: "POST", url: `${path}/${result.request.requestId}/proof`, payload: { signature } })).statusCode).toBe(200);
-  const response = await app.inject({ method: "POST", url: `${path}/${result.request.requestId}/approve`, headers,
+  const response = await app.inject({ method: "POST", url: `${path}/${result.request.requestId}/approve`, headers: headers.authorization ? headers : explicitSession(headers),
     payload: { userCode: result.request.userCode, decision: "approve", consentSha256: CONSENT_SHA256 } });
   expect(response.statusCode).toBe(200);
   return { ...result, linkId: response.json().linkId as string };
@@ -135,8 +135,15 @@ async function signIn(account = privateKeyToAccount(generatePrivateKey())) {
   return { account, headers, token: response.json().token as string };
 }
 
+function explicitSession(headers: Record<string, string>): Record<string, string> {
+  const signed = headers.cookie?.slice("pcc_session=".length);
+  const token = signed ? app.unsignCookie(signed).value : null;
+  expect(token).toBeTruthy();
+  return { ...headers, authorization: `Bearer ${token}` };
+}
+
 async function mintSessionKey(headers: Headers) {
-  const response = await app.inject({ method: "POST", url: "/api/auth/session-key", headers });
+  const response = await app.inject({ method: "POST", url: "/api/auth/session-key", headers: explicitSession(headers) });
   expect(response.statusCode).toBe(201);
   return { headers: { authorization: `Bearer ${response.json().api_key}` }, id: response.json().key_id as string };
 }

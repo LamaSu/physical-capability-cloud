@@ -16,6 +16,7 @@ interface BatchSlotClaim {
   amount: string; escrowAddress?: string; claimedAt: string;
 }
 import { batchTracker } from "../services.js";
+import { authorityOf, EXPLICIT_CREDENTIAL_REQUIRED, provenByCookieOnly } from "../auth/kernel-authority.js";
 
 import {
   gateJobRead,
@@ -176,6 +177,7 @@ export async function batchRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const pre = callerOf(req);
       if (!pre.proceed) return refuseIdentity(reply, pre.reason);
+      if (provenByCookieOnly(authorityOf(req))) return reply.code(403).send(EXPLICIT_CREDENTIAL_REQUIRED);
       const missingBatch = () => reply.code(400).send({ error: `Batch ${req.params.batchId} not found` });
       const gate = gateKernelRead(req, () => batchTracker.getBatch(req.params.batchId)?.kernelId);
       if (!gate.ok) return gate.kind === "not_found" ? missingBatch() : refuseJobRead(reply, gate);
@@ -210,6 +212,7 @@ export async function batchRoutes(app: FastifyInstance) {
   app.post("/api/batches/shared", async (req, reply) => {
     const pre = callerOf(req);
     if (!pre.proceed) return refuseIdentity(reply, pre.reason);
+    if (provenByCookieOnly(authorityOf(req))) return reply.code(403).send(EXPLICIT_CREDENTIAL_REQUIRED);
     const body = (req.body ?? {}) as {
       kernelId: string;
       capabilityType: string;

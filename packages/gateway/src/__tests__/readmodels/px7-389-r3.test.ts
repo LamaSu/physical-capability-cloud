@@ -153,6 +153,7 @@ describe("the routes refuse a page asked for under an older snapshot (409 list_c
       if (typeof p === "string") {
         (req as any).operatorId = p;
         (req as any).provenWallet = p.toLowerCase();
+        req.provenWalletCarrier = "key";
       }
     });
     await app.register(operatorWorkRoutes);

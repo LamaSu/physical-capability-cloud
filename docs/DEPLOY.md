@@ -221,6 +221,77 @@ Ship to S3/Storacha on a daily cron. Whole-file size stays under 100 MB even wit
 
 Full rationale, growth math, vacuum guidance, and recovery semantics: [`docs/WORKFLOW_RUNTIME.md`](./WORKFLOW_RUNTIME.md) §5 (Operational notes). Public API: [`packages/workflow/README.md`](../packages/workflow/README.md).
 
+## Local job dispatch on the production image (self-hosted labs)
+
+The image sets `NODE_ENV=production` (Dockerfile). A gateway in production runs a submitted job on a device it hosts only when ALL of these hold. Every other submitted job is queued for a remote node, such as pcc-node, to claim.
+
+1. **`PCC_JOB_SUBMIT_QUEUE_ONLY=false`, exactly.** In production, an unset variable or any other value means queue-only. Outside production it's the reverse: only an exact `true` turns queue-only on.
+2. **An explicit kernel config:** `KERNEL_CONFIG` (the config JSON, inline) or `KERNEL_CONFIG_FILE` (a path to a JSON file). If both are set, `KERNEL_CONFIG` wins. With neither, the gateway generates a mock config, and a generated config never authorizes a local job.
+3. **The config's `kernelId` isn't the placeholder `kernel_dev_001`.**
+4. **The job is for that `kernelId`,** and that kernel's emergency stop reads clear. A stop that is engaged, or that can't be read, queues the job instead.
+
+A submit can also send `queueOnly: true` to queue a job that would otherwise run locally.
+
+`KERNEL_ID` names the generated mock config's kernel (default `kernel_dev_001`), and the setup routes use it when they generate or validate a config that names no kernel. It never turns local dispatch on by itself.
+
+Enable local dispatch only on a gateway that untrusted callers can't reach.
+
+A self-hosted lab that runs its devices in the gateway process sets, for example:
+
+```
+PCC_JOB_SUBMIT_QUEUE_ONLY=false
+KERNEL_CONFIG_FILE=/app/data/kernel-config.json
+```
+
+To check the effective policy:
+- The boot log prints `[jobs] Effective local dispatch policy` with `queueOnly`, `localDispatch` and, when local dispatch is off, the `reason`.
+- `GET /api/setup/detect` (API key required) returns `jobs: { queueOnly, localDispatch }`. Its `localDispatch` is true only when the checks above pass for the config's own kernel AND at least one machine device has a loaded runner.
+
+## Buyer-funding V-next record: operator-approved live window
+
+On production, keep all three variables **unset**: `PCC_VNEXT_RECORD_NETWORK`,
+`PCC_VNEXT_ALLOW_TESTNET_RECORD`, and `PCC_VNEXT_TESTNET_BUYERS`. Leaving them unset
+keeps testnet-record activation disabled; do not configure them as persistent production settings.
+
+For **one operator-approved live window**, with an explicit go, set all three:
+
+- `PCC_VNEXT_RECORD_NETWORK=base-sepolia` selects the pinned canonical deployment record.
+- `PCC_VNEXT_ALLOW_TESTNET_RECORD=1` opts into a testnet-only record; only exact `1` works.
+- `PCC_VNEXT_TESTNET_BUYERS=<list>` supplies the closed comma-separated buyer allow-list.
+
+List entries must be lowercase Ethereum addresses or correctly EIP-55 checksummed addresses:
+`0x` and 40 hex digits, written all in lowercase or exactly in the address's EIP-55 checksum case.
+Any other entry invalidates the **entire** list: a bad checksum, an all-uppercase entry (unless
+that spelling happens to be its checksum), an empty entry, whitespace, or an invalid address.
+An empty or unset list permits nobody. A testnet-only activation for a verified buyer the list
+does not allow is refused; once the record's own checks pass, the refusal is
+`testnet_buyer_not_allowed`. After the live window, **unset all three variables** again; do not
+leave the opt-in on production.
+
+Keep `PCC_VNEXT_RECORD_LABEL` unset as well. If it is set to anything, even an empty value, the
+reader refuses every record without a warning.
+
+When the reader refuses a record it has read, the gateway logs one warning for that read,
+`vnext_record_refused <code>`, naming the first rule the record fails. No funding then binds or
+activates, because the expected chain is unavailable:
+
+- `R-a`: the record's `specVersion` is not 2.
+- `R-b`: `scheduleTestnetOnly` is missing or not a boolean, or it is true on a chain other than
+  84532 or 31337.
+- `R-c`: the record is testnet-only and `PCC_VNEXT_ALLOW_TESTNET_RECORD` is not exactly `1`.
+- `R-d`: the file is not a JSON object; or a field the gateway reads fails its check (`mode`,
+  `label`, `canonical`, `doNotPin`, `broadcast`, `factory`, `implementation`, `usdc`, `chainId`,
+  `blockNumber`, or a `scheduleId` that does not match `scheduleTestnetOnly`); or `chainId` is not
+  the chain of the `PCC_VNEXT_RECORD_NETWORK` directory.
+
+The reader also refuses, with no warning, when `PCC_VNEXT_RECORD_NETWORK` is unset or is not
+`base`, `base-sepolia`, `anvil` or `chain-<id>`; when the gateway cannot find the `@pcc/contracts`
+package; or when the record file or one of its directories is missing, unreadable, a symlink, or
+not a regular file or directory.
+
+The `escrow_funding` and `funding_prepares` tables start empty. **Nothing activates** via this
+path until both S1.1 (prepared TTL terms) and S1.2 (the production funding-store wiring) land.
+
 ## What this does NOT yet include
 
 - **Canary / weighted rollout** — would require Cloudflare Workers or a Railway replica layer to split traffic. Skipped until capability.network has enough traffic to warrant it.

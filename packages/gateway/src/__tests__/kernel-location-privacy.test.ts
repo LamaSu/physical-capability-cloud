@@ -341,7 +341,10 @@ describe("a proven wallet (as WP-A #326 sets it) may opt in its own kernel, and 
       const principal = req.headers["x-test-principal"];
       if (typeof principal === "string") (req as { operatorId?: string }).operatorId = principal;
       const proven = req.headers["x-test-proven"];
-      if (typeof proven === "string") (req as { provenWallet?: string }).provenWallet = proven;
+      if (typeof proven === "string") {
+        (req as { provenWallet?: string }).provenWallet = proven;
+        req.provenWalletCarrier = "key";
+      }
     });
     await stand.register(kernelRoutes);
     await stand.ready();

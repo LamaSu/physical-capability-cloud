@@ -81,7 +81,10 @@ beforeAll(async () => {
   app = Fastify({ logger: false });
   const setProvenWallet = async (req: import("fastify").FastifyRequest) => {
     const proven = req.headers["x-test-proven-wallet"];
-    if (typeof proven === "string") (req as unknown as { provenWallet: string }).provenWallet = proven;
+    if (typeof proven === "string") {
+      (req as unknown as { provenWallet: string }).provenWallet = proven;
+      req.provenWalletCarrier = "key";
+    }
   };
   app.addHook("onRequest", setProvenWallet);
   await app.register(apiGate);

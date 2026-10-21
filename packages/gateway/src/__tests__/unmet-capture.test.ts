@@ -61,6 +61,7 @@ describe("principals (server-side auth context only, two strengths)", () => {
     const req = {
       operatorId: "op-auth",
       provenWallet: "0xABCDEF",
+      provenWalletCarrier: "key",
       body: { operatorId: "forged", provenWallet: "0xforged" },
     } as unknown as FastifyRequest;
     expect(authenticatedPrincipal(req)).toBe("op-auth");
