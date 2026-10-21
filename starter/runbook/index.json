@@ -128,7 +128,7 @@
     "register.signing-refused": {
       "phase": "register",
       "trigger": "register_signing_key refuses with LogSigningRefused, or mentions pynacl.",
-      "do": "Install the crypto extra, delete .pcc/node-keys.json and .pcc/node-public-key, run phase 0 step 3 again, then the signing step.",
+      "do": "Install the crypto extra, delete the selected key file (PCC_NODE_KEY_PATH if set, else PCC_NODE_KEYS_FILE if set, else ~/.pcc-node/keys.json; if phase 0 used either variable, set it again first; folders onboarded earlier used .pcc/node-keys.json) and .pcc/node-public-key, run phase 0 step 3 again, then the signing step.",
       "file": "05-register.md",
       "section": "2. The kernel's signing key",
       "report": {
