@@ -22,6 +22,8 @@
  *   - a default parameter value;
  *   - a spread.
  * (P3) A parameter that reaches a sink unformatted makes its function a DERIVED sink for that argument position, and the engine then scans that function's callers. Run it to a fixpoint, not one level. A baseline row may no longer admit a forwarder's parameter leaf for its future callers.
+ *   - Stored-field provenance follows every statically resolved assignment write to a property's symbol and its declarations, including element-access and destructuring assignment targets. This is flow-insensitive: it does not prove execution order or which runtime object instance a write targets.
+ *   - Unresolved computed property keys, reflection or helper-based mutations, implicit constructor parameter-property writes, and writes outside the indexed program can still escape this provenance pass. It is not general heap-alias or accessor-side-effect analysis.
  * (P4) Receiver recognition covers:
  *   - union constituents and `checker.getNonNullableType` (so `trace.getActiveSpan()` and `Span | undefined` are recognized);
  *   - mapped and `Pick<>` types, through `checker.getPropertyOfType(type, method)?.declarations`;

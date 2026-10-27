@@ -16,8 +16,11 @@
  * rebuilt per test. The scan-time report lives in the last test below.
  */
 import { describe, it, expect } from "vitest";
+import * as ts from "typescript";
+import { join } from "node:path";
 import {
   getScanner,
+  derivedSinkDiagnostics,
   scanWholePackage,
   scanNode,
   findNamedFunction,
@@ -26,6 +29,7 @@ import {
   newViolations,
   staleBaselineEntries,
   N71_SCOPE_FILES,
+  GATEWAY_SRC,
   PROBE_FIXTURE_PATH,
   type Violation,
   type ScanResult,
@@ -44,6 +48,33 @@ function probeScan(fnName: string): ScanResult {
   const fn = findNamedFunction(sourceFile, fnName);
   if (!fn) throw new Error(`probe function not found in fixture: ${fnName}`);
   return scanNode(fn, "fixtures/n71-sink-scanner-probes.ts", sourceFile, scanner);
+}
+
+/** Resolve the real handler that Fastify registers, not a separate surrogate. */
+function registeredRouteHandler(relativeFile: string, url: string): {
+  sourceFile: ts.SourceFile;
+  handler: ts.ArrowFunction | ts.FunctionExpression;
+} {
+  const sourceFile = getScanner().program.getSourceFile(join(GATEWAY_SRC, relativeFile));
+  if (!sourceFile) throw new Error(`route not in scanner program: ${relativeFile}`);
+  let handler: ts.ArrowFunction | ts.FunctionExpression | undefined;
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && node.arguments.length >= 2 &&
+      ts.isStringLiteral(node.arguments[0]) && node.arguments[0].text === url) {
+      const candidate = node.arguments[node.arguments.length - 1];
+      if (ts.isArrowFunction(candidate) || ts.isFunctionExpression(candidate)) handler = candidate;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  if (!handler) throw new Error(`registered route handler not found: ${relativeFile} ${url}`);
+  return { sourceFile, handler };
+}
+
+/** Scan the actual registered route handler, including its sink calls. */
+function routeHandlerScan(relativeFile: string, url: string): ScanResult {
+  const { sourceFile, handler } = registeredRouteHandler(relativeFile, url);
+  return scanNode(handler, relativeFile, sourceFile, getScanner());
 }
 
 describe("N71 round 7: sink scanner mechanics (probes, against real typed fixtures)", () => {
@@ -94,6 +125,63 @@ describe("N71 round 7: sink scanner mechanics (probes, against real typed fixtur
   it("every formatter (logSafeId, knownErrorClassName, logSafeSmallInt, logSafeInt, logSafeIsoTimestamp, facadeErrorTelemetryCode) is allowed regardless of its OWN argument", () => {
     const r = probeScan("probeFormattersAlwaysAllowed");
     expect(r.violations, formatViolations(r.violations)).toHaveLength(0);
+  });
+
+  it("a simulation error constructor is not a derived sink through its code", () => {
+    const reasons = derivedSinkDiagnostics(getScanner());
+    expect(reasons.filter((reason) => reason.file.replaceAll("\\", "/").endsWith("/routes/capture-sim.ts") &&
+      reason.parameter === "code"), "unformatted adapter code must not propagate into diagnostic sinks").toEqual([]);
+  });
+
+  it.each([
+    ["routes/capture.ts", "/api/capture/challenge"],
+    ["routes/capture.ts", "/api/capture/anchor"],
+    ["routes/capture-sim.ts", "/api/capture/sim"],
+    ["routes/agent-feedback.ts", "/api/feedback/agent-report"],
+  ])("the real %s handler at %s does not export an unformatted request through a derived sink", (file, url) => {
+    const result = routeHandlerScan(file, url);
+    const escapes = result.unresolvedCallees.filter((row) => row.sink === "<sink-escape>" &&
+      row.argText.startsWith("async "));
+    expect(escapes, formatViolations(escapes)).toEqual([]);
+  });
+
+  it.each([
+    ["routes/capture.ts", "/api/capture/challenge"],
+    ["routes/capture.ts", "/api/capture/anchor"],
+    ["routes/capture-sim.ts", "/api/capture/sim"],
+  ])("the real %s handler at %s excludes raw dependency errors from its logger", (file, url) => {
+    const result = routeHandlerScan(file, url);
+    const rawErrors = result.violations.filter((row) => row.sink === "log.error" && row.argText === "err");
+    expect(rawErrors, formatViolations(rawErrors)).toEqual([]);
+  });
+
+  it("the real EasyPost webhook exports only a boolean for signature-header presence", () => {
+    const file = "routes/carrier.ts";
+    const url = "/api/carrier/webhook/easypost";
+    const result = routeHandlerScan(file, url);
+    const rawPresence = result.violations.filter((row) =>
+      row.sink === "log.warn" && row.argText === "!!headerValue");
+    expect(rawPresence, formatViolations(rawPresence)).toEqual([]);
+
+    // The field must still exist and preserve truthiness-based presence reporting.
+    // A baseline gate alone cannot prove that a diagnostic was not just deleted.
+    const { sourceFile, handler } = registeredRouteHandler(file, url);
+    const fields: ts.PropertyAssignment[] = [];
+    const visit = (node: ts.Node): void => {
+      if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name) && node.name.text === "hasHeader") {
+        fields.push(node);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(handler);
+    expect(fields).toHaveLength(1);
+    const value = fields[0]!.initializer;
+    expect(ts.isConditionalExpression(value)).toBe(true);
+    if (ts.isConditionalExpression(value)) {
+      expect(value.condition.getText(sourceFile)).toBe("headerValue");
+      expect(value.whenTrue.kind).toBe(ts.SyntaxKind.TrueKeyword);
+      expect(value.whenFalse.kind).toBe(ts.SyntaxKind.FalseKeyword);
+    }
   });
 
   it("control: a fully-literal call to a representative sink is clean", () => {
