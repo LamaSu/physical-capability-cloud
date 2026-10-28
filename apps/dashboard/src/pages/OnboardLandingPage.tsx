@@ -121,9 +121,9 @@ function HeroCard({ badge, title, subtitle, glow, children, cta }: HeroCardProps
 
 const secondaryPathways = [
   {
-    title: "Add a Machine",
+    title: "Describe a Machine",
     description:
-      "Register any machine — from desktop 3D printers to industrial bio-reactors.",
+      "Enter your machine's details step by step. The wizard can't register it yet.",
     path: "/onboard/wizard",
     icon: "M12 4v8m0 0l-3-3m3 3l3-3M4 14v2a2 2 0 002 2h8a2 2 0 002-2v-2",
     glow: "green" as const,
@@ -169,7 +169,7 @@ export function OnboardLandingPage(): React.ReactElement {
           Onboard to the Physical Cloud
         </h1>
         <p className="text-sm text-white/50 max-w-2xl mx-auto leading-relaxed">
-          Two ways to register a capability, talk to an operator, or wire up a machine. Pick
+          Two ways to tell PCC what you do. Pick
           whichever fits where you already are — the browser or your own AI.
         </p>
       </div>

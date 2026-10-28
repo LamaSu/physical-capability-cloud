@@ -18,12 +18,11 @@ const wizardSteps: WizardStep[] = [
   { id: "space", label: "Physical Space", description: "Footprint & power" },
   { id: "pricing", label: "Pricing", description: "Rates & ROI" },
   { id: "operator", label: "Operator", description: "Profile & certs" },
-  { id: "review", label: "Review", description: "Submit registration" },
+  { id: "review", label: "Review", description: "Review your details" },
 ];
 
 const aiMessages = [
-  { id: "1", content: "Welcome! I'll help you register your machine on the PCCP network. Start by entering your machine details.", timestamp: "now" },
-  { id: "2", content: "Tip: Upload manufacturer datasheets in step 2 and I'll automatically extract capabilities, tolerances, and materials.", suggestions: ["Upload a PDF datasheet", "Skip to manual entry"], timestamp: "now" },
+  { id: "1", content: "Welcome! Start by entering your machine details.", timestamp: "now" },
 ];
 
 const stepComponents = [
@@ -57,7 +56,7 @@ export function OnboardWizardPage() {
               AI Assistant
             </div>
             {aiMessages.map((m) => (
-              <OnboardingAIBubble key={m.id} content={m.content} suggestions={m.suggestions} timestamp={m.timestamp} />
+              <OnboardingAIBubble key={m.id} content={m.content} timestamp={m.timestamp} />
             ))}
           </div>
         }
