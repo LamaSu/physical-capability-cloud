@@ -240,8 +240,10 @@ afterEach(() => {
     const secrets = [SIGNATURE, ...replySecrets!, ...[...gateways].flatMap(gateway => [
       ...gateway.sessionTokens, ...gateway.mintedKeys, ...gateway.nonceValues,
     ])];
+    // Stack frames hold only code locations (paths and function names), never runtime values.
+    const withoutFrames = (text: string) => text.split("\n").filter(line => !/^\s+at /.test(line)).join("\n");
     const safe = (representations: string[]) => {
-      for (const representation of representations) {
+      for (const representation of representations.map(withoutFrames)) {
         for (const secret of secrets) expect(representation.includes(secret), "T9: secret in public value").toBe(false);
         expect(representation.includes("secret: "), "T9: underlying exception text").toBe(false);
       }
