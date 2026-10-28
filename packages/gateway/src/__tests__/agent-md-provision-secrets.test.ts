@@ -19,7 +19,7 @@
 
 import { execFile, spawnSync } from "node:child_process";
 import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign, verify } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -419,11 +419,27 @@ describe("no identity outcome generates or assigns a wallet", () => {
   );
 });
 
+/** Child processes must never inherit Git's redirection into the outer checkout. */
+function gitCleanEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_"))), ...extra };
+}
+
+/** Pin global ignore rules as well: an empty config still reads ~/.config/git/ignore. */
+function fixtureGitEnv(dir: string, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return gitCleanEnv({ GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: join(dir, ".git/fixture-gitconfig"), ...extra });
+}
+
+function writeFixtureGitConfig(dir: string): void {
+  mkdirSync(join(dir, ".git"), { recursive: true });
+  writeFileSync(join(dir, ".git/empty-ignore"), "");
+  writeFileSync(join(dir, ".git/fixture-gitconfig"), `[core]\n    excludesFile = ${join(dir, ".git/empty-ignore")}\n`);
+}
+
 /** CI images carry all four; elsewhere the run-it-as-written case needs them on PATH. */
-const recipeTools = spawnSync("sh", ["-c", "command -v bash && command -v curl && command -v python3 && command -v git"]).status === 0;
+const recipeTools = spawnSync("sh", ["-c", "command -v bash && command -v curl && command -v python3 && command -v git"], { env: gitCleanEnv() }).status === 0;
 const captureToolsRequired = recipeTools || process.env.CI === "true";
 if (!captureToolsRequired) console.info("Capture recipe tests skipped: bash, curl, python3 and git are required locally.");
-const tmpdirInGit = spawnSync("git", ["rev-parse", "--git-dir"], { cwd: tmpdir(), stdio: "ignore" }).status === 0;
+const tmpdirInGit = spawnSync("git", ["rev-parse", "--git-dir"], { cwd: tmpdir(), env: gitCleanEnv(), stdio: "ignore" }).status === 0;
 if (tmpdirInGit) console.info("Outside-repository tests skipped: the temporary directory is inside a Git repository.");
 
 describe.runIf(captureToolsRequired)("every leaf of every 201 the route returns is classified, and every secret copy is named (ChatGPT r1 L1)", () => {
@@ -776,10 +792,10 @@ describe("agent golden path captures the provision response without leaking it (
         mockGenerateOperatorWallet.mockResolvedValue({ address: "0x" + "ce".repeat(20), privateKey: "0x" + "9f".repeat(32) });
         mockSetAgentWalletOnChain.mockRejectedValue(new Error("no chain in tests"));
         await app.listen({ port: 0, host: "127.0.0.1" });
-        const env = { ...process.env, PCC_BASE: `http://127.0.0.1:${(app.server.address() as AddressInfo).port}` };
+        const env = { ...gitCleanEnv(), PCC_BASE: `http://127.0.0.1:${(app.server.address() as AddressInfo).port}` };
         const dir = mkdtempSync(join(tmpdir(), "agent-md-recipe-"));
         try {
-          await run("git", ["init", "-q"], { cwd: dir, timeout: 10_000 });
+          await run("git", ["init", "-q"], { cwd: dir, env: gitCleanEnv(), timeout: 10_000 });
           // The agent writes the request body with its file-writing tool before running the recipe.
           mkdirSync(join(dir, ".pcc"));
           writeFileSync(join(dir, ".pcc/provision-request.json"), JSON.stringify({ email: "recipe-run@example.com" }));
@@ -807,7 +823,7 @@ describe("agent golden path captures the provision response without leaking it (
           expect(existsSync(join(dir, ".pcc/provision-request.json"))).toBe(false);
           // check-ignore exits 1 (and execFile rejects) when the path is not ignored.
           for (const credential of ["provision.json", "auth.header", "ed25519-private.pem"])
-            await expect(run("git", ["check-ignore", "-q", "--", `.pcc/${credential}`], { cwd: dir })).resolves.toBeDefined();
+            await expect(run("git", ["check-ignore", "-q", "--", `.pcc/${credential}`], { cwd: dir, env: gitCleanEnv() })).resolves.toBeDefined();
         } finally {
           rmSync(dir, { recursive: true, force: true });
         }
@@ -861,15 +877,241 @@ if os.environ.get("FIXTURE_RACE"): pathlib.Path(".pcc/auth.header").write_text("
 if os.environ.get("FIXTURE_LOSE_IGNORE"): pathlib.Path(".git/info/exclude").write_text("")
 sys.exit(int(os.environ.get("FIXTURE_EXIT", "0")))
 `);
-  spawnSync("git", ["init", "-q"], { cwd: dir });
+  writeFixtureGitConfig(dir);
+  expect(spawnSync("git", ["init", "-q"], { cwd: dir, env: fixtureGitEnv(dir) }).status).toBe(0);
   mkdirSync(join(dir, ".pcc"), { mode: 0o755 });
   writeFileSync(join(dir, ".pcc/provision-request.json"), JSON.stringify({ email: "fixture@example.com" }));
-  const run = (extra: Record<string, string | undefined> = {}) => spawnSync("bash", ["-c", (provisionAction().recipe ?? []).join("\n")], {
-    cwd: dir, env: { ...process.env, PCC_BASE: "https://fixture.invalid", PATH: `${bin}:${process.env.PATH}`, ...extra },
-    encoding: "utf8", timeout: 15_000,
-  });
-  return { dir, body, executable, run, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  const runScript = (script: string, extra: NodeJS.ProcessEnv = {}) => {
+    const env = fixtureGitEnv(dir, { PCC_BASE: "https://fixture.invalid", PATH: `${bin}:${process.env.PATH}`, ...extra });
+    for (const name of Object.keys(env)) if (env[name] === undefined) delete env[name];
+    return spawnSync("bash", ["-c", script], { cwd: dir, env, encoding: "utf8", timeout: 15_000 });
+  };
+  const run = (extra: NodeJS.ProcessEnv = {}) => runScript((provisionAction().recipe ?? []).join("\n"), extra);
+  const archive = () => {
+    const snippet = provisionAction().request.match(/`(python3 -c[^`]*)`/)?.[1];
+    expect(snippet, "the guide must give the exact archive command").toBeDefined();
+    const result = runScript(snippet ?? "");
+    expect((result.stdout + result.stderr).includes(body.api_key)).toBe(false);
+    return result;
+  };
+  return { dir, body, executable, runScript, run, archive, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
+
+/** Refuse destructive Git commands unless the fixture owns the working tree. */
+function expectFixtureTopLevel(dir: string, env: NodeJS.ProcessEnv): void {
+  const result = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd: dir, env, encoding: "utf8" });
+  expect(result.status).toBe(0);
+  expect(realpathSync(result.stdout.trim())).toBe(realpathSync(dir));
+}
+
+function fixtureGit(dir: string, args: string[]): string {
+  const env = fixtureGitEnv(dir);
+  if (args.some((arg) => ["reset", "clean", "stash", "checkout"].includes(arg))) expectFixtureTopLevel(dir, env);
+  const result = spawnSync("git", args, { cwd: dir, env, encoding: "utf8", timeout: 10_000 });
+  expect(result.status, result.stderr).toBe(0);
+  return result.stdout;
+}
+
+const fixtureIdentity = ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"];
+function fixtureCommit(dir: string, files: string[]): void {
+  fixtureGit(dir, ["add", "--", ...files]);
+  fixtureGit(dir, [...fixtureIdentity, "commit", "-qm", "fixture"]);
+}
+
+function expectBuyerCredentialsUnstageable(dir: string): void {
+  for (const name of ["provision.json", "auth.header", "ed25519-private.pem"])
+    expect(existsSync(join(dir, ".pcc", name)), `private ${name} survives the Git operation`).toBe(true);
+  expect(fixtureGit(dir, ["add", "-A", "--dry-run"])).not.toContain(".pcc/");
+}
+
+function expectPrivateArchive(dir: string): void {
+  const walk = (relative: string): void => {
+    const path = join(dir, relative);
+    const info = statSync(path);
+    expect(info.mode & 0o777).toBe(info.isDirectory() ? 0o700 : 0o600);
+    fixtureGit(dir, ["check-ignore", "-q", "--", relative]);
+    if (info.isDirectory()) for (const name of readdirSync(path)) walk(`${relative}/${name}`);
+  };
+  const archives = readdirSync(join(dir, ".pcc/archive"));
+  expect(archives).toHaveLength(1);
+  expect(readdirSync(join(dir, ".pcc/archive", archives[0])).length).toBeGreaterThan(0);
+  walk(".pcc/archive");
+}
+
+const BUYER_DISCLOSURE = " It adds the line .pcc/ to the repository's .git/info/exclude, a local file that Git never commits, unless that line is already there; if that file cannot be written, it continues only when every credential path is already ignored.";
+const BUYER_GATEWAY_FORMS = " Set PCC_BASE to https://host[:port][/path], or to http://127.0.0.1 or http://[::1] with an optional port, with no trailing slash, userinfo, query or fragment; an exported variable and a plain assignment on the script's first line both work.";
+const BUYER_POSSIBLE_ISSUANCE = "a key may have been issued and cannot be recovered; it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. " + BUYER_ORPHAN;
+
+describe.runIf(captureToolsRequired)("durable buyer Git exclusions", () => {
+  it("BT1: an untracked ignore survives git clean through one durable exclusion", () => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, ".gitignore"), ".pcc/\n");
+      const result = f.run();
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(join(f.dir, ".git/info/exclude"), "utf8").split("\n").filter((line) => line === ".pcc/")).toHaveLength(1);
+      fixtureGit(f.dir, ["clean", "-fd"]);
+      expect(existsSync(join(f.dir, ".gitignore"))).toBe(false);
+      expectBuyerCredentialsUnstageable(f.dir);
+    } finally { f.cleanup(); }
+  });
+
+  it("BT2: an uncommitted ignore survives git reset through the durable exclusion", () => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, ".gitignore"), "*.log\n");
+      fixtureCommit(f.dir, [".gitignore"]);
+      writeFileSync(join(f.dir, ".gitignore"), "*.log\n.pcc/\n");
+      const result = f.run();
+      expect(result.status, result.stderr).toBe(0);
+      fixtureGit(f.dir, ["reset", "--hard"]);
+      expect(readFileSync(join(f.dir, ".gitignore"), "utf8")).toBe("*.log\n");
+      expectBuyerCredentialsUnstageable(f.dir);
+    } finally { f.cleanup(); }
+  });
+
+  it("BT3: an untracked ignore survives git stash through the durable exclusion", () => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, "README"), "fixture\n");
+      fixtureCommit(f.dir, ["README"]);
+      writeFileSync(join(f.dir, ".gitignore"), ".pcc/\n");
+      const result = f.run();
+      expect(result.status, result.stderr).toBe(0);
+      fixtureGit(f.dir, [...fixtureIdentity, "stash", "-u"]);
+      expect(existsSync(join(f.dir, ".gitignore"))).toBe(false);
+      expectBuyerCredentialsUnstageable(f.dir);
+    } finally { f.cleanup(); }
+  });
+
+  it("BT4: a branch-only ignore survives switching branches through the durable exclusion", () => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, "README"), "fixture\n");
+      fixtureCommit(f.dir, ["README"]);
+      fixtureGit(f.dir, ["branch", "without-ignore"]);
+      writeFileSync(join(f.dir, ".gitignore"), ".pcc/\n");
+      fixtureCommit(f.dir, [".gitignore"]);
+      const result = f.run();
+      expect(result.status, result.stderr).toBe(0);
+      fixtureGit(f.dir, ["checkout", "-q", "without-ignore"]);
+      expect(existsSync(join(f.dir, ".gitignore"))).toBe(false);
+      expectBuyerCredentialsUnstageable(f.dir);
+    } finally { f.cleanup(); }
+  });
+
+  it.each(["*.log\n.pcc/\n", "*.log\r\n.pcc/\r\n"])("BT5: an existing exclusion stays byte-identical (%j)", (contents) => {
+    const f = captureFixture();
+    try {
+      const path = join(f.dir, ".git/info/exclude");
+      const before = Buffer.from(contents);
+      writeFileSync(path, before);
+      const result = f.run();
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(path).equals(before)).toBe(true);
+    } finally { f.cleanup(); }
+  });
+
+  it("BT6: ignored final destinations alone cannot bypass a failed capture exclusion setup", () => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, ".gitignore"), [".pcc/provision.json", ".pcc/auth.header", ".pcc/provision-request.json", ".pcc/ed25519-private.pem", ""].join("\n"));
+      rmSync(join(f.dir, ".git/info"), { recursive: true });
+      const result = f.run();
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe("Git exclusion setup failed.\n");
+      expect(existsSync(join(f.dir, "requested"))).toBe(false);
+      expect(readdirSync(join(f.dir, ".pcc")).filter((name) => name.startsWith("capture."))).toEqual([]);
+    } finally { f.cleanup(); }
+  });
+
+  it("BT7: individually ignored probes still gain an exclusion that permits private archive recovery", () => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, ".gitignore"), [".pcc/provision.json", ".pcc/auth.header", ".pcc/provision-request.json", ".pcc/ed25519-private.pem", ".pcc/capture.*/", ""].join("\n"));
+      const result = f.run({ FIXTURE_EXIT: "28" });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe("Provision request timed out; " + BUYER_POSSIBLE_ISSUANCE + "\n");
+      expect(readdirSync(join(f.dir, ".pcc")).filter((name) => name.startsWith("capture."))).toHaveLength(1);
+      expect(f.archive().status).toBe(0);
+      expectPrivateArchive(f.dir);
+    } finally { f.cleanup(); }
+  });
+
+  it("BT8: the buyer request discloses its durable local Git exclusion exactly once", () => {
+    const request = provisionAction().request;
+    expect(request.split(BUYER_DISCLOSURE).length - 1).toBe(1);
+    expect(request).toContain("Inside a Git repository it enforces the exclusions strictly." + BUYER_DISCLOSURE);
+  });
+
+  it("BT10: a plain first-line PCC_BASE assignment reaches the validator without export", () => {
+    const f = captureFixture();
+    try {
+      const result = f.runScript("PCC_BASE=https://fixture.invalid\n" + (provisionAction().recipe ?? []).join("\n"), { PCC_BASE: undefined });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(join(f.dir, "curl-args.json"), "utf8"))).toContain("https://fixture.invalid/api/auth/provision");
+    } finally { f.cleanup(); }
+  });
+
+  it("BT13: accepted gateway forms and both not-sent messages have rendered buyer guidance", () => {
+    const buyer = JSON.parse(read("starter/buyer/buyer-path.json"));
+    const request = provisionAction().request;
+    expect(request).toContain("Then run the recipe as one bash script from the folder you work in." + BUYER_GATEWAY_FORMS);
+    const event = {
+      phase: "get-key",
+      trigger: "Invalid gateway base; request refused. Or: Provision request not sent; no key was issued.",
+      do: "Check PCC_BASE (https://host[:port][/path], or http://127.0.0.1 or http://[::1] with an optional port; no trailing slash, userinfo, query or fragment) and connectivity; retry at most once; stop and report.",
+    };
+    expect(buyer.events["buyer.not-sent"]).toEqual(event);
+    expect(Object.keys(buyer.events).indexOf("buyer.not-sent")).toBe(Object.keys(buyer.events).indexOf("buyer.unrecognised-rejection") + 1);
+    const doc = read("apps/dashboard/public/.well-known/agent.md");
+    expect(doc).toContain(BUYER_GATEWAY_FORMS);
+    expect(doc).toContain(`| buyer.not-sent | ${event.trigger} | ${event.do} |`);
+  });
+
+  it("BT14: an invalid 201 with a private Ed25519 field explains possible issuance and archives", () => {
+    const f = captureFixture();
+    try {
+      const privateField = randomBytes(32).toString("hex");
+      writeFileSync(join(f.dir, "body.json"), JSON.stringify({ ...f.body, ed25519: { source: "byok", private_key: privateField } }));
+      const result = f.run();
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe("Provision capture failed; " + BUYER_POSSIBLE_ISSUANCE + "\n");
+      for (const name of ["provision.json", "auth.header", "ed25519-private.pem"])
+        expect(existsSync(join(f.dir, ".pcc", name))).toBe(false);
+      expect(readdirSync(join(f.dir, ".pcc")).filter((name) => name.startsWith("capture."))).toHaveLength(1);
+      expect((result.stdout + result.stderr).includes(privateField)).toBe(false);
+      expect((result.stdout + result.stderr).includes(f.body.api_key)).toBe(false);
+      expect(f.archive().status).toBe(0);
+      expectPrivateArchive(f.dir);
+    } finally { f.cleanup(); }
+  });
+
+  it("BT9: capture fixtures scrub inherited GIT_DIR and GIT_WORK_TREE", () => {
+    const scratch = mkdtempSync(join(tmpdir(), "agent-capture-scratch-"));
+    writeFixtureGitConfig(scratch);
+    const cleanEnv = fixtureGitEnv(scratch);
+    const saved = new Map(Object.entries(process.env).filter(([name]) => name.startsWith("GIT_")));
+    let fixture: ReturnType<typeof captureFixture> | undefined;
+    try {
+      expect(spawnSync("git", ["init", "-q"], { cwd: scratch, env: cleanEnv }).status).toBe(0);
+      const exclude = join(scratch, ".git/info/exclude");
+      const before = readFileSync(exclude);
+      process.env.GIT_DIR = join(scratch, ".git");
+      process.env.GIT_WORK_TREE = scratch;
+      fixture = captureFixture();
+      const result = fixture.run();
+      expect(result.status).toBe(0);
+      expect(readFileSync(exclude).equals(before)).toBe(true);
+      expect(readFileSync(join(fixture.dir, ".git/info/exclude"), "utf8").split("\n")).toContain(".pcc/");
+    } finally {
+      for (const name of Object.keys(process.env)) if (name.startsWith("GIT_")) delete process.env[name];
+      for (const [name, value] of saved) process.env[name] = value;
+      fixture?.cleanup();
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
 
 describe.runIf(captureToolsRequired)("F2: capture fails closed and never overwrites credentials", () => {
   it.each(["unset", "malformed"])("L-e: importer refuses %s PCC_API_KEY without leaving a temporary header", (kind) => {
@@ -879,7 +1121,7 @@ describe.runIf(captureToolsRequired)("F2: capture fails closed and never overwri
       writeFileSync(join(f.dir, ".git/info/exclude"), ".pcc/\n");
       const key = kind === "unset" ? undefined : randomBytes(32).toString("hex");
       const snippet = validateAction().request.match(/`(python3 -c[^`]*)`/)?.[1];
-      const result = spawnSync("bash", ["-c", snippet ?? ""], { cwd: f.dir, env: { ...process.env, PCC_API_KEY: key }, encoding: "utf8", timeout: 10_000 });
+      const result = spawnSync("bash", ["-c", snippet ?? ""], { cwd: f.dir, env: { ...gitCleanEnv(), PCC_API_KEY: key }, encoding: "utf8", timeout: 10_000 });
       expect(result.status).toBe(1);
       expect(result.stdout).toBe("");
       expect(result.stderr).toBe("Private header import refused; preserve existing state and verify private-directory and Git setup.\n");
@@ -901,7 +1143,7 @@ describe.runIf(captureToolsRequired)("F2: capture fails closed and never overwri
     } finally { f.cleanup(); }
   });
 
-  it.each([undefined, "", "http://example.com", "http://localhost:4310", "https://x.example/", "https://user@x.example", "https://x.example?q=1", "https://x.example#frag", "https://x.example/white space"])("N3: refuses invalid PCC_BASE %s before creating private state", (base) => {
+  it.each([undefined, "", "http://example.com", "http://localhost:4310", "https://x.example/", "https://user@x.example", "https://x.example?q=1", "https://x.example#frag", "https://x.example/white space", "https://x_y.example", "https://x.example:", "https://x.example\\.evil", "https://exämple.com", "https://x.example:0", "https://x.example:65536"])("N3: refuses invalid PCC_BASE %s before creating private state", (base) => {
     const f = captureFixture();
     try {
       const result = f.run({ PCC_BASE: base });
@@ -919,7 +1161,7 @@ describe.runIf(captureToolsRequired)("F2: capture fails closed and never overwri
     finally { f.cleanup(); }
   });
 
-  it.each([1, 3, 6, 7])("N3: curl exit %s removes unissued staging and permits one rerun", (code) => {
+  it.each([3, 6, 7])("N3: curl exit %s removes unissued staging and permits one rerun", (code) => {
     const f = captureFixture();
     try {
       const result = f.run({ FIXTURE_EXIT: String(code) });
@@ -930,11 +1172,12 @@ describe.runIf(captureToolsRequired)("F2: capture fails closed and never overwri
     } finally { f.cleanup(); }
   });
 
-  it.each([28, 56])("N3: curl exit %s preserves capture for possible issuance", (code) => {
+  it.each([1, 28, 56])("N3: curl exit %s preserves capture for possible issuance", (code) => {
     const f = captureFixture();
     try {
       const result = f.run({ FIXTURE_EXIT: String(code) });
       expect(result.status).toBe(1);
+      if (code === 1) expect(result.stderr).toBe("Provision request failed; " + BUYER_POSSIBLE_ISSUANCE + "\n");
       const captures = readdirSync(join(f.dir, ".pcc")).filter((name) => name.startsWith("capture."));
       expect(captures).toHaveLength(1);
       expect(existsSync(join(f.dir, ".pcc", captures[0], "ed25519-private.pem"))).toBe(true);
@@ -948,7 +1191,7 @@ describe.runIf(captureToolsRequired)("F2: capture fails closed and never overwri
       writeFileSync(join(f.dir, "app.log"), "local log");
       const result = f.run();
       expect(result.status, result.stderr).toBe(0);
-      expect(spawnSync("git", ["check-ignore", "-q", "--", "app.log"], { cwd: f.dir }).status).toBe(0);
+      expect(spawnSync("git", ["check-ignore", "-q", "--", "app.log"], { cwd: f.dir, env: fixtureGitEnv(f.dir) }).status).toBe(0);
       expect(readFileSync(join(f.dir, ".git/info/exclude"), "utf8")).toBe("*.log\n.pcc/\n");
     } finally { f.cleanup(); }
   });
@@ -995,7 +1238,7 @@ describe.runIf(captureToolsRequired)("F2: capture fails closed and never overwri
         : kind === "other" ? issued.replace("live", "other") : kind === "uppercase" ? ["pcc", "live", "A".repeat(64)].join("_")
         : kind === "short" ? issued.slice(0, -1) : ["pcc", "live", "z".repeat(64)].join("_");
       const snippet = validateAction().request.match(/`(python3 -c[^`]*)`/)?.[1];
-      const result = spawnSync("bash", ["-c", snippet ?? ""], { cwd: f.dir, env: { ...process.env, PCC_API_KEY: key }, encoding: "utf8", timeout: 10_000 });
+      const result = spawnSync("bash", ["-c", snippet ?? ""], { cwd: f.dir, env: { ...gitCleanEnv(), PCC_API_KEY: key }, encoding: "utf8", timeout: 10_000 });
       expect(result.status === 0).toBe(kind === "live");
       expect(existsSync(join(f.dir, ".pcc/auth.header"))).toBe(kind === "live");
       expect(result.stdout + result.stderr).not.toContain(key);
@@ -1046,7 +1289,7 @@ describe.runIf(captureToolsRequired)("F2: capture fails closed and never overwri
   it("L3: failure after generating a key removes unissued staging and permits a retry", () => {
     const f = captureFixture();
     try {
-      const mktemp = spawnSync("bash", ["-c", "command -v mktemp"], { encoding: "utf8" }).stdout.trim();
+      const mktemp = spawnSync("bash", ["-c", "command -v mktemp"], { env: gitCleanEnv(), encoding: "utf8" }).stdout.trim();
       f.executable("mktemp", `#!/bin/sh\nstage=$('${mktemp}' "$@") || exit 1\nprintf late > "$stage/provision-request.json"\nprintf '%s' "$stage"\n`);
       const result = f.run();
       expect(result.status).not.toBe(0);
@@ -1092,12 +1335,12 @@ describe.runIf(captureToolsRequired)("F2: capture fails closed and never overwri
       const prior = randomBytes(32).toString("hex");
       const path = join(f.dir, ".pcc/auth.header");
       if (race) {
-        const git = spawnSync("bash", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+        const git = spawnSync("bash", ["-c", "command -v git"], { env: gitCleanEnv(), encoding: "utf8" }).stdout.trim();
         f.executable("git", `#!/bin/sh\nif [ "$1" = check-ignore ]; then case "$4" in */.pcc/auth.header.*) printf '%s' '${prior}' > .pcc/auth.header;; esac; fi\nexec '${git.replace(/'/g, "'\\''")}' "$@"\n`);
       } else writeFileSync(path, prior);
       const snippet = validateAction().request.match(/`(python3 -c[^`]*)`/)?.[1];
       const result = spawnSync("bash", ["-c", snippet ?? ""], {
-        cwd: f.dir, env: { ...process.env, PATH: `${join(f.dir, "bin")}:${process.env.PATH}`, PCC_API_KEY: f.body.api_key }, encoding: "utf8", timeout: 10_000,
+        cwd: f.dir, env: { ...gitCleanEnv(), PATH: `${join(f.dir, "bin")}:${process.env.PATH}`, PCC_API_KEY: f.body.api_key }, encoding: "utf8", timeout: 10_000,
       });
       expect(result.status).not.toBe(0);
       expect(readFileSync(path, "utf8") === prior).toBe(true);
@@ -1115,7 +1358,7 @@ describe.runIf(captureToolsRequired)("F2: capture fails closed and never overwri
       const snippet = validateAction().request.match(/`([^`]*(?:printf|python3)[^`]*)`/)?.[1];
       expect(snippet).toBeDefined();
       const result = spawnSync("bash", ["-c", snippet ?? ""], {
-        cwd: f.dir, env: { ...process.env, PCC_API_KEY: f.body.api_key }, encoding: "utf8", timeout: 10_000,
+        cwd: f.dir, env: { ...gitCleanEnv(), PCC_API_KEY: f.body.api_key }, encoding: "utf8", timeout: 10_000,
       });
       expect(result.status, "existing-key import must refuse overwrite").not.toBe(0);
       expect(readFileSync(path, "utf8") === prior, "existing-key import destroyed a captured header").toBe(true);
@@ -1128,7 +1371,7 @@ describe.runIf(captureToolsRequired)("F2: capture fails closed and never overwri
       const snippet = validateAction().request.match(/`(python3 -c[^`]*)`/)?.[1];
       expect(snippet).toBeDefined();
       const runImport = () => spawnSync("bash", ["-c", snippet ?? ""], {
-        cwd: f.dir, env: { ...process.env, PCC_API_KEY: f.body.api_key }, encoding: "utf8", timeout: 10_000,
+        cwd: f.dir, env: { ...gitCleanEnv(), PCC_API_KEY: f.body.api_key }, encoding: "utf8", timeout: 10_000,
       });
       // Neither loose permissions nor missing effective Git exclusions may allow a secret to be written.
       expect(runImport().status).not.toBe(0);
@@ -1261,13 +1504,13 @@ describe.runIf(captureToolsRequired)("F2: capture fails closed and never overwri
       writeFileSync(join(f.dir, ".pcc/capture.leftover/provision.json"), JSON.stringify(f.body));
       const snippet = provisionAction().request.match(/`(python3 -c[^`]*)`/)?.[1];
       expect(snippet, "the guide must give the exact archive command").toBeDefined();
-      const archived = spawnSync("bash", ["-c", snippet ?? ""], { cwd: f.dir, encoding: "utf8", timeout: 10_000 });
+      const archived = spawnSync("bash", ["-c", snippet ?? ""], { cwd: f.dir, env: fixtureGitEnv(f.dir), encoding: "utf8", timeout: 10_000 });
       expect(archived.status).toBe(0);
       const walk = (rel: string): void => {
         const path = join(f.dir, rel);
         const s = statSync(path);
         expect(s.mode & 0o777).toBe(s.isDirectory() ? 0o700 : 0o600);
-        expect(spawnSync("git", ["check-ignore", "-q", "--", rel], { cwd: f.dir }).status).toBe(0);
+        expect(spawnSync("git", ["check-ignore", "-q", "--", rel], { cwd: f.dir, env: fixtureGitEnv(f.dir) }).status).toBe(0);
         if (s.isDirectory()) for (const name of readdirSync(path)) walk(`${rel}/${name}`);
       };
       walk(".pcc/archive");
@@ -1295,7 +1538,7 @@ describe.runIf(captureToolsRequired)("F1: every credential destination is untrac
       writeFileSync(join(f.dir, ".gitignore"), ".pcc/provision.json\n");
       expect(f.run().status).toBe(0);
       for (const name of ["provision.json", "auth.header"])
-        expect(spawnSync("git", ["check-ignore", "-q", "--", `.pcc/${name}`], { cwd: f.dir }).status,
+        expect(spawnSync("git", ["check-ignore", "-q", "--", `.pcc/${name}`], { cwd: f.dir, env: fixtureGitEnv(f.dir) }).status,
           `${name} is eligible for commit`).toBe(0);
     } finally { f.cleanup(); }
   });
@@ -1304,7 +1547,7 @@ describe.runIf(captureToolsRequired)("F1: every credential destination is untrac
     const f = captureFixture();
     try {
       // Model Git's tracked-but-deleted index entry without mutating an index.
-      const git = spawnSync("bash", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+      const git = spawnSync("bash", ["-c", "command -v git"], { env: gitCleanEnv(), encoding: "utf8" }).stdout.trim();
       expect(git).not.toBe("");
       f.executable("git", `#!/bin/sh\nif [ "$1" = ls-files ]; then printf '.pcc/auth.header\\n'; exit 0; fi\nexec '${git.replace(/'/g, "'\\''")}' "$@"\n`);
       const result = f.run();
@@ -1345,7 +1588,7 @@ describe.runIf(captureToolsRequired)("F1: every credential destination is untrac
       rmSync(join(f.dir, ".git"), { recursive: true });
       chmodSync(join(f.dir, ".pcc"), 0o700);
       const snippet = validateAction().request.match(/`(python3 -c[^`]*)`/)?.[1];
-      const result = spawnSync("bash", ["-c", snippet ?? ""], { cwd: f.dir, env: { ...process.env, PCC_API_KEY: f.body.api_key }, encoding: "utf8", timeout: 10_000 });
+      const result = spawnSync("bash", ["-c", snippet ?? ""], { cwd: f.dir, env: { ...gitCleanEnv(), PCC_API_KEY: f.body.api_key }, encoding: "utf8", timeout: 10_000 });
       expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toContain("Outside a Git repository; private state uses filesystem permissions.");
       expect(statSync(join(f.dir, ".pcc/auth.header")).mode & 0o777).toBe(0o600);
@@ -1367,10 +1610,10 @@ describe.runIf(captureToolsRequired)("F1: every credential destination is untrac
     try {
       rmSync(join(f.dir, ".git"), { recursive: true });
       chmodSync(join(f.dir, ".pcc"), 0o700);
-      const resolve = (name: string) => spawnSync("bash", ["-c", `command -v ${name}`], { encoding: "utf8" }).stdout.trim();
+      const resolve = (name: string) => spawnSync("bash", ["-c", `command -v ${name}`], { env: gitCleanEnv(), encoding: "utf8" }).stdout.trim();
       const python = resolve("python3");
       f.executable("python3", `#!/bin/sh\nexec '${python.replace(/'/g, "'\\''")}' "$@"\n`);
-      const env = { ...process.env, PATH: join(f.dir, "bin"), PCC_API_KEY: f.body.api_key };
+      const env = { ...gitCleanEnv(), PATH: join(f.dir, "bin"), PCC_API_KEY: f.body.api_key };
       for (const action of [validateAction(), provisionAction()]) {
         const snippet = action.request.match(/`(python3 -c[^`]*)`/)?.[1];
         const result = spawnSync(resolve("bash"), ["-c", snippet ?? ""], { cwd: f.dir, env, encoding: "utf8", timeout: 10_000 });
@@ -1389,7 +1632,7 @@ function fixturePythonPath(dir: string): string {
 }
 type ProviderProbe = (command: string, args: string[]) => { status: number | null; stdout: string };
 function providerSkipReason(provider: KeyProvider, probe: ProviderProbe = (command, args) => {
-  const result = spawnSync(command, args, { encoding: "utf8", timeout: 10_000 });
+  const result = spawnSync(command, args, { env: gitCleanEnv(), encoding: "utf8", timeout: 10_000 });
   return { status: result.status, stdout: result.stdout ?? "" };
 }): string | undefined {
   if (provider === "node") return undefined; // Vitest's own Node executable is always available.
@@ -1469,7 +1712,7 @@ describe.runIf(captureToolsRequired)("F5: buyer generates and sends its own Ed25
       expect((result.stdout + result.stderr).includes(pem), "private PEM was printed").toBe(false);
       const raw = privateKey.export({ type: "pkcs8", format: "der" });
       expect((result.stdout + result.stderr).includes(raw.toString("base64")), "private DER was printed").toBe(false);
-      expect(spawnSync("git", ["check-ignore", "-q", "--", ".pcc/ed25519-private.pem"], { cwd: f.dir }).status).toBe(0);
+      expect(spawnSync("git", ["check-ignore", "-q", "--", ".pcc/ed25519-private.pem"], { cwd: f.dir, env: fixtureGitEnv(f.dir) }).status).toBe(0);
     } finally { f.cleanup(); }
   });
   }
@@ -1593,11 +1836,11 @@ describe.runIf(captureToolsRequired)("F3: diagnostics stay private and output us
     } finally { f.cleanup(); }
   });
 
-  it("AT17 orphan-recovery guidance is present exactly three times per path and never delegates to a plain key", () => {
+  it("AT17 orphan-recovery guidance is present exactly four times per path and never delegates to a plain key", () => {
     const buyer = read("starter/buyer/buyer-path.json");
     const supply = read("starter/runbook/00-prerequisites.md");
-    expect(buyer.split(BUYER_ORPHAN).length - 1).toBe(3);
-    expect(supply.split(SUPPLY_ORPHAN).length - 1).toBe(3);
+    expect(buyer.split(BUYER_ORPHAN).length - 1).toBe(4);
+    expect(supply.split(SUPPLY_ORPHAN).length - 1).toBe(4);
     expect(buyer).not.toContain("authenticated session");
     expect(supply).not.toContain("authenticated session");
   });

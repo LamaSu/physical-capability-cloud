@@ -9,7 +9,7 @@ Use the PCC gateway you were given. There is no default. At an event, a rehearsa
 
 **Ask the human** (class C) only if no gateway was given: "Which PCC gateway should this machine join? I need its URL."
 
-pcc-node talks to a gateway only over **https**, or over plain http to **127.0.0.1** or **[::1]** on this machine. It refuses `http://localhost` and plain http to any other host, because the operator key would cross the network in clear text.
+pcc-node talks to a gateway only over **https**, or over plain http to **127.0.0.1** or **[::1]** on this machine. It refuses `http://localhost` and plain http to any other host, because the operator key would cross the network in clear text. Write `.pcc/base` as `https://host[:port][/path]`, or `http://127.0.0.1` or `http://[::1]` with an optional port, with no trailing slash, userinfo, query or fragment.
 
 ```bash
 umask 077 && mkdir -p .pcc && chmod 700 .pcc    # chmod repairs a .pcc made earlier with looser modes
@@ -120,12 +120,10 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
     in_git=1
     tracked=$(git ls-files -- .pcc 2>/dev/null) || fail 'Git index verification failed.'
     [ -z "$tracked" ] || fail 'Private state has tracked paths; remove them from the index before retrying.'
+    exclude=$(git rev-parse --git-path info/exclude 2>/dev/null) || fail 'Git exclusion setup failed.'
     needs_exclude=0
     for credential in .pcc/provision.json .pcc/api-key .pcc/auth.header .pcc/capture.probe/provision.json; do git check-ignore -q -- "$credential" 2>/dev/null || needs_exclude=1; done
-    if [ "$needs_exclude" = 1 ]; then
-        exclude=$(git rev-parse --git-path info/exclude 2>/dev/null) || fail 'Git exclusion setup failed.'
-        python3 -c 'import sys; from pathlib import Path; p = Path(sys.argv[1]); d = p.read_bytes() if p.exists() else b""; open(p, "ab").write((b"\n" if d and not d.endswith(b"\n") else b"") + b".pcc/\n")' "$exclude" 2>/dev/null || fail 'Git exclusion setup failed.'
-    fi
+    python3 -c 'import sys; from pathlib import Path; p = Path(sys.argv[1]); d = p.read_bytes() if p.exists() else b""; any((line[:-1] if line.endswith(b"\r") else line) == b".pcc/" for line in d.split(b"\n")) or open(p, "ab").write((b"\n" if d and not d.endswith(b"\n") else b"") + b".pcc/\n")' "$exclude" 2>/dev/null || { [ "$needs_exclude" = 0 ] || fail 'Git exclusion setup failed.'; }
     # Defence in depth: verify final destinations before any response can contain credentials.
     for credential in .pcc/provision.json .pcc/api-key .pcc/auth.header; do
         git check-ignore -q -- "$credential" 2>/dev/null || fail 'Git exclusion verification failed; capture refused.'
@@ -159,7 +157,7 @@ PY
 request_started=1
 if http_status=$(curl -s --connect-timeout 15 --max-time 600 -X POST "$(cat .pcc/base)/api/auth/provision" -H 'Content-Type: application/json' --data-binary @"$capture_dir/provision-request.json" --output "$capture_dir/provision.json" --dump-header "$capture_dir/response.headers" --write-out '%{http_code}' 2> "$capture_dir/curl.stderr"); then :; else
     curl_status=$?
-    case "$curl_status" in 1|3|6|7) request_started=0; fail 'Provision request not sent; no key was issued.';; esac
+    case "$curl_status" in 3|6|7) request_started=0; fail 'Provision request not sent; no key was issued.';; esac
     [ "$curl_status" != 28 ] || fail 'Provision request timed out; a key may have been issued and cannot be recovered; it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. A new key cannot revoke the lost one; only the gateway admin can. Tell the human.'
     fail 'Provision request failed; a key may have been issued and cannot be recovered; it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. A new key cannot revoke the lost one; only the gateway admin can. Tell the human.'
 fi
@@ -195,7 +193,7 @@ if [ "$in_git" = 1 ]; then
         git check-ignore -q -- "$credential" 2>/dev/null || fail 'Git exclusion verification failed after capture; keep private state and stop.'
     done
 fi
-python3 - "$capture_dir" <<'PY' 2>/dev/null || fail 'Provision capture refused; preserve the private capture and archive it inside .pcc/archive/ before retrying.'
+python3 - "$capture_dir" <<'PY' 2>/dev/null || fail 'Provision capture refused; a key may have been issued and cannot be recovered; it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. A new key cannot revoke the lost one; only the gateway admin can. Tell the human.'
 import json, os, re, sys
 from pathlib import Path
 stage = Path(sys.argv[1])
@@ -224,7 +222,7 @@ PY
 rm -rf -- "$capture_dir" || fail 'Private capture cleanup failed.'
 printf '%s\n' 'provision_status: provisioned'
 ```
-The recipe requires owned regular input files and validates them before private staging. In a Git repository it refuses tracked private state and verifies that every credential destination is ignored, including after the response arrives. Outside a repository it prints one fixed note and continues with `.pcc/` at 0700. The request can await on-chain registration, so curl waits up to 600 seconds. HTTP 201 is required before importing a BYOK response. A rejection prints only `http_status`, an allowlisted fixed `error` code or `unrecognised`, an integer `retry_after_seconds` from the body or an ASCII-digit Retry-After header, and a validated JSON-escaped `trace_id`; its private staging is removed. For 5xx, a key may exist server-side and counts toward the 5-key cap: report once with the printed trace_id and do not loop. For 429, honor retry_after_seconds and do not loop. Correct every other rejected request before retrying. Curl exits 1, 3, 6 and 7 remove staging because the request was not sent and no key was issued. Every other transport failure or an invalid 201 preserves its capture: a key may have been issued and cannot be recovered, and it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. A new key cannot revoke the lost one; only the gateway admin can. Tell the human. Never print the response or its diagnostics.
+The recipe requires owned regular input files and validates them before private staging. In a Git repository it refuses tracked private state and verifies that every credential destination is ignored, including after the response arrives. It adds the line `.pcc/` to the repository's `.git/info/exclude`, a local file that Git never commits, unless that line is already there; if that file cannot be written, it continues only when every credential path is already ignored. Outside a repository it prints one fixed note and continues with `.pcc/` at 0700. The request can await on-chain registration, so curl waits up to 600 seconds. HTTP 201 is required before importing a BYOK response. A rejection prints only `http_status`, an allowlisted fixed `error` code or `unrecognised`, an integer `retry_after_seconds` from the body or an ASCII-digit Retry-After header, and a validated JSON-escaped `trace_id`; its private staging is removed. For 5xx, a key may exist server-side and counts toward the 5-key cap: report once with the printed trace_id and do not loop. For 429, honor retry_after_seconds and do not loop. Correct every other rejected request before retrying. Curl exits 3, 6 and 7 remove staging because the request was not sent and no key was issued. Every other transport failure or an invalid 201 preserves its capture: a key may have been issued and cannot be recovered, and it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. A new key cannot revoke the lost one; only the gateway admin can. Tell the human. Never print the response or its diagnostics.
 
 Node calls that use the operator API key send it with `curl -H @.pcc/auth.header`. That keeps it off the command line, where other users of this machine could read it (`ps`). The key can do everything the account can, so treat it like a password. Keep `.pcc/` out of any repository or chat. Delete `.pcc/provision.json` once `.pcc/api-key` is written. Existing credentials are never overwritten. If you need to set them aside, keep the node signing key, public key, operator input and gateway in place; archive only the API credentials and captures inside the same ignored directory with this command, then verify the archive remains ignored when working in Git:
 

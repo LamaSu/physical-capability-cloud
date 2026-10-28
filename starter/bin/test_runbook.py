@@ -594,7 +594,7 @@ class TestSupplyCapture(unittest.TestCase):
         self.git = shutil.which("git")
         if self.git is None:
             self.skipTest("Git is unavailable; supply capture repository checks need it")
-        subprocess.run([self.git, "init", "-q", str(self.cwd)], check=True)
+        subprocess.run([self.git, "init", "-q", str(self.cwd)], env=self.child_env(), check=True)
         (self.private / "base").write_text("http://127.0.0.1:4310\n")
         (self.private / "operator.json").write_text(json.dumps({"email": "operator@example.org", "name": "Bench plate reader"}))
         (self.private / "node-public-key").write_text("ab" * 32)
@@ -649,10 +649,190 @@ os.link = record_link
         self.recipe = blocks[0]
         self.archive_recipe = blocks[1] if len(blocks) > 2 else None
 
+    def assert_git_toplevel(self):
+        result = self.subprocess.run([self.git, "rev-parse", "--show-toplevel"],
+                                     cwd=self.cwd, env=self.child_env(), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(pathlib.Path(result.stdout.strip()).resolve(), self.cwd.resolve())
+
+    def child_env(self, **extras):
+        env = {name: value for name, value in self.os.environ.items() if not name.startswith("GIT_")}
+        env.update(getattr(self, "git_env", {}))
+        env.update(extras)
+        return env
+
+    def configure_fixture_git(self):
+        # Keep these inside the fixture's Git metadata so clean/stash cannot remove them.
+        empty_ignore = self.cwd / ".git/empty-ignore"
+        empty_ignore.write_text("")
+        config = self.cwd / ".git/fixture-gitconfig"
+        config.write_text("[core]\n\texcludesFile = " + str(empty_ignore) + "\n")
+        self.git_env = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(config)}
+
+    def fixture_git(self, *args):
+        if args[0] in ("reset", "clean", "stash", "checkout"):
+            self.assert_git_toplevel()
+        return self.subprocess.run(
+            [self.git, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+             "-c", "commit.gpgsign=false"] + list(args), cwd=self.cwd, env=self.child_env(),
+            check=True, capture_output=True, text=True, timeout=20,
+        )
+
+    def fixture_commit(self, *paths):
+        self.fixture_git("add", "--", *paths)
+        self.fixture_git("commit", "-q", "-m", "fixture")
+
+    def assert_no_private_state_is_stageable(self):
+        staged = self.fixture_git("add", "-A", "--dry-run")
+        self.assertNotIn(".pcc/", staged.stdout)
+
+    def assert_archive_is_private_and_ignored(self):
+        archive = self.private / "archive"
+        self.assertTrue(archive.is_dir())
+        leaves = list(archive.rglob("*"))
+        self.assertTrue(leaves)
+        for leaf in [archive] + leaves:
+            self.assertFalse(leaf.is_symlink())
+            self.assertEqual(leaf.stat().st_mode & 0o777, 0o700 if leaf.is_dir() else 0o600)
+            self.fixture_git("check-ignore", "-q", "--", str(leaf))
+
+    def test_BT9_capture_ignores_inherited_git_repository_environment(self):
+        """BT9: fixture setup and capture must never follow inherited Git repository settings."""
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="pcc-supply-scratch-") as scratch_name:
+            scratch = pathlib.Path(scratch_name)
+            clean_env = {name: value for name, value in self.os.environ.items() if not name.startswith("GIT_")}
+            empty_ignore = scratch / "empty-ignore"
+            empty_ignore.write_text("")
+            config = scratch / "fixture-gitconfig"
+            config.write_text("[core]\n\texcludesFile = " + str(empty_ignore) + "\n")
+            clean_env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=str(config))
+            self.subprocess.run([self.git, "init", "-q", str(scratch)], env=clean_env, check=True)
+            exclude = scratch / ".git/info/exclude"
+            before = exclude.read_bytes()
+            fixture = type(self)("test_success_checks_status_and_publishes_ignored_0600_files_atomically")
+            inherited = {name: self.os.environ.get(name) for name in ("GIT_DIR", "GIT_WORK_TREE")}
+            try:
+                self.os.environ.update(GIT_DIR=str(scratch / ".git"), GIT_WORK_TREE=str(scratch))
+                fixture.setUp()
+                fixture.configure_fixture_git()
+                result = fixture.run_capture()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(exclude.read_bytes(), before)
+                self.assertEqual((fixture.cwd / ".git/info/exclude").read_text().splitlines().count(".pcc/"), 1)
+            finally:
+                for name, value in inherited.items():
+                    if value is None:
+                        self.os.environ.pop(name, None)
+                    else:
+                        self.os.environ[name] = value
+                fixture.doCleanups()
+
+    def test_BT1_untracked_ignore_survives_git_clean(self):
+        self.configure_fixture_git()
+        (self.cwd / ".gitignore").write_text(".pcc/\n")
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        exclude = self.cwd / ".git/info/exclude"
+        self.assertEqual(exclude.read_text().splitlines().count(".pcc/"), 1)
+        self.fixture_git("clean", "-fd")
+        self.assert_no_private_state_is_stageable()
+
+    def test_BT2_uncommitted_ignore_survives_git_reset(self):
+        self.configure_fixture_git()
+        ignore = self.cwd / ".gitignore"
+        ignore.write_text("*.log\n")
+        self.fixture_commit(".gitignore")
+        ignore.write_text("*.log\n.pcc/\n")
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.fixture_git("reset", "--hard")
+        self.assert_no_private_state_is_stageable()
+
+    def test_BT3_untracked_ignore_survives_git_stash(self):
+        self.configure_fixture_git()
+        (self.cwd / "README").write_text("fixture\n")
+        self.fixture_commit("README")
+        (self.cwd / ".gitignore").write_text(".pcc/\n")
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.fixture_git("stash", "-u")
+        self.assert_no_private_state_is_stageable()
+
+    def test_BT4_branch_only_ignore_survives_git_checkout(self):
+        self.configure_fixture_git()
+        (self.cwd / "README").write_text("fixture\n")
+        self.fixture_commit("README")
+        self.fixture_git("branch", "without-ignore")
+        (self.cwd / ".gitignore").write_text(".pcc/\n")
+        self.fixture_commit(".gitignore")
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.fixture_git("checkout", "-q", "without-ignore")
+        self.assert_no_private_state_is_stageable()
+
+    def test_BT5_existing_exclusion_is_byte_identical_with_lf_or_crlf(self):
+        self.configure_fixture_git()
+        exclude = self.cwd / ".git/info/exclude"
+        for before in (b"*.log\n.pcc/\n", b"*.log\r\n.pcc/\r\n"):
+            with self.subTest(before=before):
+                exclude.write_bytes(before)
+                result = self.run_capture()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(exclude.read_bytes(), before)
+                self.run_archive()
+
+    def test_BT6_final_destinations_without_capture_ignore_refuse_missing_info(self):
+        import shutil
+        self.configure_fixture_git()
+        (self.cwd / ".gitignore").write_text(".pcc/provision.json\n.pcc/api-key\n.pcc/auth.header\n")
+        shutil.rmtree(self.cwd / ".git/info")
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "Git exclusion setup failed.\n")
+        self.assertFalse((self.private / "curl-called").exists())
+        self.assertFalse(list(self.private.glob("capture.*")))
+        self.assert_not_published()
+
+    def test_BT7_probe_only_ignore_still_allows_private_archive(self):
+        self.configure_fixture_git()
+        (self.cwd / ".gitignore").write_text(".pcc/provision.json\n.pcc/api-key\n.pcc/auth.header\n.pcc/capture.*/\n")
+        result = self.run_capture(MOCK_CURL_EXIT="28")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("a key may have been issued", result.stderr)
+        self.assertEqual(len(list(self.private.glob("capture.*"))), 1)
+        archived = self.run_archive()
+        self.assertEqual(archived.returncode, 0)
+        self.assert_archive_is_private_and_ignored()
+
+    def test_BT8_local_git_exclusion_disclosure_occurs_exactly_once(self):
+        clause = " It adds the line `.pcc/` to the repository's `.git/info/exclude`, a local file that Git never commits, unless that line is already there; if that file cannot be written, it continues only when every credential path is already ignored."
+        text = phase_text("00-prerequisites.md")
+        self.assertEqual(text.count(clause), 1)
+        self.assertIn("In a Git repository it refuses tracked private state and verifies that every credential destination is ignored, including after the response arrives." + clause, text)
+
+    def test_BT13_gateway_section_documents_the_accepted_forms(self):
+        sentence = " Write `.pcc/base` as `https://host[:port][/path]`, or `http://127.0.0.1` or `http://[::1]` with an optional port, with no trailing slash, userinfo, query or fragment."
+        section = between(phase_text("00-prerequisites.md"), "## 1.", "## 2.")
+        paragraph = next(line for line in section.splitlines() if line.startswith("pcc-node talks to a gateway only over **https**"))
+        self.assertTrue(paragraph.endswith(sentence))
+        self.assertEqual(section.count(sentence), 1)
+
+    def test_BT14_invalid_201_private_field_preserves_capture_and_archives(self):
+        self.configure_fixture_git()
+        result = self.run_capture(response=dict(self.response, ed25519={"source": "byok", "private_key_pkcs8_base64": self.wallet_key}))
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "Provision capture refused; a key may have been issued and cannot be recovered; it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. A new key cannot revoke the lost one; only the gateway admin can. Tell the human.\n")
+        self.assert_not_published()
+        self.assertEqual(len(list(self.private.glob("capture.*"))), 1)
+        self.assertEqual(self.run_archive().returncode, 0)
+        self.assertFalse(list(self.private.glob("capture.*")))
+        self.assert_archive_is_private_and_ignored()
+
     def run_capture(self, status="201", response=None, **extras):
         response_path = self.private / "test-response.json"
         response_path.write_text(json.dumps(self.response if response is None else response))
-        env = dict(self.os.environ, PATH=str(self.bin) + self.os.pathsep + self.os.environ["PATH"],
+        env = dict(self.child_env(), PATH=str(self.bin) + self.os.pathsep + self.os.environ["PATH"],
                    PYTHONPATH=self.os.pathsep.join(filter(None, (str(self.bin), self.os.environ.get("PYTHONPATH")))),
                    MOCK_RESPONSE=str(response_path), MOCK_STATUS=status, **extras)
         result = self.subprocess.run(["bash", "-c", self.recipe], cwd=self.cwd, env=env,
@@ -663,7 +843,7 @@ os.link = record_link
 
     def run_archive(self):
         self.assertIsNotNone(self.archive_recipe, "Phase 0 must contain an executable private archive command")
-        result = self.subprocess.run(["bash", "-c", self.archive_recipe], cwd=self.cwd,
+        result = self.subprocess.run(["bash", "-c", self.archive_recipe], cwd=self.cwd, env=self.child_env(),
                                      capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
         for secret in (self.key, self.wallet_key): self.assertNotIn(secret, result.stdout + result.stderr)
@@ -675,7 +855,7 @@ os.link = record_link
 
     def require_outside_git_temp(self):
         import tempfile
-        probe = self.subprocess.run([self.git, "-C", tempfile.gettempdir(), "rev-parse", "--git-dir"], capture_output=True)
+        probe = self.subprocess.run([self.git, "-C", tempfile.gettempdir(), "rev-parse", "--git-dir"], env=self.child_env(), capture_output=True)
         if probe.returncode == 0:
             self.skipTest("Temporary directory is inside a Git repository; outside-repository recipe test skipped")
 
@@ -700,7 +880,7 @@ os.link = record_link
         for name in ("provision.json", "api-key", "auth.header"):
             path = self.private / name
             self.assertEqual(path.stat().st_mode & 0o777, 0o600, name)
-            ignored = self.subprocess.run([self.git, "check-ignore", "-q", "--", str(path)], cwd=self.cwd)
+            ignored = self.subprocess.run([self.git, "check-ignore", "-q", "--", str(path)], cwd=self.cwd, env=self.child_env())
             self.assertEqual(ignored.returncode, 0, name)
         self.assertEqual(len((self.private / "publish-links.jsonl").read_text().splitlines()), 3)
         request = json.loads((self.private / "request-seen.json").read_text())
@@ -715,7 +895,7 @@ os.link = record_link
         (self.cwd / "app.log").write_text("keep ignored\n")
         result = self.run_capture()
         self.assertEqual(result.returncode, 0, result.stderr)
-        ignored = self.subprocess.run([self.git, "check-ignore", "-q", "--", "app.log"], cwd=self.cwd)
+        ignored = self.subprocess.run([self.git, "check-ignore", "-q", "--", "app.log"], cwd=self.cwd, env=self.child_env())
         self.assertEqual(ignored.returncode, 0)
         self.assertEqual(exclude.read_bytes(), b"*.log\n.pcc/\n")
 
@@ -841,7 +1021,7 @@ os.link = record_link
                 self.run_archive()
                 for leaf in (self.private / "archive").rglob("*"):
                     self.assertEqual(leaf.stat().st_mode & 0o777, 0o700 if leaf.is_dir() else 0o600)
-                    self.assertEqual(self.subprocess.run([self.git, "check-ignore", "-q", "--", str(leaf)], cwd=self.cwd).returncode, 0)
+                    self.assertEqual(self.subprocess.run([self.git, "check-ignore", "-q", "--", str(leaf)], cwd=self.cwd, env=self.child_env()).returncode, 0)
         result = self.run_capture()
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -898,8 +1078,9 @@ os.link = record_link
         self.assert_not_published()
 
     def test_invalid_gateway_base_file_fails_before_staging_or_curl(self):
+        """BT12: the HTTPS host check and port range each have independent refusal cases."""
         import shutil
-        for base in (None, "", "http://example.com", "http://localhost:4310", "https://x.example/", "https://user@x.example", "https://x.example?q=1", "https://x.example#part", "https://x.example/a b"):
+        for base in (None, "", "http://example.com", "http://localhost:4310", "https://x.example/", "https://user@x.example", "https://x.example?q=1", "https://x.example#part", "https://x.example/a b", "https://x_y.example", "https://x.example:", "https://x.example\\.evil", "https://exämple.com", "https://x.example:0", "https://x.example:65536"):
             with self.subTest(base=base):
                 path = self.private / "base"
                 if base is None: path.unlink()
@@ -936,8 +1117,14 @@ os.link = record_link
         result = self.run_capture()
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_curl_exit_1_is_unsent_and_can_retry(self):
-        self.assert_unsent_curl_failure_can_retry(1)
+    def test_curl_exit_1_preserves_a_possible_issuance_capture(self):
+        """BT11: exit 1 may follow a sent request and must retain its private capture."""
+        result = self.run_capture(MOCK_CURL_EXIT="1")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "Provision request failed; a key may have been issued and cannot be recovered; it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. A new key cannot revoke the lost one; only the gateway admin can. Tell the human.\n")
+        self.assert_not_published()
+        self.assertEqual(len(list(self.private.glob("capture.*"))), 1)
+        self.run_archive()
 
     def test_curl_exit_3_is_unsent_and_can_retry(self):
         self.assert_unsent_curl_failure_can_retry(3)
@@ -1048,7 +1235,7 @@ os.link = record_link
             self.assertFalse(leaf.is_symlink())
             self.assertEqual(leaf.stat().st_uid, self.os.getuid())
             self.assertEqual(leaf.stat().st_mode & 0o777, 0o700 if leaf.is_dir() else 0o600)
-            self.assertEqual(self.subprocess.run([self.git, "check-ignore", "-q", "--", str(leaf)], cwd=self.cwd).returncode, 0)
+            self.assertEqual(self.subprocess.run([self.git, "check-ignore", "-q", "--", str(leaf)], cwd=self.cwd, env=self.child_env()).returncode, 0)
         for name, content in inputs.items(): self.assertEqual((self.private / name).read_bytes(), content)
         self.assert_not_published()
         result = self.run_capture()
@@ -1063,7 +1250,7 @@ os.link = record_link
         python_only = self.cwd / "python-only"
         python_only.mkdir()
         (python_only / "python3").symlink_to(shutil.which("python3"))
-        env = dict(self.os.environ, PATH=str(python_only))
+        env = dict(self.child_env(), PATH=str(python_only))
         result = self.subprocess.run([shutil.which("bash"), "-c", self.archive_recipe],
                                      cwd=self.cwd, env=env, capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
