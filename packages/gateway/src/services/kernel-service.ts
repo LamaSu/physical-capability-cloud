@@ -25,10 +25,17 @@ import { localJobDispatchDecision, type LocalJobDispatchReason } from "./local-j
 // Types
 // ---------------------------------------------------------------------------
 
+export type LocalRunQueueReason = LocalJobDispatchReason | "local_run_not_authorized" | "no_device_selected";
+
 export interface SubmitJobParams {
   jobId: string;
   kernelId: string;
   stepId: string;
+  /**
+   * The SUBMITTER's authority. A path that re-dispatches an existing job (a resume,
+   * a retry, a reconciler) passes "none" until the submitter's authority is persisted.
+   */
+  localRunAuthority: "decide" | "none";
   deviceId?: string;
   gcodeHash?: string;
   assuranceTier?: number;
@@ -302,16 +309,14 @@ export class KernelService {
   }
 
   /**
-   * Select a device for a job. Prefers the explicitly requested deviceId,
-   * otherwise picks the first available machine adapter.
+   * Select only an exact named runner, or the sole loaded machine runner
+   * when no device was named.
    */
   private selectDevice(deviceId?: string): string | null {
-    if (deviceId && this.runners.has(deviceId)) {
-      return deviceId;
+    if (deviceId !== undefined && deviceId !== null) {
+      return this.runners.has(deviceId) ? deviceId : null;
     }
-    // Auto-select: return the first machine id
-    const first = this.runners.keys().next().value;
-    return first ?? null;
+    return this.runners.size === 1 ? this.runners.keys().next().value ?? null : null;
   }
 
   /**
@@ -328,7 +333,8 @@ export class KernelService {
    */
   async submitJob(params: SubmitJobParams): Promise<
     { jobId: string; deviceId: string; status: "accepted" } |
-    { jobId: string; deviceId: null; status: "queued"; reason: LocalJobDispatchReason }
+    { jobId: string; deviceId: null; status: "queued"; reason: LocalRunQueueReason } |
+    { jobId: string; deviceId: null; status: "refused"; reason: "device_not_runnable_here" }
   > {
     const { jobId, stepId, gcodeHash, assuranceTier = 0 } = params;
     let decision = localJobDispatchDecision(this.config.kernelId, params.kernelId, this.hasExplicitConfig);
@@ -343,10 +349,16 @@ export class KernelService {
     // A route cannot bypass local identity, the operator's queue-only switch,
     // or the kernel's stop by calling the service directly.
     if (!decision.ok) return queued();
+    if (params.localRunAuthority !== "decide") {
+      return { jobId, deviceId: null, status: "queued", reason: "local_run_not_authorized" };
+    }
 
     const deviceId = this.selectDevice(params.deviceId);
-    if (!deviceId) {
-      throw new Error("no_devices_available");
+    if (deviceId === null) {
+      if (params.deviceId !== undefined && params.deviceId !== null) {
+        return { jobId, deviceId: null, status: "refused", reason: "device_not_runnable_here" };
+      }
+      return { jobId, deviceId: null, status: "queued", reason: "no_device_selected" };
     }
 
     const runner = this.runners.get(deviceId)!;
