@@ -1573,7 +1573,7 @@
 
     {
       "name": "create_investment_pool",
-      "description": "Create an investment pool for a capability bounty. Stakers earn future protocol fees when the capability goes live.",
+      "description": "Create an investment pool for a capability bounty.",
       "input_schema": {
         "type": "object",
         "properties": {

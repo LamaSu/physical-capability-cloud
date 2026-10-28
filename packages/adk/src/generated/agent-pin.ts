@@ -6,9 +6,9 @@ import { deepFreeze } from "../deep-freeze.js";
 
 export const AGENT_PACKAGE_PIN = deepFreeze({
   schema: "pcc-agent-package/2.0",
-  version: "2.19.3",
-  toolCount: 253,
-  sha256: "sha256:a93b6fab5a8a325daafb456917b722efa1823dfe6585acecd7d65029a67d4ec9",
+  version: "2.19.4",
+  toolCount: 244,
+  sha256: "sha256:1e72134652a5d8b6e409d840203b4f477bcdb173503bde51b8bd2cae5bb534b3",
 } as const);
 
 export const AGENT_TOOLS = deepFreeze({
@@ -132,14 +132,10 @@ export const AGENT_TOOLS = deepFreeze({
   "list_transfer_agents": { method: "GET", path: "/api/transfer-agents", required: [] },
   "lit_decrypt": { method: "POST", path: "/api/evidence/{bundleId}/lit-decrypt", required: ["authSig","bundleId"] },
   "marketplace_categories": { method: "GET", path: "/api/marketplace/categories", required: [] },
-  "marketplace_create_listing": { method: "POST", path: "/api/marketplace/listings", required: ["category","name","pricePerUnit","unit"] },
-  "marketplace_delete_listing": { method: "DELETE", path: "/api/marketplace/listings/{id}", required: ["id"] },
   "marketplace_get_listing": { method: "GET", path: "/api/marketplace/listings/{id}", required: ["id"] },
   "marketplace_get_order": { method: "GET", path: "/api/marketplace/orders/{id}", required: ["id"] },
   "marketplace_list_listings": { method: "GET", path: "/api/marketplace/listings", required: [] },
   "marketplace_list_orders": { method: "GET", path: "/api/marketplace/orders", required: [] },
-  "marketplace_place_order": { method: "POST", path: "/api/marketplace/orders", required: ["listingId","quantity"] },
-  "marketplace_update_listing": { method: "PUT", path: "/api/marketplace/listings/{id}", required: ["id"] },
   "match_spaces": { method: "POST", path: "/api/spaces/match", required: [] },
   "mint_certificate": { method: "POST", path: "/api/certificates/mint", required: ["capabilityType","kernelDid"] },
   "near_intent": { method: "POST", path: "/api/near/intent", required: ["quoteId","workflowId"] },
@@ -190,7 +186,6 @@ export const AGENT_TOOLS = deepFreeze({
   "pcc_oracle_verify": { method: "POST", path: "/api/oracle/verify", required: ["escrowAddress","evidenceHash","jobId","kernelId"] },
   "pcc_orchestrator_list_templates": { method: "GET", path: "/api/orchestrator/templates", required: [] },
   "pcc_orchestrator_match_capabilities": { method: "POST", path: "/api/capabilities/templates/match", required: ["input"] },
-  "pcc_protocol_fee": { method: "GET", path: "/api/protocol/fee", required: [] },
   "pcc_publish_request": { method: "POST", path: "/api/requests/{requestId}/publish", required: ["requestId"] },
   "pcc_relay_generic_tool_call": { method: "POST", path: "/api/relay/{kernelId}/tool-call", required: ["kernelId","toolName"] },
   "pcc_relay_tool_call": { method: "POST", path: "/api/ot2/tool-call", required: ["kernelId","toolArgs","toolName"] },
@@ -213,11 +208,7 @@ export const AGENT_TOOLS = deepFreeze({
   "pcc_update_request": { method: "PUT", path: "/api/requests/{requestId}", required: ["requestId"] },
   "pcc_verifier_health": { method: "GET", path: "/api/capture/verifier-health", required: [] },
   "propose_composition": { method: "POST", path: "/api/compose", required: ["budgetUSD","minAssuranceTier","outcomeType"] },
-  "protocol_create_escrow": { method: "POST", path: "/api/protocol/create-escrow", required: ["arbiter","cwmId","payer","token"] },
-  "protocol_escrow_fees": { method: "GET", path: "/api/protocol/escrow/{escrowAddress}/fees", required: ["escrowAddress"] },
-  "protocol_fee": { method: "GET", path: "/api/protocol/fee/{amount}", required: ["amount"] },
   "protocol_state": { method: "GET", path: "/api/protocol/state", required: [] },
-  "protocol_token_fees": { method: "GET", path: "/api/protocol/token/{tokenAddress}/fees", required: ["tokenAddress"] },
   "prove_registration": { method: "POST", path: "/api/onboard/registrations/{registrationId}/prove", required: ["evidence","registrationId"] },
   "provision_api_key": { method: "POST", path: "/api/auth/provision", required: [] },
   "publish_protocol": { method: "POST", path: "/api/protocols/{id}/publish", required: ["id"] },
