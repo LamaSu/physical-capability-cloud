@@ -1,11 +1,7 @@
 import React from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
-import {
-  GlassPanel, GlowBadge, UtilizationGauge,
-  EarningsChart, CertificationBadge, MaintenanceTimelineItem,
-  AmountDisplay,
-} from "@pcc/ui";
+import { Link } from "react-router-dom";
+import { GlassPanel, GlowBadge } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useOperatorStore } from "../stores/operator-store.js";
 import { useAuthStore } from "../stores/auth-store.js";
@@ -13,11 +9,9 @@ import { authorizedFetch } from "../lib/authorized-fetch.js";
 import { OPERATOR_SIGN_IN_NOTICE, requiresOperatorSignIn } from "../lib/auth-notices.js";
 import { emergencyResume, emergencyStop, kernelsOf, machineLabel, type OperatorMachine } from "../lib/operator-api.js";
 import { InboxPanel } from "../components/inbox/InboxPanel.js";
-import {
-  mockOperatorProfile, mockEarningsData, mockMaintenanceEvents, mockCertifications,
-} from "../api/mock-onboarding-data.js";
 
-const tabs = ["inbox", "overview", "approvals", "earnings", "certifications", "maintenance"] as const;
+const tabs = ["inbox", "overview", "approvals"] as const;
+const YOUR_MACHINES = "Your Machines";
 
 function operatorPrincipal(state: ReturnType<typeof useAuthStore.getState>): string {
   return state.sessionKeyId
@@ -159,15 +153,12 @@ function timeAgo(iso: string): string {
 }
 
 export function OperatorDashboardPage() {
-  const navigate = useNavigate();
   const setPageMeta = useUIStore((s) => s.setPageMeta);
-  const { activeTab, setActiveTab, earningsPeriod, setEarningsPeriod } = useOperatorStore();
+  const { activeTab, setActiveTab } = useOperatorStore();
 
   React.useEffect(() => {
-    setPageMeta("Operator Dashboard", mockOperatorProfile.displayName);
+    setPageMeta("Operator Dashboard");
   }, [setPageMeta]);
-
-  const totalEarnings = mockEarningsData[mockEarningsData.length - 1]?.cumulative ?? 0;
 
   const keyEpoch = useAuthStore((state) => state.keyEpoch);
   const sessionEpoch = useAuthStore((state) => state.sessionEpoch);
@@ -264,86 +255,21 @@ export function OperatorDashboardPage() {
       </div>
 
       {/* Overview Tab */}
-      {activeTab === "overview" && (
-        <div className="space-y-6">
-          {/* KPIs */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <GlassPanel padding="md" glow="green" className="text-center">
-              <div className="text-[10px] text-white/20">Active Machines</div>
-              <div className="text-2xl font-mono text-green-400 mt-1">2</div>
-            </GlassPanel>
-            <GlassPanel padding="md" className="text-center">
-              <div className="text-[10px] text-white/20">Total Earnings</div>
-              <div className="text-2xl font-mono text-white/70 mt-1">${totalEarnings}</div>
-            </GlassPanel>
-            <GlassPanel padding="md" className="text-center">
-              <div className="text-[10px] text-white/20">Jobs Completed</div>
-              <div className="text-2xl font-mono text-white/70 mt-1">142</div>
-            </GlassPanel>
-            <GlassPanel padding="md" className="text-center">
-              <div className="text-[10px] text-white/20">Reputation</div>
-              <div className="text-2xl font-mono text-yellow-400 mt-1">950</div>
-            </GlassPanel>
+      {activeTab === "overview" && !machines.isError && Array.isArray(machines.data) && machines.data.length > 0 && (
+        <section className="space-y-2">
+          <h2 className="text-xs text-white/30">{YOUR_MACHINES}</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {machines.data.map((machine) => (
+              <Link
+                key={machine.id}
+                to={`/operator/${encodeURIComponent(machine.id)}`}
+                className="rounded-lg border border-white/[0.06] p-4 text-sm text-white/70 hover:bg-white/[0.04] transition-colors"
+              >
+                {machineLabel(machine)}
+              </Link>
+            ))}
           </div>
-
-          {/* Machines */}
-          <div className="space-y-2">
-            <span className="text-xs text-white/30">Your Machines</span>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {[
-                { id: "reg-001", name: "Prusa MK4 Workshop", type: "fdm", utilization: 72, status: "active" },
-                { id: "reg-002", name: "Epilog Fusion Pro", type: "laser-cut", utilization: 58, status: "active" },
-              ].map((m) => (
-                <GlassPanel
-                  key={m.id}
-                  hover
-                  padding="md"
-                  className="flex items-center justify-between cursor-pointer"
-                  onClick={() => navigate(`/operator/${m.id}`)}
-                >
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm text-white/70">{m.name}</span>
-                      <GlowBadge color="green">{m.type}</GlowBadge>
-                    </div>
-                    <span className="text-[10px] text-white/20">{m.status}</span>
-                  </div>
-                  <UtilizationGauge value={m.utilization} size={50} />
-                </GlassPanel>
-              ))}
-            </div>
-          </div>
-
-          {/* IP Revenue summary card */}
-          <div className="space-y-2">
-            <span className="text-xs text-white/30">Story Protocol IP Revenue</span>
-            <GlassPanel
-              hover
-              padding="md"
-              glow="green"
-              className="cursor-pointer"
-              onClick={() => navigate("/ip")}
-            >
-              <div className="flex items-center justify-between">
-                <div className="space-y-1">
-                  <div className="text-sm font-medium text-white/80">IP Revenue Dashboard</div>
-                  <div className="text-xs text-white/40">3 IP assets &middot; 43 derivatives</div>
-                  <div className="flex items-center gap-3 mt-2">
-                    <div>
-                      <div className="text-[10px] text-white/25">Total Revenue</div>
-                      <AmountDisplay amount="6,119.50" currency="USD" size="sm" />
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-white/25">Unclaimed</div>
-                      <div className="text-sm font-mono text-yellow-400/80">$429.50</div>
-                    </div>
-                  </div>
-                </div>
-                <div className="text-white/20 text-2xl leading-none">›</div>
-              </div>
-            </GlassPanel>
-          </div>
-        </div>
+        </section>
       )}
 
       {/* Approvals Tab */}
@@ -412,47 +338,6 @@ export function OperatorDashboardPage() {
               </GlassPanel>
             ))}
           </div>
-        </div>
-      )}
-
-      {/* Earnings Tab */}
-      {activeTab === "earnings" && (
-        <EarningsChart
-          data={mockEarningsData}
-          period={earningsPeriod}
-          onPeriodChange={setEarningsPeriod}
-          totalEarnings={totalEarnings}
-        />
-      )}
-
-      {/* Certifications Tab */}
-      {activeTab === "certifications" && (
-        <div className="space-y-2 max-w-lg">
-          {mockCertifications.map((c) => (
-            <CertificationBadge
-              key={c.id}
-              name={c.name}
-              issuer={c.issuer}
-              expiresAt={c.expiresAt}
-              status={c.status}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* Maintenance Tab */}
-      {activeTab === "maintenance" && (
-        <div className="max-w-lg">
-          {mockMaintenanceEvents.map((e) => (
-            <MaintenanceTimelineItem
-              key={e.id}
-              description={e.description}
-              type={e.type}
-              scheduledAt={e.scheduledAt}
-              completedAt={e.completedAt}
-              status={e.status}
-            />
-          ))}
         </div>
       )}
     </div>
