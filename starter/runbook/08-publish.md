@@ -10,7 +10,7 @@ This is money, so ask; never pick the rate yourself.
 
 ## How contributor pay works (tell the human this before they choose)
 - **The rate:** publishing gives the kit a license of 0 to 100 bps of each job's gross, at the rate the human chose (0 is allowed).
-- **Who pays:** the buyer. The buyer's total is the job's gross, which includes the royalty and PCC's fee on it; the operator's price is not reduced (economics #4807).
+- **Who pays:** the buyer. The buyer's total is the job's gross, which includes the royalty; the operator's price is not reduced (economics #4807).
 - **Forks keep upstream shares:** weights halve per generation, so a direct fork splits 2 : 1 with its parent, and deeper forks 4 : 2 : 1.
 - **When pay arrives:** only when a job that ran the kit is **released** (paid out).
 - **For now:** until the operator approves the rates (operator item 99), attribution and the computed split are **shown in test mode**, not paid.
