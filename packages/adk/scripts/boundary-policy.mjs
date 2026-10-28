@@ -142,6 +142,7 @@ export function manifestProblems(name, pj, { packed, privateNames }) {
 
 /** Every entry in a store's node_modules, expanding real scope directories but not symlinked ones. */
 function packageDirs(modules) {
+  /** @type {Array<[import("node:fs").Dirent, string]>} */
   const out = [];
   for (const child of readdirSync(modules, { withFileTypes: true })) {
     const dir = join(modules, child.name);
@@ -196,12 +197,19 @@ function moduleEntries(modules) {
 }
 
 /**
+ * @typedef {{ name: any, version: any, dir: string, bundledIn?: string, opaque?: never }} PackageEntry
+ * @typedef {{ opaque: string, dir: string, bundledIn?: string, name?: never, version?: never }} OpaqueEntry
+ * @typedef {PackageEntry | OpaqueEntry} InstalledEntry
+ */
+
+/**
  * Packages bundled inside `dir` (its own node_modules), at any depth (verdict 101c). A published
  * package's own node_modules holds only what shipped with it, so every entry is accounted for: a
  * readable package is recorded with `bundledIn`, and anything else -- a directory with no
  * package.json, or a symlink that will not resolve -- is an opaque entry the policy fails closed
  * on, never a silent skip. Symlinks are canonicalized against `seen`, so a cycle can neither spin
  * nor hide a target the walk already passed; there is no depth limit (the README's "at any depth").
+ * @param {InstalledEntry[]} found
  */
 function bundledPackages(dir, owner, project, found, seen) {
   const modules = join(dir, "node_modules");
@@ -231,10 +239,12 @@ function bundledPackages(dir, owner, project, found, seen) {
  * `[{ name, version, dir, bundledIn? }]`. A package's own directory is a real directory under
  * .pnpm/<id>/node_modules (its dependencies there are symlinks); anything inside the package's
  * own node_modules was bundled with it, and carries `bundledIn`.
+ * @returns {InstalledEntry[]}
  */
 export function installedPackages(project) {
   const store = join(project, "node_modules", ".pnpm");
   if (!existsSync(store)) throw new Error(`${store} is missing; the consumer was not installed by pnpm`);
+  /** @type {InstalledEntry[]} */
   const found = [];
   const seen = new Set();
   const entries = [];
