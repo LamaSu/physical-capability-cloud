@@ -1,7 +1,7 @@
 import React, { Suspense, lazy } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { AppShell, Sidebar, TopBar, StatusBar, ParticleBackground } from "@pcc/ui";
+import { AppShell, Sidebar, TopBar, ParticleBackground } from "@pcc/ui";
 import { navGroups } from "./components/nav-config.js";
 import { useUIStore } from "./stores/ui-store.js";
 import { useAuthStore, onIdentityChange } from "./stores/auth-store.js";
@@ -200,7 +200,7 @@ function DashboardShell() {
             actions={<><ModeToggle /><ConnectWallet /><TourRestartButton /></>}
           />
         }
-        statusBar={<StatusBar kernelsOnline={2} activeJobs={3} networkStatus="connected" />}
+        statusBar={null}
       >
         <PageTransition>
           <Suspense fallback={<PageLoader />}>
@@ -390,6 +390,11 @@ function Shell() {
         <OperatorMobilePage />
       </Suspense>
     );
+  }
+
+  if (location.pathname === "/operator" ||
+      (location.pathname.startsWith("/operator/") && location.pathname !== "/operator/revenue")) {
+    return <DashboardShell />;
   }
 
   // /app and /app/* — Spatial fallback web dashboard (with agent prompt banner)
