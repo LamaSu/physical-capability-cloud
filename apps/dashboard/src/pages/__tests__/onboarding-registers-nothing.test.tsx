@@ -40,6 +40,9 @@ const S1 = "Registration isn't available here yet";
 const S2 = "This page didn't register your machine. You can describe it in the onboarding chat instead.";
 const S3 = "Continue in the onboarding chat";
 const S9 = "Enter your machine's details step by step. The wizard can't register it yet.";
+// The hub's copy-paste prompt, which this change leaves as it is, tells the user's own AI
+// to use the agent package's tools "as your tool registry": a tool list, not a registration.
+const SNIPPET_TOOLS = "Use the `tools` field as your tool registry.";
 
 interface Call {
   url: string;
@@ -117,7 +120,7 @@ function textNodes(text: string): Node[] {
 }
 
 function unapprovedRegistrationCopy(text: string): string {
-  for (const allowed of [S1, S2, S9]) text = text.split(allowed).join("");
+  for (const allowed of [S1, S2, S9, SNIPPET_TOOLS]) text = text.split(allowed).join("");
   return text;
 }
 
@@ -258,6 +261,7 @@ describe("onboarding registers nothing", () => {
     expect([...container.querySelectorAll("h3")].filter((heading) => heading.textContent === "Describe a Machine")).toHaveLength(1);
     expect(container.textContent).toContain(S9);
     expect(container.textContent).toContain("Two ways to tell PCC what you do.");
+    expect(container.textContent).toContain(SNIPPET_TOOLS);
     expectNoRegistrationCopy();
     expect(calls).toEqual([]);
   });
@@ -267,5 +271,7 @@ describe("onboarding registers nothing", () => {
     expect(unapprovedRegistrationCopy(S1 + S2 + " Register now")).toMatch(/regist/i);
     expect(unapprovedRegistrationCopy(S1 + S2 + " Register now").match(/regist\w*/i)?.[0]).toBe("Register");
     expect(unapprovedRegistrationCopy("Pre-registration")).toMatch(/regist/i);
+    expect(unapprovedRegistrationCopy(SNIPPET_TOOLS)).not.toMatch(/regist/i);
+    expect(unapprovedRegistrationCopy("Add your machine to the tool registry")).toMatch(/regist/i);
   });
 });
