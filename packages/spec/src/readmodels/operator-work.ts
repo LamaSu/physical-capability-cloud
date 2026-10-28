@@ -274,7 +274,12 @@ export interface OperatorWorkDTO {
   /** When the gateway read the sources (ISO-8601). */
   asOf: string;
   /** The caller's kernels that scope this read: kernels whose operatorAddress is the caller. */
-  kernels: Array<{ kernelId: string; name: string | null }>;
+  kernels: Array<{
+    kernelId: string;
+    name: string | null;
+    /** Sorted, unique types of this kernel's current (not soft-expired) capability rows; [] when none, null when the capability read failed. */
+    capabilityTypes: string[] | null;
+  }>;
   /** One page of the sorted list (`?limit=`, `?offset=`). */
   items: OperatorWorkItem[];
   /** Every item, across all pages. */

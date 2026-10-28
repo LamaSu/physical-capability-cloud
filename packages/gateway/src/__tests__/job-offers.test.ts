@@ -17,8 +17,10 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { jobOffersRoutes } from "../routes/job-offers.js";
 import {
+  JobOffersStore,
   initJobOffersStore,
   _resetJobOffersStoreForTests,
+  type SqliteDatabaseLike,
   type VerifyFn,
 } from "../services/job-offers-store.js";
 
@@ -130,6 +132,15 @@ afterEach(() => {
 });
 
 // ── Healthz ────────────────────────────────────────────────────────────────
+
+describe("JobOffersStore durability", () => {
+  it("G1d: a store constructed with a SQLite handle is durable", () => {
+    const sqlite: SqliteDatabaseLike = {
+      prepare: () => ({ run: () => undefined, all: () => [], get: () => undefined }),
+    };
+    expect(new JobOffersStore({ sqlite }).isDurable()).toBe(true);
+  });
+});
 
 describe("GET /api/job-offers/healthz", () => {
   it("returns ok=true with counter snapshot", async () => {
@@ -266,6 +277,20 @@ describe("POST /api/job-offers — generic surface", () => {
           requirements: { pickup: {}, dropoff: {} },
           pricing: { amount: 10, currency: "USD", model: "monthly-subscription" },
         },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe("invalid_pricing");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("F4: rejects a generic POST with a null pricing amount", async () => {
+    const app = await buildApp();
+    try {
+      const res = await app.inject({
+        method: "POST", url: "/api/job-offers",
+        payload: { ...courierOffer(), pricing: { amount: null, currency: "USD", model: "fixed" } },
       });
       expect(res.statusCode).toBe(400);
       expect(res.json().error).toBe("invalid_pricing");
@@ -418,6 +443,40 @@ describe("GET /api/job-offers/open", () => {
         url: "/api/job-offers/open?capabilityType=courier.dispatch&maxAmount=10",
       });
       expect(r2.json().offers.map((j: { id: string }) => j.id).sort()).toEqual(["low", "mid"]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("F5: amount filters exclude unknown amounts and preserve numeric ranges including zero", async () => {
+    const app = await buildApp();
+    try {
+      const { CourierJobsStore } = await import("../services/courier-jobs-store.js");
+      const created = await new CourierJobsStore().create({
+        deliveryId: "unknown", pickup: { name: "A" }, dropoff: { name: "B" },
+      });
+      expect(created.ok).toBe(true);
+      for (const [id, amount] of [["zero", 0], ["low", 3], ["mid", 7], ["high", 15]] as const) {
+        const res = await app.inject({
+          method: "POST", url: "/api/job-offers",
+          payload: { ...courierOffer(id), pricing: { amount, currency: "USD", model: "fixed" } },
+        });
+        expect(res.statusCode).toBe(201);
+      }
+      const all = await app.inject({ method: "GET", url: "/api/job-offers/open?capabilityType=courier.dispatch" });
+      expect(all.statusCode).toBe(200);
+      expect(all.json().offers.find((o: { id: string }) => o.id === "unknown").pricing.amount).toBeNull();
+      for (const [query, expected] of [
+        ["maxAmount=10", ["low", "mid", "zero"]],
+        ["minAmount=0", ["high", "low", "mid", "zero"]],
+        ["minAmount=5&maxAmount=10", ["mid"]],
+      ] as const) {
+        const res = await app.inject({
+          method: "GET", url: `/api/job-offers/open?capabilityType=courier.dispatch&${query}`,
+        });
+        expect(res.statusCode).toBe(200);
+        expect(res.json().offers.map((o: { id: string }) => o.id).sort(), query).toEqual(expected);
+      }
     } finally {
       await app.close();
     }

@@ -16,13 +16,15 @@ import {
   buildOperatorIncomeDTO,
   buildOperatorWorkDTO,
   INCOME_HISTORY_REASON,
+  loadOperatorWorkSources,
   type ApprovalRow,
   type CapabilityLite,
   type KernelJobSource,
   type OperatorWorkSources,
+  type OffersReader,
 } from "../../readmodels/operator-work.js";
 import { buildSettlementAxis, type JobRow, type SettlementSource } from "../../readmodels/job-execution.js";
-import type { JobOffer } from "../../services/job-offers-store.js";
+import { JobOffersStore, type JobOffer } from "../../services/job-offers-store.js";
 
 const AS_OF = "2026-09-24T12:00:00.000Z";
 const NOW = Date.parse(AS_OF);
@@ -60,6 +62,21 @@ function offer(over: Partial<JobOffer> = {}): JobOffer {
   };
 }
 const CAPS: CapabilityLite[] = [{ id: "cap-fdm", kernelId: "k-1", type: "fdm", name: "FDM printing" }];
+
+function loadSources(offers: OffersReader | null, capabilities: CapabilityLite[] = CAPS): OperatorWorkSources {
+  const repos = {
+    jobs: { findById: () => null, findByKernel: () => [] },
+    capabilities: {
+      findById: () => null,
+      findByKernel: (kernelId: string) => capabilities.filter((c) => c.kernelId === kernelId),
+    },
+    kernels: { findById: () => null },
+    evidence: { findByJob: () => [], findEventsByBundle: () => [], findCaptureVerdictsByJob: () => [] },
+    escrows: { findMilestonesByEscrow: () => [] },
+  };
+  const db = { select: () => ({ from: () => ({ where: () => ({ all: () => [] }) }) }) };
+  return loadOperatorWorkSources([K1], repos, db, offers);
+}
 
 function sources(over: Partial<OperatorWorkSources> = {}): OperatorWorkSources {
   return {
@@ -213,6 +230,22 @@ describe("kernel jobs", () => {
 // ── Job offers ──────────────────────────────────────────────────────────────
 
 describe("job offers", () => {
+  it("F6: a null-amount offer has unknown pay", () => {
+    const [item] = work({ openOffers: { ok: true, value: [offer({ pricing: { amount: null, currency: "USD", model: "fixed" } })] } }).items;
+    expect(item!.pay).toMatchObject({ amount: null, amountBaseUnits: null, funding: "unknown", basis: null });
+  });
+
+  it("F7: quote-required placeholders have unknown pay while fixed zero remains declared", () => {
+    for (const amount of [0, 50]) {
+      const [item] = work({ openOffers: { ok: true, value: [offer({ pricing: { amount, currency: "USDC", model: "quote-required" } })] } }).items;
+      expect(item!.pay, `quote-required amount ${amount}`).toMatchObject({
+        amount: null, amountBaseUnits: null, funding: "unknown", basis: null, model: "quote_required",
+      });
+    }
+    const [fixed] = work({ openOffers: { ok: true, value: [offer({ pricing: { amount: 0, currency: "USDC", model: "fixed" } })] } }).items;
+    expect(fixed!.pay).toMatchObject({ amount: "0", amountBaseUnits: "0", funding: "declared_unfunded", basis: "job_offer_pricing", model: "fixed" });
+  });
+
   it("lists an open offer for the caller's capability type, with a claim naming the caller's kernels", () => {
     const dto = work({ openOffers: { ok: true, value: [offer()] } });
     const item = dto.items[0]!;
@@ -296,11 +329,46 @@ describe("job offers", () => {
 // ── Whole DTO ───────────────────────────────────────────────────────────────
 
 describe("OperatorWorkDTO", () => {
+  it("B1: lists sorted unique capability types for each kernel separately", () => {
+    const dto = work({
+      kernels: [K1, { ...K1, id: "k-2", name: "Shop Two" }],
+      capabilities: { ok: true, value: [
+        { id: "fdm-1", kernelId: "k-1", type: "fdm" },
+        { id: "fdm-2", kernelId: "k-1", type: "fdm" },
+        { id: "cnc-1", kernelId: "k-1", type: "cnc" },
+        { id: "hplc-1", kernelId: "k-2", type: "lab.hplc" },
+      ] },
+    });
+    expect(dto.kernels).toEqual([
+      { kernelId: "k-1", name: "Shop One", capabilityTypes: ["cnc", "fdm"] },
+      { kernelId: "k-2", name: "Shop Two", capabilityTypes: ["lab.hplc"] },
+    ]);
+  });
+
+  it("B2: a failed capability read gives null types for every kernel and unavailable offers", () => {
+    const dto = work({
+      kernels: [K1, { ...K1, id: "k-2", name: "Shop Two" }],
+      capabilities: { ok: false },
+      openOffers: { ok: true, value: [offer()] },
+    });
+    expect(dto.kernels).toEqual([
+      { kernelId: "k-1", name: "Shop One", capabilityTypes: null },
+      { kernelId: "k-2", name: "Shop Two", capabilityTypes: null },
+    ]);
+    expect(dto.items).toEqual([]);
+    expect(dto.sources.job_offer).toMatchObject({ state: "unavailable", count: 0 });
+  });
+
+  it("B3: a kernel with no current capability row has an empty type list", () => {
+    const dto = work({ kernels: [K1, { ...K1, id: "k-2", name: "Shop Two" }] });
+    expect(dto.kernels[1]).toEqual({ kernelId: "k-2", name: "Shop Two", capabilityTypes: [] });
+  });
+
   it("describes every source; skill jobs are not attributable, not empty", () => {
     const dto = work();
     expect(dto.schemaId).toBe("pcc.operator-work/v1");
     expect(dto.asOf).toBe(AS_OF);
-    expect(dto.kernels).toEqual([{ kernelId: "k-1", name: "Shop One" }]);
+    expect(dto.kernels).toEqual([{ kernelId: "k-1", name: "Shop One", capabilityTypes: ["fdm"] }]);
     expect(dto.sources.skill_job.state).toBe("not_attributable");
     expect(dto.sources.skill_job.reason).toMatch(/humanDid/);
     expect(dto.sources.kernel_job).toEqual({ state: "read", durability: "durable", count: 0, reason: null });
@@ -336,9 +404,93 @@ describe("OperatorWorkDTO", () => {
   });
 });
 
+describe("capability soft expiry", () => {
+  it.each([-1, 0])("D1: a capability expiring at nowMs with offset %d ms matches no offer or advertised type", (offset) => {
+    const dto = work({
+      capabilities: { ok: true, value: CAPS.map((c) => ({ ...c, validUntil: new Date(NOW + offset).toISOString() })) },
+      openOffers: { ok: true, value: [offer()] },
+    });
+    expect(dto.items).toEqual([]);
+    expect(dto.kernels[0]!.capabilityTypes).toEqual([]);
+  });
+
+  it("D2: a capability expiring after nowMs matches an offer and advertises its type", () => {
+    const dto = work({
+      capabilities: { ok: true, value: CAPS.map((c) => ({ ...c, validUntil: new Date(NOW + 1).toISOString() })) },
+      openOffers: { ok: true, value: [offer()] },
+    });
+    expect(dto.items).toHaveLength(1);
+    expect(dto.items[0]!.actions[0]).toMatchObject({ op: "claim", allowed: true, kernelIds: ["k-1"] });
+    expect(dto.kernels[0]!.capabilityTypes).toEqual(["fdm"]);
+  });
+
+  it.each([null, "", "not-a-date", undefined])("D3: a capability with validUntil %j still counts", (validUntil) => {
+    const dto = work({
+      capabilities: { ok: true, value: CAPS.map((c) => ({ ...c, validUntil })) },
+      openOffers: { ok: true, value: [offer()] },
+    });
+    expect(dto.items).toHaveLength(1);
+    expect(dto.items[0]!.actions[0]).toMatchObject({ op: "claim", allowed: true, kernelIds: ["k-1"] });
+    expect(dto.kernels[0]!.capabilityTypes).toEqual(["fdm"]);
+  });
+
+  it("D4: a job on a lapsed capability keeps its capability type and title", () => {
+    const dto = work({
+      capabilities: { ok: true, value: CAPS.map((c) => ({ ...c, validUntil: new Date(NOW - 1).toISOString() })) },
+      kernelJobs: { ok: true, value: [kj(job())] },
+    });
+    expect(dto.items[0]).toMatchObject({ source: "kernel_job", capabilityType: "fdm", title: "FDM printing" });
+    expect(dto.kernels[0]!.capabilityTypes).toEqual([]);
+  });
+
+  it("D5: the loader preserves soft expiry from a complete database capability row", () => {
+    const row = {
+      id: "cap-fdm", kernelId: "k-1", type: "fdm", name: "FDM printing", description: null,
+      materials: [], tolerances: null, envelope: null, assuranceTiers: [0, 1],
+      pricing: { currency: "USDC", baseCost: "0", minimum: "0" }, availability: {},
+      location: { lat: 40.7128, lng: -74.006 }, queueDepth: 0, tags: null, tenantId: null, sla: null,
+      lastHeartbeatAt: "2026-09-23T10:00:00.000Z", validUntil: new Date(NOW - 1).toISOString(),
+    };
+    const src = loadSources({ listOpen: () => [offer()], listClaimedBy: () => [], getEvents: () => [] }, [row]);
+    expect(src.capabilities).toEqual({ ok: true, value: [row] });
+    const dto = buildOperatorWorkDTO(src, AS_OF, { limit: 200, nowMs: NOW });
+    expect(dto.items).toEqual([]);
+    expect(dto.kernels[0]!.capabilityTypes).toEqual([]);
+    expect(dto.sources.job_offer).toMatchObject({ state: "read", count: 0 });
+  });
+});
+
+describe("job offer durability", () => {
+  it("G1a: the loader labels a reader reporting durable storage as durable", () => {
+    const src = loadSources({ isDurable: () => true, listOpen: () => [], listClaimedBy: () => [], getEvents: () => [] });
+    expect(src.offersDurability).toBe("durable");
+    expect(buildOperatorWorkDTO(src, AS_OF, { limit: 200, nowMs: NOW }).sources.job_offer.durability).toBe("durable");
+  });
+
+  it("G1b: a store without SQLite reports and reads as memory", () => {
+    const store = new JobOffersStore();
+    expect(store.isDurable()).toBe(false);
+    const src = loadSources(store);
+    expect(src.offersDurability).toBe("memory");
+    expect(buildOperatorWorkDTO(src, AS_OF, { limit: 200, nowMs: NOW }).sources.job_offer.durability).toBe("memory");
+  });
+
+  it("G1c: a reader without isDurable defaults to memory", () => {
+    const src = loadSources({ listOpen: () => [], listClaimedBy: () => [], getEvents: () => [] });
+    expect(src.offersDurability).toBe("memory");
+    expect(buildOperatorWorkDTO(src, AS_OF, { limit: 200, nowMs: NOW }).sources.job_offer.durability).toBe("memory");
+  });
+});
+
 // ── Income ──────────────────────────────────────────────────────────────────
 
 describe("OperatorIncomeDTO", () => {
+  it("B5: income kernel entries keep their original shape without capability types", () => {
+    const dto = buildOperatorIncomeDTO(sources(), AS_OF);
+    expect(dto.kernels).toEqual([{ kernelId: "k-1", name: "Shop One" }]);
+    expect(dto.kernels[0]).not.toHaveProperty("capabilityTypes");
+  });
+
   it("rows are the linked jobs; totals are sums of rows per status and currency", () => {
     const released = linked(escrow({ id: "e1", status: "active" }), [milestone({ status: "released", amount: "12.50" })]);
     const held = linked(escrow({ id: "e2" }), [milestone({ amount: "7.25" })]);
