@@ -8,7 +8,7 @@
  * Tests:
  *   - GET returns the two known slugs (physical-operator, data-product)
  *     with the dashboard-mirroring shape.
- *   - GET works WITHOUT an Authorization header (proves PUBLIC_EXACT entry).
+ *   - GET works WITHOUT an Authorization header (proves PUBLIC_READ_EXACT entry).
  *   - POST /match returns 400 on missing input.
  *   - POST /match scores physical and data inputs correctly.
  *   - POST /match works WITHOUT auth.
@@ -50,7 +50,7 @@ describe("orchestratorTemplatesRoutes — GET /api/orchestrator/templates", () =
     closeStore();
   });
 
-  it("returns 200 WITHOUT auth header (route is PUBLIC_EXACT)", async () => {
+  it("returns 200 WITHOUT auth header (route is PUBLIC_READ_EXACT)", async () => {
     const res = await app.inject({
       method: "GET",
       url: "/api/orchestrator/templates",
@@ -115,7 +115,7 @@ describe("orchestratorTemplatesRoutes — POST /api/capabilities/templates/match
     closeStore();
   });
 
-  it("returns 200 WITHOUT auth header (route is PUBLIC_EXACT)", async () => {
+  it("returns 200 WITHOUT auth header (route is PUBLIC_BY_DESIGN_WRITES)", async () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/capabilities/templates/match",

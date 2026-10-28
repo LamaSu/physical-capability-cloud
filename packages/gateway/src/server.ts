@@ -636,7 +636,8 @@ export async function createGateway(port = 3200) {
     warn: (msg) => app.log.warn(msg),
   });
 
-  // Scope-based RBAC — enforces required scopes per endpoint (after apiGate sets key)
+  // Scope-based RBAC — onRequest after apiGate, before body parsing and route-level hooks.
+  // A limited API key can be refused here before DHT announce's route-level 501.
   await app.register(scopeChecker);
 
   // DLP redaction — role-aware field-level response filtering (onSend hook)
@@ -645,7 +646,6 @@ export async function createGateway(port = 3200) {
   // Analytics service — subscribes to event bus, persists events + updates views
   getAnalyticsService();
 
-  // x402 payment gate (before REST routes — gates protected endpoints)
   await app.register(x402Gate);
 
   // Service status + analytics — AFTER apiGate (they expose DB data, audit logs, security events)

@@ -1,9 +1,6 @@
 /**
  * Fastify payment gate — supports both MPP (mppx/Tempo, default) and x402 (legacy).
  *
- * Registers as a Fastify plugin. Protected routes return 402
- * with payment requirements unless the request carries valid payment.
- *
  * Protocol selection via environment variable:
  *   (default)           -> MPP (mppx/Tempo) — requires MPP_SECRET_KEY
  *   PCC_X402_LEGACY=true -> x402 (legacy, deprecated)
