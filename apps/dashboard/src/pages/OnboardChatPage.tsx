@@ -265,7 +265,7 @@ export function OnboardChatPage() {
           <div>
             <h1 className="text-sm font-semibold text-white/90">No-Code Onboarding</h1>
             <p className="text-[11px] text-white/40">
-              Tell me what you do and I'll register it. No CLI, no API key.
+              Tell me what you do. Registration isn't available here yet.
             </p>
           </div>
         </div>

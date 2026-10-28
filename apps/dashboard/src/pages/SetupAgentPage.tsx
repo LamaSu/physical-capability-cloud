@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useUIStore } from "../stores/ui-store.js";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { OnboardChatHandoff } from "../components/onboard/OnboardChatHandoff.js";
 
-type UIRenderComponent = "photo_capture" | "network_scan_results" | "machine_config_preview" | "test_results" | "setup_complete" | "text_input" | "selection";
+type UIRenderComponent = "photo_capture" | "network_scan_results" | "machine_config_preview" | "chat_handoff" | "text_input" | "selection";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,12 +40,6 @@ interface MachineConfigPreview {
   url?: string;
 }
 
-interface TestResultsPreview {
-  registered: boolean;
-  testResult?: { success: boolean; duration?: number };
-  registrationError?: string;
-}
-
 // ---------------------------------------------------------------------------
 // Initial agent greeting (simulated since no live agent bus in dashboard)
 // ---------------------------------------------------------------------------
@@ -54,7 +49,7 @@ const INITIAL_MESSAGES: ChatMessage[] = [
     id: "msg_init_0",
     role: "agent",
     content:
-      "Hello! I'm your PCC Setup Assistant. I'll guide you through adding a machine to your Physical Capability Cloud instance.\n\nLet's start by identifying your machine. Do you have a photo of it, or would you like to enter the details manually?",
+      "Hello! I'm your PCC Setup Assistant.\n\nLet's start by identifying your machine. Do you have a photo of it, or would you like to enter the details manually?",
     timestamp: new Date().toISOString(),
     uiRequest: {
       component: "selection",
@@ -313,78 +308,12 @@ async function agentStep(
       });
     }
   } else if (phase === "machine_config_preview") {
-    // User confirmed the config — try to register and test
     responses.push({
       id: id(),
       role: "agent",
-      content: "Configuration confirmed! Registering your device and running a test job...",
+      content: "",
       timestamp: ts(),
-    });
-
-    try {
-      const regRes = await authorizedFetch("/api/setup/register-device", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kernelId: "kernel_dev_001", deviceId: `dev_${Date.now()}`, type: "machine", adapterType: "mock" }),
-      });
-      const regData = regRes.ok ? await regRes.json() as { registered?: boolean } : { registered: false };
-
-      const testResults: TestResultsPreview = {
-        registered: regData.registered ?? regRes.ok,
-        testResult: { success: regRes.ok, duration: 1234 },
-      };
-
-      responses.push({
-        id: id(),
-        role: "agent",
-        content: regRes.ok
-          ? "Device registered successfully! Running a quick test job to verify connectivity..."
-          : "Registration encountered an issue, but I'll show you what the test results would look like:",
-        timestamp: ts(),
-        uiRequest: {
-          component: "test_results",
-          props: testResults as unknown as Record<string, unknown>,
-        },
-      });
-    } catch {
-      const mockResults: TestResultsPreview = {
-        registered: false,
-        registrationError: "Gateway not reachable",
-        testResult: { success: false },
-      };
-
-      responses.push({
-        id: id(),
-        role: "agent",
-        content:
-          "The gateway isn't reachable right now. Here's what the results would look like once it's running:",
-        timestamp: ts(),
-        uiRequest: {
-          component: "test_results",
-          props: mockResults as unknown as Record<string, unknown>,
-        },
-      });
-    }
-  } else if (phase === "test_results") {
-    // Final step
-    responses.push({
-      id: id(),
-      role: "agent",
-      content:
-        lower.includes("done") || lower.includes("finish") || lower.includes("complete")
-          ? "Setup complete! Your machine is now connected to PCC."
-          : "Your machine is configured. Would you like to add another device, or are you done?",
-      timestamp: ts(),
-      uiRequest: {
-        component: "setup_complete",
-        props: {
-          nextSteps: [
-            { label: "View your kernel", href: "/kernels" },
-            { label: "Discover capabilities", href: "/discover" },
-            { label: "Add another device", href: "/setup/agent" },
-          ],
-        },
-      },
+      uiRequest: { component: "chat_handoff", props: {} },
     });
   } else if (lower.includes("help") || lower.includes("what can you do")) {
     responses.push({
@@ -395,8 +324,6 @@ async function agentStep(
         "  - Identify machines from photos (AI vision)",
         "  - Scan your network for connected devices",
         "  - Auto-detect connection type (OctoPrint, Modbus, OPC-UA)",
-        "  - Generate kernel configurations",
-        "  - Register devices and run test jobs",
         "",
         "Just describe what you want to do, or use the options I present.",
       ].join("\n"),
@@ -635,59 +562,6 @@ function MachineConfigPreviewComponent({
   );
 }
 
-function TestResultsComponent({ data }: { data: TestResultsPreview }) {
-  return (
-    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3">
-      <div className="flex items-center gap-2">
-        <span className={`w-2.5 h-2.5 rounded-full ${data.registered ? "bg-emerald-400" : "bg-red-400"}`} />
-        <span className="text-sm font-medium text-white/80">
-          Registration: {data.registered ? "Success" : "Failed"}
-        </span>
-      </div>
-      {data.registrationError && (
-        <p className="text-xs text-red-400">{data.registrationError}</p>
-      )}
-      {data.testResult && (
-        <div className="flex items-center gap-2">
-          <span className={`w-2.5 h-2.5 rounded-full ${data.testResult.success ? "bg-emerald-400" : "bg-red-400"}`} />
-          <span className="text-sm font-medium text-white/80">
-            Test Job: {data.testResult.success ? "Passed" : "Failed"}
-          </span>
-          {data.testResult.duration !== undefined && (
-            <span className="text-xs text-white/40 ml-auto">{data.testResult.duration}ms</span>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SetupCompleteComponent({ nextSteps }: { nextSteps?: Array<{ label: string; href: string }> }) {
-  return (
-    <div className="space-y-3">
-      <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-center">
-        <div className="text-3xl mb-2">&#10003;</div>
-        <p className="text-sm font-semibold text-emerald-300">Setup Complete!</p>
-        <p className="text-xs text-white/40 mt-1">Your machine has been added to the PCC network.</p>
-      </div>
-      {nextSteps && nextSteps.length > 0 && (
-        <div className="space-y-2">
-          <p className="text-xs text-white/40 uppercase tracking-wider font-medium">Next Steps</p>
-          {nextSteps.map((step) => (
-            <a
-              key={step.href}
-              href={step.href}
-              className="block px-4 py-2.5 rounded-xl border border-white/[0.08] bg-white/[0.02] hover:bg-white/[0.05] hover:border-emerald-500/30 text-sm text-white/70 hover:text-white/90 transition-colors"
-            >
-              {step.label} &rarr;
-            </a>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function SelectionComponent({
   options,
   prompt,
@@ -753,15 +627,8 @@ function UIRenderer({
         />
       );
 
-    case "test_results":
-      return <TestResultsComponent data={props as unknown as TestResultsPreview} />;
-
-    case "setup_complete":
-      return (
-        <SetupCompleteComponent
-          nextSteps={props.nextSteps as Array<{ label: string; href: string }> | undefined}
-        />
-      );
+    case "chat_handoff":
+      return <OnboardChatHandoff />;
 
     case "text_input": {
       const TextInputWidget = ({ onSubmit }: { onSubmit: (v: string) => void }) => {
@@ -934,10 +801,6 @@ export function SetupAgentPage() {
           <div>
             <h1 className="text-base font-semibold text-white/90">Setup Assistant</h1>
             <p className="text-xs text-white/40">AI-guided machine configuration</p>
-          </div>
-          <div className="ml-auto flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="text-xs text-white/40">Online</span>
           </div>
         </div>
       </div>

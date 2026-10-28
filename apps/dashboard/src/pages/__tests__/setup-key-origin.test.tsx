@@ -226,7 +226,7 @@ describe("N50: setup pages keep the API key on the configured gateway", () => {
     expect(call!.authorization).toBe("Bearer pcc_test_secret_key");
   });
 
-  it("SetupAgentPage sends the photo and the device registration to the configured gateway", async () => {
+  it("SetupAgentPage sends the photo to the configured gateway and registers no device", async () => {
     await act(async () => {
       root.render(
         <MemoryRouter>
@@ -247,12 +247,13 @@ describe("N50: setup pages keep the API key on the configured gateway", () => {
     await clickButton("Identify This Machine");
     await clickButton("Confirm Configuration");
     expectNoKeyLeak();
-    for (const path of ["/api/ai/identify-machine", "/api/setup/register-device"]) {
+    for (const path of ["/api/ai/identify-machine"]) {
       const call = calls.find((c) => c.url.endsWith(path));
       expect(call, path).toBeDefined();
       expect(call!.url).toBe(path);
       expect(call!.authorization).toBe("Bearer pcc_test_secret_key");
     }
+    expect(calls.some((c) => c.url.endsWith("/api/setup/register-device"))).toBe(false);
   });
 
   it("with a gateway configured, SetupAgentPage sends the key there and nowhere else", async () => {

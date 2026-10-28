@@ -54,7 +54,7 @@ describe("OnboardLandingPage — two-card hero", () => {
 
 
   it("keeps secondary pathways for power users", () => {
-    expect(source).toContain("Add a Machine");
+    expect(source).toContain("Describe a Machine");
     expect(source).toContain("Onboard Kit");
     expect(source).toContain("Marketplace");
     expect(source).toContain("Find a Space");
