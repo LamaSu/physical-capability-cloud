@@ -13,8 +13,9 @@ import type { FastifyInstance } from "fastify";
 import { v4 as uuidv4 } from "uuid";
 import { getRepos } from "../db.js";
 import { getKernelFacade, getJobFacade } from "../facades/index.js";
-import { getKernelService } from "../services/kernel-service.js";
-import { jobSubmitQueueOnly, localJobDispatchDecision, type LocalJobDispatchReason } from "../services/local-job-dispatch.js";
+import { getKernelService, type LocalRunQueueReason } from "../services/kernel-service.js";
+import { jobSubmitQueueOnly, localJobDispatchDecision } from "../services/local-job-dispatch.js";
+import { authorityOf, refuseKernelAction } from "../auth/kernel-authority.js";
 import { emergencyStopState } from "./device-relay.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
@@ -809,6 +810,17 @@ export async function setupRoutes(app: FastifyInstance) {
       });
     }
 
+    let svc;
+    try {
+      svc = getKernelService();
+    } catch {
+      // Preserve the existing device checks before the service-not-ready reply.
+    }
+    if (svc?.hasExplicitConfig === true && svc.kernelId === kernelId && kernelId !== "kernel_dev_001") {
+      const refusal = refuseKernelAction(req, authorityOf(req), kernelId, "decide");
+      if (refusal) return reply.code(refusal.status).send({ ...refusal.body, ran: false, passed: false });
+    }
+
     // The test must name a device on this kernel.
     if (!deviceId || typeof deviceId !== "string") {
       return reply.code(400).send({
@@ -828,10 +840,7 @@ export async function setupRoutes(app: FastifyInstance) {
       });
     }
 
-    let svc;
-    try {
-      svc = getKernelService();
-    } catch {
+    if (!svc) {
       return reply.code(503).send({
         error: "kernel_service_not_ready",
         message: "KernelService is not initialized",
@@ -871,25 +880,24 @@ export async function setupRoutes(app: FastifyInstance) {
         // fall through to the not-runnable answer below
       }
     }
-    if (!svc.hasRunner(deviceId)) {
-      return reply.code(409).send({
-        error: "device_not_runnable_here",
-        message:
-          `This gateway does not run device "${deviceId}" on kernel "${kernelId}". ` +
-          "Run the test job on the node that operates this kernel (for example `pcc-node`), " +
-          "which submits real evidence back to the gateway.",
-        kernelId,
-        deviceId,
-        ran: false,
-        passed: false,
-      });
-    }
+    const notRunnableHere = () => reply.code(409).send({
+      error: "device_not_runnable_here",
+      message:
+        `This gateway does not run device "${deviceId}" on kernel "${kernelId}". ` +
+        "Run the test job on the node that operates this kernel (for example `pcc-node`), " +
+        "which submits real evidence back to the gateway.",
+      kernelId,
+      deviceId,
+      ran: false,
+      passed: false,
+    });
+    if (!svc.hasRunner(deviceId)) return notRunnableHere();
 
     const jobId = `test-job-${uuidv4()}`;
     const stepId = `setup-test-${Date.now()}`;
     const resolvedKernelId = kernelId;
     const startTime = Date.now();
-    const queuedResponse = (reason: LocalJobDispatchReason) => ({
+    const queuedResponse = (reason: LocalRunQueueReason) => ({
       jobId,
       deviceId: null,
       status: "queued",
@@ -949,6 +957,7 @@ export async function setupRoutes(app: FastifyInstance) {
         jobId,
         kernelId,
         stepId,
+        localRunAuthority: "decide",
         deviceId,
         assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
       });
@@ -962,6 +971,7 @@ export async function setupRoutes(app: FastifyInstance) {
         duration: Date.now() - startTime,
       });
     }
+    if (submitResult.status === "refused") return notRunnableHere();
     // The runtime repeats the guard after its asynchronous admission check.
     if (submitResult.status === "queued") return queuedResponse(submitResult.reason);
 
