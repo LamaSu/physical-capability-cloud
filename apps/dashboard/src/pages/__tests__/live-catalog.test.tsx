@@ -11,7 +11,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 import { KernelsPage } from "../KernelsPage.js";
 import { DiscoverPage } from "../DiscoverPage.js";
@@ -24,6 +24,10 @@ import {
 } from "../../api/hooks/use-pcc-data.js";
 import { KNOWN_KERNEL_STATUSES } from "../../api/wire-vocabulary.js";
 import { describeReadError, StaleNotice, UnavailableState } from "../../components/ReadState.js";
+
+// The dashboard's vite.config.ts aliases node:crypto to a SHA-256-only browser shim
+// (src/lib/node-crypto-shim.ts). A git blob id is SHA-1, so load Node's own module.
+const { createHash } = createRequire(import.meta.url)("node:crypto") as typeof import("node:crypto");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
