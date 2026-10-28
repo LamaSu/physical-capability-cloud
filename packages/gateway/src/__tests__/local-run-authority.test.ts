@@ -293,6 +293,14 @@ describe("POST /api/jobs/submit local execution authority", () => {
     await expect(refused).resolves.toEqual({ jobId: "direct-unknown", deviceId: null, status: "refused", reason: "device_not_runnable_here" });
     expect(commands()).toEqual([]);
   });
+  it.each([{ deviceId: "" }, { deviceId: 0 }, { deviceId: false }, { deviceId: {} }, { deviceId: [] }])(
+    "T7b: with one loaded machine, the operator's explicit device $deviceId is refused and never runs on that machine", async ({ deviceId }) => {
+      const response = await submit(ownerHeaders, { deviceId });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toEqual({ error: "device_not_runnable_here", message: "This gateway does not run the named device." });
+      expect(getRepos().jobs.findAll()).toEqual([expect.objectContaining({ status: "failed" })]);
+      expect(commands()).toEqual([]);
+    });
   it.each([undefined, null])("T8: no named device (%j) runs exactly one loaded machine", async deviceId => {
     await accepted(ownerHeaders, { deviceId });
   });
@@ -466,6 +474,20 @@ describe("hosted and generated configuration replies stay unchanged", () => {
     expect(response.json()).toEqual({ error: "gateway_does_not_run_this_kernel",
       message: `This gateway runs kernel "kernel_dev_001", not "${KERNEL}". Run the test job on the node that operates this kernel (for example \`pcc-node\`), which submits real evidence back to the gateway.`,
       kernelId: KERNEL, ran: false, passed: false });
+    expect(commands()).toEqual([]);
+  });
+  it("T19c: with explicit config, a claimed owner's test-job for a kernel this gateway doesn't run keeps today's 409", async () => {
+    const other = "kernel-local-run-authority-other";
+    getRepos().kernels.insert({ ...getRepos().kernels.findById(KERNEL)!, id: other });
+    seedDevice("device-local-run-authority-other", other);
+    const check = vi.spyOn(authority, "refuseKernelAction");
+    const response = await testJob(claimed(owner.address), { kernelId: other, deviceId: "device-local-run-authority-other" });
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({ error: "gateway_does_not_run_this_kernel",
+      message: `This gateway runs kernel "${KERNEL}", not "${other}". Run the test job on the node that operates this kernel (for example \`pcc-node\`), which submits real evidence back to the gateway.`,
+      kernelId: other, ran: false, passed: false });
+    expect(check).not.toHaveBeenCalled();
+    expect(rowCount()).toBe(0);
     expect(commands()).toEqual([]);
   });
   it.each([false, true])("T19b: placeholder setup bypasses decide with explicit config=%s", async explicit => {
