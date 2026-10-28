@@ -105,12 +105,12 @@ async function buildApp(routesBeforeGate = false, carrierlessProof = false) {
 
 // Use the real EIP-4361 nonce/signature flow and real session-key endpoint, as N173 does.
 async function signIn(app: FastifyInstance, account = OWNER) {
-  const host = "localhost";
+  const host = "capability.network";
   const nonce = await app.inject({ url: "/api/auth/nonce", headers: { host } });
   expect(nonce.statusCode, nonce.body).toBe(200);
   const message = [
     `${host} wants you to sign in with your Ethereum account:`, account.address.toLowerCase(),
-    "", "Sign in to PCC.", "", `URI: http://${host}`, "Version: 1", "Chain ID: 8453",
+    "", "Sign in to PCC.", "", `URI: https://${host}`, "Version: 1", "Chain ID: 8453",
     `Nonce: ${nonce.json().nonce}`, `Issued At: ${new Date().toISOString()}`,
   ].join("\n");
   const response = await app.inject({

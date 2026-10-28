@@ -69,14 +69,14 @@ async function makeMessage(app: FastifyInstance, address: Hex, chainId = 84532) 
   const nonceResponse = await app.inject({ method: "GET", url: "/api/auth/nonce", remoteAddress });
   expect(nonceResponse.statusCode).toBe(200);
   return createSiweMessage({
-    address, domain: "localhost", uri: "http://localhost", version: "1", chainId,
+    address, domain: "capability.network", uri: "https://capability.network", version: "1", chainId,
     nonce: nonceResponse.json().nonce, issuedAt: new Date(), statement: "Sign in to PCC",
   });
 }
 
 function verify(app: FastifyInstance, message: string, signature: Hex) {
   return app.inject({
-    method: "POST", url: "/api/auth/verify", headers: { host: "localhost" },
+    method: "POST", url: "/api/auth/verify", headers: { host: "capability.network" },
     payload: { message, signature }, remoteAddress,
   });
 }

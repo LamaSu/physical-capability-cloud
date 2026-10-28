@@ -196,7 +196,7 @@ describe("a wallet session holds no scopes", () => {
 
   it("SIWE authentication routes remain open through the real login and session flow", async () => {
     const app = await buildApp("siwe");
-    const hostname = "localhost";
+    const hostname = "capability.network";
     const nonceResponse = await app.inject({
       method: "GET", url: "/api/auth/nonce", headers: { host: hostname },
     });
@@ -204,7 +204,7 @@ describe("a wallet session holds no scopes", () => {
     const account = privateKeyToAccount(generatePrivateKey());
     const message = [
       `${hostname} wants you to sign in with your Ethereum account:`, account.address,
-      "", "Sign in to PCC.", "", `URI: http://${hostname}`, "Version: 1", "Chain ID: 8453",
+      "", "Sign in to PCC.", "", `URI: https://${hostname}`, "Version: 1", "Chain ID: 8453",
       `Nonce: ${nonceResponse.json().nonce}`, `Issued At: ${new Date().toISOString()}`,
     ].join("\n");
     const signature = await account.signMessage({ message });
