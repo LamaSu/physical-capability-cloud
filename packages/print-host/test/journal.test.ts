@@ -166,6 +166,35 @@ describe("job journal", () => {
     },
   );
 
+  it.each(["torn JSON", "symlink", "insecure mode", "oversized"] as const)(
+    "R2 round 2: another unit's %s reservation marker read failure cannot block a new reservation", async (kind) => {
+      const journal = createJobJournal(dir, time);
+      await journal.initialize();
+      const foreignUnit = publicWord();
+      const marker = join(journal.directory, `.unit-${foreignUnit.slice(2)}.used.json`);
+      const value = JSON.stringify({ version: 1, jobId: "foreign-job", settlementUnitId: foreignUnit });
+      if (kind === "symlink") {
+        const target = join(dir, "foreign-marker-target");
+        await fs.writeFile(target, value, { mode: 0o600 });
+        await fs.symlink(target, marker);
+      } else {
+        const bytes = kind === "torn JSON" ? '{"version":'
+          : kind === "oversized" ? `${value}${" ".repeat(2_049)}` : value;
+        await fs.writeFile(marker, bytes, { mode: 0o600 });
+        if (kind === "insecure mode") await fs.chmod(marker, 0o644);
+        if (kind === "oversized") expect((await fs.stat(marker)).size).toBeGreaterThan(2_048);
+      }
+      const before = await fs.readFile(marker);
+      const newUnit = publicWord();
+      await expect(journal.reserveUnit("new-job", newUnit)).resolves.toBe(true);
+      expect(await journal.has("new-job")).toBe(false);
+      expect(await journal.list()).toEqual([]);
+      expect(await fs.readFile(marker)).toEqual(before);
+      expect(JSON.parse(await fs.readFile(join(journal.directory, `.unit-${newUnit.slice(2)}.used.json`), "utf8")))
+        .toEqual({ version: 1, jobId: "new-job", settlementUnitId: newUnit });
+    },
+  );
+
   it.each(["0xBAD", `0x${"A".repeat(64)}`])(
     "R2 X14: a legacy first session record that parses with the malformed unit id %s still fails closed", async (settlementUnitId) => {
       const journal = createJobJournal(dir, time);

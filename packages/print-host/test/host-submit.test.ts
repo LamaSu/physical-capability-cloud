@@ -1077,6 +1077,72 @@ describe("r5d evidence hold-and-retry (R3)", () => {
     },
   );
 
+  it.each(["run", "stopSignal"] as const)(
+    "R3 round 2: an asynchronous host stop through %s clears a pending evidence timer before it fires, and a restart never re-posts", async (stopMode) => {
+      const setup = await fixture();
+      const stop = new AbortController();
+      setup.gateway.postRelayEvidence.mockResolvedValueOnce({ ok: false, code: "unavailable", status: 503 });
+      const waits: number[] = [];
+      const holdHandle = {};
+      const clearHold = vi.fn();
+      let fireHold: (() => void) | undefined;
+      let timerFired = false;
+      let reachedHold!: () => void;
+      const holdStarted = new Promise<void>((resolve) => { reachedHold = resolve; });
+      const timers: HostTimers = {
+        setTimeout(callback, ms) {
+          if (setup.gateway.postRelayEvidence.mock.calls.length === 0) return setTimeout(callback, ms);
+          waits.push(ms);
+          fireHold = () => { timerFired = true; callback(); };
+          reachedHold();
+          return holdHandle;
+        },
+        clearTimeout(handle) {
+          if (handle === holdHandle) clearHold();
+          else if (handle !== undefined) clearTimeout(handle as ReturnType<typeof setTimeout>);
+        },
+      };
+      setup.host = createHost({ ...setup.deps, timers, ...(stopMode === "stopSignal" ? { stopSignal: stop.signal } : {}) });
+      setup.adapter.scriptStart({ outcome: "success", jobId: 101 });
+      const started = setup.adapter.started();
+      const running = stopMode === "run" ? setup.host.run(stop.signal) : setup.host.runOnce();
+      try {
+        await started;
+        setup.adapter.emit("execution_started", { ippJobId: 101 });
+        setup.adapter.emit("execution_completed", { ippJobId: 101, totalPages: 2 });
+        // Resuming here happens after setTimeout returns and the synchronous
+        // stopped check has run; only the pending hold's abort can release it.
+        await holdStarted;
+        expect(waits).toEqual([5_000]);
+        expect(stop.signal.aborted).toBe(false);
+        expect(clearHold).not.toHaveBeenCalled();
+        const before = await setup.diskRecords();
+        expect(before.at(-1)?.state).toBe("bundle_saved");
+        stop.abort();
+        expect(clearHold).toHaveBeenCalledTimes(1);
+        expect(timerFired).toBe(false);
+        if (stopMode === "stopSignal") {
+          expect(await running).toEqual({ kind: "blocked", jobId, waitMs: 5_000 });
+        } else await running;
+        expect(timerFired).toBe(false);
+        expect(await setup.diskRecords()).toEqual(before);
+        expect(setup.gateway.postRelayEvidence).toHaveBeenCalledTimes(1);
+      } finally {
+        stop.abort();
+        // Drain a mutant that failed to abort the hold after the assertion
+        // above has failed, without leaving the run pending until test timeout.
+        if (clearHold.mock.calls.length === 0) fireHold?.();
+        await running;
+      }
+      const recovered = await restart(setup);
+      await recovered.host.runOnce();
+      await recovered.host.runOnce();
+      expect((await recovered.journal.read(jobId)).map((r) => r.state).slice(-2)).toEqual(["bundle_saved", "interrupted"]);
+      expect(setup.gateway.postRelayEvidence).toHaveBeenCalledTimes(1);
+      noSubmitSignatures(setup);
+    },
+  );
+
   it.each([
     ["indeterminate", 503, "evidence_indeterminate"],
     ["operator_proof_required", 403, "evidence_refused"],
