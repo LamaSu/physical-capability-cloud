@@ -34,6 +34,7 @@ export const HOST_LOG_CODES = [
   "reader_unavailable", "stopped", "absent", "malformed", "poll_failed", "session_failed",
   "package_built", "receipt_stored", "data_dir_locked", "receipt_exists", "receipt_signer_unavailable", "submit_attempted", "submitted", "already_committed", "conflict", "refused", "submit_indeterminate",
   "device_identity_mismatch", "compromised_device", "adapter_simulated", "unit_already_used",
+  "package_challenge_refused", "package_registry_refused", "package_operator_refused", "receipt_storage_unavailable",
   ...gatewayCodes, ...JOB_INPUT_CODES, ...SUBMIT_CODES,
 ] as const;
 export type HostLogCode = typeof HOST_LOG_CODES[number];
@@ -88,6 +89,21 @@ const terminalReportCodes = new Set<GwCode>([
 const transientReportCodes = new Set<GwCode>([
   "network", "timeout", "unavailable", "server_error", "rate_limited", "malformed_response",
 ]);
+
+// These are known to store no relay evidence: 500 evidence_store_failed,
+// 503 read_failed/scope_requirements_unavailable/wallet_link_unavailable, or any 429.
+const storedNothingEvidenceCodes = new Set<GwCode>(["server_error", "unavailable", "rate_limited"]);
+const evidenceRetryWaitsMs = [5_000, 20_000, 60_000, 120_000] as const;
+const evidenceRetryMaxWaitMs = 300_000;
+const terminalReceiptRefusals = {
+  invalid_package_body: "receipt_invalid_package_body",
+  invalid_package_signatures: "receipt_invalid_package_signatures",
+  invalid_settlement_unit: "receipt_invalid_settlement_unit",
+} as const;
+const retriedReceiptRefusals = [
+  "job_not_found", "package_challenge_refused", "package_registry_refused",
+  "package_operator_refused", "receipt_storage_unavailable",
+] as const;
 const timerDefaults: HostTimers = {
   setTimeout: (callback, ms) => setTimeout(callback, ms),
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
@@ -116,7 +132,7 @@ export function createHost(deps: HostDeps): {
   let halted = false;
   let haltCode: NonNullable<HostTickResult["code"]> = "journal_failed";
   let parentAgentId: string | undefined;
-  const adapterSimulated = deps.realMode !== false && deps.adapter !== undefined && deps.adapter.source?.simulated !== false;
+  const adapterSimulated = deps.realMode !== false && (deps.adapter === undefined ? deps.pollOnly !== true : deps.adapter.source?.simulated !== false);
   let identityFailure: HostIdentityCode | undefined;
   if (deps.deviceKey) {
     try {
@@ -127,18 +143,20 @@ export function createHost(deps: HostDeps): {
       if (isCompromisedDevicePublicKey(deps.deviceKey.publicKeyHex)) identityFailure = "compromised_device";
     } catch { identityFailure = "device_identity_mismatch"; }
   }
-  const retries = new Map<string, { failures: number; until: number }>();
+  const retries = new Map<string, { failures: number; until: number; code: HostLogCode }>();
   let stopped = deps.stopSignal?.aborted === true;
   let lastHeartbeat = -Infinity;
   let pollFailures = 0;
   let nextPollAt = -Infinity;
   let activeTick: Promise<HostTickResult> | undefined;
   let activePrint: AbortController | undefined;
+  let activeHold: AbortController | undefined;
   let pending: { jobId: string; inputs: JobInputs; reported: boolean; reports: number; prints: number;
     session?: UnitEvidenceSession } | undefined;
   const requestStop = () => {
     stopped = true;
     activePrint?.abort();
+    activeHold?.abort();
   };
 
   function backoff(result: Extract<GwResult<unknown>, { ok: false }>): number {
@@ -183,10 +201,34 @@ export function createHost(deps: HostDeps): {
     log(code);
     const failures = (retries.get(jobId)?.failures ?? 0) + 1;
     const waitMs = Math.min(60_000, Math.max(5_000 * 2 ** Math.min(failures - 1, 4), Number.isFinite(retryAfterS) ? Math.max(0, retryAfterS) * 1_000 : 0));
-    retries.set(jobId, { failures, until: now() + waitMs });
+    retries.set(jobId, { failures, until: now() + waitMs, code });
   }
   function jobWait(jobId: string): number {
     return Math.max(5_000, (retries.get(jobId)?.until ?? now()) - now());
+  }
+
+  function holdEvidence(ms: number): Promise<boolean> {
+    if (stopped) return Promise.resolve(false);
+    const controller = new AbortController();
+    activeHold = controller;
+    return new Promise<boolean>((resolve) => {
+      let handle: unknown;
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        timers.clearTimeout(handle);
+        controller.signal.removeEventListener("abort", finish);
+        if (activeHold === controller) activeHold = undefined;
+        resolve(!stopped);
+      };
+      controller.signal.addEventListener("abort", finish, { once: true });
+      // A testing timer may abort the host synchronously from setTimeout.
+      // In that case, clear the handle returned after finish already ran.
+      handle = timers.setTimeout(finish, ms);
+      if (settled) timers.clearTimeout(handle);
+      if (stopped || controller.signal.aborted) finish();
+    });
   }
   async function outcome(jobId: string, result: EvidenceBroadcastOutcome, readOnly: boolean): Promise<JournalState> {
     if (result.code === "already_committed" || result.code === "conflict" || (!readOnly && result.code === "submitted")) {
@@ -302,6 +344,21 @@ export function createHost(deps: HostDeps): {
           await record(jobId, "refused", "receipt_conflict");
           return "refused";
         }
+        if (result.code === "receipt_kernel_mismatch") {
+          await record(jobId, "refused", "receipt_kernel_mismatch");
+          return "refused";
+        }
+        if (result.code === "receipt_refused") {
+          const sub = result.sub;
+          if (sub !== undefined && Object.hasOwn(terminalReceiptRefusals, sub)) {
+            await record(jobId, "refused", terminalReceiptRefusals[sub as keyof typeof terminalReceiptRefusals]);
+            return "refused";
+          }
+          if (sub !== undefined && (retriedReceiptRefusals as readonly string[]).includes(sub)) {
+            retry(jobId, sub as HostLogCode, result.retryAfterS);
+            return "package_built";
+          }
+        }
         retry(jobId, result.code === "receipt_signer_unavailable" ? result.code : safeGwCode(result.code), result.retryAfterS);
         return "package_built";
       }
@@ -377,6 +434,8 @@ export function createHost(deps: HostDeps): {
             if (entry.state === "package_built" || entry.state === "receipt_stored") log("submit_disabled");
             return false;
           }
+          const pendingUntil = retries.get(entry.jobId)?.until;
+          if (pendingUntil !== undefined && now() < pendingUntil) return false;
           return entry.state !== "evidence_stored" || entry.code === undefined;
         });
       if (recoverable) {
@@ -384,6 +443,11 @@ export function createHost(deps: HostDeps): {
         if (until !== undefined && now() < until) return { kind: "backoff", jobId: recoverable.jobId, waitMs: until - now() };
         const state = await submitStored(recoverable.jobId);
         return { kind: "job", jobId: recoverable.jobId, state, waitMs: jobWait(recoverable.jobId) };
+      }
+      for (const [cappedJobId, capped] of retries) {
+        if (capped.code === "submit_caps_exceeded" && now() < capped.until) {
+          return { kind: "backoff", jobId: cappedJobId, waitMs: capped.until - now() };
+        }
       }
     }
     if (now() < nextPollAt) return { kind: "backoff", waitMs: nextPollAt - now() };
@@ -590,21 +654,31 @@ export function createHost(deps: HostDeps): {
     await append(result.success ? "printed" : "print_failed");
     await journal.saveBundle(jobId, relayBundle);
     await append("bundle_saved");
-    let receipt;
-    try { receipt = await gateway.postRelayEvidence(jobId, relayBundle); }
-    catch { receipt = { ok: false as const, code: "indeterminate" as const, status: null }; }
-    if (receipt.ok) {
-      const skip = bundle === undefined ? "submit_disabled" : skipSubmission(pending.inputs);
-      await record(jobId, "evidence_stored", skip);
-      return done(skip ? "evidence_stored" : await submitStored(jobId, pending.inputs, bundle));
+    for (let attempt = 1; attempt <= evidenceRetryWaitsMs.length + 1; attempt++) {
+      let receipt;
+      try { receipt = await gateway.postRelayEvidence(jobId, relayBundle); }
+      catch { receipt = { ok: false as const, code: "indeterminate" as const, status: null }; }
+      if (receipt.ok) {
+        const skip = bundle === undefined ? "submit_disabled" : skipSubmission(pending.inputs);
+        await record(jobId, "evidence_stored", skip);
+        return done(skip ? "evidence_stored" : await submitStored(jobId, pending.inputs, bundle));
+      }
+      const code = safeGwCode(receipt.code);
+      if (attempt <= evidenceRetryWaitsMs.length && storedNothingEvidenceCodes.has(code)) {
+        log(code);
+        const retryAfterMs = Number.isFinite(receipt.retryAfterS) ? Math.max(0, receipt.retryAfterS ?? 0) * 1_000 : 0;
+        const waitMs = Math.min(evidenceRetryMaxWaitMs, Math.max(evidenceRetryWaitsMs[attempt - 1]!, retryAfterMs));
+        if (!await holdEvidence(waitMs)) return { kind: "blocked", jobId, waitMs: 5_000 };
+        continue;
+      }
+      if (code === "indeterminate") {
+        await append("evidence_indeterminate");
+        return done("evidence_indeterminate");
+      }
+      await append("evidence_refused", code);
+      return done("evidence_refused");
     }
-    const code = safeGwCode(receipt.code);
-    if (code === "indeterminate") {
-      await append("evidence_indeterminate");
-      return done("evidence_indeterminate");
-    }
-    await append("evidence_refused", code);
-    return done("evidence_refused");
+    throw new Error("unreachable_evidence_attempt");
   }
 
   function runOnce(): Promise<HostTickResult> {

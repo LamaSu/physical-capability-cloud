@@ -17,6 +17,7 @@ export const SUBMIT_CODES = [
   "package_inputs_missing", "submit_disabled", "package_invalid", "submit_absent",
   "submit_rpc_unavailable", "submit_refused", "submit_caps_exceeded", "submit_unknown",
   "submit_unreconciled", "receipt_conflict", "receipt_mismatch",
+  "receipt_kernel_mismatch", "receipt_invalid_package_body", "receipt_invalid_package_signatures", "receipt_invalid_settlement_unit",
 ] as const;
 export type JournalCode = GwCode | "no_bundle" | "busy_retry_limit" | "host_shutdown" | typeof SUBMIT_CODES[number];
 export interface PackageHashes { packageDigest: string; evidenceBlockHash: string }
@@ -67,11 +68,6 @@ const codes = new Set<string>([
   "malformed_response", "job_not_found", "settlement_owned_status", "job_kernel_changed",
   "invalid_status", "payload_too_large", "bad_bundle", "stored_mismatch", "not_stored",
   "evidence_refused", "indeterminate", "no_bundle", "busy_retry_limit", "host_shutdown",
-  "spend_not_approved", "idempotency_conflict", "reconciliation_required",
-  "kernel_unowned", "kernel_mismatch", "job_not_active",
-  "carrier_record_ownership_mismatch", "carrier_not_configured",
-  "missing_fields", "invalid_parcel", "invalid_document_hash",
-  "provider_mode_not_production", "weight_exceeds_ceiling", "rate_exceeds_ceiling",
   "receipt_exists", "receipt_signer_unavailable", "kernel_emergency_stopped",
 ]);
 const states = new Set<string>(JOURNAL_STATES);
@@ -364,7 +360,7 @@ export function createJobJournal(dataDir: string, clock: () => number = Date.now
     try { return await result; } catch (error) { throw safe(error, fallback); }
   }
 
-  async function readPrivateArtifact(filePath: string, limit: number): Promise<unknown | undefined> {
+  async function readPrivateArtifact(filePath: string, limit: number, unparseable: "invalid" | "absent" = "invalid"): Promise<unknown | undefined> {
     await checkDirectory();
     let before;
     try { before = await fs.lstat(filePath); } catch (error) { if (isMissing(error)) return undefined; throw error; }
@@ -386,7 +382,7 @@ export function createJobJournal(dataDir: string, clock: () => number = Date.now
         }
         if (length > limit) throw new JournalError("journal_invalid");
         try { return JSON.parse(bytes.subarray(0, length).toString("utf8")); }
-        catch { throw new JournalError("journal_invalid"); }
+        catch { if (unparseable === "absent") return undefined; throw new JournalError("journal_invalid"); }
       } finally { bytes.fill(0); }
     } finally { await handle.close(); }
   }
@@ -424,7 +420,7 @@ export function createJobJournal(dataDir: string, clock: () => number = Date.now
     try { stat = await fs.lstat(dir); } catch (error) { if (isMissing(error)) return false; throw error; }
     if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== expectedUid
       || (stat.mode & 0o777) !== 0o700) throw new JournalError("journal_bad_directory");
-    const opened = await readPrivateArtifact(join(dir, "00000000.json"), 128 * 1024);
+    const opened = await readPrivateArtifact(join(dir, "00000000.json"), 128 * 1024, "absent");
     return object(opened) && object(opened.record) && opened.record.kind === "open"
       && boundUnit(opened.record.binding) === unit;
   }
@@ -449,7 +445,22 @@ export function createJobJournal(dataDir: string, clock: () => number = Date.now
     // only its temporary file. Both retain the funded unit, failing closed.
     const tempPrefix = `${markerId}.used.json.tmp-`;
     if ((await fs.readdir(directory)).some((name) => name.startsWith(tempPrefix))) return false;
+    const markedJobs = new Set<string>();
+    for (const name of await fs.readdir(directory)) {
+      const matched = /^\.unit-([0-9a-f]{64})\.used\.json$/.exec(name);
+      if (!matched) continue;
+      const markerUnit = `0x${matched[1]}`;
+      let foreign: unknown;
+      try { foreign = await readArtifact(`.unit-${matched[1]}`, ".used.json", 2_048); }
+      catch { continue; }
+      if (object(foreign) && Object.keys(foreign).sort().join(",") === "jobId,settlementUnitId,version"
+        && foreign.version === 1 && foreign.settlementUnitId === markerUnit
+        && typeof foreign.jobId === "string" && jobFileStem(foreign.jobId) !== undefined) {
+        markedJobs.add(foreign.jobId);
+      }
+    }
     for (const record of await listRaw()) {
+      if (markedJobs.has(record.jobId)) continue;
       if (await priorJobUsesUnit(record.jobId, settlementUnitId)) return false;
     }
     await saveArtifact(markerId, ".used.json", { version: 1, jobId, settlementUnitId });
