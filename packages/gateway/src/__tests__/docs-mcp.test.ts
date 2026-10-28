@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import fastifySwagger from "@fastify/swagger";
+import { existsSync, readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { docsHttpMcpRoutes } from "../mcp/docs-mcp-server.js";
 
@@ -70,7 +71,7 @@ describe("Streamable HTTP docs MCP server", () => {
     expect(initialized.statusCode).toBe(202);
   });
 
-  it("lists the three documentation resources", async () => {
+  it("lists the golden path, integration reference, quickstart, and API resources", async () => {
     const listed = await app.inject({
       method: "POST",
       url: "/mcp/docs",
@@ -85,14 +86,52 @@ describe("Streamable HTTP docs MCP server", () => {
     const resources = listed.json().result.resources;
 
     expect(listed.statusCode).toBe(200);
-    expect(resources.length).toBeGreaterThanOrEqual(3);
+    expect(resources).toHaveLength(4);
     const uris = resources.map((r: { uri: string }) => r.uri);
     expect(uris).toEqual(
-      expect.arrayContaining(["docs://pcc/agent-guide", "docs://pcc/api", "docs://pcc/quickstart"]),
+      expect.arrayContaining([
+        "docs://pcc/agent-guide",
+        "docs://pcc/integration",
+        "docs://pcc/api",
+        "docs://pcc/quickstart",
+      ]),
+    );
+    expect(resources.find((r: { uri: string }) => r.uri === "docs://pcc/integration")).toEqual(
+      expect.objectContaining({
+        name: "pcc-integration-reference",
+        title: "PCC Agent Integration Reference",
+        mimeType: "text/markdown",
+      }),
     );
   });
 
-  it("reads the agent-guide resource as real markdown from the repo", async () => {
+  it("reads the integration reference as docs/AGENT_INTEGRATION.md", async () => {
+    const read = await app.inject({
+      method: "POST",
+      url: "/mcp/docs",
+      headers: {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": sessionId,
+        "mcp-protocol-version": protocolVersion,
+      },
+      payload: {
+        jsonrpc: "2.0",
+        id: 9,
+        method: "resources/read",
+        params: { uri: "docs://pcc/integration" },
+      },
+    });
+
+    expect(read.statusCode).toBe(200);
+    const contents = read.json().result?.contents;
+    expect(contents).toHaveLength(1);
+    expect(contents[0].mimeType).toBe("text/markdown");
+    const reference = new URL("../../../../docs/AGENT_INTEGRATION.md", import.meta.url);
+    expect(contents[0].text).toBe(readFileSync(reference, "utf8"));
+  });
+
+  it("reads the agent-guide resource as the committed agent golden path", async () => {
     const read = await app.inject({
       method: "POST",
       url: "/mcp/docs",
@@ -114,8 +153,9 @@ describe("Streamable HTTP docs MCP server", () => {
     expect(read.statusCode).toBe(200);
     expect(contents).toHaveLength(1);
     expect(contents[0].mimeType).toBe("text/markdown");
-    expect(contents[0].text).toContain("PCC Agent Integration Guide");
-    expect(contents[0].text).toContain("Complete API Reference");
+    const artifact = new URL("../../../../apps/dashboard/public/.well-known/agent.md", import.meta.url);
+    expect(existsSync(artifact), "The generated agent.md artifact must be committed").toBe(true);
+    expect(contents[0].text).toBe(readFileSync(artifact, "utf8"));
   });
 
   it("reads the quickstart resource as real markdown from the repo", async () => {
@@ -204,6 +244,38 @@ describe("Streamable HTTP docs MCP server", () => {
     expect(call.statusCode).toBe(200);
     expect(result.isError).not.toBe(true);
     expect(result.content[0].text).toContain("docs://pcc/agent-guide");
+  });
+
+  it("search_docs describes and searches all three prose resources", async () => {
+    const headers = {
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+      "mcp-session-id": sessionId,
+      "mcp-protocol-version": protocolVersion,
+    };
+    const tools = await app.inject({
+      method: "POST",
+      url: "/mcp/docs",
+      headers,
+      payload: { jsonrpc: "2.0", id: 10, method: "tools/list", params: {} },
+    });
+    const tool = tools.json().result.tools.find((t: { name: string }) => t.name === "search_docs");
+    for (const uri of ["docs://pcc/agent-guide", "docs://pcc/integration", "docs://pcc/quickstart"]) {
+      expect(tool.description).toContain(uri);
+    }
+    const call = await app.inject({
+      method: "POST",
+      url: "/mcp/docs",
+      headers,
+      payload: {
+        jsonrpc: "2.0",
+        id: 11,
+        method: "tools/call",
+        params: { name: "search_docs", arguments: { query: "Embeddable Button Endpoint" } },
+      },
+    });
+    expect(call.statusCode).toBe(200);
+    expect(call.json().result.content[0].text).toContain("docs://pcc/integration");
   });
 
   it("tools/call with an unknown tool name returns an isError tool result", async () => {
