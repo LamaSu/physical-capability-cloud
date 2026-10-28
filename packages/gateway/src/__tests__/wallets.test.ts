@@ -619,6 +619,61 @@ describe("W1 wallet ceremony", () => {
     expect((await app.inject({ url: "/api/wallets", headers })).json().links.map((link: { status: string }) => link.status)).toEqual(["active", "active"]);
   });
 
+  it.each([
+    ["valid cookie with another account's SIWE bearer", "other-session", 403],
+    ["valid cookie with its own account's API key", "own-key", 200],
+    ["valid cookie with an invalid API key", "invalid-key", 403],
+    ["valid cookie with its own SIWE bearer", "same-session", 403],
+    ["tampered cookie with a valid SIWE bearer", "tampered-cookie", 200],
+  ] as const)("foreign Origin revoke preserves credential precedence: %s", async (_label, credentials, status) => {
+    const a = await signIn();
+    const key = await mintSessionKey(a.headers);
+    expect(getRepos().apiKeys.findById(key.id)?.operatorId === a.account.address).toBe(true);
+    const linkIds: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const { request } = await proved({ role: "device" });
+      const approval = await approve(request, key.headers);
+      expect(approval.statusCode).toBe(200);
+      linkIds.push(approval.json().linkId);
+    }
+
+    let headers: Record<string, string> = { ...a.headers, origin: "https://evil.example" };
+    if (credentials === "other-session") {
+      const b = await signIn();
+      expect(b.account.address === a.account.address).toBe(false);
+      headers.authorization = `Bearer ${b.token}`;
+      const principal = await app.inject({ url: "/api/auth/me", headers });
+      expect(principal.statusCode).toBe(200);
+      expect(principal.json()).toEqual({ address: a.account.address });
+    } else if (credentials === "own-key") {
+      headers = { ...headers, ...key.headers };
+    } else if (credentials === "invalid-key") {
+      headers.authorization = `${owner.authorization}-invalid`;
+    } else {
+      headers.authorization = `Bearer ${a.token}`;
+      if (credentials === "tampered-cookie") {
+        const signed = app.signCookie(a.token);
+        const tampered = `${signed.slice(0, -1)}${signed.endsWith("a") ? "b" : "a"}`;
+        expect(app.unsignCookie(tampered).valid).toBe(false);
+        headers.cookie = `pcc_session=${tampered}`;
+      }
+    }
+
+    const before = getStore().db.all(sql`SELECT * FROM wallet_links ORDER BY id`);
+    for (const linkId of linkIds) {
+      const response = await revoke(linkId, headers);
+      expect(response.statusCode).toBe(status);
+      if (status === 403) {
+        expect(response.json()).toEqual({ error: "origin_mismatch" });
+        expect(getStore().db.all(sql`SELECT * FROM wallet_links ORDER BY id`)).toEqual(before);
+      } else {
+        expect(response.json()).toEqual({ status: "revoked", revokedAt: new Date(clockNow).toISOString() });
+        expect(getStore().db.get<{ revoked_at: string | null }>(sql`SELECT revoked_at FROM wallet_links WHERE id = ${linkId}`)?.revoked_at)
+          .toBe(new Date(clockNow).toISOString());
+      }
+    }
+  });
+
   it("cookie-session revoke accepts the configured public Origin", async () => {
     const headers = sessionHeaders("cookie-revoke-public-origin");
     const { account, request } = await proved();

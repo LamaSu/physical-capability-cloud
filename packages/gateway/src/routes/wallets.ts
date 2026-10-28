@@ -6,7 +6,7 @@ import { isValidKernelId } from "@pcc/spec";
 import { sql } from "@pcc/store";
 import { getRepos, getStore } from "../db.js";
 import { requireAuth } from "../auth/require-auth.js";
-import { resolveSession } from "../auth/siwe-auth.js";
+import { resolveCookieSession, resolveSession } from "../auth/siwe-auth.js";
 import { walletLinkConfig } from "../services/wallet-links/config.js";
 import { CONSENT_SHA256, CONSENT_VERSION, NETWORK_NAME, renderConsent } from "../services/wallet-links/consent.js";
 import { verifyProofMessage } from "../services/wallet-links/message.js";
@@ -75,9 +75,7 @@ function credentialPrincipal(req: FastifyRequest): string {
 
 function checkApprovalOrigin(req: FastifyRequest, origin: string) {
   if (req.apiKeyId || !req.cookies?.pcc_session) return;
-  const cookieRequest = Object.create(req) as FastifyRequest;
-  cookieRequest.headers = { ...req.headers, authorization: undefined };
-  const session = resolveSession(cookieRequest);
+  const session = resolveCookieSession(req);
   if (session && session.address === req.userId && req.headers.origin !== origin) {
     throw new WalletLinkError(403, "origin_mismatch");
   }
