@@ -104,9 +104,24 @@ describe("SIWE configured public origin", () => {
   });
 
   it.each([
+    ["a longer host that starts with the configured host", "capability.network.relay.invalid"],
+    ["the configured host on another port", "capability.network:8443"],
+  ])("T1 refuses %s as the domain without consuming the nonce", async (_case, domain) => {
+    const app = await buildApp();
+    const nonce = await getNonce(app);
+    const response = await verify(app, await signedMessage(nonce, domain, PUBLIC_ORIGIN));
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toEqual({ error: "Domain mismatch", message: `SIWE message domain must be '${DOMAIN}'` });
+    expectNoSession(response);
+    expectSignedIn(await verify(app, await signedMessage(nonce)));
+  });
+
+  it.each([
     ["another host", "https://relay.invalid"],
     ["another scheme", "http://capability.network"],
     ["an unparseable URI", "not a url"],
+    ["a longer host that starts with the configured origin", "https://capability.network.relay.invalid"],
+    ["the configured host on another port", "https://capability.network:8443"],
   ])("T2 refuses %s before signature verification and preserves the nonce", async (_case, uri) => {
     const app = await buildApp();
     const nonce = await getNonce(app);
