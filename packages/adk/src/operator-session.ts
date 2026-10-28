@@ -317,6 +317,10 @@ interface Reply {
   readonly isJson: boolean;
 }
 
+function cancelBody(response: Response): void {
+  try { void response.body?.cancel().catch(() => undefined); } catch { /* best effort */ }
+}
+
 async function request(config: Config, route: "nonce" | "verify" | "session-key" | "logout",
   method: "GET" | "POST", headers: Record<string, string>, body?: string): Promise<Reply> {
   const controller = new AbortController();
@@ -336,17 +340,30 @@ async function request(config: Config, route: "nonce" | "verify" | "session-key"
       controller.signal,
     );
     status = response.status;
-    const text = await responseText(response, controller.signal);
-    if (controller.signal.aborted) throw TIMEOUT;
+    const success = route === "session-key" ? 201 : 200;
+    const discriminator = route === "session-key" && status === 429;
+    // Refusals depend on status alone; only the key-cap row needs a body.
+    if (route === "logout" || (status !== success && !discriminator)) {
+      cancelBody(response);
+      return { status, json: null, isJson: false };
+    }
     const contentType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
     const isJson = contentType === "application/json" ||
       /^application\/[a-z0-9!#$&^_.+-]+\+json$/.test(contentType ?? "");
+    if (discriminator && !isJson) {
+      cancelBody(response);
+      return { status, json: null, isJson: false };
+    }
+    const text = await responseText(response, controller.signal);
+    if (controller.signal.aborted) throw TIMEOUT;
     let json: unknown = null;
     if (isJson) {
       try { json = JSON.parse(text); } catch { /* no parse error or response text escapes */ }
     }
     return { status, json, isJson };
   } catch (error) {
+    // An unreadable or unfinished discriminator still has the ordinary 429 row.
+    if (route === "session-key" && status === 429) return { status, json: null, isJson: false };
     if (controller.signal.aborted || error === TIMEOUT) throw new OperatorSessionError("timeout");
     throw new OperatorSessionError(status === null ? "network" : "malformed_response", status);
   } finally {

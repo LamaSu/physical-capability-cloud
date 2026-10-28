@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { inspect } from "node:util";
 import {
-  OperatorSessionError, buildOperatorSignInMessage, createOperatorSessionKeeper, mintOperatorSessionKey,
-  type OperatorSessionEvent, type OperatorSessionKeeperOptions, type OperatorSignInFields,
+  OperatorSessionError, buildOperatorSignInMessage,
+  createOperatorSessionKeeper as createKeeper, mintOperatorSessionKey as mintKey,
+  type OperatorSessionEvent, type OperatorSessionKey, type OperatorSessionKeeper,
+  type OperatorSessionKeeperOptions, type OperatorSessionOptions, type OperatorSignInFields,
 } from "../operator-session.js";
 
 const ADDRESS = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
@@ -13,6 +15,57 @@ const STATEMENT = "Sign in to Physical Capability Cloud as an operator host.";
 const HOUR = 3_600_000;
 const KEY_LIFETIME = 12 * HOUR;
 const FIRST_DATE = "2026-10-17T12:00:00.000Z";
+
+// Observe every public result, including rejections consumed by .rejects and
+// events whose host callback throws. The checks run for each test independently.
+let errors: unknown[];
+let observedKeys: Set<OperatorSessionKey>;
+let observedEvents: OperatorSessionEvent[];
+let gateways: Set<FakeGateway>;
+let replySecrets: Set<string> | undefined;
+let consoleSpies: Array<{ mock: { calls: unknown[][] } }>;
+
+function recordKey(key: OperatorSessionKey | null): OperatorSessionKey | null {
+  if (key !== null) observedKeys.add(key);
+  return key;
+}
+
+async function mintOperatorSessionKey(options: OperatorSessionOptions): Promise<OperatorSessionKey> {
+  try {
+    const key = await mintKey(options);
+    recordKey(key);
+    return key;
+  } catch (error) {
+    errors.push(error);
+    throw error;
+  }
+}
+
+function createOperatorSessionKeeper(options: OperatorSessionKeeperOptions): OperatorSessionKeeper {
+  try {
+    // Forward each option read once, retaining bad-config and getter behavior.
+    const observed = typeof options === "object" && options !== null ? new Proxy(options, {
+      get(target, name, receiver) {
+        const value = Reflect.get(target, name, receiver);
+        if (name !== "onEvent" || (value !== undefined && typeof value !== "function")) return value;
+        return (event: OperatorSessionEvent) => {
+          observedEvents.push(event);
+          value?.(event);
+        };
+      },
+    }) : options;
+    const keeper = createKeeper(observed);
+    return {
+      key: () => recordKey(keeper.key()),
+      ready: () => keeper.ready().then(recordKey),
+      invalidate: keyId => keeper.invalidate(keyId),
+      stop: () => keeper.stop(),
+    };
+  } catch (error) {
+    errors.push(error);
+    throw error;
+  }
+}
 
 type Route = "nonce" | "verify" | "session-key" | "logout";
 type RecordedCall = {
@@ -31,6 +84,12 @@ type Script =
   | { readonly kind: "hold"; readonly gate: Promise<void>; readonly commitFirst: boolean };
 
 function json(value: unknown, status = 200, contentType = "application/json"): Response {
+  if (typeof value === "object" && value !== null) {
+    for (const name of ["nonce", "token", "api_key", "signature"] as const) {
+      const secret: unknown = Reflect.get(value, name);
+      if (typeof secret === "string" && secret.length > 0) replySecrets?.add(secret);
+    }
+  }
   return new Response(JSON.stringify(value), { status, headers: { "content-type": contentType } });
 }
 
@@ -45,6 +104,7 @@ class FakeGateway {
   readonly calls: RecordedCall[] = [];
   readonly sessions = new Map<string, { address: string; expiresAtMs: number }>();
   readonly issuedNonces = new Map<string, number>();
+  readonly nonceValues: string[] = [];
   readonly keys = new Map<string, { token: string; address: string; revoked: boolean; expiresAtMs: number }>();
   readonly scripts = new Map<Route, Script[]>();
   readonly sessionTokens: string[] = [];
@@ -99,6 +159,7 @@ class FakeGateway {
     const now = Date.now() + this.clockOffsetMs;
     if (route === "nonce") {
       const nonce = (++this.nonceNumber).toString(16).padStart(32, "0");
+      this.nonceValues.push(nonce);
       this.issuedNonces.set(nonce, now + 5 * 60_000);
       return json({ nonce });
     }
@@ -151,6 +212,7 @@ class FakeGateway {
 }
 
 function setup(gateway = new FakeGateway()) {
+  gateways.add(gateway);
   const signer = vi.fn(async (_message: string, _fields: OperatorSignInFields) => SIGNATURE);
   const options: OperatorSessionKeeperOptions = {
     baseUrl: BASE, address: ADDRESS, chainId: 84532,
@@ -163,10 +225,59 @@ async function flush() { await vi.advanceTimersByTimeAsync(0); }
 async function tick(ms: number) { await vi.advanceTimersByTimeAsync(ms); }
 
 beforeEach(() => {
+  errors = [];
+  observedKeys = new Set();
+  observedEvents = [];
+  gateways = new Set();
+  replySecrets = new Set();
+  consoleSpies = (["log", "info", "warn", "error", "debug"] as const)
+    .map(method => vi.spyOn(console, method).mockImplementation(() => undefined));
   vi.useFakeTimers();
   vi.setSystemTime(new Date(FIRST_DATE));
 });
-afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
+afterEach(() => {
+  try {
+    const secrets = [SIGNATURE, ...replySecrets!, ...[...gateways].flatMap(gateway => [
+      ...gateway.sessionTokens, ...gateway.mintedKeys, ...gateway.nonceValues,
+    ])];
+    const safe = (representations: string[]) => {
+      for (const representation of representations) {
+        for (const secret of secrets) expect(representation.includes(secret), "T9: secret in public value").toBe(false);
+        expect(representation.includes("secret: "), "T9: underlying exception text").toBe(false);
+      }
+    };
+    for (const error of errors) {
+      expect(error).toBeInstanceOf(OperatorSessionError);
+      const failure = error as OperatorSessionError;
+      expect(failure.message).toBe(failure.code);
+      expect(Object.hasOwn(failure, "cause")).toBe(false);
+      safe([String(failure), failure.message, JSON.stringify(failure), inspect(failure),
+        ...Reflect.ownKeys(failure).map(name => String(Reflect.get(failure, name)))]);
+    }
+    for (const event of observedEvents) {
+      expect(Object.isFrozen(event)).toBe(true);
+      expect(Object.getPrototypeOf(event)).toBe(Object.prototype);
+      safe([JSON.stringify(event)]);
+    }
+    for (const key of observedKeys) {
+      expect(Object.isFrozen(key)).toBe(true);
+      safe([JSON.stringify(key), String(key), inspect(key)]);
+    }
+    for (const gateway of gateways) {
+      for (const call of gateway.calls) {
+        for (const mintedKey of gateway.mintedKeys) {
+          for (const value of [...Object.values(call.headers), call.body ?? ""]) {
+            expect(value.includes(mintedKey), "T9: minted key sent in request").toBe(false);
+          }
+        }
+      }
+    }
+    for (const spy of consoleSpies) expect(spy.mock.calls).toHaveLength(0);
+  } finally {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  }
+});
 
 describe("T1 — one mint, bounded origin and exact wire protocol", () => {
   it("sends nonce, verify and key in order, preserving the base path and the bearer-only mint", async () => {
@@ -255,7 +366,7 @@ describe("T2 — pure message builder and immutable signer fields", () => {
 describe("T3/T4 — fail-closed option snapshot before network", () => {
   it("refuses hostile gateway URLs, but allows HTTPS and explicit HTTP loopback", async () => {
     const { gateway, options } = setup();
-    const bad = ["http://gw.example", "https://u:p@gw.example", "https://gw.example?x",
+    const bad = ["http://gw.example", "https://u:p@gw.example", "https://@gw.example", "https://:@gw.example", "https://gw.example?x",
       "https://gw.example#x", " https://gw.example", "https:/gw.example",
       "https:\\gw.example", "ftp://gw.example", "not a url"];
     for (const baseUrl of bad) {
@@ -452,6 +563,93 @@ describe("T7/T8 — the status table, deadline race and signer failures", () => 
   });
 });
 
+describe("F5 — refusals map by status before body validation", () => {
+  describe.each(["oversized text", "invalid UTF-8"] as const)("%s body", bodyKind => {
+    it.each([
+      ["nonce", 404, "unexpected_status"],
+      ["verify", 400, "sign_in_refused"], ["verify", 401, "sign_in_refused"],
+      ["verify", 503, "unavailable"],
+      ["session-key", 401, "session_refused"], ["session-key", 403, "session_refused"],
+      ["session-key", 503, "unavailable"], ["session-key", 429, "rate_limited"],
+    ] as const)("maps refused %s %s to %s before body validation", async (route, status, expected) => {
+      const { gateway, options } = setup();
+      const response = bodyKind === "oversized text"
+        ? new Response("x".repeat(70_000), { status, headers: { "content-type": "text/plain" } })
+        : new Response(new Uint8Array([0xff, 0xfe]), { status, headers: { "content-type": "application/json" } });
+      gateway.queue(route, { kind: "reply", value: response });
+      await expect(mintOperatorSessionKey(options)).rejects.toMatchObject({ code: expected, status });
+    });
+  });
+
+  it("cancels an unfinished verify refusal without waiting for its body deadline", async () => {
+    const { gateway, options } = setup();
+    const cancel = vi.fn();
+    gateway.queue("verify", { kind: "reply", value: new Response(new ReadableStream({ cancel }), {
+      status: 401, headers: { "content-type": "application/json" },
+    }) });
+    let settled = false;
+    const result = mintOperatorSessionKey(options).catch(error => { settled = true; return error; });
+    const started = Date.now();
+    await flush();
+    expect(settled).toBe(true);
+    expect(Date.now()).toBe(started);
+    expect(await result).toMatchObject({ code: "sign_in_refused", status: 401 });
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats an oversized too_many_keys discriminator as rate_limited", async () => {
+    const { gateway, options } = setup();
+    gateway.queue("session-key", { kind: "reply", value: json({ error: "too_many_keys", padding: "x".repeat(70_000) }, 429) });
+    await expect(mintOperatorSessionKey(options)).rejects.toMatchObject({ code: "rate_limited", status: 429 });
+  });
+
+  it.each([
+    new Response("not JSON", { status: 429, headers: { "content-type": "application/json" } }),
+    new Response('{"error":"too_many_keys"}', { status: 429, headers: { "content-type": "text/plain" } }),
+    json(["too_many_keys"], 429),
+  ])("treats an unusable 429 discriminator as rate_limited %#", async response => {
+    const { gateway, options } = setup();
+    gateway.queue("session-key", { kind: "reply", value: response });
+    await expect(mintOperatorSessionKey(options)).rejects.toMatchObject({ code: "rate_limited", status: 429 });
+  });
+
+  it("bounds and cancels an unfinished 429 discriminator but retains its status row", async () => {
+    const { gateway, options } = setup();
+    const cancel = vi.fn();
+    gateway.queue("session-key", { kind: "reply", value: new Response(new ReadableStream({ cancel }), {
+      status: 429, headers: { "content-type": "application/json" },
+    }) });
+    let settled = false;
+    const result = mintOperatorSessionKey({ ...options, timeoutMs: 101 })
+      .catch(error => { settled = true; return error; });
+    await tick(100);
+    expect(settled).toBe(false);
+    await tick(1);
+    expect(await result).toMatchObject({ code: "rate_limited", status: 429 });
+    expect(cancel).toHaveBeenCalled();
+  });
+
+  it("drops a pending session after an oversized session refusal and signs in afresh", async () => {
+    const { gateway, options } = setup();
+    const events: OperatorSessionEvent[] = [];
+    gateway.queue("session-key", { kind: "reply", value: json({ error: "busy" }, 503) });
+    gateway.queue("session-key", { kind: "reply", value: new Response("x".repeat(70_000), { status: 401 }) });
+    const keeper = createOperatorSessionKeeper({ ...options, onEvent: event => events.push(event) });
+    await flush();
+    expect(gateway.count("nonce")).toBe(1);
+    await tick(5_000);
+    expect(events[1]).toMatchObject({ kind: "mint_failed", code: "session_refused", status: 401, step: "session_key" });
+    expect(gateway.count("nonce")).toBe(1);
+    await tick(10_000);
+    expect(gateway.count("nonce")).toBe(2);
+    expect(gateway.count("verify")).toBe(2);
+    expect(gateway.calls.slice(-3).map(call => new URL(call.url).pathname.split("/").pop()))
+      .toEqual(["nonce", "verify", "session-key"]);
+    expect(keeper.key()).not.toBeNull();
+    await keeper.stop();
+  });
+});
+
 describe("T9 — no logs, secret-safe values and request headers", () => {
   it("keeps key secret from JSON, strings and node inspection, including errors and events", async () => {
     const spies = (["log", "info", "warn", "error", "debug"] as const)
@@ -463,7 +661,7 @@ describe("T9 — no logs, secret-safe values and request headers", () => {
     expect(key).not.toBeNull();
     const secretValues = [gateway.sessionTokens[0], gateway.mintedKeys[0], SIGNATURE,
       [...gateway.issuedNonces.keys()][0] ?? "00000000000000000000000000000001"];
-    const representations = [JSON.stringify(key), String(key), inspect(key), ...events.map(JSON.stringify)];
+    const representations = [JSON.stringify(key), String(key), inspect(key), ...events.map(event => JSON.stringify(event))];
     expect(JSON.stringify(key)).not.toContain(key!.apiKey);
     expect(inspect(key)).toBe(`[OperatorSessionKey ${key!.keyId}]`);
     for (const representation of representations) {
@@ -487,7 +685,8 @@ describe("T9 — no logs, secret-safe values and request headers", () => {
     expect(gateway.routeCalls("logout")[0].headers).toEqual({
       accept: "application/json", authorization: `Bearer ${gateway.sessionTokens[0]}`,
     });
-    expect(gateway.calls.every(call => !Object.values(call.headers).includes(key!.apiKey))).toBe(true);
+    expect(gateway.calls.every(call => [...Object.values(call.headers), call.body ?? ""]
+      .every(value => !value.includes(key!.apiKey)))).toBe(true);
     for (const spy of spies) expect(spy).not.toHaveBeenCalled();
   });
 });
@@ -542,15 +741,18 @@ describe("T10/T11 — renewal, atomic key swap and single flight", () => {
     gateway.queue("session-key", { kind: "hold", gate: gate.promise, commitFirst: false });
     await tick(KEY_LIFETIME - 1_800_000);
     expect(gateway.count("nonce")).toBe(2);
+    expect(gateway.count("session-key")).toBe(2);
     keeper.invalidate(first.keyId);
     keeper.invalidate(first.keyId);
     expect(keeper.key()).toBeNull();
     await tick(1_000);
     expect(gateway.count("nonce")).toBe(2);
+    expect(gateway.count("session-key")).toBe(2);
     gate.resolve();
     await flush();
     expect(keeper.key()).not.toBeNull();
     expect(gateway.count("nonce")).toBe(2);
+    expect(gateway.count("session-key")).toBe(2);
     await keeper.stop();
   });
 });
@@ -737,7 +939,26 @@ describe("T14 — invalidation, stop, best-effort logout and late completions", 
     await expect(stopping).resolves.toBeUndefined();
     expect(keeper.key()).toBeNull();
     expect(gateway.isRevoked(gateway.mintedKeys[0])).toBe(true);
-    expect(gateway.routeCalls("logout").every(c => !Object.values(c.headers).includes(gateway.mintedKeys[0]))).toBe(true);
+    expect(gateway.routeCalls("logout").every(c => [...Object.values(c.headers), c.body ?? ""]
+      .every(value => !value.includes(gateway.mintedKeys[0])))).toBe(true);
+  });
+
+  it("logs out a late mint whose verify reply was held until after stop", async () => {
+    const { gateway, options } = setup();
+    const gate = deferred();
+    gateway.queue("verify", { kind: "hold", gate: gate.promise, commitFirst: true });
+    const keeper = createOperatorSessionKeeper(options);
+    await flush();
+    expect(gateway.sessionTokens).toHaveLength(1);
+    expect(gateway.mintedKeys).toHaveLength(0);
+    const stopping = keeper.stop();
+    expect(keeper.key()).toBeNull();
+    gate.resolve();
+    await expect(stopping).resolves.toBeUndefined();
+    expect(keeper.key()).toBeNull();
+    expect(gateway.mintedKeys).toHaveLength(1);
+    for (const mintedKey of gateway.mintedKeys) expect(gateway.isRevoked(mintedKey)).toBe(true);
+    expect(gateway.sessions.size).toBe(0);
   });
 
   it("invalidates only the current id, no sooner than one minute after success", async () => {
@@ -824,6 +1045,24 @@ describe("T16 — ready() waits for a usable key or stop, never a failure", () =
     expect(fresh).toBe(keeper.key());
     expect(fresh).not.toBe(oldKey);
     await keeper.stop();
+  });
+
+  it("ready stays pending after a clock jump to the margin before timers run", async () => {
+    const { gateway, options } = setup();
+    const keeper = createOperatorSessionKeeper(options);
+    const oldKey = (await keeper.ready())!;
+    for (let i = 0; i < 40; i++) gateway.queue("session-key", {
+      kind: "reply", value: json({ error: "busy" }, 503),
+    });
+    vi.setSystemTime(new Date(oldKey.expiresAtMs - 60_000));
+    expect(keeper.key()).toBeNull();
+    let settled = false;
+    const awaiting = keeper.ready().then(value => { settled = true; return value; });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await keeper.stop();
+    expect(await awaiting).toBeNull();
   });
 
   it("does not resolve ready on repeated signer or network errors, only on stop", async () => {

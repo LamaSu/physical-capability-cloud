@@ -68,7 +68,8 @@ const key = keeper.key();
 if (key === null) {
   // Do not send a request while there is no usable key.
 } else {
-  const reply = await fetch("https://gw.example:8443/api/operator/jobs", {
+  const hostKernelId = "your-host-kernel-id";
+  const reply = await fetch(`https://gw.example:8443/api/operator/jobs?kernelId=${encodeURIComponent(hostKernelId)}`, {
     redirect: "error",
     headers: { Authorization: `Bearer ${key.apiKey}` },
   });
