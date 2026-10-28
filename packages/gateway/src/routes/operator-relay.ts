@@ -161,7 +161,7 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
    * one scope is funded_verified with a non-null verification. It also checks that
    * operator matches its operator wallet and escrowAddress/chainId match its own
    * job-unit binding. Absent, failed or ambiguous funding means no fundedAt and
-   * no GAP-7 evidence session; the host never estimates a block timestamp.
+   * no GAP-7 evidence session; the host never puts a clock reading or an estimated block time in fundedAt's place.
    * Funding does not authorize execution: the claim route decides whether a job runs.
    */
   app.get<{

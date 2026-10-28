@@ -154,25 +154,36 @@ describe("GET /api/operator/jobs funding readmodel (N145)", () => {
 
   it("T4: without a store, every scope is no_record and no opt-in environment changes the reply", async () => {
     const paid = await listedPaidScope();
-    vi.stubEnv("PCC_VNEXT_RECORD_NETWORK", undefined);
-    vi.stubEnv("PCC_VNEXT_ALLOW_TESTNET_RECORD", undefined);
-    vi.stubEnv("PCC_VNEXT_TESTNET_BUYERS", undefined);
-    const before = await poll();
+    const optIns = {
+      PCC_VNEXT_RECORD_NETWORK: "base-sepolia",
+      PCC_VNEXT_ALLOW_TESTNET_RECORD: "1",
+      PCC_VNEXT_TESTNET_BUYERS: BUYER,
+    };
+    const originals = Object.keys(optIns).map((name) => [name, process.env[name]] as const);
+    try {
+      for (const name of Object.keys(optIns)) delete process.env[name];
+      for (const name of Object.keys(optIns)) expect(process.env[name]).toBeUndefined();
+      const before = await poll();
 
-    expect(before.statusCode).toBe(200);
-    const funding = okFunding(listedJob(before, paid.jobId));
-    expect(funding.scopes).toHaveLength(1);
-    expect(funding.scopes[0]).toMatchObject({ binding: "no_record", verification: null });
-    expect(funding.scopes[0]!.state).not.toBe("funded_verified");
-    expect(vi.mocked(paidScopeActivationTerms)).not.toHaveBeenCalled();
+      expect(before.statusCode).toBe(200);
+      const funding = okFunding(listedJob(before, paid.jobId));
+      expect(funding.scopes).toHaveLength(1);
+      expect(funding.scopes[0]).toMatchObject({ binding: "no_record", verification: null });
+      expect(funding.scopes[0]!.state).not.toBe("funded_verified");
+      expect(vi.mocked(paidScopeActivationTerms)).not.toHaveBeenCalled();
 
-    vi.stubEnv("PCC_VNEXT_RECORD_NETWORK", "base-sepolia");
-    vi.stubEnv("PCC_VNEXT_ALLOW_TESTNET_RECORD", "1");
-    vi.stubEnv("PCC_VNEXT_TESTNET_BUYERS", BUYER);
-    const after = await poll();
-    expect(after.statusCode).toBe(200);
-    expect(after.json()).toEqual(before.json());
-    expect(vi.mocked(paidScopeActivationTerms)).not.toHaveBeenCalled();
+      for (const [name, value] of Object.entries(optIns)) process.env[name] = value;
+      for (const [name, value] of Object.entries(optIns)) expect(process.env[name]).toBe(value);
+      const after = await poll();
+      expect(after.statusCode).toBe(200);
+      expect(after.json()).toEqual(before.json());
+      expect(vi.mocked(paidScopeActivationTerms)).not.toHaveBeenCalled();
+    } finally {
+      for (const [name, value] of originals) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
   });
 
   it("T4b: terms are never consulted for no-record scopes and exactly once for a recorded scope", async () => {
@@ -250,14 +261,15 @@ describe("GET /api/operator/jobs funding readmodel (N145)", () => {
     const before = await poll();
     expect(before.statusCode).toBe(200);
     expect(okFunding(listedJob(before, paid.jobId)).scopes).toHaveLength(1);
-    expect(read).toHaveBeenCalledWith(getStore().db, paid.scopeId);
+    expect(read.mock.calls.map(([handle, scopeId]) => ({ sameHandle: handle === getStore().db, scopeId })))
+      .toContainEqual({ sameHandle: true, scopeId: paid.scopeId });
     read.mockClear();
 
     setPolicy(KERNEL, { ...basePolicy(), emergencyStop: true });
     const stopped = await poll();
     expect(stopped.statusCode).toBe(200);
     expect(stopped.json()).toEqual({ jobs: [], emergencyStop: "stopped" });
-    expect(read).not.toHaveBeenCalled();
+    expect(read).toHaveBeenCalledTimes(0);
   });
 
   it("T8: removing the new key exactly restores each base job (including order), and list failure keeps its old body", async () => {
@@ -295,7 +307,7 @@ describe("GET /api/operator/jobs funding readmodel (N145)", () => {
     const anonymous = await poll({});
     expect(anonymous.statusCode).toBe(401);
     expect(anonymous.json()).toEqual(AUTHENTICATION_REQUIRED);
-    expect(read).not.toHaveBeenCalled();
+    expect(read).toHaveBeenCalledTimes(0);
 
     const otherOperator = await poll({ "x-test-principal": SEED_OPERATORS[OTHER_KERNEL] });
     expect(otherOperator.statusCode).toBe(403);
@@ -304,7 +316,7 @@ describe("GET /api/operator/jobs funding readmodel (N145)", () => {
       reason: "not_kernel_operator",
       message: "Only this kernel's operator or the gateway admin may do this.",
     });
-    expect(read).not.toHaveBeenCalled();
+    expect(read).toHaveBeenCalledTimes(0);
   });
 
   it("T10: two scopes sort by created_at then id, and only the bound scope has verification", async () => {
@@ -346,7 +358,7 @@ describe("GET /api/operator/jobs funding readmodel (N145)", () => {
     expect(claimed.statusCode).toBe(200);
     expect(claimed.json().emergencyStop).toBe("clear");
     expect(listedJob(claimed, paid.jobId)).not.toHaveProperty("funding");
-    expect(read).not.toHaveBeenCalled();
+    expect(read).toHaveBeenCalledTimes(0);
 
     const proven = await poll(PROVEN_HEADERS);
     expect(proven.statusCode).toBe(200);
