@@ -35,6 +35,11 @@
       "types": "./dist/tool-manifests/index.d.ts",
       "import": "./dist/tool-manifests/index.js",
       "default": "./dist/tool-manifests/index.js"
+    },
+    "./funding": {
+      "types": "./dist/funding/index.d.ts",
+      "import": "./dist/funding/index.js",
+      "default": "./dist/funding/index.js"
     }
   },
   "files": [
@@ -49,11 +54,20 @@
     "clean": "rm -rf dist"
   },
   "devDependencies": {
+    "viem": "^2",
     "vitest": "^1.6.0",
     "zod": "^3.23.0"
   },
   "dependencies": {
     "@noble/hashes": "^1.7.0",
     "zod": "^3.23.0"
+  },
+  "peerDependencies": {
+    "viem": "^2"
+  },
+  "peerDependenciesMeta": {
+    "viem": {
+      "optional": true
+    }
   }
 }

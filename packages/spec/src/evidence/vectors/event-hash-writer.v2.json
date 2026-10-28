@@ -1,0 +1,127 @@
+{
+  "contract": "pcc.evidence.event-hash-writer.v2",
+  "description": "Unmarked events retain v1 bytes. Only an own data source.writer equal to kernel uses eventHashVersion 2. Producer hashEvent refuses every own writer; only hashKernelWrittenEvent authors v2. Each preimage is exact UTF-8 canonical JSON.",
+  "events": [
+    {
+      "id": "unmarked-v1",
+      "description": "Unmarked v1 event: hashEvent stays byte-identical.",
+      "eventHashVersion": 1,
+      "canonicalPreimage": "{\"payload\":{\"deviceJobId\":\"device_job_writer_vector\",\"inputHash\":\"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\",\"jobId\":\"job_writer_vector\"},\"source\":{\"deviceId\":\"dev_writer_vector\",\"deviceType\":\"controller\",\"kernelId\":\"kernel_writer_vector\"},\"timestamp\":\"2026-10-16T08:00:00.000Z\",\"type\":\"method_loaded\"}",
+      "event": {
+        "id": "ev_method_loaded_writer_vector",
+        "type": "method_loaded",
+        "timestamp": "2026-10-16T08:00:00.000Z",
+        "source": {
+          "deviceId": "dev_writer_vector",
+          "deviceType": "controller",
+          "kernelId": "kernel_writer_vector"
+        },
+        "payload": {
+          "jobId": "job_writer_vector",
+          "deviceJobId": "device_job_writer_vector",
+          "inputHash": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        },
+        "hash": "sha256:875d8467a729b7527838776827d0583f0bc210a34e19bea4a31c7012db1af4f2"
+      },
+      "verified": true
+    },
+    {
+      "id": "kernel-written-v2",
+      "description": "The same event marked by the kernel uses the v2 domain key.",
+      "eventHashVersion": 2,
+      "canonicalPreimage": "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"device_job_writer_vector\",\"inputHash\":\"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\",\"jobId\":\"job_writer_vector\"},\"source\":{\"deviceId\":\"dev_writer_vector\",\"deviceType\":\"controller\",\"kernelId\":\"kernel_writer_vector\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-16T08:00:00.000Z\",\"type\":\"method_loaded\"}",
+      "event": {
+        "id": "ev_method_loaded_writer_vector",
+        "type": "method_loaded",
+        "timestamp": "2026-10-16T08:00:00.000Z",
+        "source": {
+          "deviceId": "dev_writer_vector",
+          "deviceType": "controller",
+          "kernelId": "kernel_writer_vector",
+          "writer": "kernel"
+        },
+        "payload": {
+          "jobId": "job_writer_vector",
+          "deviceJobId": "device_job_writer_vector",
+          "inputHash": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        },
+        "hash": "sha256:13cc420311545cefaa5434d4633a4d083e9e1f82b30b02cb25d5476a6d8aa291"
+      },
+      "verified": true
+    },
+    {
+      "id": "old-kernel-forgery",
+      "description": "THE FORGERY: an old kernel hashes the marked bytes under v1; a v2 verifier refuses it.",
+      "eventHashVersion": 1,
+      "canonicalPreimage": "{\"payload\":{\"deviceJobId\":\"device_job_writer_vector\",\"inputHash\":\"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\",\"jobId\":\"job_writer_vector\"},\"source\":{\"deviceId\":\"dev_writer_vector\",\"deviceType\":\"controller\",\"kernelId\":\"kernel_writer_vector\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-16T08:00:00.000Z\",\"type\":\"method_loaded\"}",
+      "event": {
+        "id": "ev_method_loaded_writer_vector",
+        "type": "method_loaded",
+        "timestamp": "2026-10-16T08:00:00.000Z",
+        "source": {
+          "deviceId": "dev_writer_vector",
+          "deviceType": "controller",
+          "kernelId": "kernel_writer_vector",
+          "writer": "kernel"
+        },
+        "payload": {
+          "jobId": "job_writer_vector",
+          "deviceJobId": "device_job_writer_vector",
+          "inputHash": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        },
+        "hash": "sha256:6f16874de21dc10757d0db52ff0652e97db506d2121c58726af3e80784c7a7ce"
+      },
+      "verified": false
+    }
+  ],
+  "invalidWriters": [
+    {
+      "id": "adapter-writer",
+      "description": "An adapter writer is refused even with the correct v2 digest.",
+      "eventHashVersion": 2,
+      "canonicalPreimage": "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"device_job_writer_vector\",\"inputHash\":\"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\",\"jobId\":\"job_writer_vector\"},\"source\":{\"deviceId\":\"dev_writer_vector\",\"deviceType\":\"controller\",\"kernelId\":\"kernel_writer_vector\",\"writer\":\"adapter\"},\"timestamp\":\"2026-10-16T08:00:00.000Z\",\"type\":\"method_loaded\"}",
+      "event": {
+        "id": "ev_method_loaded_writer_vector",
+        "type": "method_loaded",
+        "timestamp": "2026-10-16T08:00:00.000Z",
+        "source": {
+          "deviceId": "dev_writer_vector",
+          "deviceType": "controller",
+          "kernelId": "kernel_writer_vector",
+          "writer": "adapter"
+        },
+        "payload": {
+          "jobId": "job_writer_vector",
+          "deviceJobId": "device_job_writer_vector",
+          "inputHash": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        },
+        "hash": "sha256:23394182055331ae47beee0ae3a4251b41a57caa7cc41039e91f0875854d5bb0"
+      },
+      "verified": false
+    },
+    {
+      "id": "boolean-writer",
+      "description": "A boolean writer is refused even with the correct v2 digest.",
+      "eventHashVersion": 2,
+      "canonicalPreimage": "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"device_job_writer_vector\",\"inputHash\":\"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\",\"jobId\":\"job_writer_vector\"},\"source\":{\"deviceId\":\"dev_writer_vector\",\"deviceType\":\"controller\",\"kernelId\":\"kernel_writer_vector\",\"writer\":true},\"timestamp\":\"2026-10-16T08:00:00.000Z\",\"type\":\"method_loaded\"}",
+      "event": {
+        "id": "ev_method_loaded_writer_vector",
+        "type": "method_loaded",
+        "timestamp": "2026-10-16T08:00:00.000Z",
+        "source": {
+          "deviceId": "dev_writer_vector",
+          "deviceType": "controller",
+          "kernelId": "kernel_writer_vector",
+          "writer": true
+        },
+        "payload": {
+          "jobId": "job_writer_vector",
+          "deviceJobId": "device_job_writer_vector",
+          "inputHash": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        },
+        "hash": "sha256:f09bb082f789dbf4413c26d76a1b413d0b5b0812f4a867d9f73a18172a6c434a"
+      },
+      "verified": false
+    }
+  ]
+}

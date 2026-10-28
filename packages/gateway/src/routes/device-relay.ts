@@ -79,6 +79,7 @@ import { resolveSession } from "../auth/siwe-auth.js";
 import { schema, eq, and, sql } from "@pcc/store";
 import { getManifest, warmManifestCache } from "../services/tool-manifest-service.js";
 import { mockFundsWrites } from "../services/settlement-mode.js";
+import { scopeExpiryMs } from "../services/scope-expiry.js";
 import { getSafetyGateway, initSafetyGateway } from "@pcc/kernel";
 
 const {
@@ -205,7 +206,7 @@ function validateToolCall(scope: typeof executionScopes.$inferSelect, toolName: 
 /** Why `scope` does not authorize a write of `toolName` now, or null. */
 function scopeWriteRefusal(scope: typeof executionScopes.$inferSelect, toolName: string): string | null {
   if (scope.status !== "active") return "scope_not_active";
-  if (new Date(scope.expiresAt) < new Date()) return "scope_expired";
+  if (scopeExpiryMs(scope.expiresAt) < Date.now()) return "scope_expired"; // unreadable: expired (N133)
   if (!(scope.allowedTools as string[]).includes(toolName)) return "tool_not_allowed";
   return null;
 }
@@ -290,9 +291,9 @@ function ownsScope(
 // chat, call a tool or read a result. The device's own side (its polling, starts, results, frame
 // uploads and chat replies) stays claimed-or-admin (the steward's 20:16).
 
-/** The admin, or a proven wallet that is the kernel's operator: what "decide" admits. */
+/** The admin, or a proven operator wallet, including a cookie proof for reads. */
 function isProvenOperator(req: FastifyRequest, kernelId: string): boolean {
-  return refuseKernelAction(req, authorityOf(req), kernelId, "decide") === null;
+  return refuseKernelAction(req, authorityOf(req), kernelId, "read") === null;
 }
 
 /** A proven wallet holding an active scope on the kernel. */
@@ -409,7 +410,7 @@ async function relayAccessGuard(req: FastifyRequest, reply: FastifyReply) {
   const toolCall = routeKey === "POST /api/relay/:kernelId/tool-call";
   if (RELAY_DECISION_ROUTES.has(routeKey) || toolCall) {
     const decision = refuseKernelAction(req, authority, kernelId, "decide");
-    if (decision && !(toolCall && decision.status === 403 && isProvenHolderOfNamedScope(req, authority, kernelId))) {
+    if (decision && !(toolCall && decision.status === 403 && decision.body.reason === "operator_proof_required" && isProvenHolderOfNamedScope(req, authority, kernelId))) {
       return reply.status(decision.status).send(decision.body);
     }
     return;
@@ -427,7 +428,7 @@ async function relayAccessGuard(req: FastifyRequest, reply: FastifyReply) {
 
   // operator_or_grant reads face people and agents (DECISIONS 00:53): the admin, the proven
   // operator wallet, or a proven wallet holding an active scope on this kernel.
-  const proof = refuseKernelAction(req, authority, kernelId, "decide");
+  const proof = refuseKernelAction(req, authority, kernelId, "read");
   if (!proof) return;
   if (proof.status !== 403) return reply.status(proof.status).send(proof.body);
   const provenGrant = authority.provenWallet !== null && holdsActiveScope(kernelId, authority.provenWallet);
@@ -545,7 +546,7 @@ function dispatchRefusal(call: typeof toolCallRelay.$inferSelect): string | null
   if (scope.kernelId !== call.kernelId) return "scope_kernel_mismatch";
   // F2: a call needs live scope authority (#6771: every call, whatever its tool).
   if (scope.status !== "active") return "scope_not_active";
-  if (new Date(scope.expiresAt) < new Date()) return "scope_expired";
+  if (scopeExpiryMs(scope.expiresAt) < Date.now()) return "scope_expired"; // unreadable: expired (N133)
   if (!(scope.allowedTools as string[]).includes(call.toolName)) return "tool_not_allowed";
   // F3: re-derive the command budget from the rows. Admission increments
   // scope.commandCount, but a legacy row it never saw would not have been
@@ -1568,8 +1569,8 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     const scope = ownedScopeOrReply(req, reply, "proof");
     if (!scope) return reply;
 
-    // Check if expired and auto-update status
-    if (scope.status === "active" && new Date(scope.expiresAt) < new Date()) {
+    // Check if expired (an unreadable expiry included, N133) and auto-update status
+    if (scope.status === "active" && scopeExpiryMs(scope.expiresAt) < Date.now()) {
       db.update(executionScopes)
         .set({ status: "expired" })
         .where(eq(executionScopes.id, scopeId))

@@ -19,7 +19,7 @@
  * must satisfy EACH rule that matched — not just one of them.
  *
  * Behaviour:
- *   - Requests without an API key are not checked by this layer (unchanged).
+ *   - Requests without a principal are not checked; a wallet session holds no scopes.
  *   - Wildcard scope ("*") grants access to all endpoints. Unchanged.
  *   - MONEY-PATH routes (MONEY_PATH_PREFIXES) are DEFAULT-DENY for MUTATING
  *     methods (POST/PUT/PATCH/DELETE): if NEITHER a default NOR a row rule
@@ -42,17 +42,13 @@
  * keys across the API. Narrowing to the money path closes the actual exposure
  * (funds movement) with no breakage, and leaves the global flip as a follow-up
  * that needs a per-route requirement sweep first.
- *
- * ── This is only HALF the fix (see coord #615) ────────────────────
- * `routes/provision.ts` mints every self-service key with scopes:["*"], and the
- * wildcard short-circuit below grants those keys everything regardless of the
- * rules here. This file and the provisioning policy must BOTH change for the
- * money path to actually be gated; neither alone is sufficient.
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { nonCanonicalTargetReason, NON_CANONICAL_REFUSAL } from "./canonical-request-target.js";
 import { getRepos } from "../db.js";
+import { parseStoredScopes, SELF_SERVICE_OPERATOR_SCOPE } from "../auth/key-scopes.js";
+export { SELF_SERVICE_OPERATOR_SCOPE, SELF_SERVICE_KEY_SCOPES } from "../auth/key-scopes.js";
 
 // ── Default Scope Requirements ───────────────────────────────────
 
@@ -62,24 +58,26 @@ const DEFAULT_SCOPE_REQUIREMENTS: Array<{
   scopes: string[];
 }> = [
   // Operator endpoints — manage kernels, submit evidence
-  { method: "POST",   pattern: "/api/kernels/*",                    scopes: ["operator", "admin"] },
-  { method: "PUT",    pattern: "/api/kernels/*",                    scopes: ["operator", "admin"] },
-  { method: "POST",   pattern: "/api/evidence/*",                   scopes: ["operator", "verifier", "admin"] },
+  { method: "POST",   pattern: "/api/operator/jobs/*/receipt",       scopes: ["operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
+  { method: "GET",    pattern: "/api/operator/jobs/*/receipt",       scopes: ["operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
+  { method: "POST",   pattern: "/api/kernels/*",                    scopes: ["operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
+  { method: "PUT",    pattern: "/api/kernels/*",                    scopes: ["operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
+  { method: "POST",   pattern: "/api/evidence/*",                   scopes: ["operator", "verifier", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
   // Requestor endpoints — browse, submit jobs, build contracts
-  { method: "POST",   pattern: "/api/negotiate/*",                  scopes: ["requestor", "operator", "agent", "admin"] },
-  { method: "POST",   pattern: "/api/jobs/*",                       scopes: ["requestor", "operator", "agent", "admin"] },
-  { method: "POST",   pattern: "/api/build/*",                      scopes: ["requestor", "operator", "agent", "admin"] },
+  { method: "POST",   pattern: "/api/negotiate/*",                  scopes: ["requestor", "operator", "agent", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
+  { method: "POST",   pattern: "/api/jobs/*",                       scopes: ["requestor", "operator", "agent", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
+  { method: "POST",   pattern: "/api/build/*",                      scopes: ["requestor", "operator", "agent", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
   // Verifier endpoints — attestations on specific jobs
   { method: "POST",   pattern: "/api/jobs/*/attestations/*",        scopes: ["verifier", "admin"] },
   // Admin endpoints — full access
   // "**", so nested admin routes (/api/admin/observability/…) need admin too (#490).
   { method: "*",      pattern: "/api/admin/**",                     scopes: ["admin"] },
   // Template author endpoints — publish templates
-  { method: "POST",   pattern: "/api/templates/*",                  scopes: ["template_author", "operator", "admin"] },
-  { method: "PUT",    pattern: "/api/templates/*",                  scopes: ["template_author", "operator", "admin"] },
+  { method: "POST",   pattern: "/api/templates/*",                  scopes: ["template_author", "operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
+  { method: "PUT",    pattern: "/api/templates/*",                  scopes: ["template_author", "operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
   // Auditor endpoints — read-only audit and compliance access
   { method: "GET",    pattern: "/api/audit/*",                      scopes: ["auditor", "admin"] },
-  { method: "GET",    pattern: "/api/compliance/*",                 scopes: ["auditor", "operator", "admin"] },
+  { method: "GET",    pattern: "/api/compliance/*",                 scopes: ["auditor", "operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
   // ── Money path — WRITES move funds. Previously had NO requirement at all,
   // so any authenticated key could fund/release/dispute an escrow or trigger a
   // fiat withdrawal/payout. Reads are deliberately left ungated here to avoid
@@ -93,6 +91,10 @@ const DEFAULT_SCOPE_REQUIREMENTS: Array<{
   { method: "PATCH",  pattern: "/api/fiat-ramp/**",                 scopes: ["operator", "admin"] },
   { method: "DELETE", pattern: "/api/fiat-ramp/**",                 scopes: ["admin"] },
 ];
+
+export const DEFAULT_SCOPE_RULES = Object.freeze(DEFAULT_SCOPE_REQUIREMENTS.map((rule) =>
+  Object.freeze({ ...rule, scopes: Object.freeze([...rule.scopes]) }),
+));
 
 /**
  * Route prefixes where a MISSING requirement means DENY rather than allow.
@@ -242,8 +244,7 @@ function firstMatch(
 // ── Scope Extraction ─────────────────────────────────────────────
 
 /**
- * Extract scopes from the API key record.
- * Falls back to ["*"] for backwards compatibility when scopes are not set.
+ * Extract scopes from the API key record; missing or unreadable scopes grant nothing.
  */
 function getCallerScopes(req: FastifyRequest): string[] {
   if (!req.apiKeyId) return [];
@@ -252,37 +253,17 @@ function getCallerScopes(req: FastifyRequest): string[] {
     const keyRecord = getRepos().apiKeys.findById(req.apiKeyId);
     if (!keyRecord) return [];
 
-    let scopesRaw: unknown;
-    try {
-      scopesRaw = JSON.parse(keyRecord.scopes);
-    } catch {
-      scopesRaw = keyRecord.scopes;
-    }
-
-    if (Array.isArray(scopesRaw)) {
-      return (scopesRaw as string[]).filter((s) => typeof s === "string");
-    }
-    if (typeof scopesRaw === "string" && scopesRaw.length > 0) {
-      return scopesRaw.split(",").map((s) => s.trim()).filter(Boolean);
-    }
+    return parseStoredScopes(keyRecord.scopes);
   } catch {
     // Non-fatal
   }
 
-  // FAIL CLOSED. This path is reached only when a key record exists but its
-  // `scopes` column is neither a JSON array nor a non-empty string — i.e. it is
-  // malformed. The previous behaviour returned ["*"], so a corrupt scopes value
-  // silently granted WILDCARD access to every endpoint. A security control must
-  // not fail open: an unreadable scope set grants nothing.
-  // (A legitimately empty scope set stored as "[]" parses as an array and
-  // returns [] above, so it never reaches here.)
   return [];
 }
 
 /**
  * True only when the caller's API key lists the literal "admin" scope. The wildcard "*" does NOT count:
- * self-service sign-up (routes/provision.ts) mints every key with ["*"], so a wildcard key is anyone
- * with an email address, not a trusted principal. A caller without an API key is never an admin here.
+ * self-service keys hold only operator:basic. A caller without an API key is never an admin here.
  * The TMP task route's admin exception uses it (#6182).
  */
 export function hasAdminScope(req: FastifyRequest): boolean {
@@ -322,9 +303,9 @@ async function scopeCheckerImpl(app: FastifyInstance) {
 
     const rowsReady = ensureScopeCacheReady();
 
-    // Scopes live on API keys; a request without one is not checked here (unchanged).
-    if (!req.apiKeyId) return;
-    const hasApiKey = true;
+    // Public requests have no principal; a wallet session holds no scopes.
+    if (!req.apiKeyId && req.userId == null) return;
+    const hasApiKey = !!req.apiKeyId;
     const callerScopes = getCallerScopes(req);
 
     // Wildcard scope grants access to everything. Unchanged.
@@ -344,7 +325,7 @@ async function scopeCheckerImpl(app: FastifyInstance) {
     }
 
     // Fail closed: without the governance rows the checker cannot know which requirements apply to a
-    // scoped key, so it refuses rather than judging against the defaults alone.
+    // principal, so it refuses rather than judging against the defaults alone.
     if (!rowsReady) {
       return reply.status(503).send({
         error: "scope_requirements_unavailable",

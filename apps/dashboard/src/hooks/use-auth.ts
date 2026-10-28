@@ -7,8 +7,9 @@
  */
 
 import { useState, useCallback, useEffect } from "react";
-import { useAccount, useSignMessage } from "wagmi";
+import { useAccount, useConnectionEffect, useSignMessage } from "wagmi";
 import { useAuthStore } from "../stores/auth-store.js";
+import { gatewayUrl } from "../lib/gateway-base.js";
 
 /**
  * Build an EIP-4361 SIWE message string.
@@ -45,48 +46,64 @@ export function useAuth() {
     sessionToken,
     isVerifying,
     error,
+    authNotice,
     setAddress,
     setSession,
     setVerifying,
     setError,
-    logout: authLogout,
+    signOutWallet,
+    mintSessionKey,
   } = useAuthStore();
 
   const [isChecking, setIsChecking] = useState(true);
+
+  useConnectionEffect({
+    onDisconnect() {
+      if (useAuthStore.getState().sessionKeyId) void signOutWallet({ keepPersisted: true });
+      else {
+        setAddress(null);
+        setSession(null);
+      }
+    },
+  });
 
   // Sync wallet connection to auth store
   useEffect(() => {
     if (isConnected && address) {
       setAddress(address);
-    } else {
-      setAddress(null);
-      setSession(null);
     }
-  }, [isConnected, address, setAddress, setSession]);
+  }, [isConnected, address, setAddress]);
 
   // Check existing session on mount
   useEffect(() => {
+    let active = true;
+    const epoch = useAuthStore.getState().keyEpoch;
     setIsChecking(true);
-    fetch("/api/auth/me", { credentials: "include" })
+    fetch(gatewayUrl("/api/auth/me"), { credentials: "include" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        if (data?.address) {
+        const state = useAuthStore.getState();
+        if (active && state.keyEpoch === epoch && !state.sessionToken && data?.address) {
           setAddress(data.address);
+          // Restore identity for reads; minting still needs a fresh sign-in bearer.
           setSession("cookie");
+          return mintSessionKey();
         }
       })
       .catch(() => {})
-      .finally(() => setIsChecking(false));
-  }, [setAddress, setSession]);
+      .finally(() => { if (active) setIsChecking(false); });
+    return () => { active = false; };
+  }, [setAddress, setSession, mintSessionKey]);
 
   const login = useCallback(async () => {
     if (!address || !chainId) return;
+    setAddress(address);
     setVerifying(true);
     setError(null);
 
     try {
       // 1. Get nonce from gateway
-      const nonceRes = await fetch("/api/auth/nonce", {
+      const nonceRes = await fetch(gatewayUrl("/api/auth/nonce"), {
         credentials: "include",
       });
       if (!nonceRes.ok) throw new Error("Failed to get nonce");
@@ -108,7 +125,7 @@ export function useAuth() {
       const signature = await signMessageAsync({ message });
 
       // 4. Verify with gateway
-      const verifyRes = await fetch("/api/auth/verify", {
+      const verifyRes = await fetch(gatewayUrl("/api/auth/verify"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -123,22 +140,15 @@ export function useAuth() {
       const data = await verifyRes.json();
       // Session cookie is set automatically; also store the bearer token
       setSession(data.token ?? "cookie");
+      await mintSessionKey();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sign-in failed");
     }
-  }, [address, chainId, signMessageAsync, setVerifying, setError, setSession]);
+  }, [address, chainId, signMessageAsync, setAddress, setVerifying, setError, setSession, mintSessionKey]);
 
   const logout = useCallback(async () => {
-    try {
-      await fetch("/api/auth/logout", {
-        method: "POST",
-        credentials: "include",
-      });
-    } catch {
-      // Ignore network errors on logout
-    }
-    authLogout();
-  }, [authLogout]);
+    await signOutWallet();
+  }, [signOutWallet]);
 
   return {
     /** The connected wallet address */
@@ -153,6 +163,7 @@ export function useAuth() {
     isVerifying,
     /** Auth error message */
     error,
+    authNotice,
     /** Initiate SIWE sign-in flow */
     login,
     /** Sign out and destroy session */

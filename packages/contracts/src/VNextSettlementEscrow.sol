@@ -803,7 +803,7 @@ contract VNextSettlementEscrow {
             // refund on its expiry" sequence is now impossible for a stronger reason than a minimum
             // window: THAT PATH NO LONGER EXISTS. A payer's only way to contest an accepted SETTLE is a
             // bonded, assertion-specific challenge whose failure mode is RELEASE, and the floor above
-            // (`MIN_RECLAIM_DELAY == CHALLENGE + APPEAL + BACKUP + 1 day`) is what guarantees every
+            // (`MIN_RECLAIM_DELAY == CHALLENGE + APPEAL + BACKUP + SCHEDULE_WORK_MARGIN`) guarantees every
             // window in the §8.1 machine has room to run before the payer's own deadline.
 
             Unit storage u = _units[unitId];
@@ -1563,7 +1563,7 @@ contract VNextSettlementEscrow {
     /// @notice §8.2 C-3 — the latest moment an assertion may be ACCEPTED, primary or backup.
     /// @dev    `reclaimAt - CHALLENGE_WINDOW - APPEAL_WINDOW`, verbatim from the freeze. Underflow-free by
     ///         construction: funding requires `reclaimAt >= now + MIN_RECLAIM_DELAY` and
-    ///         `MIN_RECLAIM_DELAY == CHALLENGE + APPEAL + BACKUP + 1 day`. It exists so a late verdict can
+    ///         `MIN_RECLAIM_DELAY == CHALLENGE + APPEAL + BACKUP + SCHEDULE_WORK_MARGIN`. A late verdict can
     ///         never extend the payer's capital lock past its own `reclaimAt`.
     function _assertionCutoff(Unit storage u) private view returns (uint256) {
         return uint256(u.reclaimAt) - VNextSettlementLib.CHALLENGE_WINDOW - VNextSettlementLib.APPEAL_WINDOW;

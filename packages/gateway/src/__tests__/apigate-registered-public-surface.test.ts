@@ -56,8 +56,11 @@ let bootRoutes: RegisteredRoute[];
 let productionRoutes: RegisteredRoute[];
 let dashboardFixture: string;
 let declarations: readonly PublicRoute[];
+let adminDeclarations: typeof import("../middleware/api-gate.js").ADMIN_KEY_ROUTES;
 type Matcher = (url: string, method?: string) => boolean;
 let isPublicRoute: Matcher;
+let validatesPresentedCredential: Matcher;
+let acceptsAdminKey: Matcher;
 const environmentKeys = ["PCC_DB_PATH", "NODE_ENV", "PCC_SEED_DATA", "SERVE_DASHBOARD", "DASHBOARD_PATH"] as const;
 const savedEnvironment = new Map(environmentKeys.map((key) => [key, process.env[key]]));
 
@@ -75,6 +78,9 @@ beforeAll(async () => {
   const gate = await import("../middleware/api-gate.js");
   isPublicRoute = gate.isPublicRoute;
   declarations = gate.PUBLIC_ROUTES;
+  adminDeclarations = gate.ADMIN_KEY_ROUTES;
+  validatesPresentedCredential = gate.validatesPresentedCredential;
+  acceptsAdminKey = gate.acceptsAdminKey;
 
   // Close before the second boot because createGateway initialises a shared database store.
   await app.close();
@@ -285,6 +291,10 @@ const EXPECTED_DECLARATIONS = [
   [["POST"],null,"exact","/api/marketplace/roi",null,null,"ROI calculator: pure computation that stores nothing"],
   [["POST"],null,"exact","/api/carrier/webhook/easypost",null,null,"EasyPost webhook: X-Hmac-Signature verified in routes/carrier.ts (sol #297 finding 15)"],
   [["POST"],null,"exact","/api/lob/webhook",null,null,"Lob webhook: timestamp-bound HMAC verified in routes/lob.ts (carrier audit L1)"],
+  [["POST"],null,"exact","/api/wallets/link-requests",null,null,"W1 device authorization (RFC 8628 flow A): a CLI or device opens a link request before it holds a key; a presented credential is validated"],
+  [["POST"],null,"regex",null,"^\\/api\\/wallets\\/link-requests\\/[^/]+\\/fund$","","W2 testnet faucet claim for an approved link request, by request id, within one hour of approval (cliFundingLink)"],
+  [["POST"],null,"regex",null,"^\\/api\\/wallets\\/link-requests\\/[^/]+\\/proof$","","W1: the requested key signs the request message; the route verifies it and burns the request on a failure"],
+  [["GET"],"follow-get","regex",null,"^\\/api\\/wallets\\/link-requests\\/[^/]+$","","W1: the requester polls its link request by request id (rate-limited in the route)"],
 ];
 
 const EXPECTED_TEMPLATE_INTERSECTIONS: string[] = [
@@ -321,6 +331,7 @@ const EXPECTED_TEMPLATE_INTERSECTIONS: string[] = [
   "GET /api/operators/:slug/channels AMBIGUOUS",
   "GET /api/operators/:slug/status AMBIGUOUS",
   "GET /api/operators/by-compliance/:regulationId AMBIGUOUS",
+  "GET /api/wallets/link-requests/:id INTERSECTS",
   "HEAD /api/capabilities/:capId INTERSECTS",
   "HEAD /api/capabilities/:capabilityId/compliance AMBIGUOUS",
   "HEAD /api/capabilities/:id/button INTERSECTS",
@@ -353,6 +364,12 @@ const EXPECTED_TEMPLATE_INTERSECTIONS: string[] = [
   "HEAD /api/operators/:slug/channels AMBIGUOUS",
   "HEAD /api/operators/:slug/status AMBIGUOUS",
   "HEAD /api/operators/by-compliance/:regulationId AMBIGUOUS",
+  "HEAD /api/wallets/link-requests/:id INTERSECTS",
+  "POST /api/wallets/:linkId/fund AMBIGUOUS",
+  "POST /api/wallets/:linkId/revoke AMBIGUOUS",
+  "POST /api/wallets/link-requests/:id/approve AMBIGUOUS",
+  "POST /api/wallets/link-requests/:id/fund INTERSECTS",
+  "POST /api/wallets/link-requests/:id/proof INTERSECTS",
 ];
 
 // Vite's unmodified publicDir="public" and copyPublicDir=true copy these files verbatim.
@@ -371,10 +388,8 @@ const EXPECTED_STATIC_API_INVENTORY = [
 // route that disappeared or an entry that narrowed; confirm that too. Copy each line deliberately;
 // never regenerate this array.
 //
-// Against master 7d0c27ca (101 pairs) this is: minus POST /api/dht/announce and the four retired
-// marketplace writes (POST /api/marketplace/listings, PUT and DELETE /api/marketplace/listings/:id,
-// POST /api/marketplace/orders); plus the HEAD twin of seven public GETs that master opened for GET
-// only. Artifact-detail HEAD remains authenticated so SIWE owners retain private-artifact access.
+// Against master 9ac91ccf (106 pairs), this is: minus POST /api/dht/announce and the four retired marketplace writes; plus the HEAD twins of seven public GETs.
+// Artifact-detail HEAD remains authenticated so SIWE owners retain private-artifact access.
 // ─────────────────────────────────────────────────────────────────────────────
 const EXPECTED_PUBLIC_API_SURFACE: string[] = [
   "GET /api/admin/feedback",
@@ -423,6 +438,7 @@ const EXPECTED_PUBLIC_API_SURFACE: string[] = [
   "GET /api/operators/:id/ratings",
   "GET /api/orchestrator/templates",
   "GET /api/waitlist/count",
+  "GET /api/wallets/link-requests/:id",
   "HEAD /api/admin/feedback",
   "HEAD /api/agents/status",
   "HEAD /api/artifacts",
@@ -468,6 +484,7 @@ const EXPECTED_PUBLIC_API_SURFACE: string[] = [
   "HEAD /api/operators/:id/ratings",
   "HEAD /api/orchestrator/templates",
   "HEAD /api/waitlist/count",
+  "HEAD /api/wallets/link-requests/:id",
   "POST /api/auth/provision",
   "POST /api/auth/verify",
   "POST /api/beta-apply",
@@ -480,6 +497,22 @@ const EXPECTED_PUBLIC_API_SURFACE: string[] = [
   "POST /api/onboard/chat",
   "POST /api/onboard/identify-device",
   "POST /api/waitlist",
+  "POST /api/wallets/link-requests",
+  "POST /api/wallets/link-requests/:id/fund",
+  "POST /api/wallets/link-requests/:id/proof",
+];
+
+// Admin-key entries never inherit HEAD: every accepted method is declared explicitly.
+const EXPECTED_ADMIN_KEY_DECLARATIONS = [
+  [["POST", "GET", "HEAD"], "regex", null, "^\\/api\\/operator\\/jobs\\/[^/]+\\/receipt$", "", "N149 gateway receipts: the receipt route also accepts the gateway admin secret itself"],
+  [["POST"], "exact", "/api/admin/settlement-challenges", null, null, "N149 one-use settlement challenge issuance: also accepts the gateway admin secret itself"],
+];
+
+const EXPECTED_ADMIN_KEY_SURFACE = [
+  "GET /api/operator/jobs/:jobId/receipt",
+  "HEAD /api/operator/jobs/:jobId/receipt",
+  "POST /api/admin/settlement-challenges",
+  "POST /api/operator/jobs/:jobId/receipt",
 ];
 
 describe("N43: the registered /api/* surface the gate's allowlist opens", () => {
@@ -491,6 +524,106 @@ describe("N43: the registered /api/* surface the gate's allowlist opens", () => 
       expect(Object.isFrozen(entry.methods)).toBe(true);
     }
     expect(normalizedDeclarations(declarations)).toEqual(EXPECTED_DECLARATIONS);
+  });
+
+  it("CREDENTIAL: only public link-request creation validates presented credentials, and its registered surface is pinned", () => {
+    expect(validatesPresentedCredential, "api-gate.ts exports validatesPresentedCredential").toBeTypeOf("function");
+    expect(declarations.filter((entry) => "credential" in entry)).toEqual([{
+      methods: ["POST"],
+      match: "exact",
+      path: "/api/wallets/link-requests",
+      why: "W1 device authorization (RFC 8628 flow A): a CLI or device opens a link request before it holds a key; a presented credential is validated",
+      credential: "validate-if-presented",
+    }]);
+    expect(surfaceOf(bootRoutes, (r) => validatesPresentedCredential(samplePath(r.url), r.method))).toEqual([
+      "POST /api/wallets/link-requests",
+    ]);
+  });
+
+  it("ADMIN KEY DECLARATIONS: explicit methods, match, literal path, regex source/flags and why are pinned", () => {
+    expect(adminDeclarations).toBeInstanceOf(Array);
+    expect(Object.isFrozen(adminDeclarations)).toBe(true);
+    for (const entry of adminDeclarations) {
+      expect(Object.isFrozen(entry)).toBe(true);
+      expect(Object.isFrozen(entry.methods)).toBe(true);
+    }
+    expect(adminDeclarations.map((entry) => [
+      [...entry.methods],
+      entry.match,
+      typeof entry.path === "string" ? entry.path : null,
+      entry.path instanceof RegExp ? entry.path.source : null,
+      entry.path instanceof RegExp ? entry.path.flags : null,
+      entry.why,
+    ])).toEqual(EXPECTED_ADMIN_KEY_DECLARATIONS);
+  });
+
+  it("ADMIN KEY SURFACE: the four registered routes accepting the admin secret remain private", () => {
+    expect(acceptsAdminKey, "api-gate.ts exports acceptsAdminKey").toBeTypeOf("function");
+    const adminRoutes = bootRoutes.filter((r) => acceptsAdminKey(samplePath(r.url), r.method));
+    expect(surfaceOf(bootRoutes, (r) => acceptsAdminKey(samplePath(r.url), r.method))).toEqual(EXPECTED_ADMIN_KEY_SURFACE);
+    for (const route of adminRoutes) expect(isPublic(route), `${route.method} ${route.url}`).toBe(false);
+  });
+
+  it("U1: presented-credential validation matches only POST of the exact link-request create path", () => {
+    for (const url of ["/api/wallets/link-requests", "/api/wallets/link-requests?x=1"]) {
+      expect(validatesPresentedCredential(url, "POST"), `POST ${url}`).toBe(true);
+    }
+    expect(validatesPresentedCredential("/api/wallets/link-requests?x=1", "post")).toBe(true);
+    for (const [method, url] of [
+      ["GET", "/api/wallets/link-requests"],
+      ["POST", "/api/wallets/link-requests/lookup"],
+      ["POST", "/api/wallets/link-requests/r1/approve"],
+      ["POST", "/api/wallets/link-requests/r1/proof"],
+      ["POST", "/api/wallets/link-requests/r1/fund"],
+      ["PUT", "/api/wallets/link-requests"],
+    ]) {
+      expect(validatesPresentedCredential(url, method), `${method} ${url}`).toBe(false);
+    }
+    expect(validatesPresentedCredential("/api/wallets/link-requests")).toBe(false);
+  });
+
+  it("U2: admin-key acceptance requires an explicitly declared method and an exact settlement path", () => {
+    for (const method of ["POST", "GET", "HEAD"]) {
+      expect(acceptsAdminKey("/api/operator/jobs/j1/receipt", method), method).toBe(true);
+    }
+    expect(acceptsAdminKey("/api/admin/settlement-challenges", "POST")).toBe(true);
+    expect(acceptsAdminKey("/api/operator/jobs/j1/receipt?x=1", "get")).toBe(true);
+    expect(acceptsAdminKey("/api/admin/settlement-challenges?x=1", "post")).toBe(true);
+    for (const [method, url] of [
+      ["PUT", "/api/operator/jobs/j1/receipt"],
+      ["DELETE", "/api/operator/jobs/j1/receipt"],
+      ["GET", "/api/operator/jobs/a/b/receipt"],
+      ["POST", "/api/operator/jobs//receipt"],
+      ["GET", "/api/operator/jobs/j1/receipt/x"],
+      ["GET", "/api/admin/settlement-challenges"],
+      ["HEAD", "/api/admin/settlement-challenges"],
+      ["POST", "/api/admin/settlement-challenges/x"],
+    ]) {
+      expect(acceptsAdminKey(url, method), `${method} ${url}`).toBe(false);
+    }
+    expect(acceptsAdminKey("/api/operator/jobs/j1/receipt")).toBe(false);
+  });
+
+  it("U3: wallet-link public rules exclude owner actions, nested request ids and undeclared methods", () => {
+    for (const [method, url] of [
+      ["POST", "/api/wallets/link-requests/lookup"],
+      ["POST", "/api/wallets/link-requests/x/approve"],
+      ["POST", "/api/wallets/x/fund"],
+      ["POST", "/api/wallets/link-requests/a/b/fund"],
+      ["POST", "/api/wallets/link-requests/a/b/proof"],
+      ["GET", "/api/wallets/link-requests"],
+      ["PUT", "/api/wallets/link-requests/x"],
+      ["DELETE", "/api/wallets/link-requests/x"],
+      ["POST", "/api/wallets/x/revoke"],
+    ]) {
+      expect(isPublicRoute(url, method), `${method} ${url}`).toBe(false);
+    }
+    for (const method of ["GET", "HEAD", "PUT", "PATCH", "DELETE"]) {
+      for (const action of ["fund", "proof"]) {
+        const url = `/api/wallets/link-requests/x/${action}`;
+        expect(isPublicRoute(url, method), `${method} ${url}`).toBe(false);
+      }
+    }
   });
 
   it("INTERSECTIONS: every parameter or wildcard template that could be public is explicitly reviewed", () => {
@@ -599,12 +732,12 @@ describe("N43: the registered /api/* surface the gate's allowlist opens", () => 
     expect(publicApi).toEqual(EXPECTED_PUBLIC_API_SURFACE);
   });
 
-  it("the only public writes are the twelve public-by-design POSTs: no PUT, PATCH or DELETE is public anywhere under /api", () => {
+  it("the only public writes are fifteen POSTs: twelve public-by-design plus W1 create, fund and proof; no PUT, PATCH or DELETE is public anywhere under /api", () => {
     expect(isPublicRoute, "api-gate.ts exports isPublicRoute").toBeTypeOf("function");
     const writes = surfaceOf(bootRoutes, (r) => r.url.startsWith("/api/") && r.method !== "GET" && r.method !== "HEAD" && isPublic(r));
     expect(writes).toEqual(EXPECTED_PUBLIC_API_SURFACE.filter((l) => !l.startsWith("GET ") && !l.startsWith("HEAD ")));
     expect(writes.every((l) => l.startsWith("POST "))).toBe(true);
-    expect(writes).toHaveLength(12);
+    expect(writes).toHaveLength(15);
   });
 
   it("HEAD follows GET except artifact detail, which authenticates to retain SIWE ownership", () => {

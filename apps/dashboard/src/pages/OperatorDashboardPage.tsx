@@ -1,4 +1,5 @@
 import React from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
   GlassPanel, GlowBadge, UtilizationGauge,
@@ -7,12 +8,134 @@ import {
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useOperatorStore } from "../stores/operator-store.js";
+import { useAuthStore } from "../stores/auth-store.js";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { OPERATOR_SIGN_IN_NOTICE, requiresOperatorSignIn } from "../lib/auth-notices.js";
+import { emergencyResume, emergencyStop, kernelsOf, machineLabel, type OperatorMachine } from "../lib/operator-api.js";
+import { InboxPanel } from "../components/inbox/InboxPanel.js";
 import {
   mockOperatorProfile, mockEarningsData, mockMaintenanceEvents, mockCertifications,
 } from "../api/mock-onboarding-data.js";
 
-const tabs = ["overview", "approvals", "earnings", "certifications", "maintenance"] as const;
+const tabs = ["inbox", "overview", "approvals", "earnings", "certifications", "maintenance"] as const;
+
+function operatorPrincipal(state: ReturnType<typeof useAuthStore.getState>): string {
+  return state.sessionKeyId
+    ? JSON.stringify(["session", state.sessionEpoch, state.address?.toLowerCase()])
+    : JSON.stringify(["key", state.keyEpoch, state.sessionEpoch, state.address?.toLowerCase()]);
+}
+
+function stopPanelPrincipal(state: ReturnType<typeof useAuthStore.getState>): string {
+  const address = state.address?.toLowerCase();
+  // A wallet retains its stop panel through sign-in and session-key renewal.
+  // A held key without session-key metadata instead identifies a separate key.
+  return state.sessionToken !== null && (!state.isAuthenticated || state.sessionKeyId !== null)
+    ? JSON.stringify(["wallet", address])
+    : JSON.stringify(["key", state.keyEpoch, address]);
+}
+
+function EmergencyStopPanel({ kernels, loading }: { kernels: ReturnType<typeof kernelsOf>; loading: boolean }) {
+  const [outcomes, setOutcomes] = React.useState<Record<string, {
+    stopped: boolean;
+    pending: "stop" | "resume" | null;
+    error: string | null;
+  }>>({});
+  const inFlight = React.useRef(new Set<string>());
+  const labelCounts = new Map<string, number>();
+  if (Array.isArray(kernels)) {
+    for (const machine of kernels) {
+      const label = machineLabel(machine);
+      labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+    }
+  }
+  const targetLabel = (machine: OperatorMachine) => (labelCounts.get(machineLabel(machine)) ?? 0) > 1
+    ? `${machineLabel(machine)} (${machine.id})` : machineLabel(machine);
+
+  async function stop(requestedTargets: OperatorMachine[]) {
+    const targets = requestedTargets.filter((machine) => !inFlight.current.has(machine.id));
+    if (targets.length === 0) return;
+    const names = targets.map(targetLabel).join(", ");
+    const confirmation = targets.length === 1
+      ? `EMERGENCY STOP for ${names}: PCC stops handing work to this machine and cancels its queued device commands. Queued jobs are held, not cancelled, and can start when you resume. Work already running stops only with the machine's own emergency stop. Continue?`
+      : `EMERGENCY STOP for ${targets.length} machines (${names}): PCC stops handing work to these machines and cancels their queued device commands. Queued jobs are held, not cancelled, and can start when you resume. Work already running stops only with each machine's own emergency stop. Continue?`;
+    if (!window.confirm(confirmation)) return;
+    for (const machine of targets) inFlight.current.add(machine.id);
+    setOutcomes((prev) => ({
+      ...prev,
+      ...Object.fromEntries(targets.map((machine) => [machine.id, { stopped: prev[machine.id]?.stopped === true, pending: "stop", error: null }])),
+    }));
+    await Promise.all(targets.map(async (machine) => {
+      const result = await emergencyStop(machine);
+      inFlight.current.delete(machine.id);
+      setOutcomes((prev) => ({ ...prev, [machine.id]: { stopped: result.ok || prev[machine.id]?.stopped === true, pending: null, error: result.error } }));
+    }));
+  }
+
+  async function resume(machine: OperatorMachine) {
+    if (inFlight.current.has(machine.id) || !window.confirm(`Resume operations on ${targetLabel(machine)}? Jobs PCC held during the stop can start on the machine.`)) return;
+    inFlight.current.add(machine.id);
+    setOutcomes((prev) => ({ ...prev, [machine.id]: { stopped: true, pending: "resume", error: null } }));
+    const result = await emergencyResume(machine);
+    inFlight.current.delete(machine.id);
+    setOutcomes((prev) => ({ ...prev, [machine.id]: { stopped: !result.ok, pending: null, error: result.error } }));
+  }
+
+  if (loading) {
+    return <p role="status" className="text-sm text-white/50">Loading your machines. Use each machine's physical emergency stop.</p>;
+  }
+  if (kernels === "withheld") {
+    return <p role="alert" className="text-sm text-red-400">Your machines aren't shown for this sign-in: PCC needs proof that you own them. Sign in with your wallet (or use a linked wallet) to see and stop them here. Until then, use each machine's physical emergency stop.</p>;
+  }
+  if (kernels === "unavailable") {
+    return <p role="alert" className="text-sm text-red-400">Your machines can't be read right now. Use each machine's physical emergency stop.</p>;
+  }
+  if (kernels.length === 0) {
+    return <p className="text-sm text-white/50">No machines are registered to this key yet.</p>;
+  }
+
+  return (
+    <div className="space-y-3">
+      {kernels.length > 1 && (
+        <button
+          onClick={() => void stop(kernels)}
+          disabled={kernels.every((machine) => Boolean(outcomes[machine.id]?.pending))}
+          className="w-full rounded-lg border border-red-400/40 px-4 py-3 text-sm font-medium text-red-400 hover:bg-red-400/10 disabled:opacity-40"
+        >
+          EMERGENCY STOP: all of your machines
+        </button>
+      )}
+      {kernels.map((machine) => {
+        const label = machineLabel(machine);
+        const outcome = outcomes[machine.id];
+        return (
+          <section key={machine.id} aria-label={`Emergency controls for ${targetLabel(machine)}`} className="rounded-lg border border-red-400/30 px-4 py-3 space-y-2">
+            <div className="text-sm font-medium text-white/70">{label}</div>
+            {(labelCounts.get(label) ?? 0) > 1 && <div className="text-xs font-mono text-white/50">{machine.id}</div>}
+            {outcome?.stopped ? (
+              <span className="text-sm text-red-400 font-medium">
+                {`EMERGENCY STOP ACTIVE for ${label}: PCC is holding this machine's jobs and has cancelled its queued device commands. Held jobs can start when you resume. Work already running stops only with the machine's own emergency stop.`}
+              </span>
+            ) : (
+              <p className="text-xs text-white/50">
+                {`No stop confirmed for ${label}. A confirmed stop makes PCC stop handing work to this machine and cancel its queued device commands. Queued jobs are held, not cancelled, and can start when you resume. Work already running stops only with the machine's physical emergency stop.`}
+              </p>
+            )}
+            <button
+              onClick={() => void (outcome?.stopped ? resume(machine) : stop([machine]))}
+              disabled={Boolean(outcome?.pending)}
+              className="rounded-lg border border-red-400/30 px-3 py-2 text-xs font-medium text-red-400 hover:bg-red-400/10 disabled:opacity-40"
+            >
+              {outcome?.pending === "stop" ? `Stopping ${label}...`
+                : outcome?.pending === "resume" ? `Resuming ${label}...`
+                  : outcome?.stopped ? `Resume Operations: ${label}` : `EMERGENCY STOP: ${label}`}
+            </button>
+            {outcome?.error && <p role="alert" className="text-sm text-red-400">{outcome.error}</p>}
+          </section>
+        );
+      })}
+    </div>
+  );
+}
 
 /* ---------- Approval types ---------- */
 interface Approval {
@@ -46,49 +169,35 @@ export function OperatorDashboardPage() {
 
   const totalEarnings = mockEarningsData[mockEarningsData.length - 1]?.cumulative ?? 0;
 
-  /* ---------- Emergency Stop state ---------- */
-  const [emergencyStopped, setEmergencyStopped] = React.useState(false);
-  const [estopLoading, setEstopLoading] = React.useState(false);
-
-  async function handleEmergencyStop() {
-    if (!window.confirm("EMERGENCY STOP: This will immediately halt all active jobs on kernel-nanoclaw. Continue?")) return;
-    setEstopLoading(true);
-    try {
-      await authorizedFetch("/api/operator/emergency-stop", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kernelId: "kernel-nanoclaw" }),
-      });
-      setEmergencyStopped(true);
-    } catch {
-      // best-effort — show stopped state anyway for operator safety
-      setEmergencyStopped(true);
-    } finally {
-      setEstopLoading(false);
-    }
-  }
-
-  async function handleEmergencyResume() {
-    if (!window.confirm("Resume operations on kernel-nanoclaw?")) return;
-    setEstopLoading(true);
-    try {
-      await authorizedFetch("/api/operator/emergency-resume", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kernelId: "kernel-nanoclaw" }),
-      });
-      setEmergencyStopped(false);
-    } catch {
-      // no-op
-    } finally {
-      setEstopLoading(false);
-    }
-  }
+  const keyEpoch = useAuthStore((state) => state.keyEpoch);
+  const sessionEpoch = useAuthStore((state) => state.sessionEpoch);
+  const address = useAuthStore((state) => state.address);
+  // A session-key renewal changes the credential, not the principal. The mint
+  // restores sessionKeyId synchronously after adopting the key; React batches
+  // those store updates. Pasted-key changes still require a fresh panel.
+  const identity = useAuthStore(operatorPrincipal);
+  const stopPanelIdentity = useAuthStore(stopPanelPrincipal);
+  const machines = useQuery({
+    queryKey: ["operator-machines", keyEpoch, sessionEpoch, address],
+    queryFn: async ({ signal }) => {
+      const res = await authorizedFetch("/api/agent/me", { cache: "no-store", signal });
+      if (!res.ok) throw new Error("Machines unavailable");
+      const kernels = kernelsOf(await res.json());
+      if (kernels === "unavailable") throw new Error("Machines unavailable");
+      return kernels;
+    },
+    enabled: activeTab === "overview",
+    retry: false,
+  });
 
   /* ---------- Approvals state ---------- */
   const [approvals, setApprovals] = React.useState<Approval[]>([]);
   const [approvalsLoading, setApprovalsLoading] = React.useState(false);
   const [approvalsError, setApprovalsError] = React.useState<string | null>(null);
+  const [approvalSignIn, setApprovalSignIn] = React.useState<string | null>(null);
+  const decisionNotice = approvalSignIn === identity ? OPERATOR_SIGN_IN_NOTICE : null;
+
+  React.useEffect(() => { setApprovalSignIn(null); }, [identity]);
 
   const fetchApprovals = React.useCallback(async () => {
     setApprovalsLoading(true);
@@ -114,9 +223,14 @@ export function OperatorDashboardPage() {
 
   async function handleApprovalAction(id: string, action: "approve" | "reject") {
     try {
-      await authorizedFetch(`/api/operator/approvals/${id}/${action}`, {
+      const res = await authorizedFetch(`/api/operator/approvals/${id}/${action}`, {
         method: "POST",
       });
+      if (await requiresOperatorSignIn(res)) {
+        if (operatorPrincipal(useAuthStore.getState()) === identity) setApprovalSignIn(identity);
+        return;
+      }
+      if (res.ok) setApprovalSignIn((principal) => principal === identity ? null : principal);
       setApprovals((prev) => prev.filter((a) => a.id !== id));
     } catch {
       // silently fail — next auto-refresh will reconcile
@@ -142,41 +256,16 @@ export function OperatorDashboardPage() {
         ))}
       </div>
 
+      {activeTab === "inbox" && <InboxPanel />}
+
+      {/* Keep confirmed outcomes across tabs; a different identity gets a fresh panel. */}
+      <div hidden={activeTab !== "overview"}>
+        <EmergencyStopPanel key={stopPanelIdentity} kernels={machines.isError ? "unavailable" : machines.data ?? "unavailable"} loading={machines.isPending} />
+      </div>
+
       {/* Overview Tab */}
       {activeTab === "overview" && (
         <div className="space-y-6">
-          {/* Emergency Stop */}
-          {emergencyStopped && (
-            <div
-              className="rounded-lg border border-red-400/40 px-4 py-3 flex items-center justify-between"
-              style={{ background: "rgba(248, 113, 113, 0.08)" }}
-            >
-              <div className="flex items-center gap-3">
-                <span className="inline-block w-2 h-2 rounded-full bg-red-400 animate-pulse" />
-                <span className="text-sm text-red-400 font-medium">
-                  EMERGENCY STOP ACTIVE — All jobs halted on kernel-nanoclaw
-                </span>
-              </div>
-              <button
-                onClick={handleEmergencyResume}
-                disabled={estopLoading}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium border border-green-400/30 text-green-400 hover:bg-green-400/10 transition-all disabled:opacity-40"
-              >
-                {estopLoading ? "Resuming..." : "Resume Operations"}
-              </button>
-            </div>
-          )}
-          {!emergencyStopped && (
-            <button
-              onClick={handleEmergencyStop}
-              disabled={estopLoading}
-              className="w-full rounded-lg border border-red-400/30 px-4 py-3 text-sm font-medium text-red-400 hover:bg-red-400/10 hover:border-red-400/50 transition-all disabled:opacity-40"
-              style={{ background: "rgba(248, 113, 113, 0.04)" }}
-            >
-              {estopLoading ? "Stopping..." : "EMERGENCY STOP"}
-            </button>
-          )}
-
           {/* KPIs */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <GlassPanel padding="md" glow="green" className="text-center">
@@ -268,13 +357,13 @@ export function OperatorDashboardPage() {
             </GlassPanel>
           )}
 
-          {approvalsError && (
+          {(decisionNotice || approvalsError) && (
             <GlassPanel padding="md">
-              <span className="text-xs text-red-400">Error: {approvalsError}</span>
+              <span className="text-xs text-red-400">Error: {decisionNotice || approvalsError}</span>
             </GlassPanel>
           )}
 
-          {!approvalsLoading && !approvalsError && approvals.length === 0 && (
+          {!approvalsLoading && !approvalsError && !decisionNotice && approvals.length === 0 && (
             <GlassPanel padding="lg" className="text-center">
               <div className="text-sm text-white/30">No pending approvals.</div>
               <div className="text-xs text-white/20 mt-1">

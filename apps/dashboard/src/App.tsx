@@ -33,6 +33,7 @@ const BuilderPage = lazy(() => import("./pages/BuilderPage.js").then(m => ({ def
 const WorkflowPage = lazy(() => import("./pages/WorkflowPage.js").then(m => ({ default: m.WorkflowPage })));
 const JobsPage = lazy(() => import("./pages/JobsPage.js").then(m => ({ default: m.JobsPage })));
 const JobDetailPage = lazy(() => import("./pages/JobDetailPage.js").then(m => ({ default: m.JobDetailPage })));
+const JobFlowPage = lazy(() => import("./pages/JobFlowPage.js").then(m => ({ default: m.JobFlowPage })));
 const KernelsPage = lazy(() => import("./pages/KernelsPage.js").then(m => ({ default: m.KernelsPage })));
 const KernelDetailPage = lazy(() => import("./pages/KernelDetailPage.js").then(m => ({ default: m.KernelDetailPage })));
 const EscrowPage = lazy(() => import("./pages/EscrowPage.js").then(m => ({ default: m.EscrowPage })));
@@ -75,6 +76,7 @@ const NegotiationPage = lazy(() => import("./pages/NegotiationPage.js").then(m =
 const OperatorMobilePage = lazy(() => import("./pages/OperatorMobilePage.js").then(m => ({ default: m.OperatorMobilePage })));
 const EconomicAgreementsPage = lazy(() => import("./pages/EconomicAgreementsPage.js").then(m => ({ default: m.EconomicAgreementsPage })));
 const WalletPage = lazy(() => import("./pages/WalletPage.js").then(m => ({ default: m.WalletPage })));
+const WalletLinkPage = lazy(() => import("./pages/WalletLinkPage.js").then(m => ({ default: m.WalletLinkPage })));
 const WhitepaperPage = lazy(() => import("./pages/WhitepaperPage.js").then(m => ({ default: m.WhitepaperPage })));
 const BatchBoardPage = lazy(() => import("./pages/BatchBoardPage.js").then(m => ({ default: m.BatchBoardPage })));
 const NegotiationSessionPage = lazy(() => import("./pages/NegotiationSessionPage.js").then(m => ({ default: m.NegotiationSessionPage })));
@@ -154,10 +156,10 @@ function AgentShell() {
 // ---------------------------------------------------------------------------
 
 function LogoutButton() {
-  const logout = useAuthStore((s) => s.logout);
+  const logout = useAuthStore((s) => s.signOutWallet);
   return (
     <button
-      onClick={logout}
+      onClick={() => void logout()}
       className="w-full px-3 py-2 text-[10px] text-white/25 hover:text-red-400/70 hover:bg-white/[0.03] rounded-lg transition-all text-left tracking-wide uppercase"
     >
       Disconnect
@@ -292,6 +294,9 @@ function Shell() {
   const interfaceMode = useUIStore((s) => s.interfaceMode);
   const location = useLocation();
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const sessionToken = useAuthStore((s) => s.sessionToken);
+  // A restored wallet session can still make cookie-authorized reads and stops.
+  const hasAccess = isAuthenticated || sessionToken !== null;
 
   // Public pages that don't require auth
   const publicPaths = ["/", "/start", "/whitepaper", "/go", "/earn", "/onboard/chat"];
@@ -299,7 +304,7 @@ function Shell() {
 
   // Login page at /login
   if (location.pathname === "/login") {
-    return isAuthenticated ? (
+    return hasAccess ? (
       <Suspense fallback={<PageLoader />}><LandingPage /></Suspense>
     ) : (
       <LoginPage />
@@ -307,8 +312,19 @@ function Shell() {
   }
 
   // Auth gate — redirect to login for non-public pages
-  if (!isAuthenticated && !isPublicPage) {
+  if (!hasAccess && !isPublicPage) {
     return <LoginPage />;
+  }
+
+  if (location.pathname === "/link") {
+    return (
+      <Suspense fallback={<PageLoader />}>
+        <WalletLinkPage />
+      </Suspense>
+    );
+  }
+  if (location.pathname === "/jobs/flow") {
+    return <Suspense fallback={<PageLoader />}><JobFlowPage /></Suspense>;
   }
 
   // Landing page — agent-first (root)

@@ -80,6 +80,7 @@ vi.mock("../services/kernel-service.js", async (importOriginal) => {
     // #450 (N59): the test-job route runs only on the gateway's own kernel, on a loaded
     // device, and judges simulation on the adapter the job ran on.
     kernelId: "kernel-nyc",
+    hasExplicitConfig: true,
     hasRunner: vi.fn().mockReturnValue(true),
     jobRanSimulated: vi.fn().mockReturnValue(false),
   };

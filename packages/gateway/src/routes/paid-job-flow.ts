@@ -82,12 +82,14 @@ import {
 } from "../services/device-evidence-settlement.js";
 import { withSignerLock } from "../contracts/signer-lock.js";
 import { emergencyStopState } from "./device-relay.js";
+import { canDispatchJobLocally } from "../services/local-job-dispatch.js";
 import { authorityOf } from "../auth/kernel-authority.js";
 import { bindBuyer } from "../auth/buyer-identity.js";
 import { isMockSettlement } from "../services/settlement-mode.js";
 import {
   acceptanceFor,
   buyerFundingRefusal,
+  PAID_SCOPE_TTL_MS,
   SCOPE_AWAITING_ACCEPTANCE,
   SCOPE_AWAITING_FUNDING,
   SCOPE_REJECTED,
@@ -240,44 +242,19 @@ function extractEscrowCreatedAddress(
  * This is the core wiring logic shared by the commit handler and the fast-track endpoint.
  */
 /**
- * Resolve the per-operator payout address for a kernel (option A revenue routing).
- * Looks up the kernel's operator, then finds the api_keys row with the operator's
- * per-operator EOA (set by /api/auth/provision + best-effort setAgentWallet). If
- * none found, returns null so callers can fall back to the gateway signer
- * (preserves existing behavior for legacy operators not yet migrated).
- *
- * Cf. coord bulletin 235: without this, V3 releases route funds to the gateway
- * signer (self-pay). With this, funds route to the operator's operational EOA.
- */
-function resolveOperatorPayoutAddress(kernelId: string): `0x${string}` | null {
-  try {
-    const repos = getRepos();
-    const kernel = repos.kernels.findById(kernelId);
-    if (!kernel?.operatorAddress) return null;
-    const keys = repos.apiKeys.findByOperator(kernel.operatorAddress);
-    for (const k of keys) {
-      const addr = (k as { operatorWalletAddress?: string | null }).operatorWalletAddress;
-      if (addr && /^0x[0-9a-fA-F]{40}$/.test(addr)) {
-        return addr as `0x${string}`;
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * N133: the status createJobFromSession mints a paid job's write scope with (exported for its
  * tests). Its caller inserts the
  * scope with no await after this call, so the policy and the stop are read as they are at the mint;
  * a block, a switch to manual or a stop that lands while the escrow is created is honoured.
  *   - The buyer is on the kernel's block list: rejected (dead).
  *   - The kernel's operator has not accepted this buyer per its policy (manual, the default; policy
- *     mode and not trusted; a policy that is missing, garbled or cannot be read): awaiting_acceptance.
+ *     mode and not trusted; a block list that is present but not an array of strings, whatever the
+ *     mode; a policy that is missing, garbled or cannot be read): awaiting_acceptance.
  *   - The stop is engaged or cannot be read: awaiting_acceptance too, even for an auto policy. The
  *     relay's POST /scope mints nothing then, and the accept route refuses then.
- *   - Accepted: active on the buyer's own, real funding, else awaiting_funding.
+ *   - Accepted: active on the buyer's own, real funding, else awaiting_funding. At the mint that
+ *     can only be a test's mock escrow: no verification record can name a scope that does not
+ *     exist yet, so a real escrow's scope goes live later, through reconcilePaidScope.
  */
 export function mintedScopeStatus(kernelId: string, buyer: string, escrowId: string): string {
   let policy: unknown;
@@ -424,13 +401,8 @@ export async function createJobFromSession(
           `[paid-job] Created on-chain V3 (Mode A) escrow: ${addr} (token: ${tokenAddr})`,
         );
 
-        // Add each milestone (V2 ABI is byte-identical on V3). Operator payout
-        // address prefers the per-operator EOA from option A (revenue routes to
-        // the operator's own wallet, not the gateway signer). Falls back to
-        // account.address for legacy operators that haven't been minted A yet.
+        // Every milestone pays the gateway signer.
         // requiredTier is carried for parity; Mode A ignores it at release.
-        const v3OperatorPayout =
-          resolveOperatorPayoutAddress(session.kernelId) ?? account.address;
         for (const ms of normalizedMilestones) {
           const stepIdBytes = keccak256(toBytes(ms.stepId));
           const addTx = await walletClient.writeContract({
@@ -439,7 +411,7 @@ export async function createJobFromSession(
             functionName: "addMilestone",
             args: [
               stepIdBytes,
-              v3OperatorPayout,
+              account.address,
               parseUnits(ms.amount, 6),
               parseUnits(ms.bondAmount ?? "0.00", 6),
               BigInt(ms.challengeWindowSeconds ?? 0),
@@ -546,11 +518,7 @@ export async function createJobFromSession(
 
         // createEscrowV2 mints an EMPTY escrow; without >=1 milestone fund() reverts.
         // Add each milestone in sequence on the same (locked) signer, BEFORE fund().
-        // Operator payout prefers the per-operator EOA from option A (revenue
-        // routes to the operator, not the gateway); falls back to account.address
-        // for legacy operators. Cf. coord bulletin 235.
-        const v2OperatorPayout =
-          resolveOperatorPayoutAddress(session.kernelId) ?? account.address;
+        // Every milestone pays the gateway signer.
         let dropped = false;
         for (const ms of normalizedMilestones) {
           const stepIdBytes = keccak256(toBytes(ms.stepId));
@@ -560,7 +528,7 @@ export async function createJobFromSession(
             functionName: "addMilestone",
             args: [
               stepIdBytes,
-              v2OperatorPayout,
+              account.address,
               parseUnits(ms.amount, 6),
               parseUnits(ms.bondAmount ?? "0.00", 6),
               BigInt(ms.challengeWindowSeconds ?? 0),
@@ -667,8 +635,8 @@ export async function createJobFromSession(
   // kernel, or for a remote operator node that polls
   // GET /api/operator/jobs?status=queued and executes it out-of-process?
   //
-  // isExternal is a best-effort routing hint (queued vs active/pending), never
-  // a correctness gate — so a missing/uninitialised kernel-service must NOT
+  // This is status routing only; this function never starts a local runner.
+  // A missing/uninitialised kernel-service must NOT
   // abort escrow+job creation. Both callers wrap createJobFromSession (the
   // negotiate commit handler swallows throws as "best-effort"; the fast-track
   // route turns them into a 500), so an unguarded getKernelService() throw here
@@ -683,12 +651,15 @@ export async function createJobFromSession(
   // operator daemon (which polls status=queued) never sees, stranding a
   // stranger's paid job forever. Treat "not our own kernel" as external.
   let localKernelId: string | undefined;
+  let hasExplicitConfig = false;
   try {
-    localKernelId = (getKernelService() as any).config?.kernelId;
+    const service = getKernelService();
+    localKernelId = service.kernelId;
+    hasExplicitConfig = service.hasExplicitConfig;
   } catch {
     localKernelId = undefined;
   }
-  const isExternal = !(localKernelId && session.kernelId === localKernelId);
+  const isExternal = !canDispatchJobLocally(localKernelId, session.kernelId, hasExplicitConfig);
 
   repos.jobs.insert({
     id: jobId,
@@ -714,7 +685,8 @@ export async function createJobFromSession(
   // the insert below.
   const scopeId = `scope_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const allowedTools = getWriteToolsForDeviceType(session.capabilityType);
-  const expiry = new Date(Date.now() + 60 * 60_000).toISOString(); // 1 hour
+  // The scope's lifetime; for a scope that is not live yet, its window to be accepted and funded.
+  const expiry = new Date(Date.now() + PAID_SCOPE_TTL_MS).toISOString(); // 1 hour
 
   const scopeStatus = mintedScopeStatus(session.kernelId, buyer, escrowId);
   db.insert(executionScopes).values({

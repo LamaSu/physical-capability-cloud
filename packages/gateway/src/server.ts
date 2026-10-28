@@ -5,7 +5,9 @@ initSentry();
 
 import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
 import { writeAuditHook } from "./services/write-audit-hook.js";
-import { GATEWAY_LOGGER_OPTIONS, telemetryLookalikeHook } from "./services/telemetry-privacy.js";
+import { GATEWAY_LOGGER_OPTIONS, telemetryLookalikeHook, isWalletRequest } from "./services/telemetry-privacy.js";
+import { walletsRoutes } from "./routes/wallets.js";
+import { walletFaucetRoutes } from "./routes/wallet-faucet.js";
 initPostHog();
 import { randomBytes } from "node:crypto";
 
@@ -18,6 +20,8 @@ import fastifySwaggerUi from "@fastify/swagger-ui";
 import { createOperationIdTransform } from "./openapi/operation-id.js";
 import websocket from "@fastify/websocket";
 import { initStore, closeStore, getRepos, getStore } from "./db.js";
+import { resolveListenHost } from "./config/listen-host.js";
+import { shouldSeedDemoData, warnInvalidSeedDataOverride } from "./config/seed-policy.js";
 import { capabilityRoutes } from "./routes/capabilities.js";
 import { graphSearchRoutes } from "./routes/graph-search.js";
 import { buildRoutes } from "./routes/build.js";
@@ -135,6 +139,7 @@ import { ot2LegacyGoneRoutes } from "./routes/ot2-legacy-gone.js";
 import { deviceRelayRoutes } from "./routes/device-relay.js";
 import { paidJobFlowRoutes } from "./routes/paid-job-flow.js";
 import { operatorRelayRoutes } from "./routes/operator-relay.js";
+import { settlementReceiptRoutes } from "./routes/settlement-receipts.js";
 import { diagnosticLogRoutes } from "./routes/diagnostic-logs.js";
 import { supportMessageRoutes } from "./routes/support-messages.js";
 import { analyticsRoutes } from "./routes/analytics.js";
@@ -176,15 +181,17 @@ import { notificationSSE } from "./sse/notifications.js";
 import { topicSSE } from "./sse/topic-sse.js";
 import { ProducerManager } from "./sse/producers.js";
 import { getOrCreateSession } from "./session.js";
+import { jobSubmitQueueOnly, localJobDispatchDecision } from "./services/local-job-dispatch.js";
 
 export async function createGateway(port = 3200) {
-  // Initialize SQLite store — only seed demo data in dev (not production)
-  const shouldSeed = process.env.PCC_SEED_DATA === "true" || process.env.NODE_ENV !== "production";
-  initStore({ seed: shouldSeed });
+  const host = resolveListenHost(process.env.PCC_LISTEN_HOST);
+  warnInvalidSeedDataOverride(process.env.PCC_SEED_DATA, process.env.NODE_ENV);
+  // Seed outside production by default; exact true/false overrides always win.
+  initStore({ seed: shouldSeedDemoData(process.env.PCC_SEED_DATA, process.env.NODE_ENV) });
 
   // Initialize KernelService (mock mode by default)
   const { initKernelService } = await import("./services/kernel-service.js");
-  initKernelService();
+  const kernelService = initKernelService();
 
   const app = Fastify({
     // Default pino logger, with a request serializer that never logs the public
@@ -197,6 +204,9 @@ export async function createGateway(port = 3200) {
   app.log.info(isRelayGateOpen()
     ? "[relay] The device relay is open."
     : "[relay] The device relay is admin-only.");
+  const dispatch = localJobDispatchDecision(kernelService.kernelId, kernelService.kernelId, kernelService.hasExplicitConfig);
+  app.log.info({ queueOnly: jobSubmitQueueOnly(), localDispatch: dispatch.ok, reason: dispatch.ok ? undefined : dispatch.reason },
+    "[jobs] Effective local dispatch policy");
 
   // Sentry error handler — captures Fastify errors and attaches request context
   // Must be registered before other error handlers
@@ -210,6 +220,10 @@ export async function createGateway(port = 3200) {
   // and returns a clean 400 instead of letting them bubble as 500s to Sentry.
   // Registered after Sentry so Sentry's onError hook still fires for 500s.
   app.setErrorHandler((error, request, reply) => {
+    if (isWalletRequest(request.url)) {
+      const status = (error.statusCode ?? 500) >= 500 ? 500 : 400;
+      return reply.status(status).send({ error: status === 500 ? "internal_error" : "invalid_request" });
+    }
     // FST_ERR_CTP_BODY_TOO_LARGE or body size mismatch
     if (
       error.code === "FST_ERR_CTP_BODY_TOO_LARGE" ||
@@ -265,6 +279,7 @@ export async function createGateway(port = 3200) {
   // status gate is cheap (only 5xx pay the parse cost) and it skips /api/feedback
   // itself. See ai/research/agent-feedback-auto-design.md.
   app.addHook("onSend", async (request, reply, payload) => {
+    if (isWalletRequest(request.url)) return payload;
     if (typeof payload !== "string" || reply.statusCode < 500 || reply.statusCode >= 600) return payload;
     return decorateWithReportHint(payload, {
       statusCode: reply.statusCode,
@@ -384,12 +399,21 @@ export async function createGateway(port = 3200) {
       } as Record<string, unknown>),
     },
   });
-  await app.register(fastifySwaggerUi, {
-    routePrefix: "/docs/api",
-    uiConfig: {
-      docExpansion: "list",
-      deepLinking: true,
-    },
+  await app.register(async (swaggerApp) => {
+    // Swagger's static wildcard serves oauth2-redirect.html, which has inline
+    // JavaScript. The plugin exposes no route config option for its static files.
+    swaggerApp.addHook("onRoute", (route) => {
+      if (route.url === "/docs/api/static/*") {
+        route.config = { ...route.config, cspInlineScripts: true };
+      }
+    });
+    await swaggerApp.register(fastifySwaggerUi, {
+      routePrefix: "/docs/api",
+      uiConfig: {
+        docExpansion: "list",
+        deepLinking: true,
+      },
+    });
   });
 
   // Expose the raw OpenAPI JSON document. PUBLIC — referenced by directory
@@ -678,6 +702,8 @@ export async function createGateway(port = 3200) {
   await app.register(registrySnapshotRoutes);
   await app.register(spaceRoutes);
   await app.register(operatorRoutes);
+  await app.register(walletsRoutes);
+  await app.register(walletFaucetRoutes);
   await app.register(operatorWorkRoutes);
   await app.register(productHomeRoutes);
   await app.register(operatorsPublicRoutes);
@@ -696,6 +722,7 @@ export async function createGateway(port = 3200) {
   await app.register(captureSimRoutes);
   await app.register(pizzaDemoRoutes);
   await app.register(operatorRelayRoutes);
+  await app.register(settlementReceiptRoutes);
   await app.register(diagnosticLogRoutes);
   await app.register(supportMessageRoutes);
   await app.register(negotiationRoutes);
@@ -910,7 +937,9 @@ export async function createGateway(port = 3200) {
     } catch {
       landingHtml = null;
     }
-    app.get<{ Querystring: { mode?: string } }>("/", async (req, reply) => {
+    app.get<{ Querystring: { mode?: string } }>("/", {
+      config: { cspStaticHtmlPath: landingHtml !== null ? "/landing.html" : "/index.html" },
+    }, async (req, reply) => {
       if (req.query.mode === "agent") {
         reply.header("Cache-Control", "public, max-age=300");
         return reply.type("application/json").send({
@@ -1044,8 +1073,8 @@ export async function createGateway(port = 3200) {
       // Start ERC-8004 identity write retry sweeper (no-op if write disabled)
       import("./services/erc8004-identity-sweeper.js")
         .then(({ startIdentitySweeper }) => startIdentitySweeper())
-        .catch((err) =>
-          console.warn("[gateway] ERC-8004 sweeper init failed:", err),
+        .catch(() =>
+          console.warn("[gateway] ERC-8004 sweeper init failed:", { code: "unknown" }),
         );
 
       // Start mock streaming producers
@@ -1091,7 +1120,7 @@ export async function createGateway(port = 3200) {
         console.warn("[gateway] settlement-keeper start failed:", err);
       }
 
-      const address = await app.listen({ port, host: "0.0.0.0" });
+      const address = await app.listen({ port, host });
       console.log(`PCC Gateway listening on ${address}`);
       return address;
     },

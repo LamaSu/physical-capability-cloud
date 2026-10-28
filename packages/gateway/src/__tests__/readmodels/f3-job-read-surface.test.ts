@@ -69,7 +69,10 @@ beforeAll(async () => {
     const principal = req.headers["x-test-principal"];
     if (typeof principal === "string") (req as any).operatorId = principal;
     const proven = req.headers["x-test-proven-wallet"];
-    if (typeof proven === "string") (req as any).provenWallet = proven;
+    if (typeof proven === "string") {
+      (req as any).provenWallet = proven;
+      req.provenWalletCarrier = "key";
+    }
   });
   const { jobRoutes } = await import("../../routes/jobs.js");
   const { batchRoutes } = await import("../../routes/batches.js");
@@ -276,7 +279,7 @@ describe("MEDIUM (timing): a missing job and a stranger's job do the same author
     const store = getStore();
     const kernels = vi.spyOn(store.repos.kernels, "findById");
     const select = vi.spyOn(store.db, "select");
-    const req = (jobId: string) => ({ headers: {}, provenWallet: STRANGER, operatorId: STRANGER, log: { error: () => {}, warn: () => {} }, params: { jobId } }) as never;
+    const req = (jobId: string) => ({ headers: {}, provenWallet: STRANGER, provenWalletCarrier: "key", operatorId: STRANGER, log: { error: () => {}, warn: () => {} }, params: { jobId } }) as never;
     const counts = (jobId: string) => {
       kernels.mockClear();
       select.mockClear();

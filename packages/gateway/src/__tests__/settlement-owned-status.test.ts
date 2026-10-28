@@ -9,7 +9,8 @@
  * the settlement pipeline. Otherwise its settlement is stranded or re-run.
  * A job without a settlement record is unchanged: its node finishes it (adk #452).
  *
- * Who may write a job's status (owner checks) is gateway's N85(b), in WP-C.
+ * Relay status writes authenticate as the job kernel's operator (N85); this suite isolates
+ * the settlement-owned status rule after that authority check succeeds.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
@@ -23,6 +24,7 @@ import { closeWorkflowStore } from "../workflow-store.js";
 import { isWriteEnabled } from "../contracts/escrow-client.js";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
 import { schema } from "@pcc/store";
+import { provisionApiKey, resolveApiKey } from "../auth/api-key-auth.js";
 
 // The same I/O mocks as paid-job-flow.test.ts: evidence storage (IPFS), the
 // escrow client and batch settlement. None of them decides a job's status.
@@ -72,6 +74,7 @@ let app: FastifyInstance;
 // the admin submits each paid job for it (paidJob below).
 const ADMIN = "settlement-owned-status-admin";
 let savedAdminKey: string | undefined;
+const operatorKeys = new Map<string, string>();
 
 beforeEach(async () => {
   savedAdminKey = process.env.PCC_ADMIN_KEY;
@@ -81,8 +84,17 @@ beforeEach(async () => {
   process.env.WORKFLOW_DB_PATH = ":memory:";
   closeWorkflowStore();
   initStore({ seed: true });
+  operatorKeys.clear();
   resetSettlementService();
   app = Fastify({ logger: false });
+  app.addHook("onRequest", async (req) => {
+    const key = resolveApiKey(req);
+    if (key) {
+      req.apiKeyId = key.id;
+      req.operatorId = key.operatorId;
+      req.userId = key.operatorId as `0x${string}`;
+    }
+  });
   await app.register(paidJobFlowRoutes);
   await app.register(negotiationRoutes);
   // The legacy OT-2 relay and scope routes are retired (N4b-gw, #400); no test here calls them.
@@ -141,8 +153,16 @@ async function paidJob(): Promise<string> {
   return res.json().jobId as string;
 }
 
-const relay = (jobId: string, status: string) =>
-  app.inject({ method: "POST", url: "/api/operator/job-status", payload: { jobId, status } });
+const relay = (jobId: string, status: string) => {
+  const job = getRepos().jobs.findById(jobId)!;
+  const operator = getRepos().kernels.findById(job.kernelId!)!.operatorAddress;
+  let rawKey = operatorKeys.get(operator);
+  if (!rawKey) {
+    rawKey = provisionApiKey({ operatorId: operator, name: "settlement-status-operator", scopes: ["*"] }).rawKey;
+    operatorKeys.set(operator, rawKey);
+  }
+  return app.inject({ method: "POST", url: "/api/operator/job-status", headers: { authorization: `Bearer ${rawKey}` }, payload: { jobId, status } });
+};
 const patch = (jobId: string, status: string) =>
   app.inject({ method: "PATCH", url: `/api/jobs/${jobId}/status`, payload: { status } });
 const complete = (jobId: string) =>

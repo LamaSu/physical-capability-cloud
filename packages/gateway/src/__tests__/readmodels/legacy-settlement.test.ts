@@ -373,7 +373,11 @@ describe("the legacy settlement routes on a real store", () => {
       const principal = req.headers["x-test-principal"];
       if (typeof principal === "string") (req as any).operatorId = principal;
       const proven = req.headers["x-test-proven-wallet"];
-      if (typeof proven === "string") (req as any).provenWallet = proven;
+      if (typeof proven === "string") {
+        (req as any).provenWallet = proven;
+        req.provenWalletCarrier = "bearer-session";
+        (req as any).provenWalletVia = "siwe-session";
+      }
     });
     await app.register(paidJobFlowRoutes);
     await app.register(negotiationRoutes);

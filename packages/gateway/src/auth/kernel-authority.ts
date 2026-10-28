@@ -10,8 +10,8 @@
  *     (PUT, PATCH, the agent-package configuration; PATCH {emergencyStop:false} is a resume by
  *     another name), and an approval submitted with autoApprove (a pre-made approval decision).
  *     It needs the gateway admin secret, or a wallet the caller PROVED that is the kernel's
- *     operator. WP-A (#326) sets req.provenWallet for a SIWE session or a key minted from one;
- *     nothing sets it before that merges, so until then only the admin decides. A claimed
+ *     operator, carried by an explicit key or bearer session, never the sign-in cookie alone.
+ *     apiGate sets req.provenWallet for a SIWE session or a key minted from one. A claimed
  *     identity never decides: anyone can provision a key that names any wallet or email.
  *   - "operate": the kernel's own running, through routes the operator's daemons and agents call
  *     with the operator's key: its heartbeat and capability announce, and every device-relay route
@@ -28,13 +28,17 @@ import type { FastifyRequest } from "fastify";
 import { schema, eq } from "@pcc/store";
 import { getStore } from "../db.js";
 
-export type KernelAction = "decide" | "stop_or_submit" | "operate";
+export type KernelAction = "decide" | "read" | "stop_or_submit" | "operate";
 
 export interface KernelAuthority {
   /** The request carried a valid X-Admin-Key. */
   admin: boolean;
   /** The wallet the caller proved control of (WP-A); null when none. */
   provenWallet: string | null;
+  /** Server-recorded proof origin; absence grants no buyer binding. */
+  provenWalletVia?: string | null;
+  /** The credential that actually supplied the proof; decisions require a key or bearer session. */
+  provenWalletCarrier?: FastifyRequest["provenWalletCarrier"] | null;
   /** The caller's claimed identity: its API key's operator id, or its session's address. */
   claimed: string | null;
 }
@@ -54,22 +58,33 @@ function hasAdminSecret(provided: unknown, expected: string | undefined = proces
 }
 
 export function authorityOf(req: FastifyRequest): KernelAuthority {
-  const r = req as unknown as { provenWallet?: unknown; operatorId?: unknown; userId?: unknown };
+  const r = req as unknown as { provenWallet?: unknown; provenWalletVia?: unknown; provenWalletCarrier?: FastifyRequest["provenWalletCarrier"]; operatorId?: unknown; userId?: unknown };
   const text = (v: unknown) => (typeof v === "string" && v.trim().length > 0 ? v.trim() : null);
   return {
     admin: hasAdminSecret(req.headers["x-admin-key"]),
     provenWallet: text(r.provenWallet),
+    provenWalletVia: typeof r.provenWalletVia === "string" ? r.provenWalletVia : null,
+    provenWalletCarrier: r.provenWalletCarrier ?? null,
     claimed: text(r.operatorId) ?? text(r.userId),
   };
 }
 
 export const isAnonymous = (a: KernelAuthority) => !a.admin && a.provenWallet === null && a.claimed === null;
 
+/**
+ * A non-admin wallet proof needs a key or bearer-session carrier to authorize an
+ * owner decision; cookie, missing and unknown carriers fail closed.
+ */
+export function provenByCookieOnly(a: { admin: boolean; provenWallet: string | null; provenWalletCarrier?: FastifyRequest["provenWalletCarrier"] | null }): boolean {
+  return !a.admin && a.provenWallet != null
+    && a.provenWalletCarrier !== "key" && a.provenWalletCarrier !== "bearer-session";
+}
+
 const WALLET_RE = /^0x[0-9a-fA-F]{40}$/;
 /** operatorAddress values that record no owner: the empty string and the legacy zero placeholder. */
 const UNOWNED = new Set(["", "0x0000000000000000000000000000000000000000"]);
 
-function ownerOf(operatorAddress: unknown): string | null {
+export function ownerOf(operatorAddress: unknown): string | null {
   if (typeof operatorAddress !== "string") return null;
   const owner = operatorAddress.trim().toLowerCase();
   return UNOWNED.has(owner) ? null : owner;
@@ -95,8 +110,19 @@ export const AUTHENTICATION_REQUIRED = {
   message: "This operator action needs an API key or a signed-in wallet.",
 };
 
+export const EXPLICIT_CREDENTIAL_REQUIRED = {
+  error: "explicit_credential_required",
+  message: "This decision needs an API key or a session key in the Authorization header; the sign-in cookie alone can't authorize it.",
+};
+
 const REFUSALS: Record<KernelAction, Record<string, string>> = {
   decide: {
+    error: "forbidden",
+    reason: "operator_proof_required",
+    message:
+      "This needs the gateway admin secret, or proof that you control the kernel's operator wallet (wallet sign-in proof, WP-A). An API key's claimed identity is not proof.",
+  },
+  read: {
     error: "forbidden",
     reason: "operator_proof_required",
     message:
@@ -127,6 +153,9 @@ export interface Refusal {
  */
 export function refuseKernelAction(req: FastifyRequest, a: KernelAuthority, kernelId: string, action: KernelAction): Refusal | null {
   if (a.admin) return null;
+  if (action === "decide" && provenByCookieOnly(a)) {
+    return { status: 403, body: EXPLICIT_CREDENTIAL_REQUIRED };
+  }
   let kernel: { operatorAddress: string } | undefined;
   try {
     const { db } = getStore();
@@ -140,7 +169,7 @@ export function refuseKernelAction(req: FastifyRequest, a: KernelAuthority, kern
     return { status: 503, body: { error: "read_failed", message: "The kernel could not be read to check who operates it. Try again shortly." } };
   }
   if (!kernel) return { status: 404, body: { error: "kernel_not_found", message: "No kernel with this id is registered." } };
-  const allowed = action === "decide" ? mayDecide(a, kernel.operatorAddress) : mayStopOrSubmit(a, kernel.operatorAddress);
+  const allowed = action === "decide" || action === "read" ? mayDecide(a, kernel.operatorAddress) : mayStopOrSubmit(a, kernel.operatorAddress);
   // "operate" (the kernel's own running: heartbeat, capability announce, the device relay) takes
   // the same rule as "stop_or_submit": the kernel's own principal, its proven wallet, or the admin.
   return allowed ? null : { status: 403, body: REFUSALS[action] };

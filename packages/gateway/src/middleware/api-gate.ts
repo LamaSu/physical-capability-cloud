@@ -19,9 +19,12 @@
  *     to the newly public twins skip scopeChecker, as their public GETs do.
  *     scopeChecker is a later onRequest hook, before body parsing; a limited
  *     key can be refused before DHT's route-level 501.
- *   - A prefix or regex entry can only be a read.
- *   - A write is public only as an EXACT public-by-design entry with a
- *     one-line `why`.
+ *   - A prefix entry can only be a read. A write is public only as an EXACT
+ *     entry, or one of W1's two regex writes (one opaque request-id segment,
+ *     then a literal final segment); each has a one-line `why`.
+ *   - PUBLIC_WALLET_LINK_REQUESTS carries W1's device authorization rules.
+ *   - credential: "validate-if-presented" validates credentials on public create.
+ *   - ADMIN_KEY_ROUTES admits the admin secret on private settlement routes.
  *   - OPTIONS is never listed: @fastify/cors answers preflight in its own
  *     onRequest hook, which runs before this one.
  *   - A prefix matches at a path-segment boundary: "/api/health" opens
@@ -42,9 +45,13 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { hasSingleValidAdminKey } from "./relay-admin-gate.js";
 import { nonCanonicalTargetReason, NON_CANONICAL_REFUSAL } from "./canonical-request-target.js";
-import { resolveApiKey } from "../auth/api-key-auth.js";
+import { resolveApiKey, siweSessionKeyAddress } from "../auth/api-key-auth.js";
+import { ownerOf } from "../auth/kernel-authority.js";
 import { resolveSession } from "../auth/siwe-auth.js";
+import { containsKeyMaterial } from "../services/wallet-links/guards.js";
+import { isWalletRequest } from "../services/telemetry-privacy.js";
 
 /** A public read: HEAD follows GET unless explicitly kept authenticated. */
 export interface PublicRead {
@@ -57,13 +64,14 @@ export interface PublicRead {
   readonly why: string;
 }
 
-/** A public-by-design write: POST on one EXACT path, and why a caller with no key must reach it. */
-export interface PublicWrite {
+/** A public-by-design POST: one exact path, or a W1 request-id regex, with its reason. */
+export type PublicWrite = {
   readonly methods: readonly ["POST"];
-  readonly match: "exact";
-  readonly path: string;
   readonly why: string;
-}
+} & (
+  | { readonly match: "exact"; readonly path: string; readonly credential?: "validate-if-presented" }
+  | { readonly match: "regex"; readonly path: RegExp }
+);
 
 export type PublicRoute = PublicRead | PublicWrite;
 
@@ -169,13 +177,28 @@ const PUBLIC_BY_DESIGN_WRITES: PublicWrite[] = [
   { methods: POST, match: "exact", path: "/api/lob/webhook", why: "Lob webhook: timestamp-bound HMAC verified in routes/lob.ts (carrier audit L1)" },
 ];
 
+// ── W1 device authorization: create, fund, proof and poll ────────────
+const PUBLIC_WALLET_LINK_REQUESTS: PublicRoute[] = [
+  { methods: POST, match: "exact", path: "/api/wallets/link-requests", credential: "validate-if-presented", why: "W1 device authorization (RFC 8628 flow A): a CLI or device opens a link request before it holds a key; a presented credential is validated" },
+  { methods: POST, match: "regex", path: /^\/api\/wallets\/link-requests\/[^/]+\/fund$/, why: "W2 testnet faucet claim for an approved link request, by request id, within one hour of approval (cliFundingLink)" },
+  { methods: POST, match: "regex", path: /^\/api\/wallets\/link-requests\/[^/]+\/proof$/, why: "W1: the requested key signs the request message; the route verifies it and burns the request on a failure" },
+  { methods: GET, match: "regex", path: /^\/api\/wallets\/link-requests\/[^/]+$/, why: "W1: the requester polls its link request by request id (rate-limited in the route)" },
+];
+
 /** The entire public allowlist. No other /api/ path skips apiGate. */
 export const PUBLIC_ROUTES: readonly PublicRoute[] = Object.freeze([
   ...PUBLIC_READ_PREFIXES,
   ...PUBLIC_READ_EXACT,
   ...PUBLIC_READ_REGEX,
   ...PUBLIC_BY_DESIGN_WRITES,
+  ...PUBLIC_WALLET_LINK_REQUESTS,
 ].map((entry) => Object.freeze(entry)));
+
+/** Private routes that additionally accept the gateway admin secret; HEAD is explicit. */
+export const ADMIN_KEY_ROUTES = Object.freeze([
+  Object.freeze({ methods: Object.freeze(["POST", "GET", "HEAD"] as const), match: "regex" as const, path: /^\/api\/operator\/jobs\/[^/]+\/receipt$/, why: "N149 gateway receipts: the receipt route also accepts the gateway admin secret itself" }),
+  Object.freeze({ methods: POST, match: "exact" as const, path: "/api/admin/settlement-challenges", why: "N149 one-use settlement challenge issuance: also accepts the gateway admin secret itself" }),
+]);
 
 function pathMatches(entry: PublicRoute, path: string): boolean {
   if (entry.match === "regex") return (entry.path as RegExp).test(path);
@@ -203,6 +226,29 @@ export function isPublicRoute(url: string, method?: string): boolean {
   );
 }
 
+/** Public entries whose presented credential must still pass normal authentication. */
+export function validatesPresentedCredential(url: string, method?: string): boolean {
+  const path = url.split("?")[0];
+  const m = (method ?? "").toUpperCase();
+  const effective = m === "HEAD" ? "GET" : m;
+  return PUBLIC_ROUTES.some(
+    (entry) => "credential" in entry && entry.credential === "validate-if-presented"
+      && (entry.methods as readonly string[]).includes(effective)
+      && !(m === "HEAD" && "head" in entry && entry.head === "authenticated")
+      && pathMatches(entry, path),
+  );
+}
+
+/** True only for the explicitly listed methods and paths in the private admin-key table. */
+export function acceptsAdminKey(url: string, method?: string): boolean {
+  const path = url.split("?")[0];
+  const m = (method ?? "").toUpperCase();
+  return ADMIN_KEY_ROUTES.some(
+    (entry) => (entry.methods as readonly string[]).includes(m)
+      && (entry.match === "regex" ? entry.path.test(path) : path === entry.path),
+  );
+}
+
 /** The retired write surface (N43, steward #2637). */
 const RETIRED_WRITE_PREFIX = "/api/marketplace/";
 
@@ -225,18 +271,35 @@ export function isRetiredWrite(url: string, method?: string): boolean {
 }
 
 async function apiGateImpl(app: FastifyInstance) {
-  app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
-    // A target the router would route differently is never judged (N105; the server-level guard
-    // refuses it first, and this keeps apiGate closed even without that guard).
-    if (nonCanonicalTargetReason(req.url) !== null) return reply.status(400).send(NON_CANONICAL_REFUSAL);
+  const proveSiweWallet = (req: FastifyRequest, address: string | null, carrier: NonNullable<FastifyRequest["provenWalletCarrier"]>) => {
+    // Defensive: in production nothing sets a proof before this onRequest hook.
+    // SSE routes live under /sse/, outside the gate; W1b's self-link hook is a later
+    // preHandler and also keeps an existing proof. Keep a proof an earlier hook set.
+    // A key supplies only its own stored SIWE identity, never a companion cookie's.
+    if (typeof req.provenWallet === "string" && req.provenWallet.length > 0) return;
+    const wallet = ownerOf(address);
+    if (wallet === null || !/^0x[0-9a-f]{40}$/.test(wallet)) return;
+    req.provenWallet = wallet;
+    req.provenWalletVia = "siwe-session";
+    req.provenWalletCarrier = carrier;
+  };
+  const authenticate = async (req: FastifyRequest, reply: FastifyReply) => {
     // Only gate /api/* routes
     if (!req.url.startsWith("/api/")) return;
 
     // Retired marketplace writes: refused before authentication, so no key or session opens them.
     if (isRetiredWrite(req.url, req.method)) return reply.status(410).send(MARKETPLACE_WRITES_RETIRED);
 
-    // Skip public routes
-    if (isPublicRoute(req.url, req.method)) return;
+    const optionalCreate = validatesPresentedCredential(req.url, req.method);
+    if (optionalCreate && req.headers["x-pcc-api-key"] !== undefined) {
+      return reply.status(401).send({ error: "api_key_required",
+        message: "Send the key as Authorization: Bearer <key>; X-PCC-API-Key is not read." });
+    }
+    // A presented credential on create must be validated even though create is public.
+    if (isPublicRoute(req.url, req.method) && !(optionalCreate && req.headers.authorization !== undefined)) return;
+
+    // These private settlement routes also accept the gateway admin secret itself.
+    if (acceptsAdminKey(req.url, req.method) && hasSingleValidAdminKey(req)) return;
 
     // Try API key first (most common for agents)
     const apiKey = resolveApiKey(req);
@@ -244,13 +307,22 @@ async function apiGateImpl(app: FastifyInstance) {
       req.apiKeyId = apiKey.id;
       req.operatorId = apiKey.operatorId;
       req.userId = apiKey.operatorId as `0x${string}`;
+      proveSiweWallet(req, siweSessionKeyAddress(apiKey), "key");
       return;
     }
 
     // Try SIWE session (dashboard users)
-    const session = resolveSession(req);
+    // Preserve legacy cookie authentication after a failed key, but never lend it
+    // wallet proof. Public link creation still refuses that credential fallback.
+    const keyPresented = /^bearer\s+pcc_/i.test(req.headers.authorization ?? "") || req.headers["x-pcc-api-key"] !== undefined;
+    const sessionRequest = optionalCreate ? Object.assign(Object.create(req), { cookies: {} }) as FastifyRequest : req;
+    const session = resolveSession(sessionRequest);
     if (session) {
       req.userId = session.address;
+      // resolveSession is cookie-first. Only an explicit bearer of that same token
+      // can carry its proof; an unrelated/invalid Authorization header cannot upgrade it.
+      if (!keyPresented) proveSiweWallet(req, session.address,
+        req.headers.authorization === `Bearer ${session.token}` ? "bearer-session" : "cookie");
       return;
     }
 
@@ -261,6 +333,20 @@ async function apiGateImpl(app: FastifyInstance) {
       provision_url: "/api/auth/provision",
       docs: "https://capability.network/whitepaper.md",
     });
+  };
+  app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
+    // A target the router would route differently is never judged (N105).
+    if (nonCanonicalTargetReason(req.url) !== null) return reply.status(400).send(NON_CANONICAL_REFUSAL);
+    if (isWalletRequest(req.url) && (req.method === "GET" || req.method === "HEAD") &&
+      (req.headers["transfer-encoding"] !== undefined || Number(req.headers["content-length"] ?? 0) > 0)) {
+      return reply.status(400).send({ error: "invalid_request" });
+    }
+    return authenticate(req, reply);
+  });
+  app.addHook("preValidation", async (req: FastifyRequest, reply: FastifyReply) => {
+    if (!isWalletRequest(req.url)) return;
+    // Root preValidation: I1 precedes route validation and handler persistence.
+    if (containsKeyMaterial(req.body)) return reply.status(400).send({ error: "key_material_refused" });
   });
 }
 

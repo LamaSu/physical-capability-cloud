@@ -907,7 +907,7 @@ function bindA2ABuyer(
 ): { ok: true; params: Record<string, unknown> } | Extract<BuyerBinding, { ok: false }> {
   const named = skillParams.userAgentId;
   if (!named) return { ok: true, params: skillParams };
-  const binding = bindBuyer({ admin, provenWallet: principal.proven }, named);
+  const binding = bindBuyer({ admin, provenWallet: principal.proven, provenWalletVia: principal.proven ? "siwe-session" : null }, named);
   return binding.ok ? { ok: true, params: { ...skillParams, userAgentId: binding.buyer } } : binding;
 }
 

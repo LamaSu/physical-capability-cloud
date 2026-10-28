@@ -154,6 +154,27 @@ describe("N43 (a): the retired marketplace writes are 410 for every caller, and 
     expect(await marketplaceState()).toEqual(before);
   });
 
+  it("E5: the admin secret alone and X-PCC-API-Key still get 410 before authentication without changing the marketplace", async () => {
+    const savedAdminKey = process.env.PCC_ADMIN_KEY;
+    const adminFixture = "n43-marketplace-test-admin";
+    process.env.PCC_ADMIN_KEY = adminFixture;
+    try {
+      const before = await marketplaceState();
+      const write = marketplaceWrites((before.listings.listings as Listing[])[0]!.id)[0]!;
+      for (const headers of [{ "x-admin-key": adminFixture }, { "x-pcc-api-key": apiKey }]) {
+        const res = await send("anonymous", { ...write, headers });
+        expect({ status: res.statusCode, error: body(res).error }).toEqual({
+          status: 410,
+          error: "marketplace_writes_retired",
+        });
+        expect(await marketplaceState()).toEqual(before);
+      }
+    } finally {
+      if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+      else process.env.PCC_ADMIN_KEY = savedAdminKey;
+    }
+  });
+
   it.each(CALLERS)("%s gets 410 for a write the marketplace never registered (default deny: PATCH, or a new POST path)", async (caller) => {
     const before = await marketplaceState();
     const id = (before.listings.listings as Listing[])[0]!.id;
@@ -195,6 +216,16 @@ describe("N43 (a): the retired marketplace writes are 410 for every caller, and 
     expect(res.statusCode).toBe(200);
     expect((body(res).projection as unknown[]).length).toBe(25);
     expect(await marketplaceState()).toEqual(before);
+  });
+});
+
+describe("W1: the public wallet link-request poll", () => {
+  it("E1: an anonymous HEAD reaches the poll route and gets 404 for a nonexistent request", async () => {
+    const res = await send("anonymous", {
+      method: "HEAD",
+      url: `/api/wallets/link-requests/n43-absent-${randomUUID()}`,
+    });
+    expect({ status: res.statusCode, body: res.body }).toEqual({ status: 404, body: "" });
   });
 });
 

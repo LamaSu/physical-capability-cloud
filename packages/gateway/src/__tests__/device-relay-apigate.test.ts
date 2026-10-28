@@ -72,7 +72,10 @@ beforeAll(async () => {
   app = Fastify({ logger: false }); // the router defaults server.ts uses
   app.addHook("onRequest", async (req) => {
     const proven = req.headers[PROVEN];
-    if (typeof proven === "string") (req as unknown as { provenWallet: string }).provenWallet = proven;
+    if (typeof proven === "string") {
+      (req as unknown as { provenWallet: string }).provenWallet = proven;
+      req.provenWalletCarrier = "key";
+    }
   });
   await app.register(cors, { origin: true, methods: ["GET", "POST", "OPTIONS"] });
   await app.register(apiGate);
