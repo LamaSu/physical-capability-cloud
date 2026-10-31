@@ -22,6 +22,7 @@ import { classifyProvisionError, provisionApiKey } from "./api-key-auth.js";
 import { SELF_SERVICE_KEY_SCOPES } from "../middleware/scope-checker.js";
 import { canSiweVerify } from "../middleware/security-hardening.js";
 import { auditService } from "../services/audit-service.js";
+import { walletLinkConfig } from "../services/wallet-links/config.js";
 
 // ---------------------------------------------------------------------------
 // In-memory nonce store (ephemeral, no DB persistence needed)
@@ -300,12 +301,31 @@ export async function siweAuthPlugin(app: FastifyInstance) {
         .send({ error: "Invalid SIWE message format" });
     }
 
-    // Validate domain matches this server (prevents cross-site SIWE replay attacks)
-    const expectedHost = req.hostname;
+    // Bind sign-in to the configured deployment, independently of proxy headers.
+    let config: ReturnType<typeof walletLinkConfig>;
+    try {
+      config = walletLinkConfig();
+    } catch {
+      return reply.status(503).send({ error: "Sign-in unavailable" });
+    }
+    const { domain: expectedHost, publicOrigin } = config;
     if (parsed.domain !== expectedHost) {
       return reply.status(401).send({
         error: "Domain mismatch",
-        message: `SIWE message domain '${parsed.domain}' does not match server '${expectedHost}'`,
+        message: `SIWE message domain must be '${expectedHost}'`,
+      });
+    }
+
+    let uriOrigin: string | undefined;
+    try {
+      uriOrigin = new URL(parsed.uri).origin;
+    } catch {
+      // An unparseable URI is refused by the same origin check below.
+    }
+    if (uriOrigin !== publicOrigin) {
+      return reply.status(401).send({
+        error: "URI mismatch",
+        message: `SIWE message URI must be on ${publicOrigin}`,
       });
     }
 

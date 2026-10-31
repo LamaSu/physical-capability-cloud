@@ -91,10 +91,10 @@ describe("non-ok signature reason mappings", () => {
     const app = await buildSiweApp();
     const nonceResponse = await app.inject({ method: "GET", url: "/api/auth/nonce", remoteAddress });
     expect(nonceResponse.statusCode).toBe(200);
-    const message = createSiweMessage({ address, domain: "localhost", uri: "http://localhost", version: "1",
+    const message = createSiweMessage({ address, domain: "capability.network", uri: "https://capability.network", version: "1",
       chainId: 84532, nonce: nonceResponse.json().nonce, issuedAt: new Date(), statement: "Sign in to PCC" });
     const sessionsBefore = getRepos().sessions.countActive();
-    const request = { method: "POST" as const, url: "/api/auth/verify", headers: { host: "localhost" },
+    const request = { method: "POST" as const, url: "/api/auth/verify", headers: { host: "capability.network" },
       payload: { message, signature }, remoteAddress };
     const response = await app.inject(request);
     expect(response.statusCode).toBe(siweStatus);
