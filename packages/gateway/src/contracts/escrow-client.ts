@@ -76,7 +76,7 @@ import {
 
 const PCC_NETWORK = process.env.PCC_NETWORK ?? "base-sepolia";
 
-function resolveChainConfig(): { chain: Chain; rpcUrl: string } {
+export function resolveChainConfig(): { chain: Chain; rpcUrl: string } {
   try {
     const deployment = getDeployment(PCC_NETWORK);
     return {
@@ -142,7 +142,7 @@ let _publicClient: PublicClient | undefined;
 let _walletClient: WalletClient | undefined;
 let _account: Account | undefined;
 
-function getPublicClient(): PublicClient {
+export function getPublicClient(): PublicClient {
   if (!_publicClient) {
     const { chain, rpcUrl } = resolveChainConfig();
     _publicClient = createPublicClient({

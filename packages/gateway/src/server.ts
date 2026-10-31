@@ -40,6 +40,7 @@ import { startRoutes } from "./routes/start.js";
 import { marketplaceRoutes } from "./routes/marketplace.js";
 import { spaceRoutes } from "./routes/spaces.js";
 import { operatorRoutes } from "./routes/operator.js";
+import { kernelPayoutRoutes } from "./routes/kernel-payout.js";
 import { operatorWorkRoutes } from "./routes/operator-work.js";
 import { productHomeRoutes } from "./routes/product-home.js";
 import { operatorsPublicRoutes } from "./routes/operators-public.js";
@@ -702,6 +703,7 @@ export async function createGateway(port = 3200) {
   await app.register(registrySnapshotRoutes);
   await app.register(spaceRoutes);
   await app.register(operatorRoutes);
+  await app.register(kernelPayoutRoutes);
   await app.register(walletsRoutes);
   await app.register(walletFaucetRoutes);
   await app.register(operatorWorkRoutes);
