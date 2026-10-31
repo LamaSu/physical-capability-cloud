@@ -25,6 +25,7 @@ export * from "./simulate.js";
 export * from "./bind.js";
 export * from "./adapters.js";
 export * from "./examples.js";
+export * from "./templates.js";
 export * from "./kits.js";
 export * from "./preview.js";
 export * from "./rates.js";
