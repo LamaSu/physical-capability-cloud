@@ -22,7 +22,7 @@ import {
   populateJobDetailDTO,
   populateJobList,
 } from "./populators/job.populator.js";
-import { getKernelService } from "../services/kernel-service.js";
+import { getKernelService, type LocalRunQueueReason } from "../services/kernel-service.js";
 import { localJobDispatchDecision } from "../services/local-job-dispatch.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
@@ -84,7 +84,7 @@ export interface JobSubmitResult {
   jobId: string;
   deviceId: string | null;
   status: "queued" | "accepted";
-  reason?: Extract<ReturnType<typeof localJobDispatchDecision>, { ok: false }>["reason"];
+  reason?: LocalRunQueueReason;
 }
 
 export interface JobStatusResult {
@@ -270,6 +270,7 @@ export class JobFacade extends BaseFacade {
    */
   async submit(
     body: SubmitJobInput,
+    localRunAuthority: "decide" | "none",
     actorId?: string,
     ip?: string,
     userAgent?: string,
@@ -325,7 +326,7 @@ export class JobFacade extends BaseFacade {
         // KernelService not initialized — treat as external kernel path
       }
 
-      const queued = (reason: Extract<ReturnType<typeof localJobDispatchDecision>, { ok: false }>["reason"]) => {
+      const queued = (reason: LocalRunQueueReason) => {
         pipelineTelemetry.emit(jobId, "job_submit", "completed", {
           metadata: { kernelId, stepId, external: true, reason },
         });
@@ -348,7 +349,10 @@ export class JobFacade extends BaseFacade {
 
       // Local kernel: fire-and-forget via KernelService
       try {
-        const result = await svc!.submitJob({ jobId, kernelId, stepId, deviceId, gcodeHash, assuranceTier });
+        const result = await svc!.submitJob({ jobId, kernelId, stepId, deviceId, gcodeHash, assuranceTier, localRunAuthority });
+        if (result.status === "refused") {
+          throw new ConflictError("This gateway does not run the named device.", "device_not_runnable_here");
+        }
         // The stop or operator switch may have changed during safety preflight.
         if (result.status === "queued") return queued(result.reason);
         pipelineTelemetry.emit(result.jobId, "job_submit", "completed", {

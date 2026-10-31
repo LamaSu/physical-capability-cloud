@@ -15,6 +15,7 @@ import { gateJobRead, refuseJobRead } from "../readmodels/job-read-gate.js";
 import type { SubmitJobInput, RegisterDeviceInput } from "../facades/index.js";
 import { getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
+import { authorityOf, refuseKernelAction } from "../auth/kernel-authority.js";
 
 const { operatorPolicies, captureVerdicts, captureAnchors } = schema;
 
@@ -230,8 +231,12 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
         }
       }
 
+      const localRunAuthority = typeof kernelId === "string" && kernelId.length > 0
+        && refuseKernelAction(req, authorityOf(req), kernelId, "decide") === null
+        ? "decide" : "none";
       const result = await facade.submit(
         req.body,
+        localRunAuthority,
         actorId,
         req.ip,
         req.headers["user-agent"],

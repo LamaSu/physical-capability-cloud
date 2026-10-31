@@ -7,6 +7,8 @@ import { createHash } from "node:crypto";
  *   -> consent.ts at e5404d0f (prod since 2026-10-15 21:22 PDT).
  * 24480b7fd41e13804038619c248b398cd247d009729a8ff69d98b486c8b0dc19
  *   -> consent.ts at 062663b5f (#647, merged as dce2676c at 2026-10-16 00:43 PDT; on staging from about 01:15 PDT; prod since 2026-10-16 19:25 PDT, with 4c99f0ce).
+ * 759f2d8945c1ca8dde417829792dc63ec3b3d43be8718d682e0b815897b86f9b
+ *   -> consent.ts after CODE #52 (its "What jobs cost:" line); the merge, staging and prod times are added after the merge.
  * The hash covers only CONSENT_TEMPLATES' text. TESTNET_FUNDING and CONSENT_VERSION are outside it, so an amount change needs a new hash: edit the template, or hash it with the amounts filled in.
  */
 export const CONSENT_VERSION = "wallet-link-v1";
@@ -24,7 +26,7 @@ Wallet: {key} on Base Sepolia (test network, chain 84532).
 Who holds the key: the key was created on that computer and has not been sent to PCC. PCC cannot see, use or recover it. If it is lost, so is anything it holds.
 What linking lets it do for your account {accountName}: {permissions}
 Spending limit: {spendingLimit}
-What jobs cost: every job is priced all-in before anything is funded. The operator's price, PCC's fee and the pass-through costs PCC pays vendors for you (postage, printing services, carriers) each get their own line. A pass-through amount goes to PCC only when the vendor's work is evidenced (for postage, the carrier's acceptance scan); unused amounts are refunded.
+What jobs cost: every job is priced all-in before anything is funded. Some jobs include pass-through costs that PCC pays vendors for you (postage, printing services, carriers). A pass-through amount goes to PCC only when the vendor's work is evidenced (for postage, the carrier's acceptance scan); unused amounts are refunded.
 Funding: {funding} Test funds have no value. On mainnet PCC never funds wallets; you add funds yourself (Onramp or transfer).
 How long: {duration}
 Undo: Wallets → {label} → Unlink. PCC then refuses this key's signatures for your account at once. Unlinking doesn't move funds; on mainnet, revoke its spending permission in your wallet too (we show you how).
