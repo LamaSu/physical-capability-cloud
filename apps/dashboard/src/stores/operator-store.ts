@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import type { EarningsPeriod } from "@pcc/ui";
 
-type OperatorTab = "inbox" | "overview" | "approvals" | "earnings" | "certifications" | "maintenance";
+type OperatorTab = "inbox" | "overview" | "approvals";
 
 interface OperatorState {
   selectedMachineId: string | null;

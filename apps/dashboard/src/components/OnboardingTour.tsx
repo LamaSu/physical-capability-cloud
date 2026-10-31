@@ -25,7 +25,6 @@ const tourSteps: TourStep[] = [
   { id: "ai-setup", title: "AI-Powered Setup", content: "Upload manufacturer datasheets and documentation. The AI extracts capabilities, substrates, detection limits, and parameters automatically — just review and accept." },
   { id: "marketplace", title: "Instrument Marketplace", content: "Explore demand heatmaps, supply gaps across the network, price trends, and ROI projections. Find the most profitable instruments to bring online." },
   { id: "find-space", title: "Find a Space", content: "Browse hosting locations that match your instrument's power, environmental, and safety requirements. Filter by price, access schedule, and amenities." },
-  { id: "operator-dash", title: "Operator Dashboard", content: "Monitor instrument health, track earnings over time, manage certifications, and schedule maintenance — all in one place." },
   { id: "grow-network", title: "Growing the Network", content: "Every instrument you onboard expands the Physical Capability Cloud. Earn from every job your instrument completes on the network." },
 ];
 
