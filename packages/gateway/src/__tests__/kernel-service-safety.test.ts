@@ -274,18 +274,18 @@ describe("KernelService.submitJob — real device failures trip the breaker", ()
     const svc = new KernelService(config);
 
     // Job 1 — fails.
-    await svc.submitJob({ kernelId: config.kernelId, jobId: "ks-fail-1", stepId: "s", assuranceTier: 0, deviceId: "dev-fail" });
+    await svc.submitJob({ localRunAuthority: "decide", kernelId: config.kernelId, jobId: "ks-fail-1", stepId: "s", assuranceTier: 0, deviceId: "dev-fail" });
     await waitFor(() => (gw.getStatus().circuits.get("dev-fail")?.failures ?? 0) >= 1);
     expect(gw.getStatus().circuits.get("dev-fail")?.state).toBe("closed"); // 1 of 2
 
     // Job 2 — fails → trips.
-    await svc.submitJob({ kernelId: config.kernelId, jobId: "ks-fail-2", stepId: "s", assuranceTier: 0, deviceId: "dev-fail" });
+    await svc.submitJob({ localRunAuthority: "decide", kernelId: config.kernelId, jobId: "ks-fail-2", stepId: "s", assuranceTier: 0, deviceId: "dev-fail" });
     await waitFor(() => gw.getStatus().circuits.get("dev-fail")?.state === "open");
     expect(gw.getStatus().circuits.get("dev-fail")?.state).toBe("open");
 
     // Job 3 — blocked by the tripped breaker (admission rejects before accepting).
     await expect(
-      svc.submitJob({ kernelId: config.kernelId, jobId: "ks-fail-3", stepId: "s", assuranceTier: 0, deviceId: "dev-fail" }),
+      svc.submitJob({ localRunAuthority: "decide", kernelId: config.kernelId, jobId: "ks-fail-3", stepId: "s", assuranceTier: 0, deviceId: "dev-fail" }),
     ).rejects.toThrow(/circuit_open|denied/i);
   });
 });
@@ -334,10 +334,10 @@ async function busyRefusalsAreNotFailures(kernelId: string): Promise<void> {
   };
 
   // Job 1 runs, and holds the device until its adapter answers.
-  await svc.submitJob({ kernelId, jobId: "ks-busy-1", stepId: "s", assuranceTier: 0, deviceId: "dev-held" });
+  await svc.submitJob({ localRunAuthority: "decide", kernelId, jobId: "ks-busy-1", stepId: "s", assuranceTier: 0, deviceId: "dev-held" });
   // Jobs 2 and 3 are refused busy: twice the breaker's threshold, were refusals failures.
   for (const jobId of ["ks-busy-2", "ks-busy-3"]) {
-    await svc.submitJob({ kernelId, jobId, stepId: "s", assuranceTier: 0, deviceId: "dev-held" });
+    await svc.submitJob({ localRunAuthority: "decide", kernelId, jobId, stepId: "s", assuranceTier: 0, deviceId: "dev-held" });
     await waitDone(jobId);
   }
   expect(heldAdapter?.commands, "commands the device received: job 1's only").toEqual(["load_gcode", "start"]);
@@ -345,7 +345,7 @@ async function busyRefusalsAreNotFailures(kernelId: string): Promise<void> {
   expect.soft(gw.getStatus().circuits.get("dev-held")?.failures ?? 0, "device failures recorded").toBe(0);
   expect.soft(gw.getStatus().circuits.get("dev-held")?.state ?? "closed", "the breaker").toBe("closed");
   await expect.soft(
-    svc.submitJob({ kernelId, jobId: "ks-busy-4", stepId: "s", assuranceTier: 0, deviceId: "dev-held" }),
+    svc.submitJob({ localRunAuthority: "decide", kernelId, jobId: "ks-busy-4", stepId: "s", assuranceTier: 0, deviceId: "dev-held" }),
     "job 4's admission",
   ).resolves.toMatchObject({ status: "accepted" });
   await waitDone("ks-busy-4").catch(() => {});
@@ -454,7 +454,7 @@ describe.each(["Sentry span", "Sentry fallback"])("N104 local dispatch final def
     if (stopped) stopDispatchKernel();
     const run = vi.spyOn(JobRunner.prototype, "run");
     const preflight = vi.spyOn(getSafetyGateway(), "validateOnly");
-    await expect(svc.submitJob({ jobId: "n104-blocked", kernelId: jobKernelId, stepId: "s" }))
+    await expect(svc.submitJob({ localRunAuthority: "decide", jobId: "n104-blocked", kernelId: jobKernelId, stepId: "s" }))
       .resolves.toEqual({ jobId: "n104-blocked", deviceId: null, status: "queued", reason });
     expect(preflight).not.toHaveBeenCalled();
     expect(run).not.toHaveBeenCalled();
@@ -465,7 +465,7 @@ describe.each(["Sentry span", "Sentry fallback"])("N104 local dispatch final def
     applyUnavailablePolicy(DISPATCH_KERNEL, policyCase);
     const run = vi.spyOn(JobRunner.prototype, "run");
     const preflight = vi.spyOn(getSafetyGateway(), "validateOnly");
-    await expect(svc.submitJob({ jobId: "n104-unavailable", kernelId: DISPATCH_KERNEL, stepId: "s" }))
+    await expect(svc.submitJob({ localRunAuthority: "decide", jobId: "n104-unavailable", kernelId: DISPATCH_KERNEL, stepId: "s" }))
       .resolves.toEqual({ jobId: "n104-unavailable", deviceId: null, status: "queued", reason: "policy_unavailable" });
     expect(preflight).not.toHaveBeenCalled();
     expect(run).not.toHaveBeenCalled();
@@ -475,7 +475,7 @@ describe.each(["Sentry span", "Sentry fallback"])("N104 local dispatch final def
     vi.stubEnv("PCC_JOB_SUBMIT_QUEUE_ONLY", flag);
     const svc = dispatchService();
     const run = vi.spyOn(JobRunner.prototype, "run").mockResolvedValue({ success: true, durationMs: 0 });
-    await expect(svc.submitJob({ jobId: "n104-matched", kernelId: DISPATCH_KERNEL, stepId: "s" }))
+    await expect(svc.submitJob({ localRunAuthority: "decide", jobId: "n104-matched", kernelId: DISPATCH_KERNEL, stepId: "s" }))
       .resolves.toMatchObject({ deviceId: "dev-n104", status: "accepted" });
     expect(run).toHaveBeenCalledTimes(1);
   });
@@ -488,7 +488,7 @@ describe.each(["Sentry span", "Sentry fallback"])("N104 local dispatch final def
       stopDispatchKernel();
       return { allowed: true, executed: false };
     });
-    await expect(svc.submitJob({ jobId: "n104-preflight-stop", kernelId: DISPATCH_KERNEL, stepId: "s" }))
+    await expect(svc.submitJob({ localRunAuthority: "decide", jobId: "n104-preflight-stop", kernelId: DISPATCH_KERNEL, stepId: "s" }))
       .resolves.toMatchObject({ status: "queued" });
     expect(run).not.toHaveBeenCalled();
     expect(Sentry.startSpanManual).not.toHaveBeenCalled();
@@ -503,7 +503,7 @@ describe.each(["Sentry span", "Sentry fallback"])("N104 local dispatch final def
       if (path === "Sentry fallback") throw new Error("Sentry unavailable");
       cb({ end: vi.fn(), setStatus: vi.fn() });
     });
-    await expect(svc.submitJob({ jobId: "n104-runner-stop", kernelId: DISPATCH_KERNEL, stepId: "s" }))
+    await expect(svc.submitJob({ localRunAuthority: "decide", jobId: "n104-runner-stop", kernelId: DISPATCH_KERNEL, stepId: "s" }))
       .resolves.toEqual({
         jobId: "n104-runner-stop", deviceId: null, status: "queued",
         reason: blocker === "emergency stop" ? "emergency_stop" : "queue_only",
@@ -530,7 +530,7 @@ describe.each(["Sentry span", "Sentry fallback"])("N104 local dispatch final def
       if (path === "Sentry fallback") throw new Error("Sentry unavailable");
       cb({ end: vi.fn(), setStatus: vi.fn() });
     });
-    await expect(svc.submitJob({ jobId: "n104-persisted", kernelId: DISPATCH_KERNEL, stepId: "s" }))
+    await expect(svc.submitJob({ localRunAuthority: "decide", jobId: "n104-persisted", kernelId: DISPATCH_KERNEL, stepId: "s" }))
       .resolves.toEqual({ jobId: "n104-persisted", deviceId: null, status: "queued", reason: "emergency_stop" });
     expect(run).not.toHaveBeenCalled();
     expect(getRepos().jobs.findById("n104-persisted")?.status).toBe("queued");
@@ -545,7 +545,7 @@ describe("N104 explicit local configuration", () => {
     const svc = new KernelService();
     expect(svc.hasExplicitConfig).toBe(false);
     const run = vi.spyOn(JobRunner.prototype, "run");
-    await expect(svc.submitJob({ jobId: "default-blocked", kernelId: svc.kernelId, stepId: "s" }))
+    await expect(svc.submitJob({ localRunAuthority: "decide", jobId: "default-blocked", kernelId: svc.kernelId, stepId: "s" }))
       .resolves.toEqual({ jobId: "default-blocked", deviceId: null, status: "queued", reason: "no_configured_local_kernel" });
     expect(run).not.toHaveBeenCalled();
   });
@@ -572,7 +572,7 @@ describe("N104 explicit local configuration", () => {
     const svc = dispatchService({ kernelId: "kernel_dev_001" });
     expect(svc.hasExplicitConfig).toBe(true);
     const run = vi.spyOn(JobRunner.prototype, "run");
-    await expect(svc.submitJob({ jobId: "placeholder-blocked", kernelId: "kernel_dev_001", stepId: "s" }))
+    await expect(svc.submitJob({ localRunAuthority: "decide", jobId: "placeholder-blocked", kernelId: "kernel_dev_001", stepId: "s" }))
       .resolves.toEqual({ jobId: "placeholder-blocked", deviceId: null, status: "queued", reason: "no_configured_local_kernel" });
     expect(run).not.toHaveBeenCalled();
   });
@@ -605,7 +605,7 @@ it("does not dispatch a second runner if Sentry throws after invoking the callba
     cb({ end: vi.fn(), setStatus: vi.fn() });
     throw new Error("Sentry failed after dispatch");
   });
-  await expect(svc.submitJob({ jobId: "n104-once", kernelId: DISPATCH_KERNEL, stepId: "s" }))
+  await expect(svc.submitJob({ localRunAuthority: "decide", jobId: "n104-once", kernelId: DISPATCH_KERNEL, stepId: "s" }))
     .resolves.toEqual({ jobId: "n104-once", deviceId: "dev-n104", status: "accepted" });
   expect(run).toHaveBeenCalledTimes(1);
 });

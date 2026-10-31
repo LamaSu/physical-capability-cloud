@@ -338,6 +338,7 @@ describe("KernelService.submitJob — Sentry spans", () => {
     const svc = getKernelService();
 
     await svc.submitJob({
+      localRunAuthority: "decide",
       jobId: "job-tracing-ks-001",
       kernelId: mockKernelConfig.kernelId,
       stepId: "step-ks-tracing",
@@ -359,6 +360,7 @@ describe("KernelService.submitJob — Sentry spans", () => {
     const svc = getKernelService();
 
     await svc.submitJob({
+      localRunAuthority: "decide",
       jobId: "job-tracing-ks-002",
       kernelId: mockKernelConfig.kernelId,
       stepId: "step-ks-attrs",
