@@ -26,7 +26,7 @@ work in a specific capability_type. The shape is:
 |---|---|---|
 | `capabilityType` | yes | e.g. `courier.dispatch`, `pizza.order`, `lab.hplc`, `opentrons.runProtocol`, `chemistry.synthesize`, `cnc.run`, `creative.commission` |
 | `requirements` | yes | Category-specific opaque JSON. Validated against the registered schema for the capability_type when one exists (graceful degrade — accepted with `requirementsValidated:false` when no schema is registered yet) |
-| `pricing` | yes | `{ amount: number, currency: "USD" \| "USDC" \| "ETH" \| ..., model: "fixed" \| "quote-required" \| "per-unit", unit?: string }` |
+| `pricing` | yes | `{ amount: number, currency: "USD" \| "USDC" \| "ETH" \| ..., model: "fixed" \| "quote-required" \| "per-unit", unit?: string }`. With `quote-required`, send a placeholder `amount` (for example 0): the price comes from the quote, and GET /api/operator/work shows that offer's pay as unknown. An offer reads back with `amount: null` only when it is a courier job posted without `feeUSD`. |
 | `serviceAreaGeofence` | no | Optional GeoJSON polygon for area-bound capabilities (couriers, drone surveys, in-person services) |
 | `deadline` | no | Optional hard deadline (ISO timestamp). Used by scheduled categories |
 | `assuranceTier` | no | 0..3 — per PCC's tier model (see CLAUDE.md §7) |

@@ -20,7 +20,7 @@ function work(patch: Partial<OperatorWorkItem> = {}): OperatorWorkItem {
 function dto(patch: Partial<OperatorWorkDTO> = {}): OperatorWorkDTO {
   const read = { state: "read", durability: "durable", count: 0, reason: null } as const;
   return {
-    schemaId: "pcc.operator-work/v1", asOf: "2026-10-10T12:00:00Z", kernels: [{ kernelId: "k", name: "kernel" }],
+    schemaId: "pcc.operator-work/v1", asOf: "2026-10-10T12:00:00Z", kernels: [{ kernelId: "k", name: "kernel", capabilityTypes: ["fdm"] }],
     items: [work()], total: 1, offset: 0, truncated: false, nextOffset: null, snapshot: "snapshot",
     sources: { approval: read, kernel_job: read, skill_job: read, job_offer: read }, ...patch,
   };

@@ -36,6 +36,7 @@ import {
 } from "@pcc/spec";
 import { createHash } from "node:crypto";
 import { schema, eq, and } from "@pcc/store";
+import { filterCapabilitiesByTtl } from "../facades/capability.facade.js";
 import type { JobOffer, JobOfferEvent } from "../services/job-offers-store.js";
 import { extractRequirementsCoords } from "../services/job-offers-store.js";
 import {
@@ -62,6 +63,7 @@ export interface CapabilityLite {
   kernelId: string;
   type: string;
   name?: string | null;
+  validUntil?: string | null;
 }
 
 export interface ApprovalRow {
@@ -97,9 +99,10 @@ export interface OperatorWorkSources {
   capabilities: SourceRead<CapabilityLite[]>;
   kernelJobs: SourceRead<KernelJobSource[]>;
   approvals: SourceRead<ApprovalRow[]>;
-  /** Job offers are kept in process memory by the gateway (write-through, best effort). */
+  /** Job offers are written through to SQLite when the store has its handle; kept in memory only otherwise. */
   claimedOffers: SourceRead<Array<{ offer: JobOffer; events: JobOfferEvent[] }>>;
   openOffers: SourceRead<JobOffer[]>;
+  offersDurability?: "durable" | "memory";
 }
 
 /** What the job-offers store must offer this read model. */
@@ -107,6 +110,7 @@ export interface OffersReader {
   listOpen(filters?: { capabilityType?: string }): JobOffer[];
   listClaimedBy(kernelIds: ReadonlySet<string>): JobOffer[];
   getEvents(id: string): JobOfferEvent[];
+  isDurable?(): boolean;
 }
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -213,7 +217,8 @@ export function loadOperatorWorkSources(
     return offers.listOpen({});
   });
 
-  return { kernels, capabilities, kernelJobs, approvals, claimedOffers, openOffers };
+  const offersDurability = offers?.isDurable?.() === true ? "durable" : "memory";
+  return { kernels, capabilities, kernelJobs, approvals, claimedOffers, openOffers, offersDurability };
 }
 
 /** The disputes filed against one milestone (by its step) of one escrow. */
@@ -374,7 +379,7 @@ export function offerPay(offer: JobOffer): OperatorWorkPay {
   const p = offer.pricing as Partial<JobOffer["pricing"]> | undefined;
   const currency = nonEmpty(p?.currency);
   const decimals = currencyDecimals(currency);
-  const amount = typeof p?.amount === "number" && Number.isFinite(p.amount) && p.amount >= 0 ? String(p.amount) : null;
+  const amount = p?.model !== "quote-required" && typeof p?.amount === "number" && Number.isFinite(p.amount) && p.amount >= 0 ? String(p.amount) : null;
   const model =
     p?.model === "fixed" ? "fixed" : p?.model === "quote-required" ? "quote_required" : p?.model === "per-unit" ? "per_unit" : "unknown";
   return {
@@ -630,11 +635,16 @@ export function buildOperatorWorkDTO(src: OperatorWorkSources, asOf: string, opt
   const kernelById = new Map(src.kernels.map((k) => [k.id, k]));
   const caps = src.capabilities.ok ? src.capabilities.value : [];
   const capById = new Map(caps.map((c) => [c.id, c]));
+  const currentCaps = filterCapabilitiesByTtl(caps, new Date(opts.nowMs));
   const kernelsByType = new Map<string, string[]>();
-  for (const c of caps) {
+  const typesByKernel = new Map<string, Set<string>>();
+  for (const c of currentCaps) {
     const list = kernelsByType.get(c.type) ?? [];
     if (!list.includes(c.kernelId)) list.push(c.kernelId);
     kernelsByType.set(c.type, list);
+    const types = typesByKernel.get(c.kernelId) ?? new Set<string>();
+    types.add(c.type);
+    typesByKernel.set(c.kernelId, types);
   }
 
   const items: OperatorWorkItem[] = [];
@@ -696,7 +706,11 @@ export function buildOperatorWorkDTO(src: OperatorWorkSources, asOf: string, opt
   return {
     schemaId: OPERATOR_WORK_SCHEMA_ID,
     asOf,
-    kernels: src.kernels.map((k) => ({ kernelId: k.id, name: nonEmpty(k.name) })),
+    kernels: src.kernels.map((k) => ({
+      kernelId: k.id,
+      name: nonEmpty(k.name),
+      capabilityTypes: src.capabilities.ok ? [...(typesByKernel.get(k.id) ?? [])].sort() : null,
+    })),
     items: shown.page,
     total: shown.total,
     offset: shown.offset,
@@ -710,7 +724,7 @@ export function buildOperatorWorkDTO(src: OperatorWorkSources, asOf: string, opt
         ...(src.kernelJobs.ok && !src.capabilities.ok ? { reason: CAPABILITY_NAMES_UNREAD } : {}),
       },
       approval: sourceState(src.approvals, "durable", "The gateway's approval records could not be read.", approvalOnlyCount),
-      job_offer: sourceState(offersRead, "memory", "The job-offers store, or the capabilities offers are matched against, could not be read.", offersCount),
+      job_offer: sourceState(offersRead, src.offersDurability ?? "memory", "The job-offers store, or the capabilities offers are matched against, could not be read.", offersCount),
       skill_job: { state: "not_attributable", durability: "durable", count: 0, reason: SKILL_JOBS_NOT_ATTRIBUTABLE },
     } satisfies Record<OperatorWorkSource, OperatorWorkSourceState>,
   };

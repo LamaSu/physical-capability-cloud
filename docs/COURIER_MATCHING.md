@@ -68,6 +68,8 @@ Content-Type: application/json
 
 Returns 201 with `{ ok, id, status: "open", verified, validUntil, feedUrl }`.
 
+`feeUSD` is optional. A job posted without it reads back with `feeUSD: null`, and its job offer with `pricing.amount: null`. PCC never fills in 0.
+
 If `sourceVerifyUrl` is provided, the gateway GETs it before accepting the
 post. A 4xx/5xx response or `placed:false`/`valid:false` body fails the
 create with HTTP 400 `source_verify_failed`. Re-verification runs every 60s
@@ -117,7 +119,7 @@ Status transitions: `pickup` → `in_transit`; `delivered` → `delivered`;
 
 - `PATCH /api/courier-jobs/:id` — update `pickupReadyAt`, `feeUSD`,
   `description`, or `validUntil`. Ownership check: caller's API-key
-  `operatorId` must match the original `postedBy`. Otherwise 403.
+  `operatorId` must match the original `postedBy`. Otherwise 403. Sending `feeUSD: null` clears it; it then reads back as `null`.
 - `DELETE /api/courier-jobs/:id` — set status to `cancelled`. Same
   ownership check.
 - `POST /api/courier-jobs/:id/heartbeat` — refresh `lastHeartbeatAt`.
