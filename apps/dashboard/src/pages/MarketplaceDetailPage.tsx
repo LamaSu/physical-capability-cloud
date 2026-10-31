@@ -94,7 +94,7 @@ export function MarketplaceDetailPage() {
           onClick={() => navigate("/onboard/wizard")}
           className="px-6 py-2.5 rounded-lg text-sm font-medium bg-green-500/20 border border-green-500/30 text-green-400 hover:bg-green-500/30 transition-all"
         >
-          Register a {ec.name} &rarr;
+          Describe your {ec.name} &rarr;
         </button>
       </div>
     </div>
