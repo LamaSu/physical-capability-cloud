@@ -46,10 +46,6 @@ All endpoints are relative to the base URL above. Most return JSON.
 | GET | /api/capabilities | List all registered capability instances |
 | GET | /api/capabilities/types | List capability type identifiers |
 | GET | /api/capabilities/templates | List capability templates with full details |
-| GET | /api/marketplace/classes | Browse marketplace capability classes |
-| GET | /api/marketplace/classes/:id | Get marketplace class details |
-| GET | /api/marketplace/demand-supply | Demand/supply analytics |
-| POST | /api/marketplace/roi | Calculate ROI for a capability class |
 | GET | /api/kernels | List Shop Kernels (physical sites), filter by ?status= |
 | GET | /api/kernels/:kernelId | Get kernel details + capabilities + devices |
 | GET | /api/kernels/:kernelId/devices | List devices at a kernel |
@@ -151,13 +147,6 @@ All endpoints are relative to the base URL above. Most return JSON.
 | GET | /api/onboard/check/:code | Check onboarding code validity |
 | GET | /api/onboard/status | Onboarding pipeline status |
 
-### Device Discovery
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | /api/discover/scan | Scan local network for devices (mDNS/IPP) |
-| POST | /api/discover/generate-csd | Generate a CSD from a discovered device |
-| POST | /api/discover/onboard | Full pipeline: discover, generate CSD, register device, register CSD |
-
 ### CSD (Capability StructureDefinitions)
 | Method | Path | Description |
 |--------|------|-------------|
@@ -184,24 +173,6 @@ All endpoints are relative to the base URL above. Most return JSON.
 | POST | /api/batches/shared | Create a shared batch |
 | GET | /api/batches/shared/open | List open shared batches |
 | GET | /api/batches/shared/:batchId | Get shared batch details |
-
-### Protocols (Multi-Step Workflows)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /api/protocols/:id | Get protocol template |
-| POST | /api/protocols | Create a new protocol template |
-| PUT | /api/protocols/:id | Update a protocol template |
-| POST | /api/protocols/:id/publish | Publish a protocol |
-| POST | /api/protocols/:id/fork | Fork a protocol |
-| GET | /api/protocols/:id/forks | List forks of a protocol |
-| GET | /api/protocols/:id/runs | List runs of a protocol |
-| POST | /api/protocols/:id/runs | Start a new protocol run |
-| POST | /api/protocols/:id/validate | Validate a protocol |
-| GET | /api/protocol-runs/:runId | Get protocol run details |
-| POST | /api/protocol-runs/:runId/start | Start a protocol run |
-| POST | /api/protocol-runs/:runId/pause | Pause a protocol run |
-| POST | /api/protocol-runs/:runId/resume | Resume a protocol run |
-| POST | /api/protocol-runs/:runId/cancel | Cancel a protocol run |
 
 ### DePIN Rewards & Certificates
 | Method | Path | Description |
@@ -250,43 +221,9 @@ All endpoints are relative to the base URL above. Most return JSON.
 | POST | /api/faucet/usdc | Request testnet USDC |
 | GET | /api/faucet/usdc | Faucet status |
 
-### Spaces (Equipment Hosting)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /api/spaces | List available hosting spaces |
-| GET | /api/spaces/:id | Get space details |
-| POST | /api/spaces/match | Match equipment to spaces |
-
-### Logistics
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /api/logistics/providers | List logistics providers |
-| GET | /api/logistics/providers/:id | Get provider details |
-| GET | /api/logistics/shipments | List shipments |
-| GET | /api/logistics/shipments/:id | Get shipment details |
-| POST | /api/logistics/shipments/quote | Get shipping quote |
-| GET | /api/logistics/bookings | List bookings |
-| GET | /api/logistics/bookings/:id | Get booking details |
-| GET | /api/logistics/installations | List installations |
-| GET | /api/logistics/installations/:id | Get installation details |
-| GET | /api/logistics/timeline | Logistics timeline |
-| GET | /api/logistics/summary | Logistics summary dashboard |
-
-### Orchestrator (Multi-Instrument Workflows)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /api/orchestrator/graphs | List transfer graphs |
-| GET | /api/orchestrator/graphs/:kernelId | Get kernel transfer graph |
-| GET | /api/orchestrator/samples/:sampleId | Get sample routing info |
-| GET | /api/orchestrator/claims | List orchestrator claims |
-| POST | /api/orchestrator/workflows | Create an orchestration workflow |
-| GET | /api/orchestrator/workflows/:workflowId | Get workflow details |
-
 ### Agents & Negotiation
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | /api/agents/conversations | List agent conversations |
-| GET | /api/agents/conversations/:convId | Get conversation details |
 | GET | /api/agent/tools | List available agent tools |
 | POST | /api/negotiate/session | Start a negotiation session |
 
@@ -529,10 +466,6 @@ function buildStructuredPack(baseUrl: string): {
           { method: "GET", path: "/api/capabilities", description: "List all registered capabilities" },
           { method: "GET", path: "/api/capabilities/types", description: "List capability type identifiers" },
           { method: "GET", path: "/api/capabilities/templates", description: "List capability templates" },
-          { method: "GET", path: "/api/marketplace/classes", description: "Browse marketplace classes" },
-          { method: "GET", path: "/api/marketplace/classes/:id", description: "Get marketplace class details" },
-          { method: "GET", path: "/api/marketplace/demand-supply", description: "Demand/supply analytics" },
-          { method: "POST", path: "/api/marketplace/roi", description: "Calculate ROI" },
           { method: "GET", path: "/api/kernels", description: "List Shop Kernels" },
           { method: "GET", path: "/api/kernels/:kernelId", description: "Get kernel details" },
           { method: "POST", path: "/api/kernels", description: "Create a new kernel" },

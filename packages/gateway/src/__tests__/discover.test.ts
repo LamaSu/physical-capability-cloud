@@ -17,6 +17,16 @@ async function buildApp(): Promise<FastifyInstance> {
   return app;
 }
 
+let savedDemoRoutes: string | undefined;
+beforeAll(() => {
+  savedDemoRoutes = process.env.PCC_DEMO_ROUTES;
+  process.env.PCC_DEMO_ROUTES = "1";
+});
+afterAll(() => {
+  if (savedDemoRoutes === undefined) delete process.env.PCC_DEMO_ROUTES;
+  else process.env.PCC_DEMO_ROUTES = savedDemoRoutes;
+});
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

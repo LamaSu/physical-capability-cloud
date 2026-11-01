@@ -234,41 +234,55 @@ describe("Gateway Routes", () => {
 
   // ── Agents (mock conversations plugin) ─────────────────────────
 
-  describe("GET /api/agents/conversations", () => {
-    it("returns array of conversations", async () => {
-      const res = await app.inject({ method: "GET", url: "/api/agents/conversations" });
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(body.conversations).toBeDefined();
-      expect(Array.isArray(body.conversations)).toBe(true);
-      expect(body.conversations.length).toBeGreaterThan(0);
+  describe("demo conversations with PCC_DEMO_ROUTES=1", () => {
+    let savedDemoRoutes: string | undefined;
+
+    beforeAll(() => {
+      savedDemoRoutes = process.env.PCC_DEMO_ROUTES;
+      process.env.PCC_DEMO_ROUTES = "1";
     });
 
-    it("each conversation has id, topic, participants, status", async () => {
-      const res = await app.inject({ method: "GET", url: "/api/agents/conversations" });
-      const body = res.json();
-      const conv = body.conversations[0];
-      expect(conv.id).toBeDefined();
-      expect(conv.topic).toBeDefined();
-      expect(Array.isArray(conv.participants)).toBe(true);
-      expect(conv.status).toBeDefined();
-    });
-  });
-
-  describe("GET /api/agents/conversations/:convId", () => {
-    it("returns a conversation by id", async () => {
-      const res = await app.inject({ method: "GET", url: "/api/agents/conversations/conv-001" });
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(body.conversation).toBeDefined();
-      expect(body.conversation.id).toBe("conv-001");
+    afterAll(() => {
+      if (savedDemoRoutes === undefined) delete process.env.PCC_DEMO_ROUTES;
+      else process.env.PCC_DEMO_ROUTES = savedDemoRoutes;
     });
 
-    it("returns error for unknown conversation", async () => {
-      const res = await app.inject({ method: "GET", url: "/api/agents/conversations/conv-nonexistent" });
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(body.error).toBe("not_found");
+    describe("GET /api/agents/conversations", () => {
+      it("returns array of conversations", async () => {
+        const res = await app.inject({ method: "GET", url: "/api/agents/conversations" });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        expect(body.conversations).toBeDefined();
+        expect(Array.isArray(body.conversations)).toBe(true);
+        expect(body.conversations.length).toBeGreaterThan(0);
+      });
+
+      it("each conversation has id, topic, participants, status", async () => {
+        const res = await app.inject({ method: "GET", url: "/api/agents/conversations" });
+        const body = res.json();
+        const conv = body.conversations[0];
+        expect(conv.id).toBeDefined();
+        expect(conv.topic).toBeDefined();
+        expect(Array.isArray(conv.participants)).toBe(true);
+        expect(conv.status).toBeDefined();
+      });
+    });
+
+    describe("GET /api/agents/conversations/:convId", () => {
+      it("returns a conversation by id", async () => {
+        const res = await app.inject({ method: "GET", url: "/api/agents/conversations/conv-001" });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        expect(body.conversation).toBeDefined();
+        expect(body.conversation.id).toBe("conv-001");
+      });
+
+      it("returns error for unknown conversation", async () => {
+        const res = await app.inject({ method: "GET", url: "/api/agents/conversations/conv-nonexistent" });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        expect(body.error).toBe("not_found");
+      });
     });
   });
 

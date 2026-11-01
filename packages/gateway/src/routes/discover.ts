@@ -16,6 +16,7 @@ import type { FastifyInstance } from "fastify";
 import type { CSD } from "@pcc/spec";
 import { buildAdapterEvidence } from "@pcc/spec";
 import { getCsdRegistry } from "./csd.js";
+import { gateDemoRoutes, notAvailable } from "../config/demo-routes.js";
 
 // ── Discovery types ──────────────────────────────────────────────────────────
 
@@ -242,7 +243,14 @@ function deviceToCsd(device: DiscoveredDevice): CSD {
 
 // ── Route handlers ───────────────────────────────────────────────────────────
 
+const DISCOVER_NOT_AVAILABLE = notAvailable(
+  "Network device discovery is not run by this gateway.",
+  "Only built-in example printers exist, and they are not served.",
+  [],
+);
+
 export async function discoverRoutes(app: FastifyInstance) {
+  gateDemoRoutes(app, DISCOVER_NOT_AVAILABLE);
   // ── POST /api/discover/scan ──────────────────────────────────────
   app.post<{
     Body: { protocols?: string[]; timeoutMs?: number };
