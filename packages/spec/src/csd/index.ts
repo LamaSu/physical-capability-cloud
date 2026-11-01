@@ -15,3 +15,5 @@ export * from "./plan-json.js";
 export * from "./document-print-and-mail.plan.js";
 // Builtin CSDs registered by the gateway's live registry (not loadBuiltinCsds)
 export * from "./builtins/dashboard-v1.js";
+// Republishable composition templates: immutable shape, identity and supersession (N41).
+export * from "./composition-template.js";
