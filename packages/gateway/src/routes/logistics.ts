@@ -7,6 +7,7 @@ import type {
   DeliveryQuote,
   LogisticsTimelineEvent,
 } from "@pcc/spec";
+import { gateDemoRoutes, notAvailable } from "../config/demo-routes.js";
 
 // ---------------------------------------------------------------------------
 // Mock Data
@@ -309,7 +310,14 @@ const mockTimeline: LogisticsTimelineEvent[] = [
 // Routes
 // ---------------------------------------------------------------------------
 
+const LOGISTICS_NOT_AVAILABLE = notAvailable(
+  "Logistics providers, shipments, quotes, bookings and installations under /api/logistics are not recorded on this gateway.",
+  "A job's own shipment, when it has one, is at the carrier route.",
+  ["/api/carrier/shipments/:jobId"],
+);
+
 export async function logisticsRoutes(app: FastifyInstance) {
+  gateDemoRoutes(app, LOGISTICS_NOT_AVAILABLE);
   // --- Providers ---
 
   app.get("/api/logistics/providers", async (req) => {

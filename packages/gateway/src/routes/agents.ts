@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { gateDemoRoutes, notAvailable } from "../config/demo-routes.js";
 
 const mockConversations = [
   {
@@ -19,7 +20,14 @@ const mockConversations = [
   },
 ];
 
+const AGENTS_NOT_AVAILABLE = notAvailable(
+  "Conversations under /api/agents/conversations are not recorded on this gateway.",
+  "Only built-in examples exist, and they are not served.",
+  [],
+);
+
 export async function agentRoutes(app: FastifyInstance) {
+  gateDemoRoutes(app, AGENTS_NOT_AVAILABLE);
   app.get("/api/agents/conversations", async () => {
     return { conversations: mockConversations };
   });

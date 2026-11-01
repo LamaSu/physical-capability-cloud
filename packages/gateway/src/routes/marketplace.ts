@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { EquipmentClass, MarketSnapshot, ROIProjection, MarketplaceListing, MarketplaceOrder, MarketplaceCategory } from "@pcc/spec";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
+import { gateDemoRoutes, notAvailable } from "../config/demo-routes.js";
 
 const mockClasses: EquipmentClass[] = [
   {
@@ -223,7 +224,21 @@ const ALL_CATEGORIES: MarketplaceCategory[] = [
 
 // ── Equipment Marketplace Mock Data ─────────────────────────────────────────
 
+const MARKETPLACE_NOT_AVAILABLE = notAvailable(
+  "Marketplace equipment classes, demand and supply figures and ROI projections are not recorded or computed on this gateway, and supply listings and orders are not served.",
+  "Registered capabilities are listed by the capability registry.",
+  ["/api/capabilities"],
+);
+
+export const MARKETPLACE_N43_WRITES = [
+  "POST /api/marketplace/listings",
+  "PUT /api/marketplace/listings/:id",
+  "DELETE /api/marketplace/listings/:id",
+  "POST /api/marketplace/orders",
+] as const;
+
 export async function marketplaceRoutes(app: FastifyInstance) {
+  gateDemoRoutes(app, MARKETPLACE_NOT_AVAILABLE, { except: MARKETPLACE_N43_WRITES });
   // List equipment classes with market snapshots
   app.get("/api/marketplace/classes", async () => {
     return {
