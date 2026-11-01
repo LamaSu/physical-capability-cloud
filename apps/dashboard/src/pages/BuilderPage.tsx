@@ -13,45 +13,39 @@ import { NegotiationPanel } from "../components/builder/NegotiationPanel.js";
 
 const DEFAULT_SPLITS: SplitEntry[] = [
   { role: "designer",  percentage: 10, label: "CSD Author" },
-  { role: "operator",  percentage: 70, label: "Machine Operator" },
+  { role: "operator",  percentage: 80, label: "Machine Operator" },
   { role: "verifier",  percentage: 10, label: "Evidence Verifier" },
-  { role: "network",   percentage: 10, label: "Protocol Treasury" },
 ];
 
-// Split presets — legacy (designer/network) kept for backward compat with
+// Split presets — legacy (designer) kept for backward compat with
 // older saved drafts. ADR-12 contributor-economics presets demonstrate the
-// canonical 10-value ContributorRole taxonomy and mirror SPLIT_PROFILES in
-// @pcc/contracts/ts/story-defaults.ts.
-const SPLIT_PRESETS: Record<string, SplitEntry[]> = {
+// canonical 10-value ContributorRole taxonomy.
+export const SPLIT_PRESETS: Record<string, SplitEntry[]> = {
   "Single-Step": DEFAULT_SPLITS,
   "Multi-Step": [
     { role: "designer",  percentage: 5,  label: "Workflow Designer" },
-    { role: "operator",  percentage: 75, label: "Step Operators" },
+    { role: "operator",  percentage: 85, label: "Step Operators" },
     { role: "verifier",  percentage: 10, label: "Evidence Verifiers" },
-    { role: "network",   percentage: 10, label: "Protocol Treasury" },
   ],
   "Community": [
     { role: "designer",  percentage: 20, label: "CSD Author" },
-    { role: "operator",  percentage: 60, label: "Machine Operator" },
+    { role: "operator",  percentage: 70, label: "Machine Operator" },
     { role: "curator",   percentage:  5, label: "Community Curator" },
     { role: "verifier",  percentage:  5, label: "Evidence Verifier" },
-    { role: "network",   percentage: 10, label: "Protocol Treasury" },
   ],
   // ADR-12 contributor-economics presets
   "Contrib-Econ — Minimal": [
-    { role: "operator",         percentage: 92, label: "Machine Operator" },
+    { role: "operator",         percentage: 93, label: "Machine Operator" },
     { role: "verifier",         percentage:  3, label: "Evidence Verifier" },
     { role: "protocol-author",  percentage:  2, label: "CSD Author" },
     { role: "integrator",       percentage:  2, label: "Adapter Integrator" },
-    { role: "network-treasury", percentage:  1, label: "Network Treasury" },
   ],
   "Contrib-Econ — With AI": [
-    { role: "operator",         percentage: 87, label: "Machine Operator" },
+    { role: "operator",         percentage: 89, label: "Machine Operator" },
     { role: "verifier",         percentage:  3, label: "Evidence Verifier" },
     { role: "protocol-author",  percentage:  2, label: "CSD Author" },
     { role: "integrator",       percentage:  2, label: "Adapter Integrator" },
     { role: "model-author",     percentage:  4, label: "Model Author" },
-    { role: "network-treasury", percentage:  2, label: "Network Treasury" },
   ],
 };
 
