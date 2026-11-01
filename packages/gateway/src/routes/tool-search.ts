@@ -6,11 +6,11 @@
  *
  *   POST /api/tools/search   Body: {query, topK?, source?}
  *                            Returns: {tools: Array<{id, name, description, source, score, endpoint}>, ...}
- *                            Public-read by design — the catalog itself is
+ *                            Requires an API key — the catalog itself is
  *                            already served publicly at /agent-package.json.
  *
  *   GET  /api/tools/status   Returns: {indexed, providers: {embedding, dim}, lastReload}
- *                            Public-read.
+ *                            Requires an API key.
  *
  *   POST /api/tools/reload   Requires the caller's operatorId to be on the
  *                            PCC_TOOL_INDEX_ADMINS allowlist (closed-by-default).

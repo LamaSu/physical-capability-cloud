@@ -1,10 +1,10 @@
 /**
- * GET /api/aggregator/tools/search — public registry query.
+ * GET /api/aggregator/tools/search — registry query requiring an API key.
  *
  * Returns up to N IndexedTools matching the supplied filter (q, actionClass,
  * minTrustTier, skill, domain). Sorted ascending by id for stable pagination.
  *
- * Read-only and public per spec §4.1. No auth required to browse the index;
+ * Read-only per spec §4.1. Requires an API key to browse the index;
  * invocation is gated on /api/aggregator/invoke separately.
  *
  * Ranker mode: gated by PCC_RANKER_MODE (legacy | shadow | hybrid). In
