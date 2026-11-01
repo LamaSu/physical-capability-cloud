@@ -1,4 +1,5 @@
 import ts from "typescript";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 export interface TextSinkIssue {
@@ -95,6 +96,48 @@ const CREDENTIAL_SCRUB_FILE = fileURLToPath(new URL("../../../../apps/dashboard/
 const CREDENTIAL_SCRUB_STATEMENT = "history.replaceState(null, '', location.pathname + location.search);";
 const CREDENTIAL_SCRUB_OWNER = "function bootKey() {\n    // Host lockdown (D14): in an MCP-App/host view never read a fragment key or\n    // touch storage — a hosted view holds no browser-persisted PCC credential.\n    if (isHostEmbed()) return;\n    // 1. #pcc_key=… in the URL fragment: how an LLM hands its OWN person a\n    // private live link. Fragments never reach servers/logs. Strip immediately\n    // so it cannot be read back off `location` and cannot leak into history.\n    try {\n      var h = location.hash || '';\n      var m = h.match(/[#&]pcc_key=([^&]+)/);\n      if (m && m[1]) {\n        var k = decodeURIComponent(m[1]);\n        try { sessionStorage.setItem(KEY_STORE, k); } catch (e) {}\n        try {\n          history.replaceState(null, '', location.pathname + location.search);\n        } catch (e2) {}\n      }\n    } catch (e) {}\n  }";
 const NAVIGATION_METHODS = new Set(["replaceState", "pushState"]);
+
+// These acquisition names are denied independently of the receiver's type.
+const INTRINSIC_WALK_NAMES = new Set(["__proto__", "compile", "__defineGetter__", "__lookupGetter__", "getPrototypeOf"]);
+const INTRINSIC_GLOBALS = new Set(["Object", "Function", "Array", "String", "Number", "Boolean", "RegExp", "Date", "Error", "TypeError", "RangeError", "URIError", "SyntaxError", "EvalError", "ReferenceError", "Math", "JSON", "Promise", "WeakSet", "WeakMap", "Set", "Map", "Symbol", "BigInt", "Intl", "ArrayBuffer", "SharedArrayBuffer", "DataView", "Atomics", "Int8Array", "Uint8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array", "Int32Array", "Uint32Array", "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array"]);
+const GLOBAL_NAMESPACES = new Set(["window", "globalThis", "self"]);
+for (const name of ["parseInt", "parseFloat", "isNaN", "isFinite", "decodeURI", "decodeURIComponent", "encodeURI", "encodeURIComponent", "escape", "unescape", "eval", "Reflect", "Proxy"]) INTRINSIC_GLOBALS.add(name);
+const INTL_CONSTRUCTORS = new Set(["Collator", "DateTimeFormat", "DisplayNames", "DurationFormat", "ListFormat", "Locale", "NumberFormat", "PluralRules", "RelativeTimeFormat", "Segmenter"]);
+for (const property of ["href", "action", "formAction"]) TEXT_PROPERTIES.add(property);
+const BRAND_CAPTURE_DECLARATIONS = [
+  "var brandHas = Function.prototype.call.bind(WeakSet.prototype.has);",
+  "var brandAdd = Function.prototype.call.bind(WeakSet.prototype.add);",
+  "var freezeText = Object.freeze;",
+];
+const BRAND_OWNER_DECLARATIONS = new Map<string, string>([
+  ["mintText","function mintText(t) {\n    if (typeof t !== 'string') { window.__PCC_UI_TEXT_VIOLATIONS__++; t = '—'; }\n    var text = freezeText({ t: t });\n    brandAdd(TEXT_BRANDS, text);\n    return text;\n  }"],
+  ["isKitText","function isKitText(text) { return !!text && typeof text === 'object' && brandHas(TEXT_BRANDS, text); }"],
+  ["agentText","function agentText(raw, prose) {\n    var t = String(raw);\n    if (CLAIM_DETECTOR && hasBidiControl(t)) return WITHHELD_PROSE;\n    if (isProseClaim(t)) return prose ? WITHHELD_PROSE : WITHHELD_FIELD;\n    var text = freezeText({ t: t });\n    brandAdd(AGENT_TEXT_BRANDS, text);\n    return text;\n  }"],
+  ["agentEl","function agentEl(tag, cls, text) {\n    if (text === WITHHELD_PROSE || text === WITHHELD_FIELD) return el(tag, (cls || '') + ' pcc-withheld', text);\n    var e = document.createElement(tag);\n    e.className = (cls || '') + ' pcc-agent pcc-untrusted';\n    if (text && typeof text === 'object' && brandHas(AGENT_TEXT_BRANDS, text)) e.textContent = text.t;\n    else { window.__PCC_UI_TEXT_VIOLATIONS__++; e.textContent = '—'; }\n    return e;\n  }"],
+  ["isAgentText","function isAgentText(text) { return !!text && typeof text === 'object' && brandHas(AGENT_TEXT_BRANDS, text); }"],
+]);
+// The existing form controls may change their enabled state. Their complete
+// enclosing functions and exact assignment expressions identify those writes.
+const CONTROL_DISABLED_PINS: readonly (readonly [string, string])[] = [
+  ["5ccdda9b461ff731a0582c323f0da4664d60932e25863c896921ceeb984e215a","btn.disabled = true"],
+  ["71a6ba5a396c0f1819676249ebebf16c39133d99e83d10736e56604c8a93baee","approve.disabled = true"],
+  ["71a6ba5a396c0f1819676249ebebf16c39133d99e83d10736e56604c8a93baee","deny.disabled = true"],
+  ["c60046cd32161c156901e014d574803403469dadb9f3ba82a3fdccbe4a37cb8b","approve.disabled = !!(desc.money && (intent.key || intent.posting || intent.done))"],
+  ["c60046cd32161c156901e014d574803403469dadb9f3ba82a3fdccbe4a37cb8b","deny.disabled = false"],
+  ["50b952136bc94334120303b3b32cea0716029e37a5d042e38e2f63f019dadde4","approve.disabled = true"],
+  ["50b952136bc94334120303b3b32cea0716029e37a5d042e38e2f63f019dadde4","deny.disabled = true"],
+  ["2de52d071bd67e9594a547e013bc5de1c9670ee673dd3ff1066f03c65c3df12f","approve.disabled = true"],
+];
+const CONTROL_DISABLED_MODULE_PINS: readonly (readonly [string, string])[] = [
+  ["5ccdda9b461ff731a0582c323f0da4664d60932e25863c896921ceeb984e215a","5ccdda9b461ff731a0582c323f0da4664d60932e25863c896921ceeb984e215a"],
+  ["71a6ba5a396c0f1819676249ebebf16c39133d99e83d10736e56604c8a93baee","f958e909c12e224c746bcbf02242f332c88fbccb89829bd62a40fbe47a006f77"],
+  ["c60046cd32161c156901e014d574803403469dadb9f3ba82a3fdccbe4a37cb8b","f958e909c12e224c746bcbf02242f332c88fbccb89829bd62a40fbe47a006f77"],
+  ["50b952136bc94334120303b3b32cea0716029e37a5d042e38e2f63f019dadde4","f958e909c12e224c746bcbf02242f332c88fbccb89829bd62a40fbe47a006f77"],
+  ["2de52d071bd67e9594a547e013bc5de1c9670ee673dd3ff1066f03c65c3df12f","a3a08c7fdb6bf610545c9b68b6f3d74072c3a49927b27abe9e217fc9dbc64a37"],
+];
+const DATA_AT_OWNER_HASH = "cf41d5b193e226289c77cfdc52d7065b7ce961f236df5d14aee2518f1f138aca";
+function normalizedText(node: ts.Node, file: ts.SourceFile): string { return node.getText(file).replace(/\r\n/g, "\n"); }
+function textHash(node: ts.Node, file: ts.SourceFile): string { return createHash("sha256").update(normalizedText(node, file)).digest("hex"); }
 
 function unwrap(node: ts.Node): ts.Node {
   while (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node)) node = node.expression;
@@ -325,6 +368,7 @@ export function isElementCreation(node: ts.Node | undefined): boolean {
  * exemptions; named string-capable insertion calls need reviewed Node-only allowances.
  * Type-aware IR checks additionally reject unresolved/any expressions. */
 export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkIssue[] {
+  source = source.replace(/\r\n/g, "\n");
   const file = ts.createSourceFile(config.file, source, ts.ScriptTarget.Latest, true, config.scriptKind);
   const issues: TextSinkIssue[] = [];
   const definitions = new Map(config.sinks.map((name) => [name, [] as ts.Node[]]));
@@ -402,6 +446,116 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
     } else report(declarations[1] ?? file, `pinned caller must have exactly one declaration: ${caller}`);
   }
   const resolveBinding = bindingResolver(file);
+  const isPlainKit = config.file === CREDENTIAL_SCRUB_FILE;
+  const brandOwners = new Set<ts.Node>();
+  if (isPlainKit) for (const [name, text] of BRAND_OWNER_DECLARATIONS) {
+    const owners = allFunctions.get(name) ?? [];
+    const owner = owners.length === 1 && ts.isFunctionDeclaration(owners[0]) && owners[0].parent === moduleBody ? owners[0] : undefined;
+    if (owner) brandOwners.add(owner);
+    if (!owner || normalizedText(owner, file) !== text) report(owner ?? owners[1] ?? file, `brand owner must match the reviewed declaration: ${name}`);
+  }
+  const exactCaptureStatements = new Set<ts.Node>();
+  if (isPlainKit && moduleBody) for (const [index, text] of BRAND_CAPTURE_DECLARATIONS.entries()) {
+    const statement = moduleBody.statements[index + 1];
+    if (statement && normalizedText(statement, file) === text && !["Function", "WeakSet", "Object"].some((name) => resolveBinding(statement, name))) exactCaptureStatements.add(statement);
+    else report(statement ?? moduleBody, `brand capture must match the reviewed declaration: ${index + 1}`);
+  }
+  const brandCaptureBindings = new Map<string, ts.Node>();
+  for (const statement of exactCaptureStatements) if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations) if (ts.isIdentifier(declaration.name)) brandCaptureBindings.set(declaration.name.text, declaration);
+  const isCapturedFunction = (node: ts.Node): boolean => {
+    if (!isPlainKit || !ts.isIdentifier(node) || node.text !== "Function" || !isValueIdentifier(node)) return false;
+    for (let ancestor: ts.Node | undefined = node.parent; ancestor && ancestor !== moduleBody; ancestor = ancestor.parent) if (exactCaptureStatements.has(ancestor)) return true;
+    return false;
+  };
+  const functionHashes = new Map<string, ts.Node[]>();
+  for (const nodes of allFunctions.values()) for (const owner of nodes) {
+    const hash = textHash(owner, file);
+    const owners = functionHashes.get(hash) ?? [];
+    owners.push(owner); functionHashes.set(hash, owners);
+  }
+  const collectAnonymousOwners = (node: ts.Node): void => {
+    if (ts.isFunctionLike(node) && !functionName(node)) {
+      const hash = textHash(node, file);
+      const owners = functionHashes.get(hash) ?? [];
+      owners.push(node); functionHashes.set(hash, owners);
+    }
+    ts.forEachChild(node, collectAnonymousOwners);
+  };
+  collectAnonymousOwners(file);
+  const isControlDisabledWrite = (node: ts.Node): boolean => {
+    if (!isPlainKit) return false;
+    const owner = nearestFunction(node), assignment = node.parent;
+    if (!owner || !ts.isBinaryExpression(assignment) || assignment.left !== node || assignment.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return false;
+    const hash = textHash(owner, file), owners = functionHashes.get(hash);
+    let moduleOwner: ts.Node | undefined = owner;
+    while (moduleOwner && !(ts.isFunctionDeclaration(moduleOwner) && moduleOwner.parent === moduleBody)) moduleOwner = nearestFunction(moduleOwner);
+    if (!moduleOwner) return false;
+    const moduleHash = textHash(moduleOwner, file), moduleOwners = functionHashes.get(moduleHash);
+    if (moduleOwners?.length !== 1 || moduleOwners[0] !== moduleOwner || !CONTROL_DISABLED_MODULE_PINS.some(([ownerHash, containerHash]) => ownerHash === hash && containerHash === moduleHash)) return false;
+    return owners?.length === 1 && owners[0] === owner && CONTROL_DISABLED_PINS.some(([pinHash, expression]) => hash === pinHash && normalizedText(assignment, file) === expression);
+  };
+  const isDataPrototypeRead = (node: ts.Node): boolean => {
+    const owner = nearestFunction(node);
+    return isPlainKit && !!owner && (allFunctions.get("dataAt") ?? []).length === 1 && allFunctions.get("dataAt")?.[0] === owner && owner.parent === moduleBody && textHash(owner, file) === DATA_AT_OWNER_HASH && normalizedText(node, file) === "Object.getPrototypeOf" && isDirectCallTarget(node);
+  };
+  const globalNamespace = (node: ts.Node): boolean => {
+    node = unwrap(node);
+    if (ts.isIdentifier(node)) return GLOBAL_NAMESPACES.has(node.text) && !resolveBinding(node, node.text);
+    return (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && GLOBAL_NAMESPACES.has(memberName(node) ?? "") && globalNamespace(node.expression);
+  };
+  const intrinsicGlobal = (node: ts.Node): boolean => {
+    node = unwrap(node);
+    if (ts.isIdentifier(node)) return INTRINSIC_GLOBALS.has(node.text) && !resolveBinding(node, node.text);
+    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && INTL_CONSTRUCTORS.has(memberName(node) ?? "") && isIdentifier(node.expression, "Intl") && !resolveBinding(node, "Intl")) return true;
+    return (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && INTRINSIC_GLOBALS.has(memberName(node) ?? "") && globalNamespace(node.expression);
+  };
+  const intrinsicObject = (node: ts.Node): boolean => {
+    node = unwrap(node);
+    return intrinsicGlobal(node) || ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && memberName(node) === "prototype" && intrinsicGlobal(node.expression));
+  };
+  const receiverOnly = (node: ts.Node): boolean => {
+    while (node.parent && unwrap(node.parent) === node) node = node.parent;
+    const parent = node.parent;
+    if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === node) return true;
+    if ((ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.expression === node) return true;
+    if (ts.isTypeOfExpression(parent)) return true;
+    return ts.isBinaryExpression(parent) && [ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken, ts.SyntaxKind.InKeyword, ts.SyntaxKind.InstanceOfKeyword].includes(parent.operatorToken.kind);
+  };
+  const checkIntrinsicTarget = (target: ts.Node): void => {
+    target = unwrap(target);
+    const state = memberName(target);
+    if ((state === "media" || state === "disabled") && !isControlDisabledWrite(target)) report(target, `stylesheet state write: ${state}`);
+    if (ts.isObjectLiteralExpression(target)) {
+      for (const property of target.properties) {
+        if (ts.isPropertyAssignment(property)) checkIntrinsicTarget(property.initializer);
+        else if (ts.isShorthandPropertyAssignment(property)) checkIntrinsicTarget(property.name);
+        else if (ts.isSpreadAssignment(property)) checkIntrinsicTarget(property.expression);
+      }
+    } else if (ts.isArrayLiteralExpression(target)) for (const element of target.elements) checkIntrinsicTarget(ts.isSpreadElement(element) ? element.expression : element);
+    else {
+      let receiver = target;
+      for (;;) {
+        if (intrinsicGlobal(receiver)) { report(target, "intrinsic target write"); break; }
+        if (!(ts.isPropertyAccessExpression(receiver) || ts.isElementAccessExpression(receiver))) break;
+        receiver = unwrap(receiver.expression);
+      }
+    }
+  };
+  const navigationReceiver = (node: ts.Node, kind: "location" | "window"): boolean => {
+    node = unwrap(node);
+    if (kind === "window") return globalNamespace(node);
+    return (ts.isIdentifier(node) && node.text === "location" && !resolveBinding(node, "location")) || ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && memberName(node) === "location" && globalNamespace(node.expression));
+  };
+  const navigationMember = (node: ts.Node): string | undefined => {
+    node = calledExpression(node);
+    if (!(ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))) return;
+    const name = memberName(node);
+    return ((name === "assign" || name === "replace") && navigationReceiver(node.expression, "location")) || (name === "open" && navigationReceiver(node.expression, "window")) ? name : undefined;
+  };
+  const checkNavigationBinding = (node: ts.Node, name: string | undefined, receiver: ts.Node | undefined): void => {
+    if (!name || !receiver) return;
+    if (((name === "assign" || name === "replace") && navigationReceiver(receiver, "location")) || (name === "open" && navigationReceiver(receiver, "window"))) report(node, `navigation method destructuring: ${name}`);
+  };
   const credentialOwners = allFunctions.get("bootKey") ?? [];
   const credentialOwner = credentialOwners.length === 1 && ts.isFunctionDeclaration(credentialOwners[0]) && credentialOwners[0].parent === moduleBody ? credentialOwners[0] : undefined;
   const isCredentialScrub = (call: ts.CallExpression): boolean => {
@@ -578,6 +732,40 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
     } else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) checkTarget(node.left);
   };
   const visit = (node: ts.Node): void => {
+    if (isCapturedFunction(node)) return;
+    if (ts.isIdentifier(node) && brandCaptureBindings.has(node.text)) {
+      const capture = brandCaptureBindings.get(node.text)!;
+      const declarationName = (ts.isVariableDeclaration(node.parent) || ts.isFunctionDeclaration(node.parent) || ts.isParameter(node.parent)) && node.parent.name === node;
+      if ((isValueIdentifier(node) || declarationName) && (resolveBinding(node, node.text) ?? []).includes(capture) && node.parent !== capture && !brandOwners.has(nearestFunction(node) as ts.Node)) report(node, `brand capture reference outside reviewed owner: ${node.text}`);
+    }
+
+    if (ts.isIdentifier(node) && isValueIdentifier(node) && isPlainKit && ["TEXT_BRANDS", "AGENT_TEXT_BRANDS"].includes(node.text) && !brandOwners.has(nearestFunction(node) as ts.Node)) report(node, `brand store reference outside reviewed owner: ${node.text}`);
+    if ((ts.isIdentifier(node) && isValueIdentifier(node) || ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && intrinsicObject(node) && !receiverOnly(node)) report(node, "intrinsic reference must be a direct receiver");
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) checkIntrinsicTarget(node.left);
+    if ((ts.isForInStatement(node) || ts.isForOfStatement(node)) && !ts.isVariableDeclarationList(node.initializer)) checkIntrinsicTarget(node.initializer);
+    if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) && (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)) checkIntrinsicTarget(node.operand);
+    if (ts.isDeleteExpression(node)) checkIntrinsicTarget(node.expression);
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const name = memberName(node);
+      if (name && INTRINSIC_WALK_NAMES.has(name) && !isDataPrototypeRead(node)) report(node, `forbidden intrinsic member: ${name}`);
+      const navigation = navigationMember(node);
+      if (navigation && !isDirectCallTarget(node)) report(node, `navigation method read: ${navigation}`);
+    }
+    if (ts.isCallExpression(node)) {
+      const navigation = navigationMember(node.expression);
+      if (navigation) report(node, `navigation method call: ${navigation}`);
+    }
+    if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent)) {
+      const name = literalName(node.propertyName ?? node.name);
+      if (name && INTRINSIC_WALK_NAMES.has(name)) report(node, `forbidden intrinsic destructuring: ${name}`);
+      const declaration = node.parent.parent;
+      checkNavigationBinding(node, name, ts.isVariableDeclaration(declaration) ? declaration.initializer : undefined);
+    }
+    if (ts.isPropertyAssignment(node) && ts.isObjectLiteralExpression(node.parent) && ts.isBinaryExpression(node.parent.parent) && node.parent.parent.left === node.parent) {
+      const name = literalName(node.name);
+      if (name && INTRINSIC_WALK_NAMES.has(name)) report(node, `forbidden intrinsic destructuring: ${name}`);
+      checkNavigationBinding(node, name, node.parent.parent.right);
+    }
     // Types describe a surface but cannot read a method or render a byte.
     if (ts.isTypeNode(node)) return;
     if (agentConfig) {

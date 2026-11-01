@@ -143,6 +143,12 @@ export const SCHEMA_FIELDS: Readonly<Record<BindSchema, SchemaSpec>> = Object.fr
     ]),
   }),
 });
+for (const schema of Object.values(SCHEMA_FIELDS)) {
+  for (const field of schema.fields) {
+    if (Array.isArray(field.key)) Object.freeze(field.key);
+    Object.freeze(field);
+  }
+}
 
 // The settlement record is a STATIC pointer — fixed PCC text, no fetch, no data labels.
 // The endpoint reports `settled` for a merely-completed job and exposes the PHYSICAL

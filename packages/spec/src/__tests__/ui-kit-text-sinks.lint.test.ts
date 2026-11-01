@@ -819,3 +819,119 @@ describe("round 2f-b: exact credential scrub navigation pin", () => {
     expect(lintTextSinks(source, { ...plainConfig, file: "other-kit.js" })).toContainEqual(expect.objectContaining({ rule: "named text API call: replaceState" }));
   });
 });
+
+// Source policy checks keep the private text registration boundary fixed.
+describe("round 2g: private brand store Programs", () => {
+  const source = readFileSync(plainConfig.file, "utf8");
+  it.each([
+    ["F20 kit store write", "TEXT_BRANDS.add(raw);", "TEXT_BRANDS"],
+    ["F20a agent store write", "AGENT_TEXT_BRANDS.add(raw);", "AGENT_TEXT_BRANDS"],
+    ["F20 kit store alias", "var store = TEXT_BRANDS;", "TEXT_BRANDS"],
+    ["F20a agent store alias", "var store = AGENT_TEXT_BRANDS;", "AGENT_TEXT_BRANDS"],
+    ["F20 kit store argument", "consume(TEXT_BRANDS);", "TEXT_BRANDS"],
+    ["F20a agent store argument", "consume(AGENT_TEXT_BRANDS);", "AGENT_TEXT_BRANDS"],
+  ])("rejects %s at its own Program line", (_name, code, store) => {
+    const prefix = source + "\nfunction storePolicyProgram(raw) {\n";
+    expect(lintTextSinks(prefix + code + "\n}", plainConfig)).toContainEqual(expect.objectContaining({ line: prefix.split("\n").length, rule: `brand store reference outside reviewed owner: ${store}` }));
+  });
+  it.each([
+    ["Y03 kit owner reference", "mintText", "TEXT_BRANDS"],
+    ["Y03 agent owner reference", "agentText", "AGENT_TEXT_BRANDS"],
+  ])("rejects %s on the changed declaration line", (_name, owner, store) => {
+    const marker = `function ${owner}(`;
+    const start = source.indexOf(marker), opening = source.indexOf("{", start);
+    const changed = source.slice(0, opening + 1) + ` retainedStore = ${store};` + source.slice(opening + 1);
+    expect(lintTextSinks(changed, plainConfig)).toContainEqual(expect.objectContaining({ line: source.slice(0, start).split("\n").length, rule: `brand owner must match the reviewed declaration: ${owner}` }));
+  });
+  it.each(["mintText", "isKitText", "agentText", "agentEl", "isAgentText"])("pins the complete %s owner declaration", (owner) => {
+    const marker = `function ${owner}(`;
+    const start = source.indexOf(marker), opening = source.indexOf("{", start);
+    const changed = source.slice(0, opening + 1) + " void 0;" + source.slice(opening + 1);
+    expect(lintTextSinks(changed, plainConfig)).toContainEqual(expect.objectContaining({ rule: `brand owner must match the reviewed declaration: ${owner}` }));
+  });
+  it("requires the unique mint owner declaration identity", () => {
+    const prefix = source + "\nfunction ownerIdentityProgram() {\n";
+    expect(lintTextSinks(prefix + "function mintText(t) { TEXT_BRANDS.add(t); }\n}", plainConfig)).toContainEqual(expect.objectContaining({ line: prefix.split("\n").length, rule: "brand store reference outside reviewed owner: TEXT_BRANDS" }));
+  });
+  it("pins the brand method capture initializer", () => {
+    const changed = source.replace("var brandHas = Function.prototype.call.bind(WeakSet.prototype.has);", "var brandHas = WeakSet.prototype.has;");
+    expect(lintTextSinks(changed, plainConfig)).toContainEqual(expect.objectContaining({ rule: "brand capture must match the reviewed declaration: 1" }));
+  });
+});
+
+describe("round 2g: intrinsic policy Programs", () => {
+  const source = readFileSync(plainConfig.file, "utf8");
+  it.each([
+    ["W01 prototype variable", "var prototype = Set.prototype; prototype.has = function () { return true; };", "intrinsic reference must be a direct receiver"],
+    ["W05 prototype container", "var box = { prototype: Set.prototype }; box.prototype.has = function () { return true; };", "intrinsic reference must be a direct receiver"],
+    ["W17 getter definition", "var prototype = Set.prototype; prototype.__defineGetter__('has', function () { return function () { return true; }; });", "forbidden intrinsic member: __defineGetter__"],
+    ["X19 prototype member", "var prototype = new Set().__proto__; prototype.has = function () { return true; };", "forbidden intrinsic member: __proto__"],
+    ["X20 prototype acquisition", "var getPrototype = Object.getPrototypeOf; var prototype = getPrototype(new Set()); prototype.has = function () { return true; };", "forbidden intrinsic member: getPrototypeOf"],
+    ["W01 intrinsic assignment", "Set.prototype.has = replacement;", "intrinsic target write"],
+    ["W01 intrinsic deletion", "delete Set.prototype.has;", "intrinsic target write"],
+    ["W01 intrinsic update", "Set.prototype.size++;", "intrinsic target write"],
+    ["W01 global intrinsic assignment", "window.Set.prototype.has = replacement;", "intrinsic target write"],
+    ["W01 intrinsic global assignment", "Set = replacement;", "intrinsic target write"],
+    ["W17 getter lookup", "prototype.__lookupGetter__('has');", "forbidden intrinsic member: __lookupGetter__"],
+    ["W17 regular expression compilation", "pattern.compile(raw);", "forbidden intrinsic member: compile"],
+  ])("rejects %s at its own Program line", (_name, code, rule) => {
+    const prefix = source + "\nfunction intrinsicPolicyProgram(raw, prototype, pattern, replacement) {\n";
+    expect(lintTextSinks(prefix + code + "\n}", plainConfig)).toContainEqual(expect.objectContaining({ line: prefix.split("\n").length, rule }));
+  });
+  it.each(["__proto__", "compile", "__defineGetter__", "__lookupGetter__", "getPrototypeOf"])("rejects %s destructuring at its own Program line", (name) => {
+    const prefix = source + "\n";
+    expect(lintTextSinks(prefix + `var { ${name}: operation } = prototype;`, plainConfig)).toContainEqual(expect.objectContaining({ line: prefix.split("\n").length, rule: `forbidden intrinsic destructuring: ${name}` }));
+  });
+});
+
+describe("round 2g: navigation and stylesheet state Programs", () => {
+  const source = readFileSync(plainConfig.file, "utf8");
+  it.each([
+    ["location assign call", "location.assign(raw);", "navigation method call: assign"],
+    ["location replace call", "location.replace(raw);", "navigation method call: replace"],
+    ["window open call", "window.open(raw);", "navigation method call: open"],
+    ["location assign read", "var navigate = location.assign;", "navigation method read: assign"],
+    ["location replace read", "var navigate = location.replace;", "navigation method read: replace"],
+    ["window open read", "var navigate = window.open;", "navigation method read: open"],
+    ["location assign destructuring", "var { assign: navigate } = location;", "navigation method destructuring: assign"],
+    ["location replace destructuring", "var { replace: navigate } = location;", "navigation method destructuring: replace"],
+    ["window open destructuring", "var { open: navigate } = window;", "navigation method destructuring: open"],
+    ["link href", "node.href = raw;", "text property write: href"],
+    ["form action", "node.action = raw;", "text property write: action"],
+    ["submit formAction", "node.formAction = raw;", "text property write: formAction"],
+    ["style media", "node.media = raw;", "stylesheet state write: media"],
+    ["style disabled", "node.disabled = true;", "stylesheet state write: disabled"],
+    ["sheet disabled", "node.sheet.disabled = true;", "stylesheet state write: disabled"],
+  ])("rejects %s at its own Program line", (_name, code, rule) => {
+    const prefix = source + "\nfunction navigationAndStyleProgram(node, raw) {\n";
+    expect(lintTextSinks(prefix + code + "\n}", plainConfig)).toContainEqual(expect.objectContaining({ line: prefix.split("\n").length, rule }));
+  });
+});
+
+describe("round 2g: source pin line endings", () => {
+  it("accepts the shipped source with CRLF pin text", () => {
+    const source = readFileSync(plainConfig.file, "utf8").replace(/\r\n/g, "\n").replace(/\n/g, "\r\n");
+    expect(lintTextSinks(source, plainConfig)).toEqual([]);
+  });
+});
+
+describe("round 2g: control callback context pin", () => {
+  it("requires the complete module owner of control callbacks", () => {
+    const source = readFileSync(plainConfig.file, "utf8");
+    const marker = "function renderApproval(ctx, w) {";
+    const changed = source.replace(marker, marker + " void 0;");
+    const assignment = changed.indexOf("approve.disabled = true;", changed.indexOf(marker));
+    const line = changed.slice(0, assignment).split("\n").length;
+    expect(lintTextSinks(changed, plainConfig)).toContainEqual(expect.objectContaining({ line, rule: "stylesheet state write: disabled" }));
+  });
+});
+
+describe("round 2g: capture use confinement", () => {
+  it.each(["brandHas", "brandAdd", "freezeText"])("rejects W01 %s assignment at its own Program line", (capture) => {
+    const source = readFileSync(plainConfig.file, "utf8");
+    const marker = "  function mintText(t) {";
+    const changed = source.replace(marker, `${capture} = replacement;\n` + marker);
+    const line = changed.slice(0, changed.indexOf(`${capture} = replacement;`)).split("\n").length;
+    expect(lintTextSinks(changed, plainConfig)).toContainEqual(expect.objectContaining({ line, rule: `brand capture reference outside reviewed owner: ${capture}` }));
+  });
+});

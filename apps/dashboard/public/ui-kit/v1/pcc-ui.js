@@ -43,6 +43,10 @@
 (function () {
   'use strict';
 
+  var brandHas = Function.prototype.call.bind(WeakSet.prototype.has);
+  var brandAdd = Function.prototype.call.bind(WeakSet.prototype.add);
+  var freezeText = Object.freeze;
+
   // A manifest may only be rendered once per document; guard re-entry.
   if (window.__PCC_UI_BOOTED__) return;
   window.__PCC_UI_BOOTED__ = true;
@@ -157,12 +161,12 @@
   window.__PCC_UI_TEXT_VIOLATIONS__ = 0;
   function mintText(t) {
     if (typeof t !== 'string') { window.__PCC_UI_TEXT_VIOLATIONS__++; t = '—'; }
-    var text = Object.freeze({ t: t });
-    TEXT_BRANDS.add(text);
+    var text = freezeText({ t: t });
+    brandAdd(TEXT_BRANDS, text);
     return text;
   }
   function kitText(t) { return mintText(t); }
-  function isKitText(text) { return !!text && typeof text === 'object' && TEXT_BRANDS.has(text); }
+  function isKitText(text) { return !!text && typeof text === 'object' && brandHas(TEXT_BRANDS, text); }
   function readText(text) {
     if (isKitText(text)) return text.t;
     window.__PCC_UI_TEXT_VIOLATIONS__++;
@@ -200,16 +204,17 @@
     var t = String(raw);
     if (CLAIM_DETECTOR && hasBidiControl(t)) return WITHHELD_PROSE;
     if (isProseClaim(t)) return prose ? WITHHELD_PROSE : WITHHELD_FIELD;
-    var text = Object.freeze({ t: t });
-    AGENT_TEXT_BRANDS.add(text);
+    var text = freezeText({ t: t });
+    brandAdd(AGENT_TEXT_BRANDS, text);
     return text;
   }
+  function isAgentText(text) { return !!text && typeof text === 'object' && brandHas(AGENT_TEXT_BRANDS, text); }
   // The sole agent sink marks the agent's words; PCC notices retain PCC authorship.
   function agentEl(tag, cls, text) {
     if (text === WITHHELD_PROSE || text === WITHHELD_FIELD) return el(tag, (cls || '') + ' pcc-withheld', text);
     var e = document.createElement(tag);
     e.className = (cls || '') + ' pcc-agent pcc-untrusted';
-    if (text && typeof text === 'object' && AGENT_TEXT_BRANDS.has(text)) e.textContent = text.t;
+    if (text && typeof text === 'object' && brandHas(AGENT_TEXT_BRANDS, text)) e.textContent = text.t;
     else { window.__PCC_UI_TEXT_VIOLATIONS__++; e.textContent = '—'; }
     return e;
   }
@@ -1406,7 +1411,7 @@
   function winShell(title, statusText, statusCls) {
     var wrap = el('article', 'pcc-win');
     var head = el('div', 'pcc-win-head');
-    head.appendChild((title && typeof title === 'object' && AGENT_TEXT_BRANDS.has(title)) || title === WITHHELD_FIELD || title === WITHHELD_PROSE ?
+    head.appendChild(isAgentText(title) || title === WITHHELD_FIELD || title === WITHHELD_PROSE ?
       agentEl('span', 'pcc-win-title pcc-text', title) : el('span', 'pcc-win-title', title));
     if (statusText != null) head.appendChild(el('span', 'pcc-pill ' + (statusCls || ''), statusText));
     wrap.appendChild(head);

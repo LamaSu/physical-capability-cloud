@@ -21,9 +21,16 @@ import { dirname, resolve } from "node:path";
 import { TextDecoder as NodeTextDecoder, TextEncoder as NodeTextEncoder } from "node:util";
 import { JSDOM } from "jsdom";
 import { describe, it, expect } from "vitest";
+import { vi } from "vitest";
 import { LIST_PROFILES, dashboardManifestToIr, validateIr, readText } from "./dashboard-ir.js";
 import type { IrNode } from "./dashboard-ir.js";
 import { listWindow as brandedListWindow } from "./dashboard-ir-renderer.js";
+
+// The scoped profile fixture gets its own record; production exports stay frozen.
+vi.mock("./dashboard-ir.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./dashboard-ir.js")>();
+  return { ...actual, LIST_PROFILES: { ...actual.LIST_PROFILES } };
+});
 
 // Keep this disclosure table about displayed text while authenticating the new
 // object representation before reading the same expected strings.

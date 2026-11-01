@@ -7,6 +7,7 @@
   },
   "include": [
     "src/__tests__/ir-kit-text-brand.test.ts",
+    "src/__tests__/ir-kit-text-brand*.ts",
     "../spec/src/__tests__/ui-kit*.ts"
   ]
 }

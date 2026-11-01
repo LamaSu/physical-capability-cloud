@@ -25,6 +25,7 @@ import type { IrBind, IrNode, KitText } from "./dashboard-ir.js";
 import { registerKitText, kitText, readText } from "./dashboard-ir.js";
 
 export const BINDER_LIM = { maxBytes: 512 * 1024, maxRows: 200, minPollMs: 5000, maxPollMs: 3_600_000, defaultPollMs: 30_000, sessionMs: 30 * 60 * 1000 } as const;
+Object.freeze(BINDER_LIM);
 
 /** Build the absolute URL for a bind — ONLY against the fixed origin. Returns null
  * (bind is dropped) for anything that could escape it. bind.path is already

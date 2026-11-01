@@ -1,3 +1,6 @@
 # The generated, byte-checked Phase-B browser kit MUST stay LF so `pnpm check:ir-kit`
 # (esbuild emits LF) is byte-stable across platforms / contributors.
 apps/dashboard/public/ui-kit/v1/pcc-ir-kit.js text eol=lf
+apps/dashboard/public/ui-kit/v1/pcc-ui.js text eol=lf
+apps/dashboard/public/ui-kit/v1/example-manifests/demo-snapshot.html text eol=lf
+packages/gateway/src/mcp/dashboard-ir.ts text eol=lf

@@ -72,8 +72,10 @@
     "form-summary",
     "field-label"
   ];
+  Object.freeze(IR_NODE_TYPES);
   var FROZEN = new Set(IR_NODE_TYPES);
   var BADGE_TONES = ["neutral", "info", "positive", "warning", "danger"];
+  Object.freeze(BADGE_TONES);
   var TONE_SET = new Set(BADGE_TONES);
   var CARD_KINDS = /* @__PURE__ */ new Set(["capability", "run"]);
   var GRID_KINDS = /* @__PURE__ */ new Set(["actions-readonly"]);
@@ -470,6 +472,14 @@
     // route's own property.
     "/api/capabilities": { rows: "items", title: ["name", "id"], meta: ["id", "type", "kernelId"], status: ["available"], paged: { defaultLimit: 50, total: "total" } }
   };
+  for (const profile of Object.values(LIST_PROFILES)) {
+    Object.freeze(profile.title);
+    Object.freeze(profile.meta);
+    Object.freeze(profile.status);
+    if (profile.paged) Object.freeze(profile.paged);
+    Object.freeze(profile);
+  }
+  Object.freeze(LIST_PROFILES);
   function listRowsOf(path, data) {
     const key = Object.prototype.hasOwnProperty.call(LIST_PROFILES, path) ? LIST_PROFILES[path].rows : void 0;
     if (!key) return null;
@@ -492,6 +502,7 @@
     capabilityCount: "count",
     type: "capType"
   };
+  Object.freeze(LIST_FIELD_KINDS);
   function listProfileViolation(path, props) {
     const prof = LIST_PROFILES[path];
     if (!prof) return `no list field profile for ${path}`;
@@ -732,6 +743,8 @@
     { route: "/api/capabilities/:", handler: "routes/capabilities.ts GET /api/capabilities/:capId -> CapabilityFacade.getById", effect: FACADE_READ + FUNNEL },
     { route: "/sse/stream/job/:", handler: "sse/topic-sse.ts GET /sse/stream/job/:jobId (auth + ownership check, topic subscribe)", effect: "no business-state write; per-IP connection counter; never opened by the browser kit" }
   ];
+  for (const reviewedRead of EFFECT_REVIEWED_READS) Object.freeze(reviewedRead);
+  Object.freeze(EFFECT_REVIEWED_READS);
   function bindMatchesPolicy(bind, key) {
     const policy = BIND_POLICY[key];
     if (!policy) return `no bind policy for ${key}`;
@@ -1266,6 +1279,12 @@
       ])
     })
   });
+  for (const schema of Object.values(SCHEMA_FIELDS)) {
+    for (const field of schema.fields) {
+      if (Array.isArray(field.key)) Object.freeze(field.key);
+      Object.freeze(field);
+    }
+  }
   var SETTLEMENT_NOTICE = Object.freeze({
     heading: kitText("Settlement record (read-only)"),
     note: kitText("Not proof of payment; verify on the authenticated PCC surface.")
@@ -1718,6 +1737,7 @@
 
   // src/mcp/dashboard-ir-binder.ts
   var BINDER_LIM = { maxBytes: 512 * 1024, maxRows: 200, minPollMs: 5e3, maxPollMs: 36e5, defaultPollMs: 3e4, sessionMs: 30 * 60 * 1e3 };
+  Object.freeze(BINDER_LIM);
   function bindUrl(origin, bind) {
     const p = bind.path;
     if (typeof p !== "string" || p.length < 2) return null;

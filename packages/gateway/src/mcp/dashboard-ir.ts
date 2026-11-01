@@ -84,9 +84,11 @@ export const IR_NODE_TYPES = [
   "root", "section", "heading", "text", "stat", "card", "receipt", "list",
   "badge", "grid", "approval-notice", "plan", "form-summary", "field-label",
 ] as const;
+Object.freeze(IR_NODE_TYPES);
 export type IrNodeType = (typeof IR_NODE_TYPES)[number];
 const FROZEN: ReadonlySet<string> = new Set(IR_NODE_TYPES);
 export const BADGE_TONES = ["neutral", "info", "positive", "warning", "danger"] as const;
+Object.freeze(BADGE_TONES);
 const TONE_SET: ReadonlySet<string> = new Set(BADGE_TONES);
 const CARD_KINDS: ReadonlySet<string> = new Set(["capability", "run"]);
 const GRID_KINDS: ReadonlySet<string> = new Set(["actions-readonly"]);
@@ -452,6 +454,14 @@ export const LIST_PROFILES: Readonly<Record<string, { rows: string; title: reado
   // route's own property.
   "/api/capabilities": { rows: "items", title: ["name", "id"], meta: ["id", "type", "kernelId"], status: ["available"], paged: { defaultLimit: 50, total: "total" } },
 };
+for (const profile of Object.values(LIST_PROFILES)) {
+  Object.freeze(profile.title);
+  Object.freeze(profile.meta);
+  Object.freeze(profile.status);
+  if (profile.paged) Object.freeze(profile.paged);
+  Object.freeze(profile);
+}
+Object.freeze(LIST_PROFILES);
 /** The rows of a list response, read ONLY by the route's PCC-owned rows key (an own property;
  * never a manifest selector, never a bare top-level array — astra r5 F3). Returns **null** when
  * there is no collection at all: the path has no LIST_PROFILES entry; `data` is not a non-null,
@@ -489,6 +499,7 @@ export const LIST_FIELD_KINDS: Readonly<Record<string, ListFieldKind>> = {
   capabilityCount: "count",
   type: "capType",
 };
+Object.freeze(LIST_FIELD_KINDS);
 
 function listProfileViolation(path: string, props: Record<string, unknown>): string | null {
   const prof = LIST_PROFILES[path];
@@ -802,6 +813,8 @@ export const EFFECT_REVIEWED_READS: ReadonlyArray<{ route: string; handler: stri
   { route: "/api/capabilities/:", handler: "routes/capabilities.ts GET /api/capabilities/:capId -> CapabilityFacade.getById", effect: FACADE_READ + FUNNEL },
   { route: "/sse/stream/job/:", handler: "sse/topic-sse.ts GET /sse/stream/job/:jobId (auth + ownership check, topic subscribe)", effect: "no business-state write; per-IP connection counter; never opened by the browser kit" },
 ];
+for (const reviewedRead of EFFECT_REVIEWED_READS) Object.freeze(reviewedRead);
+Object.freeze(EFFECT_REVIEWED_READS);
 /** Regex sources of every route (and SSE route) BIND_POLICY lets a manifest bind. */
 export function bindPolicyRouteSources(): string[] {
   const out = new Set<string>();

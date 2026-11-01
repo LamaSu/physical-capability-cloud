@@ -24,6 +24,7 @@ function shippedCss(): string {
   };
   visit(file);
   expect(expression).toBeDefined();
+  expression = expression?.replace(/\r\n/g, "\n");
   return new Function("return (" + expression + ");")();
 }
 const css = shippedCss();
@@ -131,6 +132,22 @@ describe("r2f T8: every agentEl call site draws the shipped attribution", () => 
     expect(new Set(produced.map(({ site }) => site))).toEqual(new Set(sites.map((_, index) => index)));
     for (const { site, node } of produced) {
       expect(selectors.some((selector) => node.matches(selector)), "agentEl source line " + file.getLineAndCharacterOfPosition(sites[site]!.getStart(file)).line).toBe(true);
+      const style = document.createElement("style");
+      style.textContent = css;
+      document.head.appendChild(style);
+      const pendingRules = Array.from(style.sheet!.cssRules);
+      for (let index = 0; index < pendingRules.length; index++) {
+        const rule = pendingRules[index]!;
+        if ("cssRules" in rule) pendingRules.push(...Array.from((rule as CSSGroupingRule).cssRules));
+        if (!("selectorText" in rule) || !("style" in rule)) continue;
+        const typed = rule as CSSStyleRule;
+        const matchingBefore = typed.selectorText.split(",").some((selector) => {
+          const trimmed = selector.trim();
+          return /::before$/.test(trimmed) && node.matches(trimmed.replace(/::before$/, ""));
+        });
+        if (matchingBefore) expect(["", '"agent-authored"', "'agent-authored'"]).toContain(typed.style.getPropertyValue("content"));
+      }
+      style.remove();
     }
   });
 });
@@ -164,6 +181,10 @@ describe("r2f T11: the rendered style node is pinned", () => {
     await boot({ sections: [{ heading: "Operations", windows: [{ kind: "note", text: "Make parts" }] }] }, {});
     const node = document.getElementById("pcc-ui-styles");
     expect(node).not.toBeNull();
+    expect((node as HTMLStyleElement).media).toBe("");
+    expect((node as HTMLStyleElement).disabled ?? false).toBe(false);
+    expect((node as HTMLStyleElement).sheet!.disabled ?? false).toBe(false);
+    expect(node!.isConnected).toBe(true);
     expect(node!.textContent).toBe(css);
     const expected = document.createElement("style");
     expected.textContent = css;
