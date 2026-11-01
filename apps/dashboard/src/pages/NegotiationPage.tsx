@@ -7,49 +7,43 @@ import { SplitEditor } from "../components/SplitEditor.js";
 import type { SplitEntry } from "../components/SplitEditor.js";
 
 // ---------------------------------------------------------------------------
-// Split presets (mirrors story-defaults SPLIT_PROFILES)
+// Split presets
 //
-// Legacy presets keep `designer`/`network` so older saved negotiations keep
+// Legacy presets keep `designer` so older saved negotiations keep
 // rendering. ADR-12 contributor-economics presets show the canonical 10-value
-// ContributorRole taxonomy and match @pcc/contracts/ts/story-defaults.ts
-// SPLIT_PROFILES.contributorEconomics{Minimal,WithAi}.
+// ContributorRole taxonomy.
 // ---------------------------------------------------------------------------
 
-const SPLIT_PRESETS: Record<string, SplitEntry[]> = {
+export const SPLIT_PRESETS: Record<string, SplitEntry[]> = {
   "Single-Step": [
     { role: "designer",  percentage: 10, label: "CSD Author" },
-    { role: "operator",  percentage: 70, label: "Machine Operator" },
+    { role: "operator",  percentage: 80, label: "Machine Operator" },
     { role: "verifier",  percentage: 10, label: "Evidence Verifier" },
-    { role: "network",   percentage: 10, label: "Protocol Treasury" },
   ],
   "Multi-Step": [
     { role: "designer",  percentage: 5,  label: "Workflow Designer" },
-    { role: "operator",  percentage: 75, label: "Step Operators" },
+    { role: "operator",  percentage: 85, label: "Step Operators" },
     { role: "verifier",  percentage: 10, label: "Evidence Verifiers" },
-    { role: "network",   percentage: 10, label: "Protocol Treasury" },
   ],
   "Community": [
     { role: "designer",  percentage: 20, label: "CSD Author" },
-    { role: "operator",  percentage: 60, label: "Machine Operator" },
+    { role: "operator",  percentage: 70, label: "Machine Operator" },
     { role: "curator",   percentage:  5, label: "Community Curator" },
     { role: "verifier",  percentage:  5, label: "Evidence Verifier" },
-    { role: "network",   percentage: 10, label: "Protocol Treasury" },
   ],
   // ADR-12 contributor-economics presets
   "Contrib-Econ — Minimal": [
-    { role: "operator",         percentage: 92, label: "Machine Operator" },
+    { role: "operator",         percentage: 93, label: "Machine Operator" },
     { role: "verifier",         percentage:  3, label: "Evidence Verifier" },
     { role: "protocol-author",  percentage:  2, label: "CSD Author" },
     { role: "integrator",       percentage:  2, label: "Adapter Integrator" },
-    { role: "network-treasury", percentage:  1, label: "Network Treasury" },
   ],
   "Contrib-Econ — With AI": [
-    { role: "operator",         percentage: 87, label: "Machine Operator" },
+    { role: "operator",         percentage: 89, label: "Machine Operator" },
     { role: "verifier",         percentage:  3, label: "Evidence Verifier" },
     { role: "protocol-author",  percentage:  2, label: "CSD Author" },
     { role: "integrator",       percentage:  2, label: "Adapter Integrator" },
     { role: "model-author",     percentage:  4, label: "Model Author" },
-    { role: "network-treasury", percentage:  2, label: "Network Treasury" },
   ],
 };
 
@@ -490,19 +484,19 @@ export function NegotiationPage() {
                 onClick={() => setGlobalSplits(SPLIT_PRESETS["Single-Step"].map((s) => ({ ...s })))}
                 className="px-3 py-2 rounded-lg text-xs bg-white/[0.03] border border-white/[0.08] text-white/50 hover:bg-white/[0.06] transition-all"
               >
-                Single-Step (10/70/10/10)
+                Single-Step (10/80/10)
               </button>
               <button
                 onClick={() => setGlobalSplits(SPLIT_PRESETS["Multi-Step"].map((s) => ({ ...s })))}
                 className="px-3 py-2 rounded-lg text-xs bg-white/[0.03] border border-white/[0.08] text-white/50 hover:bg-white/[0.06] transition-all"
               >
-                Multi-Step (5/75/10/10)
+                Multi-Step (5/85/10)
               </button>
               <button
                 onClick={() => setGlobalSplits(SPLIT_PRESETS["Community"].map((s) => ({ ...s })))}
                 className="px-3 py-2 rounded-lg text-xs bg-white/[0.03] border border-white/[0.08] text-white/50 hover:bg-white/[0.06] transition-all"
               >
-                Community (20/60/5/5/10)
+                Community (20/70/5/5)
               </button>
             </div>
           </GlassPanel>

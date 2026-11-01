@@ -41,7 +41,7 @@ import { RateSchedulePreviewChart } from "../components/RateSchedulePreviewChart
 // (100% minus the sum of all other contributors' bps), not via RateSchedule.
 // ---------------------------------------------------------------------------
 
-const PUBLISHER_ROLES: { value: string; label: string; description: string }[] = [
+export const PUBLISHER_ROLES: { value: string; label: string; description: string }[] = [
   { value: "integrator",            label: "Integrator",            description: "Adapter author / driver maintainer" },
   { value: "protocol-author",       label: "Protocol Author",       description: "CSD / capability schema author" },
   { value: "model-author",          label: "Model Author",          description: "Trained model owner (LoRA, distilled, etc.)" },
@@ -50,7 +50,6 @@ const PUBLISHER_ROLES: { value: string; label: string; description: string }[] =
   { value: "insurer",               label: "Insurer",               description: "Capacity / settlement insurer" },
   { value: "curator",               label: "Curator",               description: "Community capability curator" },
   { value: "assembler",             label: "Assembler",             description: "Workflow / multi-step assembler" },
-  { value: "network-treasury",      label: "Network Treasury",      description: "Protocol treasury beneficiary" },
 ];
 
 // ---------------------------------------------------------------------------
