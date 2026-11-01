@@ -1,0 +1,352 @@
+{
+  "schema": "pcc-llm-money-address-tools/1",
+  "entries": [
+    {
+      "source": "agent-package",
+      "tool": "deposit_bond",
+      "params": [
+        "address"
+      ],
+      "class": "money",
+      "why": "Escrow target receives the operator bond for a milestone."
+    },
+    {
+      "source": "agent-package",
+      "tool": "distribute_royalties",
+      "params": [
+        "splits[].address"
+      ],
+      "class": "money",
+      "why": "Each split address receives a share of IP royalty revenue."
+    },
+    {
+      "source": "agent-package",
+      "tool": "file_escrow_dispute",
+      "params": [
+        "address"
+      ],
+      "class": "money",
+      "why": "Escrow target holds the challenger bond and disputed milestone funds."
+    },
+    {
+      "source": "agent-package",
+      "tool": "fund_escrow",
+      "params": [
+        "address"
+      ],
+      "class": "money",
+      "why": "Escrow target receives the funding transfer."
+    },
+    {
+      "source": "agent-package",
+      "tool": "get_escrow",
+      "params": [
+        "escrowId"
+      ],
+      "class": "other",
+      "why": "Escrow identifier selects a read-only database or on-chain status lookup."
+    },
+    {
+      "source": "agent-package",
+      "tool": "get_escrow_chain_state",
+      "params": [
+        "address"
+      ],
+      "class": "other",
+      "why": "Contract address selects a read-only escrow state query."
+    },
+    {
+      "source": "agent-package",
+      "tool": "get_escrow_dispute",
+      "params": [
+        "address"
+      ],
+      "class": "other",
+      "why": "Contract address selects a read-only milestone dispute query."
+    },
+    {
+      "source": "agent-package",
+      "tool": "get_escrow_events",
+      "params": [
+        "address"
+      ],
+      "class": "other",
+      "why": "Contract address selects a read-only escrow event query."
+    },
+    {
+      "source": "agent-package",
+      "tool": "get_token_allowance",
+      "params": [
+        "owner",
+        "spender",
+        "tokenAddress"
+      ],
+      "class": "other",
+      "why": "Token, owner and spender addresses select a read-only allowance query."
+    },
+    {
+      "source": "agent-package",
+      "tool": "get_token_balance",
+      "params": [
+        "account",
+        "tokenAddress"
+      ],
+      "class": "other",
+      "why": "Token and account addresses select a read-only balance query."
+    },
+    {
+      "source": "agent-package",
+      "tool": "grant_evidence_access",
+      "params": [
+        "recipientAddress"
+      ],
+      "class": "other",
+      "why": "Recipient identity receives an encrypted evidence access grant."
+    },
+    {
+      "source": "agent-package",
+      "tool": "list_evidence_grants",
+      "params": [
+        "address"
+      ],
+      "class": "other",
+      "why": "Address selects a read-only list of evidence access grants."
+    },
+    {
+      "source": "agent-package",
+      "tool": "lit_decrypt",
+      "params": [
+        "authSig.address"
+      ],
+      "class": "other",
+      "why": "Auth signature address identifies the evidence decryption requester."
+    },
+    {
+      "source": "agent-package",
+      "tool": "near_intent",
+      "params": [
+        "recipient"
+      ],
+      "class": "money",
+      "why": "Recipient routes the cross-chain payment intent to its destination."
+    },
+    {
+      "source": "agent-package",
+      "tool": "near_quote",
+      "params": [
+        "recipient"
+      ],
+      "class": "money",
+      "why": "Recipient determines the destination of the quoted cross-chain payment route."
+    },
+    {
+      "source": "agent-package",
+      "tool": "onboard_machine",
+      "params": [
+        "operator.walletAddress"
+      ],
+      "class": "other",
+      "why": "Operator wallet address binds the machine registration to its identity."
+    },
+    {
+      "source": "agent-package",
+      "tool": "pay_ip_royalty",
+      "params": [
+        "payerAddress"
+      ],
+      "class": "money",
+      "why": "Payer address supplies the royalty payment into the IP vault."
+    },
+    {
+      "source": "agent-package",
+      "tool": "pcc_contributor_list",
+      "params": [
+        "address"
+      ],
+      "class": "other",
+      "why": "Address selects a read-only contributor profile lookup."
+    },
+    {
+      "source": "agent-package",
+      "tool": "pcc_contributor_register",
+      "params": [
+        "address"
+      ],
+      "class": "other",
+      "why": "Address binds a contributor identity to a persisted profile and schedule hash."
+    },
+    {
+      "source": "agent-package",
+      "tool": "pcc_oracle_verify",
+      "params": [
+        "escrowAddress"
+      ],
+      "class": "money",
+      "why": "Escrow target binds the requested evidence attestation to a settlement contract."
+    },
+    {
+      "source": "agent-package",
+      "tool": "provision_api_key",
+      "params": [
+        "walletAddress"
+      ],
+      "class": "other",
+      "why": "Wallet address binds the provisioned API key to the operator identity."
+    },
+    {
+      "source": "agent-package",
+      "tool": "register_capability_ip",
+      "params": [
+        "designerAddress"
+      ],
+      "class": "money",
+      "why": "Designer wallet owns the registered IP and its future royalty entitlement."
+    },
+    {
+      "source": "agent-package",
+      "tool": "register_job_evidence_ip",
+      "params": [
+        "operatorAddress"
+      ],
+      "class": "money",
+      "why": "Operator wallet owns the derivative IP and its royalty entitlement."
+    },
+    {
+      "source": "agent-package",
+      "tool": "release_milestone",
+      "params": [
+        "address"
+      ],
+      "class": "money",
+      "why": "Escrow target releases the milestone payment."
+    },
+    {
+      "source": "agent-package",
+      "tool": "submit_attestation",
+      "params": [
+        "address"
+      ],
+      "class": "money",
+      "why": "Escrow target records an attestation used to authorize settlement."
+    },
+    {
+      "source": "agent-package",
+      "tool": "submit_evidence_hash",
+      "params": [
+        "address"
+      ],
+      "class": "money",
+      "why": "Escrow target records evidence used to authorize settlement."
+    },
+    {
+      "source": "mcp",
+      "tool": "pcc_contributor_list",
+      "params": [
+        "address"
+      ],
+      "class": "other",
+      "why": "Address selects a read-only contributor profile lookup."
+    },
+    {
+      "source": "mcp",
+      "tool": "pcc_contributor_register",
+      "params": [
+        "address"
+      ],
+      "class": "other",
+      "why": "Address binds a contributor identity to a persisted profile and schedule hash."
+    },
+    {
+      "source": "mcp",
+      "tool": "pcc_create_onramp_session",
+      "params": [
+        "walletAddress"
+      ],
+      "class": "money",
+      "why": "Destination wallet receives the purchased USDC."
+    },
+    {
+      "source": "mcp",
+      "tool": "pcc_get_escrow",
+      "params": [
+        "escrowId"
+      ],
+      "class": "other",
+      "why": "Escrow identifier selects a read-only settlement status lookup."
+    },
+    {
+      "source": "mcp",
+      "tool": "pcc_get_escrow_events",
+      "params": [
+        "address"
+      ],
+      "class": "other",
+      "why": "Contract address selects a read-only escrow event query."
+    },
+    {
+      "source": "mcp",
+      "tool": "pcc_ip_claim",
+      "params": [
+        "ipId"
+      ],
+      "class": "money",
+      "why": "IP asset selects the royalty vault from which accumulated revenue is claimed."
+    },
+    {
+      "source": "mcp",
+      "tool": "pcc_ip_lineage",
+      "params": [
+        "ipId"
+      ],
+      "class": "other",
+      "why": "IP asset address selects a read-only provenance lineage query."
+    },
+    {
+      "source": "mcp",
+      "tool": "pcc_ip_register_capability",
+      "params": [
+        "designerAddress"
+      ],
+      "class": "money",
+      "why": "Designer wallet owns the registered IP and its future royalty entitlement."
+    },
+    {
+      "source": "mcp",
+      "tool": "pcc_ip_revenue_snapshot",
+      "params": [
+        "ipId"
+      ],
+      "class": "other",
+      "why": "IP asset address selects a read-only royalty revenue snapshot."
+    },
+    {
+      "source": "mcp",
+      "tool": "pcc_ip_set_splits",
+      "params": [
+        "ipId",
+        "splits[].address"
+      ],
+      "class": "money",
+      "why": "IP asset and split wallets determine the recipients of future royalty revenue."
+    },
+    {
+      "source": "mcp",
+      "tool": "pcc_setup_generate_env",
+      "params": [
+        "escrowAddress",
+        "gatewayPrivateKey"
+      ],
+      "class": "money",
+      "why": "Escrow address configures the settlement target; gatewayPrivateKey matches the address-description heuristic and controls the configured signing authority."
+    },
+    {
+      "source": "mcp",
+      "tool": "pcc_submit_withdrawal",
+      "params": [
+        "walletAddress"
+      ],
+      "class": "money",
+      "why": "Source wallet supplies USDC earnings for the fiat withdrawal."
+    }
+  ]
+}
