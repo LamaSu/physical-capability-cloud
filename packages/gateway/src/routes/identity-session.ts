@@ -9,6 +9,7 @@
 import type { FastifyInstance } from "fastify";
 import nacl from "tweetnacl";
 import { SessionKeyService } from "@pcc/verifier";
+import { refuseCookieCredentialWrite } from "../auth/explicit-session.js";
 import type {
   PrincipalKey,
   SessionAction,
@@ -61,6 +62,8 @@ export async function identitySessionRoutes(app: FastifyInstance) {
    * The private key is returned exactly ONCE and never stored by the gateway.
    */
   app.post("/api/identity/session", async (req, reply) => {
+    const refusal = refuseCookieCredentialWrite(req);
+    if (refusal) return reply.code(401).send(refusal);
     const body = req.body as {
       principalAgentId: string;
       scope?: {

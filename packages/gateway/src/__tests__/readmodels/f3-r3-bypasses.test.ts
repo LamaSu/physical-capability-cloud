@@ -79,7 +79,10 @@ beforeAll(async () => {
     const principal = req.headers["x-test-principal"];
     if (typeof principal === "string") (req as any).operatorId = principal;
     const proven = req.headers["x-test-proven-wallet"];
-    if (typeof proven === "string") (req as any).provenWallet = proven;
+    if (typeof proven === "string") {
+      (req as any).provenWallet = proven;
+      req.provenWalletCarrier = "key";
+    }
   });
   const { batchRoutes } = await import("../../routes/batches.js");
   const { telemetryRoutes } = await import("../../routes/telemetry.js");

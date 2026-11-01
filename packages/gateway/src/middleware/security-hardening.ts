@@ -12,6 +12,17 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { isIrBindablePath } from "../mcp/dashboard-ir.js";
 import { projectIrRead } from "../mcp/dashboard-ir-read-projection.js";
 
+declare module "fastify" {
+  interface FastifyContextConfig {
+    /** Static HTML served at an alias, so its CSP follows the actual file. */
+    cspStaticHtmlPath?: string;
+    /** Gateway-rendered HTML with executable inline scripts. */
+    cspInlineScripts?: boolean;
+    /** Route owns its CSP, including script and framing restrictions. */
+    cspOwnPolicy?: boolean;
+  }
+}
+
 // ── CORS Allowlist ──────────────────────────────────────────────────────────
 
 /** Origins allowed to make credentialed requests */
@@ -86,6 +97,7 @@ export async function irCorsReadProjection(
   const path = (req as unknown as Record<symbol, unknown>)[IR_CORS_READ];
   if (typeof path !== "string" || req.method !== "GET") return payload;
   reply.header("content-type", "application/json; charset=utf-8");
+  if (reply.statusCode === 503 && payload === '{"error":"wallet_link_unavailable"}') return payload;
   if (reply.statusCode !== 200) return "{}";
   let body: unknown;
   try {
@@ -301,8 +313,31 @@ setInterval(() => {
 
 // ── Security Response Headers ───────────────────────────────────────────────
 
+// Static HTML with executable inline scripts. The React SPA shell (including
+// /index.html) needs no inline script permission.
+export const INLINE_SCRIPT_HTML_PATHS = new Set([
+  "/commentary.html",
+  "/driver-capture.html",
+  "/driver.html",
+  "/install.html",
+  "/landing.html",
+  "/onboard.html",
+  "/operator-capture.html",
+  "/operator-status.html",
+  "/operator.html",
+  "/order.html",
+  "/pizza-llm-agent-prompt.html",
+  "/pizza-llm-bootstrap.html",
+  "/pizza-observability.html",
+  "/pizza-onboard-driver.html",
+  "/pizza-onboard-shop.html",
+  "/pizza-onboard-user.html",
+  "/ui-kit/v1/shell.html",
+  "/ui-kit/v1/example-manifests/demo-snapshot.html",
+]);
+
 export async function securityHeaders(app: FastifyInstance) {
-  app.addHook("onSend", async (_req: FastifyRequest, reply: FastifyReply) => {
+  app.addHook("onSend", async (req: FastifyRequest, reply: FastifyReply) => {
     // Prevent clickjacking
     reply.header("X-Frame-Options", "DENY");
     // Prevent MIME type sniffing
@@ -323,12 +358,21 @@ export async function securityHeaders(app: FastifyInstance) {
         "max-age=31536000; includeSubDomains; preload",
       );
     }
+    // Only explicitly opted-in routes may supply their own policy. Other route
+    // headers cannot weaken the global CSP; all other security headers still apply.
+    if (req.routeOptions.config.cspOwnPolicy === true && reply.hasHeader("Content-Security-Policy")) return;
+
     // Content Security Policy
+    const htmlPath = req.routeOptions.config.cspStaticHtmlPath ?? req.url.split("?")[0]!;
+    const inlineScripts = process.env.NODE_ENV !== "production" || (
+      (req.routeOptions.config.cspInlineScripts === true || INLINE_SCRIPT_HTML_PATHS.has(htmlPath)) &&
+      String(reply.getHeader("content-type") ?? "").startsWith("text/html")
+    );
     reply.header(
       "Content-Security-Policy",
       [
         "default-src 'self'",
-        "script-src 'self' 'unsafe-inline'",  // unsafe-inline needed for Vite/React in dev
+        inlineScripts ? "script-src 'self' 'unsafe-inline'" : "script-src 'self'",
         "style-src 'self' 'unsafe-inline'",   // inline styles used by dashboard
         "img-src 'self' data: https:",
         "font-src 'self' https://fonts.gstatic.com",

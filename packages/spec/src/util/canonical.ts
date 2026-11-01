@@ -434,20 +434,115 @@ export async function sha256(input: string): Promise<SHA256> {
   return `sha256:${hashHex}` as SHA256;
 }
 
+/** Read the marker once; even an own undefined/non-enumerable/accessor is present. */
+function eventWriterDescriptor(source: unknown): PropertyDescriptor | undefined {
+  if (source === null || (typeof source !== "object" && typeof source !== "function")) return undefined;
+  try {
+    return getOwnPropertyDescriptor(source, "writer");
+  } catch {
+    throw new NonCanonicalValueError("$.source", "a source whose writer descriptor could not be read");
+  }
+}
+
 /**
- * Hash an evidence event.
- * Hashes the canonical JSON of: type + timestamp + source + payload.
+ * Capture source's own data once, reusing the writer descriptor already read.
+ * Marker selection and canonical bytes therefore cannot see different Proxy
+ * answers. In particular, undefined must not erase an own writer before the
+ * caller has checked it, and non-enumerable/accessor members remain malformed.
+ */
+function eventSourceSnapshot(source: unknown, writer: PropertyDescriptor | undefined): unknown {
+  if (source === null || typeof source !== "object") return source;
+  try {
+    const proto = getPrototypeOf(source);
+    const array = isArray(source);
+    if (array ? proto !== ARRAY_PROTOTYPE : proto !== OBJECT_PROTOTYPE && proto !== null) {
+      throw new NonCanonicalValueError("$.source", "a non-plain source");
+    }
+    const copy: object = array ? [] : createObject(null);
+    const keys = ownKeys(source);
+    const count = keys.length;
+    // A Proxy may omit a configurable own marker from ownKeys. Its captured
+    // descriptor still governs the marker and must still appear in the bytes.
+    if (writer !== undefined) copyMember("writer", writer);
+    for (let i = 0; i < count; i++) {
+      const key = keys[i];
+      if (key === "writer" && writer !== undefined) continue;
+      const descriptor = key === "writer" ? writer : getOwnPropertyDescriptor(source, key);
+      if (descriptor === undefined) throw new NonCanonicalValueError("$.source", "a source property that vanished while it was read");
+      if (array && key === "length") {
+        const length = dataValueOf(descriptor);
+        if (!defineProperty(copy, "length", { __proto__: null, value: length } as PropertyDescriptor)) {
+          throw new NonCanonicalValueError("$.source.length", "a source array length that could not be copied");
+        }
+      } else {
+        copyMember(key, descriptor);
+      }
+    }
+    return copy;
+
+    function copyMember(key: PropertyKey, descriptor: PropertyDescriptor): void {
+      const member = dataValueOf(descriptor);
+      if (member === NOT_DATA) throw new NonCanonicalValueError("$.source", "an accessor source property");
+      if (!isEnumerable(descriptor)) throw new NonCanonicalValueError("$.source", "a non-enumerable source property");
+      if (!defineProperty(copy, key, dataDescriptor(member))) {
+        throw new NonCanonicalValueError("$.source", "a source property that could not be copied");
+      }
+    }
+  } catch (error) {
+    if (weakSetHas(CANONICAL_ERRORS, error)) throw error;
+    throw new NonCanonicalValueError("$.source", "a source that could not be read as a plain JSON tree");
+  }
+}
+
+function eventHashText(
+  event: Omit<EvidenceEvent, "hash" | "id">,
+  source: unknown,
+  writer: PropertyDescriptor | undefined,
+  version2: boolean,
+): string {
+  const hashInput = {
+    type: event.type,
+    timestamp: event.timestamp,
+    source: eventSourceSnapshot(source, writer),
+    payload: event.payload,
+    ...(version2 ? { eventHashVersion: 2 } : {}),
+  };
+  return canonicalize(hashInput);
+}
+
+/**
+ * Producer hash for unmarked evidence events: canonical { type, timestamp,
+ * source, payload }, byte-identical to event hash v1. Any own source.writer
+ * property is reserved and refused; only the kernel's internal authoring path
+ * may use hashKernelWrittenEvent.
  */
 export async function hashEvent(
   event: Omit<EvidenceEvent, "hash" | "id">
 ): Promise<SHA256> {
-  const hashInput = {
-    type: event.type,
-    timestamp: event.timestamp,
-    source: event.source,
-    payload: event.payload,
-  };
-  return sha256(canonicalize(hashInput));
+  const source = event.source;
+  const writer = eventWriterDescriptor(source);
+  if (writer !== undefined) throw new Error("source.writer is reserved for kernel-written events");
+  return sha256(eventHashText(event, source, writer, false));
+}
+
+/**
+ * Kernel-internal event hash v2. Requires an own DATA source.writer equal to
+ * "kernel" and hashes canonical { type, timestamp, source, payload,
+ * eventHashVersion: 2 }.
+ *
+ * Deploy order: every verifier (the oracle's /settle first) must support v2
+ * before any kernel that stamps writer runs a job that settles. A v1-only
+ * verifier fails such a bundle with bundle_hash_mismatch.
+ */
+export async function hashKernelWrittenEvent(
+  event: Omit<EvidenceEvent, "hash" | "id">
+): Promise<SHA256> {
+  const source = event.source;
+  const writer = eventWriterDescriptor(source);
+  if (writer === undefined || dataValueOf(writer) !== "kernel") {
+    throw new Error('source.writer must be an own data property equal to "kernel" for kernel-written events');
+  }
+  return sha256(eventHashText(event, source, writer, true));
 }
 
 /**
@@ -472,11 +567,16 @@ export async function verifyBundleHash(
 }
 
 /**
- * Verify that an event hash matches its contents.
+ * Verify v1 for an unmarked event, v2 for an own data source.writer "kernel".
+ * Other own writer values/accessors return false. Other malformed canonical
+ * input continues to throw NonCanonicalValueError, as for v1.
  */
 export async function verifyEventHash(
   event: EvidenceEvent
 ): Promise<boolean> {
-  const computed = await hashEvent(event);
+  const source = event.source;
+  const writer = eventWriterDescriptor(source);
+  if (writer !== undefined && dataValueOf(writer) !== "kernel") return false;
+  const computed = await sha256(eventHashText(event, source, writer, writer !== undefined));
   return computed === event.hash;
 }

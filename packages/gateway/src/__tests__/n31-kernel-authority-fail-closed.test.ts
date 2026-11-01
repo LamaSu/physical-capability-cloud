@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { refuseKernelAction, type KernelAuthority } from "../auth/kernel-authority.js";
+import { EXPLICIT_CREDENTIAL_REQUIRED, provenByCookieOnly, refuseKernelAction, type KernelAuthority } from "../auth/kernel-authority.js";
 import { operatorRoutes } from "../routes/operator.js";
 import { kernelAgentPackageRoutes } from "../routes/kernel-agent-package.js";
 import { initStore, closeStore } from "../db.js";
@@ -57,7 +57,7 @@ describe("N31 without apiGate in front, the routes themselves refuse an anonymou
 
 describe("N31 a kernel read that fails is 503, never a pass", () => {
   const req = { headers: {}, log: { warn: () => undefined } } as never;
-  const proven: KernelAuthority = { admin: false, provenWallet: WALLET, claimed: WALLET };
+  const proven: KernelAuthority = { admin: false, provenWallet: WALLET, provenWalletCarrier: "key", claimed: WALLET };
 
   it("for a decision and for a stop, while the store cannot be read", () => {
     closeStore(); // getStore() now throws, as a failed read would
@@ -71,5 +71,60 @@ describe("N31 a kernel read that fails is 503, never a pass", () => {
   it("the admin does not read the kernel, so it still proceeds", () => {
     closeStore();
     expect(refuseKernelAction(req, { admin: true, provenWallet: null, claimed: null }, "kernel-nyc", "decide")).toBeNull();
+  });
+});
+
+describe("N176 decisions require an explicit carrier for a proven wallet", () => {
+  const req = { headers: {}, log: { warn: () => undefined } } as never;
+  const proven: KernelAuthority = { admin: false, provenWallet: WALLET, claimed: WALLET };
+
+  beforeAll(() => {
+    process.env.PCC_DB_PATH = ":memory:";
+    closeStore();
+    initStore({ seed: true });
+  });
+
+  afterAll(() => {
+    closeStore();
+    if (PREV_DB === undefined) delete process.env.PCC_DB_PATH;
+    else process.env.PCC_DB_PATH = PREV_DB;
+  });
+
+  it.each([undefined, null, "cookie"] as const)("refuses a proven wallet carried by %s", carrier => {
+    const authority = { ...proven, provenWalletCarrier: carrier };
+    expect(provenByCookieOnly(authority)).toBe(true);
+    expect(refuseKernelAction(req, authority, "kernel-nyc", "decide")).toEqual({
+      status: 403, body: EXPLICIT_CREDENTIAL_REQUIRED,
+    });
+    expect(refuseKernelAction(req, authority, "kernel-nyc", "read")).toBeNull();
+    expect(refuseKernelAction(req, authority, "kernel-nyc", "stop_or_submit")).toBeNull();
+  });
+
+  it.each(["key", "bearer-session"] as const)("allows a proven operator carried by %s", carrier => {
+    const authority = { ...proven, provenWalletCarrier: carrier };
+    expect(provenByCookieOnly(authority)).toBe(false);
+    expect(refuseKernelAction(req, authority, "kernel-nyc", "decide")).toBeNull();
+  });
+
+  it("refuses an unknown carrier", () => {
+    const authority = { ...proven, provenWalletCarrier: "unknown" as never };
+    expect(provenByCookieOnly(authority)).toBe(true);
+    expect(refuseKernelAction(req, authority, "kernel-nyc", "decide")).toEqual({
+      status: 403, body: EXPLICIT_CREDENTIAL_REQUIRED,
+    });
+  });
+
+  it.each([undefined, null, "cookie"] as const)("preserves the admin exemption with carrier %s", carrier => {
+    const authority = { ...proven, admin: true, provenWalletCarrier: carrier };
+    expect(provenByCookieOnly(authority)).toBe(false);
+    expect(refuseKernelAction(req, authority, "kernel-nyc", "decide")).toBeNull();
+  });
+
+  it("leaves a caller without wallet proof to the ownership refusal", () => {
+    const authority = { ...proven, provenWallet: null };
+    expect(provenByCookieOnly(authority)).toBe(false);
+    expect(refuseKernelAction(req, authority, "kernel-nyc", "decide")).toMatchObject({
+      status: 403, body: { reason: "operator_proof_required" },
+    });
   });
 });

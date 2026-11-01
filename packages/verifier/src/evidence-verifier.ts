@@ -19,6 +19,8 @@
  *     at, which the CALLER takes from authoritative, owner-bound state (the accepted plan or its
  *     poster), never from the bundle. The bundle's own `assuranceTier` is not read at all (E11e).
  *     Without an accepted tier no requirement can be chosen, so the verdict fails closed.
+ *   - A supplied tier ladder has no provenance in this verifier. This is a precheck under the
+ *     caller's ladder; the oracle selects its ladder from the funded committed program identity.
  *   - The lifecycle and power events checked in step 4 are chosen by committed fields (timestamp,
  *     then hash), never by position.
  *   - A workflow step in step 6 is covered only by a committed `payload.stepId`, never by an id.
@@ -38,8 +40,10 @@ import type {
   DigitalWorkflowStep,
   WorkflowChallenge,
   ExecutionProof,
+  TierEvidenceRequirements,
 } from "@pcc/spec";
-import { DEFAULT_TIER_REQUIREMENTS, verifyBundleHash, verifyEventHash, ids } from "@pcc/spec";
+import { types as nodeTypes } from "node:util";
+import { DEFAULT_TIER_REQUIREMENTS, EVIDENCE_EVENT_TYPES, verifyBundleHash, verifyEventHash, ids } from "@pcc/spec";
 import { canonicalize, sha256 } from "@pcc/spec";
 import { computeAssuranceScore } from "./workflow/assurance-score.js";
 import { checkStepCompleteness, type StepTrace } from "./workflow/completeness-checker.js";
@@ -62,6 +66,17 @@ export interface DigitalVerifyOptions {
   executionProof?: ExecutionProof;
   /** Block timestamp to use for challenge age check. Defaults to Date.now()/1000. */
   currentBlockTimestamp?: bigint;
+  /**
+   * The caller's tier requirements, for example `compileTierLadder(csd).tiers`
+   * (@pcc/spec). This option carries no provenance: the result is a precheck
+   * under that ladder, not proof of the funded policy. The oracle selects its
+   * ladder from the funded committed program identity. When omitted, defaults to
+   * DEFAULT_TIER_REQUIREMENTS, which is FDM-shaped (gcode_hash_verified at
+   * every tier), so a non-FDM bundle only passes under its own CSD's ladder.
+   * Supplied ladders are copied before verification and must be dense,
+   * well-formed, contiguous from tier 0, unique by tier, and monotone.
+   */
+  tierRequirements?: readonly TierEvidenceRequirements[];
 }
 
 /**
@@ -100,6 +115,87 @@ function isAssuranceTier(v: unknown): v is AssuranceTier {
   return v === 0 || v === 1 || v === 2 || v === 3;
 }
 
+const EVENT_TYPES = new Set<string>(EVIDENCE_EVENT_TYPES);
+
+/** Read data descriptors rather than invoking accessors or caller-provided iterators. */
+function dataProperties(value: unknown): PropertyDescriptorMap {
+  if (typeof value !== "object" || value === null || nodeTypes.isProxy(value)) {
+    throw new Error("Tier requirements must contain ordinary data objects");
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new Error("Tier requirement entries must be plain objects");
+  }
+  const properties: PropertyDescriptorMap = Object.getOwnPropertyDescriptors(value);
+  Object.setPrototypeOf(properties, null);
+  if (Reflect.ownKeys(properties).some((key) => !Object.hasOwn(properties[key as string]!, "value"))) {
+    throw new Error("Tier requirements must not contain accessors");
+  }
+  return properties;
+}
+
+function denseValues(value: unknown): unknown[] {
+  if (!Array.isArray(value) || nodeTypes.isProxy(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    throw new Error("Tier requirements and event groups must be ordinary arrays");
+  }
+  const properties: PropertyDescriptorMap = Object.getOwnPropertyDescriptors(value as object);
+  Object.setPrototypeOf(properties, null);
+  const length = properties.length!.value as number;
+  const result: unknown[] = [];
+  for (let i = 0; i < length; i++) {
+    const property = properties[String(i)];
+    if (!property || !Object.hasOwn(property, "value")) {
+      throw new Error("Tier requirements and event groups must be dense data arrays");
+    }
+    result.push(property.value);
+  }
+  return result;
+}
+
+/** Own the requirements used across awaits, and reject ladders that can omit lower-tier promises. */
+function snapshotTierRequirements(value: unknown): TierEvidenceRequirements[] {
+  const snapshot: TierEvidenceRequirements[] = [];
+  const seen = new Set<AssuranceTier>();
+  for (const raw of denseValues(value)) {
+    const properties = dataProperties(raw);
+    const tier: unknown = properties.tier?.value;
+    const minimumEvents: unknown = properties.minimumEvents?.value;
+    const description: unknown = properties.description?.value;
+    if (
+      !isAssuranceTier(tier) ||
+      typeof minimumEvents !== "number" || !Number.isSafeInteger(minimumEvents) || minimumEvents < 0 ||
+      typeof description !== "string"
+    ) {
+      throw new Error("Each tier needs a tier 0..3, a nonnegative integer minimumEvents, and a description");
+    }
+    if (seen.has(tier)) throw new Error(`Tier ${tier} is defined more than once`);
+    seen.add(tier);
+    const requiredEventTypes = denseValues(properties.requiredEventTypes?.value).map((rawGroup) => {
+      const group = denseValues(rawGroup);
+      if (group.length === 0 || group.some((event) => typeof event !== "string" || !EVENT_TYPES.has(event))) {
+        throw new Error(`Tier ${tier} contains an empty or unknown event group`);
+      }
+      return group as TierEvidenceRequirements["requiredEventTypes"][number];
+    });
+    snapshot.push({ tier, minimumEvents, description, requiredEventTypes });
+  }
+  snapshot.sort((a, b) => a.tier - b.tier);
+  for (const [index, upper] of snapshot.entries()) {
+    if (upper.tier !== index) throw new Error("Tier requirements must be contiguous from tier 0");
+    for (const lower of snapshot.slice(0, index)) {
+      // An OR group may become stricter: [cv] implies the default lower tier's [cv, camera].
+      // It may never become weaker: [cv, camera] does not imply a lower [cv] requirement.
+      const impliesLowerGroups = lower.requiredEventTypes.every((lowerGroup) =>
+        upper.requiredEventTypes.some((upperGroup) => upperGroup.every((event) => lowerGroup.includes(event))),
+      );
+      if (!impliesLowerGroups || upper.minimumEvents < lower.minimumEvents) {
+        throw new Error(`Tier ${upper.tier} weakens tier ${lower.tier}'s requirements`);
+      }
+    }
+  }
+  return snapshot;
+}
+
 export class EvidenceVerifier {
   private verifierId: string;
   private verifierAddress: string;
@@ -132,6 +228,18 @@ export class EvidenceVerifier {
     options?: DigitalVerifyOptions,
   ): Promise<VerificationAttestation> {
     const findings: VerificationFinding[] = [];
+    const acceptedTier = options?.acceptedTier;
+    let ladder: TierEvidenceRequirements[] | undefined;
+    let ladderError: string | undefined;
+    if (isAssuranceTier(acceptedTier)) {
+      try {
+        const supplied = options?.tierRequirements;
+        ladder = snapshotTierRequirements(supplied === undefined ? DEFAULT_TIER_REQUIREMENTS : supplied);
+      } catch {
+        // A caller accessor can throw any value, including a Proxy. Do not inspect that value.
+        ladderError = "Malformed tier requirements";
+      }
+    }
 
     // 1. Verify bundle hash
     const bundleValid = await verifyBundleHash(bundle);
@@ -157,7 +265,6 @@ export class EvidenceVerifier {
 
     // 3. Tier requirements, chosen by the ACCEPTED tier only (N118, E11e). The bundle's own assuranceTier
     // is not signed, so it is not read at all.
-    const acceptedTier = options?.acceptedTier;
     if (!isAssuranceTier(acceptedTier)) {
       findings.push({
         evidenceEventId: "",
@@ -176,8 +283,27 @@ export class EvidenceVerifier {
         passed: true,
         details: `The evidence required is the accepted tier ${acceptedTier}'s`,
       });
-      const tierReq = DEFAULT_TIER_REQUIREMENTS.find((r) => r.tier === acceptedTier);
-      if (tierReq) {
+      // Shape validation proves no policy provenance. The oracle resolves the ladder from the
+      // funded committed program identity; this verifier only prechecks the caller's snapshot.
+      const tierReq = ladder?.find((r) => r.tier === acceptedTier);
+      if (ladderError !== undefined) {
+        findings.push({
+          evidenceEventId: "",
+          check: "tier_requirements_valid",
+          passed: false,
+          details: `Invalid tier requirements: ${ladderError}`,
+          severity: "critical",
+        });
+      } else if (!tierReq) {
+        // An accepted tier the funded capability's ladder does not define proves nothing: fail closed.
+        findings.push({
+          evidenceEventId: "",
+          check: "tier_requirement_defined",
+          passed: false,
+          details: `Tier ${acceptedTier} is not defined by the tier requirements in force`,
+          severity: "critical",
+        });
+      } else {
         const eventTypes = new Set(bundle.events.map((e) => e.type));
         for (const group of tierReq.requiredEventTypes) {
           const found = group.some((t) => eventTypes.has(t));

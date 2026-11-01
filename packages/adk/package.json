@@ -1,0 +1,37 @@
+{
+  "name": "@pcc/adk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PCC Agent Development Kit: the one public package for building, publishing and running capabilities on PCC (working name; publishing awaits the operator, queue 36)",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "generate": "node scripts/generate-agent-pin.mjs",
+    "check:generated": "node scripts/generate-agent-pin.mjs --check",
+    "check:clean-install": "node scripts/clean-install-check.mjs"
+  },
+  "dependencies": {
+    "@pcc/kernel-sdk": "workspace:*",
+    "@pcc/spec": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

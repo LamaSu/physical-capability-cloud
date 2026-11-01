@@ -1,0 +1,1137 @@
+{
+  "contract": "pcc.evidence.subject-binding.v1",
+  "description": "Kernel-written input binding: event hash v2 plus the exact device-job completion rule mirrored by oracle #8973. Only execution_completed counts as completion. All input authority comes from the authenticated funded subject recipeRef. eventHashVersions describes supplied preimages, including an old-kernel v1 forgery.",
+  "completionEventTypes": [
+    "execution_completed"
+  ],
+  "vectors": [
+    {
+      "id": "shared-device-job-every-load-every-completion",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d"
+        },
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input"
+          },
+          "id": "input-event-2",
+          "hash": "sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input"
+          },
+          "id": "input-event-3",
+          "hash": "sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        2,
+        1,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"device-job-input\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"device-job-input\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}",
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5\",\"sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5\",\"sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d\",\"sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d\"]",
+      "bundleHash": "sha256:59c8301b551cae28c95ba6aecd24cbaf5909876daa2b9165ef2780327ecfaaf6",
+      "expected": {
+        "ok": true
+      }
+    },
+    {
+      "id": "completion-before-load",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5"
+        },
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d"
+        }
+      ],
+      "eventHashVersions": [
+        1,
+        2
+      ],
+      "eventPreimages": [
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}",
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"device-job-input\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}"
+      ],
+      "bundlePreimage": "[\"sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5\",\"sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d\"]",
+      "bundleHash": "sha256:3d5447c977950bf33721d561802bbd32407ee205615f9131b244ccc73d6f95ea",
+      "expected": {
+        "ok": true
+      }
+    },
+    {
+      "id": "unmarked-method-loaded",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:d7511700443770ce29304f1c24331cbe2afbac384db05e04fef934279b6210c8"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5"
+        }
+      ],
+      "eventHashVersions": [
+        1,
+        1
+      ],
+      "eventPreimages": [
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5\",\"sha256:d7511700443770ce29304f1c24331cbe2afbac384db05e04fef934279b6210c8\"]",
+      "bundleHash": "sha256:9ebfcfe78ea0b5493c6134ac8cf04db3116370707c36ca584ff78ec9125a84b9",
+      "expected": {
+        "ok": false,
+        "reason": "input-not-kernel-written",
+        "eventIndex": 0
+      }
+    },
+    {
+      "id": "adapter-writer",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "adapter"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:4e4f13b962ff700faf067bd3f00ee9b5917b8e3416ddf1fbfc1b2dbc2e0c253b"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5"
+        }
+      ],
+      "eventHashVersions": [
+        1,
+        1
+      ],
+      "eventPreimages": [
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"adapter\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:4e4f13b962ff700faf067bd3f00ee9b5917b8e3416ddf1fbfc1b2dbc2e0c253b\",\"sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5\"]",
+      "bundleHash": "sha256:2a97772e49de0514a63a404ea04892cf455dd4981a2fbe760fbab9e200d3ceb8",
+      "expected": {
+        "ok": false,
+        "reason": "event-writer-invalid",
+        "eventIndex": 0
+      }
+    },
+    {
+      "id": "boolean-writer",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": true
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:f90d66ab6ccd1289c2c1d9413b40694795d6f69e9d9c3f4ca5a64f28f674ee04"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5"
+        }
+      ],
+      "eventHashVersions": [
+        1,
+        1
+      ],
+      "eventPreimages": [
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":true},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5\",\"sha256:f90d66ab6ccd1289c2c1d9413b40694795d6f69e9d9c3f4ca5a64f28f674ee04\"]",
+      "bundleHash": "sha256:3e6f10049e1e11913610fe10396a047a97ebd942b50163060760ea6616d1f6d8",
+      "expected": {
+        "ok": false,
+        "reason": "event-writer-invalid",
+        "eventIndex": 0
+      }
+    },
+    {
+      "id": "old-kernel-v1-forgery",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:f22385d7862ed0898a3971b0be838313e6f09fa0bf4f2ed41d441107414a5277"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5"
+        }
+      ],
+      "eventHashVersions": [
+        1,
+        1
+      ],
+      "eventPreimages": [
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5\",\"sha256:f22385d7862ed0898a3971b0be838313e6f09fa0bf4f2ed41d441107414a5277\"]",
+      "bundleHash": "sha256:f49368a4c41fd0bec64b5525950636bf7e7801ddc3128686c8008e666ecebd08",
+      "expected": {
+        "ok": false,
+        "reason": "event-hash-mismatch",
+        "eventIndex": 0
+      }
+    },
+    {
+      "id": "load-device-job-missing",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:f5accd81937fccdd991e2ba249c0e59dbfa9ea8f9145466d2c69c5fd2610c70d"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5\",\"sha256:f5accd81937fccdd991e2ba249c0e59dbfa9ea8f9145466d2c69c5fd2610c70d\"]",
+      "bundleHash": "sha256:a06f0ed3a06f8edabdfa4bcf7b2060ffedf3e2de9d9ad32674f93291b4a93628",
+      "expected": {
+        "ok": false,
+        "reason": "input-device-job-not-committed",
+        "eventIndex": 0
+      }
+    },
+    {
+      "id": "load-device-job-empty",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:64cdb079c1c7410f9fbcbcf853a1eaf5db55e93be6caf4f3e125e339cee8ae3a"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5\",\"sha256:64cdb079c1c7410f9fbcbcf853a1eaf5db55e93be6caf4f3e125e339cee8ae3a\"]",
+      "bundleHash": "sha256:f1f84c83a98a206f3d0134535466f1d1569029998ca005c95867e3f466e95470",
+      "expected": {
+        "ok": false,
+        "reason": "input-device-job-not-committed",
+        "eventIndex": 0
+      }
+    },
+    {
+      "id": "load-device-job-numeric",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": 42,
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:83843b98a56ddc51d93c3b0b6184af3001532d7f03f01103264ea037510716c9"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":42,\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5\",\"sha256:83843b98a56ddc51d93c3b0b6184af3001532d7f03f01103264ea037510716c9\"]",
+      "bundleHash": "sha256:b61c2e2fcd328d86ee369ac602e1c7622571c9e2e1f30a50aba36062648baf2a",
+      "expected": {
+        "ok": false,
+        "reason": "input-device-job-not-committed",
+        "eventIndex": 0
+      }
+    },
+    {
+      "id": "load-device-job-null",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": null,
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:68639b82ce4133abdcf1d7ff9ce60add82f122823bcb8a7916da35b511e6c23a"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":null,\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5\",\"sha256:68639b82ce4133abdcf1d7ff9ce60add82f122823bcb8a7916da35b511e6c23a\"]",
+      "bundleHash": "sha256:ff4c56bf563d9fa4f9277bc5ed0a865fc0bba16a644ba10f5c7dfbedae6f754a",
+      "expected": {
+        "ok": false,
+        "reason": "input-device-job-not-committed",
+        "eventIndex": 0
+      }
+    },
+    {
+      "id": "two-load-device-jobs",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d"
+        },
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "other-device-job",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:70850a630146f732e4b231c0137292669d84dc3d1b98138b3b49e1ab7e145d65"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input"
+          },
+          "id": "input-event-2",
+          "hash": "sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        2,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"device-job-input\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"other-device-job\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5\",\"sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d\",\"sha256:70850a630146f732e4b231c0137292669d84dc3d1b98138b3b49e1ab7e145d65\"]",
+      "bundleHash": "sha256:a8650b98472d4247e5a0e34394d4fed54b803132d2c38b85f4758e9a8c6aa105",
+      "expected": {
+        "ok": false,
+        "reason": "input-device-job-mismatch",
+        "eventIndex": 1
+      }
+    },
+    {
+      "id": "completion-device-job-missing",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:82bb5a2371f88a6786de74ec565f6bd0d045a39b7c7e93d08911e7d38e8be24f"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"device-job-input\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d\",\"sha256:82bb5a2371f88a6786de74ec565f6bd0d045a39b7c7e93d08911e7d38e8be24f\"]",
+      "bundleHash": "sha256:4974056e58348f942d6667c19b5868ad103425c15f3ace5106dc0441c9dd9c5e",
+      "expected": {
+        "ok": false,
+        "reason": "input-completion-device-job-mismatch",
+        "eventIndex": 1
+      }
+    },
+    {
+      "id": "completion-device-job-different",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "other-device-job"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:cb9f1be7a7b9745c566606f7b834e87901d35b8fe1b8e3a3fa9e08f13b8e9880"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"device-job-input\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"other-device-job\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d\",\"sha256:cb9f1be7a7b9745c566606f7b834e87901d35b8fe1b8e3a3fa9e08f13b8e9880\"]",
+      "bundleHash": "sha256:c09dc73be57c95610f07c5449cef1125533cd41ecd7cb940fe58a2b7df94a2e1",
+      "expected": {
+        "ok": false,
+        "reason": "input-completion-device-job-mismatch",
+        "eventIndex": 1
+      }
+    },
+    {
+      "id": "completion-device-job-empty",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": ""
+          },
+          "id": "input-event-1",
+          "hash": "sha256:b363c9c72cf44fc7c486ff82256f8d987ed0f4f89afbbeb064fa873386359375"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"device-job-input\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d\",\"sha256:b363c9c72cf44fc7c486ff82256f8d987ed0f4f89afbbeb064fa873386359375\"]",
+      "bundleHash": "sha256:11698bccef496058b65e489aed93e5465e1c44f10a56e0264fee2c9d7e0a2984",
+      "expected": {
+        "ok": false,
+        "reason": "input-completion-device-job-mismatch",
+        "eventIndex": 1
+      }
+    },
+    {
+      "id": "completion-device-job-numeric",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": 42
+          },
+          "id": "input-event-1",
+          "hash": "sha256:666acffe996032672d4c6bcda426a9812f0214cd6e321dda79cf7e441640a0ed"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"device-job-input\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":42,\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:666acffe996032672d4c6bcda426a9812f0214cd6e321dda79cf7e441640a0ed\",\"sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d\"]",
+      "bundleHash": "sha256:5a1371570f6d8517b4a21ae8e3c1586999a44c46fa62b4b9f3bf4f11bcbee479",
+      "expected": {
+        "ok": false,
+        "reason": "input-completion-device-job-mismatch",
+        "eventIndex": 1
+      }
+    },
+    {
+      "id": "completion-device-job-null",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": null
+          },
+          "id": "input-event-1",
+          "hash": "sha256:09fd1e8a8be937e3b9b74fdf689d940594b7bd3b5d0f648a1555e00b0ebf0730"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"device-job-input\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":null,\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:09fd1e8a8be937e3b9b74fdf689d940594b7bd3b5d0f648a1555e00b0ebf0730\",\"sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d\"]",
+      "bundleHash": "sha256:7282c7a366911d16ea8d2b28c98ea89c68307d81efcd495339c4cd706a25bf3c",
+      "expected": {
+        "ok": false,
+        "reason": "input-completion-device-job-mismatch",
+        "eventIndex": 1
+      }
+    },
+    {
+      "id": "second-completion-missing-device-job",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5"
+        },
+        {
+          "type": "execution_completed",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input"
+          },
+          "id": "input-event-2",
+          "hash": "sha256:82bb5a2371f88a6786de74ec565f6bd0d045a39b7c7e93d08911e7d38e8be24f"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        1,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"device-job-input\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}",
+        "{\"payload\":{\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_completed\"}"
+      ],
+      "bundlePreimage": "[\"sha256:62a58ff07c1384d33d7f7e166ef7fcc4ff9804927f09ac96d6a8b67a9cb414f5\",\"sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d\",\"sha256:82bb5a2371f88a6786de74ec565f6bd0d045a39b7c7e93d08911e7d38e8be24f\"]",
+      "bundleHash": "sha256:91045b9c7b4f61fe763c9b2546b22a0a07a9f348cf2365c090c053370fbf4f3c",
+      "expected": {
+        "ok": false,
+        "reason": "input-completion-device-job-mismatch",
+        "eventIndex": 2
+      }
+    },
+    {
+      "id": "no-execution-completed",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d"
+        }
+      ],
+      "eventHashVersions": [
+        2
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"device-job-input\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}"
+      ],
+      "bundlePreimage": "[\"sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d\"]",
+      "bundleHash": "sha256:72c7779d70ff4a8c6776a1b6714182c3bc4b533678790ae1fcb37fcea68912ae",
+      "expected": {
+        "ok": false,
+        "reason": "input-completion-not-committed"
+      }
+    },
+    {
+      "id": "execution-started-is-not-completion",
+      "subject": {
+        "jobId": "job-input",
+        "kernelId": "kernel-input",
+        "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "events": [
+        {
+          "type": "method_loaded",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller",
+            "writer": "kernel"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input",
+            "inputHash": "sha256:abababababababababababababababababababababababababababababababab"
+          },
+          "id": "input-event-0",
+          "hash": "sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d"
+        },
+        {
+          "type": "execution_started",
+          "timestamp": "2026-10-15T10:00:00Z",
+          "source": {
+            "kernelId": "kernel-input",
+            "deviceId": "device-input",
+            "deviceType": "controller"
+          },
+          "payload": {
+            "jobId": "job-input",
+            "deviceJobId": "device-job-input"
+          },
+          "id": "input-event-1",
+          "hash": "sha256:f5c902ab2beee028a1bf2dcd59c58f34a99d2fa4be9a3c18f74bf622fff594b4"
+        }
+      ],
+      "eventHashVersions": [
+        2,
+        1
+      ],
+      "eventPreimages": [
+        "{\"eventHashVersion\":2,\"payload\":{\"deviceJobId\":\"device-job-input\",\"inputHash\":\"sha256:abababababababababababababababababababababababababababababababab\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\",\"writer\":\"kernel\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"method_loaded\"}",
+        "{\"payload\":{\"deviceJobId\":\"device-job-input\",\"jobId\":\"job-input\"},\"source\":{\"deviceId\":\"device-input\",\"deviceType\":\"controller\",\"kernelId\":\"kernel-input\"},\"timestamp\":\"2026-10-15T10:00:00Z\",\"type\":\"execution_started\"}"
+      ],
+      "bundlePreimage": "[\"sha256:68e1d178d93c9a26af54840c252a1b0d93fb407b71cec740a7be96fe2500a94d\",\"sha256:f5c902ab2beee028a1bf2dcd59c58f34a99d2fa4be9a3c18f74bf622fff594b4\"]",
+      "bundleHash": "sha256:0592c07d50f322c81d29b0782b7e079f50f64e2a718c43b472c9d5c27f176937",
+      "expected": {
+        "ok": false,
+        "reason": "input-completion-not-committed"
+      }
+    }
+  ]
+}

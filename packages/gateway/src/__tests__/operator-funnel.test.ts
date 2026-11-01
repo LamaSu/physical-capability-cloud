@@ -27,6 +27,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { KernelConfig } from "@pcc/kernel";
 
@@ -80,6 +81,7 @@ vi.mock("../services/kernel-service.js", async (importOriginal) => {
     // #450 (N59): the test-job route runs only on the gateway's own kernel, on a loaded
     // device, and judges simulation on the adapter the job ran on.
     kernelId: "kernel-nyc",
+    hasExplicitConfig: true,
     hasRunner: vi.fn().mockReturnValue(true),
     jobRanSimulated: vi.fn().mockReturnValue(false),
   };
@@ -131,6 +133,7 @@ function opFunnelRows(): Array<Record<string, unknown>> {
 // rather than deleting, so we never leak state into sibling test files that
 // may share this worker thread's process.env.
 const ORIGINAL_ENV = {
+  PCC_ADMIN_KEY: process.env.PCC_ADMIN_KEY,
   PCC_FUNNEL_ENABLED: process.env.PCC_FUNNEL_ENABLED,
   PCC_OBSERVABILITY_ADMINS: process.env.PCC_OBSERVABILITY_ADMINS,
   NODE_ENV: process.env.NODE_ENV,
@@ -355,6 +358,8 @@ const mockConfig = { kernelId: "kernel-nyc", mockMode: true, devices: [] } as Ke
 const REAL_ADDR = `0x${"a".repeat(40)}`;
 
 async function buildFullApp(): Promise<FastifyInstance> {
+  const adminKey = randomUUID();
+  process.env.PCC_ADMIN_KEY = adminKey;
   process.env.PCC_DB_PATH = ":memory:";
   initStore({ seed: true });
 
@@ -380,7 +385,10 @@ async function buildFullApp(): Promise<FastifyInstance> {
   // anonymous caller clear it with the x-test-anonymous header.
   app.decorateRequest("operatorId", null);
   app.addHook("onRequest", async (req) => {
-    if (req.headers["x-test-anonymous"] !== "1") (req as unknown as { operatorId: string }).operatorId = "op-test";
+    if (req.headers["x-test-anonymous"] !== "1") {
+      (req as unknown as { operatorId: string }).operatorId = "op-test";
+      req.headers["x-admin-key"] = adminKey;
+    }
   });
   await app.register(kernelRoutes);
   await app.register(setupRoutes);

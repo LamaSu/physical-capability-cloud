@@ -8,8 +8,9 @@
  *   POST /api/kits/:digest/fork         publish a kit whose parentKitDigest is :digest (same rule)
  *
  * The publishing role is checked HERE, not left to the scope-checker's
- * defaults (astra k1-511): an API key holding template_author, operator, admin
- * or *. A SIWE session carries no scopes and is refused.
+ * defaults (astra k1-511): issued scopes only — template_author, admin or *.
+ * Self-service keys (operator:basic) and operator are refused until a later slice.
+ * A SIWE session carries no scopes and is refused.
  *
  * There is no update or delete: a published version never changes, and an edit
  * is a new manifest. Deprecation needs publisher ownership under WP-A's identity
@@ -21,8 +22,8 @@ import { z } from "zod";
 import { getCallerScopes } from "../middleware/scope-checker.js";
 import { getKitRegistry, KitIntegrityError, KitRegistryError, type KitRegistry } from "../services/kit-registry.js";
 
-/** The API-key scopes that may publish or fork a kit (as for template authoring). */
-export const KIT_PUBLISH_SCOPES: readonly string[] = ["*", "template_author", "operator", "admin"];
+/** Issued scopes only: template_author, admin or *; self-service keys (operator:basic) and operator are refused until a later slice. */
+export const KIT_PUBLISH_SCOPES: readonly string[] = ["*", "template_author", "admin"];
 
 const ListQuerySchema = z
   .object({

@@ -91,9 +91,18 @@ vi.mock("../services/kernel-service.js", async (importActual) => {
 // Test app builder
 // ---------------------------------------------------------------------------
 
+// N133 (the steward's DECISIONS 01:01): a paid job's buyer is the caller's proven wallet, or the
+// gateway admin acts for it. This suite has no caller stand-in and its buyers are not wallets, so
+// the admin submits each fast-track job for its buyer.
+const ADMIN = "paid-job-flow-dispatch-admin";
+let savedAdminKey: string | undefined;
+let savedQueueOnly: string | undefined;
+
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   process.env.MOCK_SETTLEMENT = "true";
+  savedAdminKey = process.env.PCC_ADMIN_KEY;
+  process.env.PCC_ADMIN_KEY = ADMIN;
   initStore({ seed: true });
 
   const app = Fastify({ logger: false });
@@ -110,6 +119,7 @@ async function submitJob(app: FastifyInstance, kernelId: string, userAgentId: st
   const res = await app.inject({
     method: "POST",
     url: "/api/jobs/submit-from-discovery",
+    headers: { "x-admin-key": ADMIN },
     // A type the kernel actually registers: the quote is the registered capability's price (N98),
     // so a type the kernel does not offer is refused before any job exists.
     payload: { kernelId, capabilityType: "fdm", userAgentId },
@@ -129,6 +139,8 @@ describe("SEAM-1: remote-kernel job dispatch routing", () => {
   let app: FastifyInstance;
 
   beforeEach(async () => {
+    savedQueueOnly = process.env.PCC_JOB_SUBMIT_QUEUE_ONLY;
+    delete process.env.PCC_JOB_SUBMIT_QUEUE_ONLY;
     vi.clearAllMocks();
     // Default: no initialised local kernel (a production control-plane gateway).
     // getKernelService() throws, so createJobFromSession sees localKernelId
@@ -140,8 +152,12 @@ describe("SEAM-1: remote-kernel job dispatch routing", () => {
   });
 
   afterEach(async () => {
+    if (savedQueueOnly === undefined) delete process.env.PCC_JOB_SUBMIT_QUEUE_ONLY;
+    else process.env.PCC_JOB_SUBMIT_QUEUE_ONLY = savedQueueOnly;
     await app.close();
     closeStore();
+    if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = savedAdminKey;
   });
 
   it("dispatches a job as 'queued' when the gateway has NO local kernel (remote node picks it up)", async () => {
@@ -154,7 +170,7 @@ describe("SEAM-1: remote-kernel job dispatch routing", () => {
 
   it("dispatches a job as 'queued' when kernelId differs from the gateway's own kernel", async () => {
     // Gateway owns "kernel-home" in-process; the job targets a different kernel.
-    vi.mocked(getKernelService).mockReturnValue({ config: { kernelId: "kernel-home" } } as any);
+    vi.mocked(getKernelService).mockReturnValue({ kernelId: "kernel-home", hasExplicitConfig: true } as any);
 
     const job = await submitJob(app, "kernel-nyc", "user-seam1-different");
     expect(job.status).toBe("queued");
@@ -163,7 +179,7 @@ describe("SEAM-1: remote-kernel job dispatch routing", () => {
   it("keeps a gateway-local job 'active' in mock settlement (gateway owns the kernel — OT-2/pizza in-process demo)", async () => {
     // Gateway owns kernel-nyc in-process AND the job targets it -> local path.
     // This must NOT regress: the in-process demos rely on immediate "active".
-    vi.mocked(getKernelService).mockReturnValue({ config: { kernelId: "kernel-nyc" } } as any);
+    vi.mocked(getKernelService).mockReturnValue({ kernelId: "kernel-nyc", hasExplicitConfig: true } as any);
 
     const job = await submitJob(app, "kernel-nyc", "user-seam1-local");
     expect(job.status).toBe("active");

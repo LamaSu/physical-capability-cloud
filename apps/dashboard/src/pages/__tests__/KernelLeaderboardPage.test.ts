@@ -142,6 +142,7 @@ describe("sortLeaderboard", () => {
       kernelId: name,
       kernelName: name,
       kernelStatus: "online" as const,
+      online: true,
       avgScore: score,
       scoredCount: score == null ? 0 : 1,
       capabilityCount: 1,
@@ -203,5 +204,36 @@ describe("sortLeaderboard", () => {
 
   it("handles empty array", () => {
     expect(sortLeaderboard([], "desc")).toEqual([]);
+  });
+});
+
+describe("buildLeaderboard — online status and queue depth", () => {
+  it("marks online via isKernelOnline (status+isStale), not the kernel's status alone", () => {
+    const caps = [cap({ id: "c1", kernelId: "k1" }), cap({ id: "c2", kernelId: "k2" })];
+    const kernels = [
+      kernel({ id: "k1", status: "online", isStale: true }),
+      kernel({ id: "k2", status: "online", isStale: false }),
+    ];
+    const rows = buildLeaderboard(caps, kernels);
+    expect(rows.find((r) => r.kernelId === "k1")!.online).toBe(false);
+    expect(rows.find((r) => r.kernelId === "k2")!.online).toBe(true);
+  });
+
+  it("queue depth is null when a capability doesn't report it, and summed when all do", () => {
+    const caps = [
+      cap({ id: "c1", kernelId: "k1", queueDepth: 3 }),
+      cap({ id: "c2", kernelId: "k1", queueDepth: undefined }),
+      cap({ id: "c3", kernelId: "k2", queueDepth: 3 }),
+      cap({ id: "c4", kernelId: "k2", queueDepth: 4 }),
+    ];
+    const kernels = [kernel({ id: "k1" }), kernel({ id: "k2" })];
+    const rows = buildLeaderboard(caps, kernels);
+    expect(rows.find((r) => r.kernelId === "k1")!.queueDepth).toBeNull();
+    expect(rows.find((r) => r.kernelId === "k2")!.queueDepth).toBe(7);
+  });
+
+  it("does not infer a fresh online heartbeat from a capability when its kernel is missing", () => {
+    const rows = buildLeaderboard([cap({ kernelId: "unknown", kernelStatus: "online" })], []);
+    expect(rows[0]!.online).toBe(false);
   });
 });

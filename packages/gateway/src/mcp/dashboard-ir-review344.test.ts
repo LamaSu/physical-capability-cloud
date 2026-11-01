@@ -713,7 +713,10 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
   it("a mistyped id ('Your payment', not a valid id shape) fails the WHOLE row: every value UNAVAILABLE, labels kept", () => {
     const node = { type: "list", id: "n1", props: { rowTitle: "id", rowMeta: ["kernelId"], statusFrom: "status" }, bind: { path: "/api/jobs" } } as unknown as IrNode;
     const listEl = fdoc.createElement("div");
-    bindListRows(fdoc, listEl, node, [{ id: "Your payment", kernelId: "k-1", status: "completed" }]);
+    // The jobs route's own envelope: jobs declare their total (the N110 follow-up), and a window
+    // holding the whole collection adds no note, so the row is the only child.
+    const rows = [{ id: "Your payment", kernelId: "k-1", status: "completed" }];
+    bindListRows(fdoc, listEl, node, rows, { jobs: rows, total: rows.length });
     expect(listEl.children.length).toBe(1); // the row is NOT dropped (title was PRESENT, just mistyped)
     const texts = (listEl.children[0] as RElement).children as RElement[];
     expect(texts.map((c) => c.textContent)).toEqual(["ID:", UNAVAILABLE, "Kernel:", UNAVAILABLE, "Status:", UNAVAILABLE]);
@@ -722,7 +725,8 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
   it("'status' in META uses the closed vocabulary (boundStatusText applies by KIND, not just as statusFrom)", () => {
     const node = { type: "list", id: "n1", props: { rowTitle: "id", rowMeta: ["status"] }, bind: { path: "/api/jobs" } } as unknown as IrNode;
     const listEl = fdoc.createElement("div");
-    bindListRows(fdoc, listEl, node, [{ id: "j-1", status: "settled" }, { id: "j-2", status: "weirdWord" }]);
+    const rows = [{ id: "j-1", status: "settled" }, { id: "j-2", status: "weirdWord" }];
+    bindListRows(fdoc, listEl, node, rows, { jobs: rows, total: rows.length }); // the route's own envelope: no window note
     const texts = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
     expect(texts).toEqual([
       ["ID:", REPORTED_PREFIX + "j-1", "Status:", "settled" + RECORD_STATUS_NOTE], // ids are attributed (steward #5149)
@@ -798,7 +802,8 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
   it("mutation survivor — time kind: a valid timestamp is shown as-is; a non-timestamp string fails the row closed", () => {
     const node = { type: "list", id: "n1", props: { rowTitle: "id", rowMeta: ["createdAt"] }, bind: { path: "/api/jobs" } } as unknown as IrNode;
     const listEl = fdoc.createElement("div");
-    bindListRows(fdoc, listEl, node, [{ id: "j-1", createdAt: "2026-09-24T10:00:00Z" }, { id: "j-2", createdAt: "yesterday" }]);
+    const jobs = [{ id: "j-1", createdAt: "2026-09-24T10:00:00Z" }, { id: "j-2", createdAt: "yesterday" }];
+    bindListRows(fdoc, listEl, node, jobs, { jobs, total: jobs.length }); // the route's own envelope: no window note
     const rows = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
     expect(rows).toEqual([
       ["ID:", REPORTED_PREFIX + "j-1", "Created:", "2026-09-24T10:00:00Z"], // ids are attributed (steward #5149)

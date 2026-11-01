@@ -10,7 +10,10 @@
  * kit bytes (the `scene` harness, copied from dashboard-ir-provenance.test.ts — not exported
  * there); (3) the server defaults pinned against the real producers, so the disclosure can never
  * silently guess a page size that drifted; (4) an equal-time poll whose only change is the
- * disclosed total, proving the window note is part of the committed fingerprint.
+ * disclosed total, proving the window note is part of the committed fingerprint; (5) the no-total
+ * fallback on a scoped test-only profile, since jobs now declare their total like capabilities;
+ * (6) the null case: an explicit null query value is refused by the adapter and by validateIr, and
+ * listWindow reads it as unknown, never as the default.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -18,7 +21,7 @@ import { dirname, resolve } from "node:path";
 import { TextDecoder as NodeTextDecoder, TextEncoder as NodeTextEncoder } from "node:util";
 import { JSDOM } from "jsdom";
 import { describe, it, expect } from "vitest";
-import { LIST_PROFILES } from "./dashboard-ir.js";
+import { LIST_PROFILES, dashboardManifestToIr, validateIr } from "./dashboard-ir.js";
 import type { IrNode } from "./dashboard-ir.js";
 import { listWindow } from "./dashboard-ir-renderer.js";
 
@@ -56,20 +59,26 @@ describe("N110 listWindow: unit table (pure, no DOM)", () => {
   });
 
   it("offset 100: from row 101, and empty is 'no rows in this window'", () => {
-    const r = listWindow(listNode({ path: "/api/jobs", query: { offset: 100 } }), undefined, 1);
+    // jobs {total: 101}: the window ends at the reported total, so no total note.
+    const r = listWindow(listNode({ path: "/api/jobs", query: { offset: 100 } }), { total: 101 }, 1);
     expect(r.note).toBe("from row 101");
     expect(r.empty).toBe("no rows in this window");
   });
 
-  it("offset 'abc' (off-grammar): offset not shown (an unknown offset is never 0)", () => {
-    const r = listWindow(listNode({ path: "/api/jobs", query: { offset: "abc" } }), undefined, 1);
-    expect(r.note).toBe("offset not shown");
+  it("offset 100 with jobs {total: 500}: from row 101 · 1 of 500 returned", () => {
+    const r = listWindow(listNode({ path: "/api/jobs", query: { offset: 100 } }), { total: 500 }, 1);
+    expect(r.note).toBe("from row 101 · 1 of 500 returned");
+  });
+
+  it("offset 'abc' (off-grammar): offset not shown (an unknown offset is never 0), so no total can be reconciled", () => {
+    const r = listWindow(listNode({ path: "/api/jobs", query: { offset: "abc" } }), { total: 5 }, 1);
+    expect(r.note).toBe("offset not shown · total not shown");
     expect(r.empty).toBe("no rows in this window");
   });
 
-  it("offset '0' (canonical string form): none", () => {
-    const r = listWindow(listNode({ path: "/api/jobs", query: { offset: "0" } }), undefined, 1);
-    expect(r.empty).toBe("none");
+  it("offset '0' (canonical string form) with jobs {total: 0}: none", () => {
+    const r = listWindow(listNode({ path: "/api/jobs", query: { offset: "0" } }), { total: 0 }, 0);
+    expect(r).toEqual({ empty: "none", note: null });
   });
 
   it("capabilities {total:120} with 50 returned: 50 of 120 returned", () => {
@@ -87,25 +96,46 @@ describe("N110 listWindow: unit table (pure, no DOM)", () => {
     expect(r.note).toBe("total not shown");
   });
 
-  it("jobs with 50 returned and no query: 50 returned; more may exist (the facade's own default)", () => {
-    const r = listWindow(listNode({ path: "/api/jobs" }), undefined, 50);
-    expect(r.note).toBe("50 returned; more may exist");
+  // Jobs declare their total (`paged.total: "total"`, the follow-up to N110 once N111 landed), so
+  // jobs read exactly like capabilities: the route's own total, never the page size.
+  it("jobs {total:120} with 50 returned and no query: 50 of 120 returned", () => {
+    const r = listWindow(listNode({ path: "/api/jobs" }), { total: 120 }, 50);
+    expect(r.note).toBe("50 of 120 returned");
   });
 
-  it("jobs with 49 returned (under the default): null", () => {
-    const r = listWindow(listNode({ path: "/api/jobs" }), undefined, 49);
+  it("jobs {total:50} with 50 returned: no note (the total vouches that the window holds every job)", () => {
+    // Before jobs declared a total, a full default page could only say "50 returned; more may exist".
+    const r = listWindow(listNode({ path: "/api/jobs" }), { total: 50 }, 50);
     expect(r.note).toBeNull();
   });
 
-  it("jobs {limit:10} with 10 returned: 10 returned; more may exist", () => {
-    const r = listWindow(listNode({ path: "/api/jobs", query: { limit: 10 } }), undefined, 10);
-    expect(r.note).toBe("10 returned; more may exist");
-    expect(r.empty).toBe("none"); // `limit` is not a filter
+  it("jobs total absent (an off-contract envelope, or a 4-argument caller): total not shown", () => {
+    expect(listWindow(listNode({ path: "/api/jobs" }), {}, 49).note).toBe("total not shown");
+    expect(listWindow(listNode({ path: "/api/jobs" }), undefined, 49).note).toBe("total not shown");
   });
 
-  it("jobs {limit:\"x\"} (off-grammar) with 1 returned: 1 returned; more may exist", () => {
-    const r = listWindow(listNode({ path: "/api/jobs", query: { limit: "x" } }), undefined, 1);
-    expect(r.note).toBe("1 returned; more may exist");
+  it("jobs {total:\"120\"} (mistyped): total not shown", () => {
+    expect(listWindow(listNode({ path: "/api/jobs" }), { total: "120" }, 50).note).toBe("total not shown");
+  });
+
+  it("jobs {total:3} with 5 returned (claims fewer jobs than shown): total not shown", () => {
+    expect(listWindow(listNode({ path: "/api/jobs" }), { total: 3 }, 5).note).toBe("total not shown");
+  });
+
+  it("jobs {limit:10} {total:25} with 10 returned: 10 of 25 returned", () => {
+    const r = listWindow(listNode({ path: "/api/jobs", query: { limit: 10 } }), { total: 25 }, 10);
+    expect(r.note).toBe("10 of 25 returned");
+  });
+
+  it("jobs {limit:10} {total:0} with 0 returned: none (`limit` is not a filter)", () => {
+    expect(listWindow(listNode({ path: "/api/jobs", query: { limit: 10 } }), { total: 0 }, 0)).toEqual({ empty: "none", note: null });
+  });
+
+  it("jobs {limit:\"x\"} (off-grammar) {total:3} with 1 returned: 1 of 3 returned, and never 'none'", () => {
+    // The total does not depend on the limit, so it is still disclosed; an unknown limit can never vouch for "none".
+    const r = listWindow(listNode({ path: "/api/jobs", query: { limit: "x" } }), { total: 3 }, 1);
+    expect(r.note).toBe("1 of 3 returned");
+    expect(r.empty).toBe("no rows in this window");
   });
 
   it("kernels (no paged profile at all) with 300 returned: never a page note", () => {
@@ -174,6 +204,13 @@ const capsManifest = (query?: Record<string, unknown>) => ({
     { kind: "list", binding: { path: "/api/capabilities", ...(query ? { query } : {}) }, item: { title: "name", meta: ["type"], statusFrom: "available" } },
   ] }],
 });
+const jobsManifest = (query?: Record<string, unknown>) => ({
+  csd: "pcc://artifacts/dashboard/v1", title: "Ops", sections: [{ heading: "Sec J", windows: [
+    { kind: "list", binding: { path: "/api/jobs", ...(query ? { query } : {}) }, item: { title: "id", meta: ["status"], statusFrom: "status" } },
+  ] }],
+});
+// A seeded-store-shaped job row (kernel-nyc's job-001).
+const JOB_ROW = { id: "job-001", capabilityId: "cap-nyc-fdm", kernelId: "kernel-nyc", status: "completed" };
 
 describe("N110 end-to-end on the rebuilt pcc-ir-kit.js", () => {
   it("a filtered, timed, empty capabilities list: 'no rows in this window' + a window note, never 'none'", async () => {
@@ -193,6 +230,28 @@ describe("N110 end-to-end on the rebuilt pcc-ir-kit.js", () => {
     expect(s.q(".pcc-list .pcc-empty").textContent).toBe("none");
     expect(s.q(".pcc-list .pcc-window")).toBeNull();
     s.close();
+  });
+
+  it("a jobs list discloses the jobs route's own total: 1 of 3 returned", async () => {
+    const s = scene([{ status: 200, json: { jobs: [JOB_ROW], items: [JOB_ROW], total: 3, offset: 0, limit: 1, hasMore: true, asOf: iso(T0) } }], T0);
+    s.deliver(jobsManifest({ limit: 1 })); await s.settle();
+    expect(s.q(".pcc-list").querySelectorAll(".pcc-row").length).toBe(1);
+    expect(s.q(".pcc-list .pcc-window").textContent).toBe("1 of 3 returned");
+    s.close();
+  });
+
+  it("an unfiltered, empty jobs list renders 'none' only on a reported total of 0", async () => {
+    const s = scene([{ status: 200, json: { jobs: [], items: [], total: 0, asOf: iso(T0) } }], T0);
+    s.deliver(jobsManifest()); await s.settle();
+    expect(s.q(".pcc-list .pcc-empty").textContent).toBe("none");
+    expect(s.q(".pcc-list .pcc-window")).toBeNull();
+    s.close();
+    // The same empty page with no total cannot vouch for the whole collection.
+    const t = scene([{ status: 200, json: { jobs: [], asOf: iso(T0) } }], T0);
+    t.deliver(jobsManifest()); await t.settle();
+    expect(t.q(".pcc-list .pcc-empty").textContent).toBe("no rows in this window");
+    expect(t.q(".pcc-list .pcc-window").textContent).toBe("total not shown");
+    t.close();
   });
 });
 
@@ -251,23 +310,125 @@ describe("astra n110 r1 (@975d583e): reproduced (verify before fix)", () => {
   it("capabilities with no reported total and 0 returned is not 'none' (the route cannot vouch)", () => {
     expect(listWindow(listNode({ path: "/api/capabilities" }), {}, 0)).toEqual({ empty: "no rows in this window", note: "total not shown" });
   });
-  it("jobs {limit: 0} with 0 returned is not 'none' (an off-grammar limit can empty a non-empty page)", () => {
-    expect(listWindow(listNode({ path: "/api/jobs", query: { limit: 0 } }), {}, 0).empty).toBe("no rows in this window");
+  // jobs now declare a total, so these two carry a reported total of 0: the limit rule alone must refuse "none".
+  it("jobs {limit: 0} {total: 0} with 0 returned is not 'none' (an off-grammar limit can empty a non-empty page)", () => {
+    expect(listWindow(listNode({ path: "/api/jobs", query: { limit: 0 } }), { total: 0 }, 0).empty).toBe("no rows in this window");
   });
-  it("jobs {limit: 'x'} with 0 returned is not 'none'", () => {
-    expect(listWindow(listNode({ path: "/api/jobs", query: { limit: "x" } }), {}, 0).empty).toBe("no rows in this window");
+  it("jobs {limit: 'x'} {total: 0} with 0 returned is not 'none'", () => {
+    expect(listWindow(listNode({ path: "/api/jobs", query: { limit: "x" } }), { total: 0 }, 0).empty).toBe("no rows in this window");
+  });
+  it("jobs with no reported total and 0 returned is not 'none' (the route cannot vouch)", () => {
+    expect(listWindow(listNode({ path: "/api/jobs" }), {}, 0)).toEqual({ empty: "no rows in this window", note: "total not shown" });
   });
   // Positive controls: an honest "none" survives the fix.
   it("capabilities {total: 0} with 0 returned is 'none', with no note", () => {
     expect(listWindow(listNode({ path: "/api/capabilities" }), { total: 0 }, 0)).toEqual({ empty: "none", note: null });
   });
-  it("jobs with no query and 0 returned is 'none' (an empty FIRST page of a positive limit means an empty collection)", () => {
-    expect(listWindow(listNode({ path: "/api/jobs" }), {}, 0)).toEqual({ empty: "none", note: null });
+  it("jobs {total: 0} with no query and 0 returned is 'none'", () => {
+    expect(listWindow(listNode({ path: "/api/jobs" }), { total: 0 }, 0)).toEqual({ empty: "none", note: null });
   });
-  it("jobs {limit: 10} with 0 returned is 'none'", () => {
-    expect(listWindow(listNode({ path: "/api/jobs", query: { limit: 10 } }), {}, 0)).toEqual({ empty: "none", note: null });
+  it("jobs {limit: 10} {total: 0} with 0 returned is 'none'", () => {
+    expect(listWindow(listNode({ path: "/api/jobs", query: { limit: 10 } }), { total: 0 }, 0)).toEqual({ empty: "none", note: null });
   });
   it("kernels (unpaginated) with 0 returned is 'none'", () => {
     expect(listWindow(listNode({ path: "/api/kernels" }), {}, 0)).toEqual({ empty: "none", note: null });
+  });
+});
+
+// ── The no-total fallback, on a scoped test-only profile ─────────────────────────────────
+// Every paged LIST_PROFILES route declares its total now, so listWindow's reviewed fallback for a
+// paged route WITHOUT one ("N returned; more may exist", and "none" only for an empty FIRST page of
+// a positive limit) has no real route left. It stays for a future paged route that reports no
+// total. These tests install a test-only profile for ONE call and always remove it.
+const NO_TOTAL = "/api/test-paged-no-total";
+function onPagedNoTotal<T>(fn: () => T): T {
+  const profiles = LIST_PROFILES as unknown as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(profiles, NO_TOTAL)) throw new Error(NO_TOTAL + " is a real profile");
+  profiles[NO_TOTAL] = { rows: "rows", title: ["id"], meta: [], status: [], paged: { defaultLimit: 50 } };
+  try { return fn(); } finally { delete profiles[NO_TOTAL]; }
+}
+
+describe("N110 fallback for a paged route with no total (scoped test-only profile)", () => {
+  it("every real paged profile declares its total, so the fallback has no real route today", () => {
+    for (const [path, prof] of Object.entries(LIST_PROFILES)) if (prof.paged) expect(typeof prof.paged.total, path).toBe("string");
+  });
+  it("50 returned and no query: 50 returned; more may exist (the profile's own default page)", () => {
+    expect(onPagedNoTotal(() => listWindow(listNode({ path: NO_TOTAL }), {}, 50).note)).toBe("50 returned; more may exist");
+  });
+  it("49 returned (under the default): no note", () => {
+    expect(onPagedNoTotal(() => listWindow(listNode({ path: NO_TOTAL }), {}, 49).note)).toBeNull();
+  });
+  it("{limit:10} with 10 returned: 10 returned; more may exist, and `limit` is not a filter", () => {
+    const r = onPagedNoTotal(() => listWindow(listNode({ path: NO_TOTAL, query: { limit: 10 } }), {}, 10));
+    expect(r).toEqual({ empty: "none", note: "10 returned; more may exist" });
+  });
+  it("{limit:\"x\"} (off-grammar) with 1 returned: 1 returned; more may exist", () => {
+    expect(onPagedNoTotal(() => listWindow(listNode({ path: NO_TOTAL, query: { limit: "x" } }), {}, 1).note)).toBe("1 returned; more may exist");
+  });
+  it("an empty FIRST page of a positive limit is 'none'; an off-grammar limit's empty page is not", () => {
+    expect(onPagedNoTotal(() => listWindow(listNode({ path: NO_TOTAL }), {}, 0))).toEqual({ empty: "none", note: null });
+    expect(onPagedNoTotal(() => listWindow(listNode({ path: NO_TOTAL, query: { limit: 10 } }), {}, 0))).toEqual({ empty: "none", note: null });
+    expect(onPagedNoTotal(() => listWindow(listNode({ path: NO_TOTAL, query: { limit: 0 } }), {}, 0)).empty).toBe("no rows in this window");
+    expect(onPagedNoTotal(() => listWindow(listNode({ path: NO_TOTAL, query: { limit: "x" } }), {}, 0)).empty).toBe("no rows in this window");
+  });
+  it("the test-only profile never outlives its call", () => {
+    onPagedNoTotal(() => undefined);
+    expect(Object.prototype.hasOwnProperty.call(LIST_PROFILES, NO_TOTAL)).toBe(false);
+  });
+});
+
+// ── N110 null case (#5992: elsewhere, an explicit null silently took the default) ─────────────
+// genui's answer to #5992: the closed IR is not affected. A manifest or IR query value must be a
+// string, a number or a boolean, so an explicit null never reaches a bound read; and listWindow
+// reads null as UNKNOWN, never as the default. These tests pin all three layers.
+function findListNode(v: unknown): { bind: { query: Record<string, unknown> } } | null {
+  if (Array.isArray(v)) {
+    for (const x of v) { const f = findListNode(x); if (f) return f; }
+    return null;
+  }
+  if (v === null || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  if (o.type === "list" && o.bind !== undefined) return o as unknown as { bind: { query: Record<string, unknown> } };
+  for (const x of Object.values(o)) { const f = findListNode(x); if (f) return f; }
+  return null;
+}
+
+describe("N110 null case: an explicit null query value is refused, and is never read as the default", () => {
+  it("the manifest adapter refuses a null offset, limit or filter value; the same window with a number is accepted", () => {
+    expect(dashboardManifestToIr(jobsManifest({ limit: 10 }) as never).ok).toBe(true);
+    for (const query of [{ offset: null }, { limit: null }, { status: null }]) {
+      const r = dashboardManifestToIr(jobsManifest(query) as never);
+      expect(r.ok, JSON.stringify(query)).toBe(false);
+      if (!r.ok) expect(r.reason, JSON.stringify(query)).toContain("query value type");
+    }
+  });
+
+  it("validateIr refuses a list node whose bind.query holds a null (the IR boundary itself, not only the adapter)", () => {
+    const base = dashboardManifestToIr(jobsManifest({ limit: 10 }) as never);
+    if (!base.ok) throw new Error(base.reason);
+    const doc = JSON.parse(JSON.stringify(base.doc)) as unknown;
+    expect(validateIr(doc)).toEqual({ ok: true });
+    const list = findListNode(doc);
+    expect(list, "the adapter's IR has a bound list node").not.toBeNull();
+    list!.bind.query.limit = null;
+    const r = validateIr(doc);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("query value type");
+  });
+
+  it("listWindow (a direct caller): a null offset is unknown, never 0", () => {
+    // Read as 0, it would say "1 of 5 returned".
+    expect(listWindow(listNode({ path: "/api/jobs", query: { offset: null } }), { total: 5 }, 1)).toEqual({ empty: "no rows in this window", note: "offset not shown · total not shown" });
+  });
+
+  it("listWindow: a null limit is unknown, never the default page, so it never vouches for 'none'", () => {
+    // Read as absent, each of the first two would be "none", and the third would print no note (1 < 50).
+    expect(listWindow(listNode({ path: "/api/jobs", query: { limit: null } }), { total: 0 }, 0).empty).toBe("no rows in this window");
+    expect(listWindow(listNode({ path: "/api/capabilities", query: { limit: null } }), { total: 0 }, 0).empty).toBe("no rows in this window");
+    expect(onPagedNoTotal(() => listWindow(listNode({ path: NO_TOTAL, query: { limit: null } }), {}, 1).note)).toBe("1 returned; more may exist");
+  });
+
+  it("listWindow: a null filter value is never printed raw, and forces 'no rows in this window'", () => {
+    expect(listWindow(listNode({ path: "/api/jobs", query: { status: null } }), { total: 0 }, 0)).toEqual({ empty: "no rows in this window", note: "filtered by this view: status=(value not shown)" });
   });
 });

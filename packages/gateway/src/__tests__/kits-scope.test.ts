@@ -2,8 +2,8 @@
  * Scope authorization tests for the Capability Kit routes (kits K1 slice 1).
  *
  * scope-checker.ts's DEFAULT_SCOPE_REQUIREMENTS adds:
- *   { method: "POST", pattern: "/api/kits",    scopes: ["template_author","operator","admin"] }
- *   { method: "POST", pattern: "/api/kits/**", scopes: ["template_author","operator","admin"] }
+ *   { method: "POST", pattern: "/api/kits",    scopes: ["template_author", "admin"] }
+ *   { method: "POST", pattern: "/api/kits/**", scopes: ["template_author", "admin"] }
  * GET /api/kits has no requirement and is not on the money-path default-deny
  * list, so it stays open to any authenticated caller regardless of scope.
  *
@@ -49,6 +49,26 @@ const FORK_URL = `/api/kits/sha256:${"a".repeat(64)}/fork`;
 
 describe("scope-checker — Capability Kit routes", () => {
   describe("publish and fork are gated", () => {
+    it.each([["operator"], ["operator:basic"]])("DENIES POST /api/kits to a key scoped only [%s]", async (scope) => {
+      keyScopes = JSON.stringify([scope]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/kits" });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("insufficient_scope");
+      expect(res.json().reached).toBeUndefined();
+      await app.close();
+    });
+
+    it.each([["operator"], ["operator:basic"]])("DENIES POST /api/kits/:digest/fork to a key scoped only [%s]", async (scope) => {
+      keyScopes = JSON.stringify([scope]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: FORK_URL });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("insufficient_scope");
+      expect(res.json().reached).toBeUndefined();
+      await app.close();
+    });
+
     it("DENIES POST /api/kits to a key scoped only [\"contributor:read\"]", async () => {
       keyScopes = JSON.stringify(["contributor:read"]);
       const app = await buildApp();
@@ -188,12 +208,27 @@ describe("astra k1-511: the kit routes decide the publishing role themselves", (
     await cleanup();
   });
 
-  it.each([["template_author"], ["operator"], ["admin"], ["*"]])("a key scoped [%s] may publish", async (scope) => {
+  it.each([["template_author"], ["admin"], ["*"]])("a key scoped [%s] may publish", async (scope) => {
     keyScopes = JSON.stringify([scope]);
     const { app, registry, cleanup } = await routesOnly({ apiKeyId: "key-1", operatorId: "op@kits.test" });
     const res = await app.inject({ method: "POST", url: "/api/kits", payload: completeKit() });
     expect(res.statusCode).toBe(201);
     expect((await registry.list()).total).toBe(1);
+    await app.close();
+    await cleanup();
+  });
+
+  it.each([["operator"], ["operator:basic"]])("a key scoped [%s] may not publish or fork", async (scope) => {
+    keyScopes = JSON.stringify([scope]);
+    const { app, registry, cleanup } = await routesOnly({ apiKeyId: "key-1", operatorId: "op@kits.test" });
+    const res = await app.inject({ method: "POST", url: "/api/kits", payload: completeKit() });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("insufficient_scope");
+    expect((await registry.list()).total).toBe(0);
+    const fork = await app.inject({ method: "POST", url: FORK_URL, payload: completeKit("1.0.1") });
+    expect(fork.statusCode).toBe(403);
+    expect(fork.json().error).toBe("insufficient_scope");
+    expect((await registry.list()).total).toBe(0);
     await app.close();
     await cleanup();
   });
