@@ -217,7 +217,9 @@ export function KernelLeaderboardPage() {
       {/* Leaderboard */}
       {rows.length === 0 ? (
         <GlassPanel padding="lg">
-          {kernels.length === 0 && complete ? (
+          {skipped > 0 ? (
+            <EmptyState title={NOTHING_TO_RANK} />
+          ) : kernels.length === 0 && complete ? (
             <EmptyState
               title="No kernels on the network yet"
               description="Leaderboard populates as kernels register capabilities and complete jobs with evidence."
