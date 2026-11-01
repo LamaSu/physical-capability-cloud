@@ -188,7 +188,7 @@ curl -X POST "$PCC_BASE/api/job-offers" \
   -d '{
     "capabilityType": "manufacturing.fdm",
     "requirements": { "stl_cid": "bafy...", "material": "PLA" },
-    "pricing": { "model": "quote-required" },
+    "pricing": { "amount": 0, "currency": "USDC", "model": "quote-required" },
     "idempotencyKey": "stl-print-2026-07-13"
   }'
 ```

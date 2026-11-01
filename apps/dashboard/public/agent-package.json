@@ -2,8 +2,8 @@
   "schema": "pcc-agent-package/2.0",
   "name": "Physical Capability Cloud",
   "description": "Turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on. Public beta: payments settle on a test network. Open infrastructure for agents to buy and sell from each other — anything, not just digital goods. Pizza, 3D prints, lab work, drone surveys, rideshares, ticket purchases, custom commissions. Drop this package into a Claude conversation and Claude can transact on the user's behalf.",
-  "version": "2.19.4",
-  "toolCount": 244,
+  "version": "2.19.5",
+  "toolCount": 243,
   "lastUpdated": "2026-10-21T00:00:00.000Z",
   "homepage": "https://capability.network",
   "api_base": "https://capability.network",
@@ -3569,70 +3569,6 @@
       }
     },
     {
-      "name": "pcc_dht_announce",
-      "description": "Announce capabilities to the DHT network. Signs the announcement with your node's Ed25519 key and broadcasts to connected peers.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "kernelId": {
-            "type": "string",
-            "description": "Kernel ID announcing capabilities"
-          },
-          "capabilities": {
-            "type": "array",
-            "description": "Array of capability summaries to announce",
-            "items": {
-              "type": "object",
-              "properties": {
-                "type": {
-                  "type": "string",
-                  "description": "Capability type"
-                },
-                "materials": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                "priceRange": {
-                  "type": "object",
-                  "properties": {
-                    "min": {
-                      "type": "number"
-                    },
-                    "max": {
-                      "type": "number"
-                    },
-                    "currency": {
-                      "type": "string"
-                    }
-                  }
-                },
-                "queueDepth": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "type"
-              ]
-            }
-          },
-          "ttlSeconds": {
-            "type": "number",
-            "description": "How long the announcement is valid (default 300)"
-          }
-        },
-        "required": [
-          "kernelId",
-          "capabilities"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/dht/announce"
-      }
-    },
-    {
       "name": "pcc_dht_peers",
       "description": "List known DHT peers and their connection status. Shows which nodes are currently connected to the gossip network.",
       "input_schema": {
@@ -7185,7 +7121,7 @@
     "openai": "const OpenAI = require('openai');\nconst pkg = require('./agent-package.json');\nconst client = new OpenAI();\n\nconst PCC_BASE = process.env.PCC_BASE ?? pkg.api_base; // the gateway you were given; api_base is production\nconst tools = pkg.tools.map(t => ({\n  type: 'function',\n  function: { name: t.name, description: t.description, parameters: t.input_schema },\n}));\n\nlet apiKey = null;\n\nasync function callTool(toolName, input) {\n  const tool = pkg.tools.find(t => t.name === toolName);\n  let path = tool.endpoint.path;\n  for (const [k, v] of Object.entries(input)) path = path.replace(`{${k}}`, v);\n  const headers = { 'Content-Type': 'application/json' };\n  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;\n  const res = await fetch(`${PCC_BASE}${path}`, {\n    method: tool.endpoint.method,\n    headers,\n    body: tool.endpoint.method !== 'GET' ? JSON.stringify(input) : undefined,\n  });\n  const data = await res.json();\n  if (toolName === 'provision_api_key' && data.api_key) apiKey = data.api_key;\n  return data;\n}\n\nasync function chat(userMessage) {\n  const messages = [\n    { role: 'system', content: pkg.system_prompt },\n    { role: 'user', content: userMessage },\n  ];\n  while (true) {\n    const response = await client.chat.completions.create({ model: 'gpt-4o', tools, messages });\n    const msg = response.choices[0].message;\n    messages.push(msg);\n    if (!msg.tool_calls) break;\n    for (const call of msg.tool_calls) {\n      const result = await callTool(call.function.name, JSON.parse(call.function.arguments));\n      messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });\n    }\n  }\n  return messages;\n}\n\nchat('I want to register my HPLC lab and start accepting jobs on the PCC network.');"
   },
   "metadata": {
-    "tool_count": 244,
+    "tool_count": 243,
     "updated": "2026-10-21T00:00:00.000Z",
     "front_door_polished": true
   },
@@ -7193,7 +7129,7 @@
   "examples": [
     {
       "user_request": "Order me a pizza for delivery to 728 Geary St SF.",
-      "what_claude_does": "1. GET /api/capabilities?type=pizza.order&within=37.78,-122.41,10 — find pizza shops near Geary St.\n2. Pick the best-rated one (check `reputation`), present to user with price + ETA.\n3. On user confirmation: POST /api/job-offers with capabilityType=pizza.order, requirements={ shopId, items, deliveryAddress, customer }, pricing={ model:'fixed', amount: shopPrice, currency:'USD' }, idempotencyKey='pizza-728geary-{timestamp}'.\n4. (separately) GET /api/capabilities?type=courier.dispatch&within=... — find a driver.\n5. POST /api/job-offers with capabilityType=courier.dispatch, requirements={ pickup:{shopAddress}, dropoff:{userAddress}, pickupReadyAt }, pricing={ model:'fixed' }.\n6. Poll GET /api/job-offers/:id for both, reading offer.status and the events. A `delivered` status is a claim: any caller can post it, with no evidence.\n7. Report to the user only what evidence shows: a photo the operator or courier shares by CID (GET /api/storage/:cid). Say that PCC has not verified it.",
+      "what_claude_does": "1. GET /api/capabilities?type=pizza.order&within=37.78,-122.41,10 — find pizza shops near Geary St.\n2. Pick the best-rated one (check `reputation`), present to user with price + ETA.\n3. On user confirmation: POST /api/job-offers with capabilityType=pizza.order, requirements={ shopId, items, deliveryAddress, customer }, pricing={ model:'fixed', amount: shopPrice, currency:'USD' }, idempotencyKey='pizza-728geary-{timestamp}'.\n4. (separately) GET /api/capabilities?type=courier.dispatch&within=... — find a driver. Present the driver's price from the listing to the user, as in step 2, and post step 5's offer only once they confirm that price.\n5. POST /api/job-offers with capabilityType=courier.dispatch, requirements={ pickup:{shopAddress}, dropoff:{userAddress}, pickupReadyAt }, pricing={ model:'fixed', amount: driverPrice, currency:'USD' }.\n6. Poll GET /api/job-offers/:id for both, reading offer.status and the events. A `delivered` status is a claim: any caller can post it, with no evidence.\n7. Report to the user only what evidence shows: a photo the operator or courier shares by CID (GET /api/storage/:cid). Say that PCC has not verified it.",
       "tools_used": [
         "search_capabilities",
         "list_capability_types",
@@ -7202,7 +7138,7 @@
     },
     {
       "user_request": "I have an STL file. Print it on an FDM printer near me.",
-      "what_claude_does": "1. Upload the STL's raw bytes via POST /api/storage (Content-Type model/stl or application/octet-stream). Save the returned CID.\n2. GET /api/capabilities?type=manufacturing.fdm&within=<user-coords>,25 — find local print shops.\n3. Pick by price + material support. Present to user.\n4. POST /api/job-offers with capabilityType=manufacturing.fdm, requirements={ stl_cid, material:'PLA', infill:0.2, layer_height:0.2 }, pricing={ model:'quote-required' } (let operator quote).\n5. Wait for operator to claim + quote. Show user the quote. On confirmation, accept.\n6. The operator prints and shares a photo as a storage CID (an offer has no evidence field).\n7. GET /api/storage/<cid> to view the photo. Confirm to the user only what it shows; offer.status alone proves nothing.\n8. (optional) chain into courier.dispatch for delivery using shop pickup location.",
+      "what_claude_does": "1. Upload the STL's raw bytes via POST /api/storage (Content-Type model/stl or application/octet-stream). Save the returned CID.\n2. GET /api/capabilities?type=manufacturing.fdm&within=<user-coords>,25 — find local print shops.\n3. Pick by price + material support. Present to user.\n4. POST /api/job-offers with capabilityType=manufacturing.fdm, requirements={ stl_cid, material:'PLA', infill:0.2, layer_height:0.2 }, pricing={ model:'quote-required', amount: 0, currency:'USDC' } (let operator quote).\n5. Wait for operator to claim + quote. Show user the quote. On confirmation, accept.\n6. The operator prints and shares a photo as a storage CID (an offer has no evidence field).\n7. GET /api/storage/<cid> to view the photo. Confirm to the user only what it shows; offer.status alone proves nothing.\n8. (optional) chain into courier.dispatch for delivery using shop pickup location.",
       "tools_used": [
         "pcc_capture_upload",
         "search_capabilities",
@@ -7219,7 +7155,7 @@
     },
     {
       "user_request": "Order me a pizza and dispatch a courier to bring it — and give me a live dashboard I can watch and reuse.",
-      "what_claude_does": "1. Recall first: search_dashboards({ capabilityType: 'pizza.order' }). If a matching dashboard already exists, get_dashboard or fork_dashboard it and skip regenerating.\n2. Discover + ask (never order blind): POST /api/build/options for the pizza to get the real size/crust/topping choices, then present them and get the user's selections. A fiddly config like this is a good `form`-window candidate rather than a long Q&A. GET /api/capabilities?type=pizza.order&within=<coords>,10 to pick a shop.\n3. Price + confirm: POST /api/build/price with the chosen selections; show the total to the user and get explicit confirmation BEFORE committing.\n4. Post the pizza offer: POST /api/job-offers (capabilityType=pizza.order, requirements from the confirmed selections, a stable idempotencyKey). Set requirements.pickupReadyAt = now + estimatedWaitMinutes + 5min buffer.\n5. Compose the courier: GET /api/capabilities?type=courier.dispatch, then POST /api/job-offers (courier.dispatch, dispatchAt = pickupReadyAt - driverETA). The two offers settle independently.\n6. Now the task needs a surface to watch — emit a DashboardManifest conforming to /ui-kit/v1/manifest.schema.json: a `chain` window pinning the pizza+courier ComposeRequest, a `run` window per offer bound to /sse/stream/job/:id, and a `receipt` window on the settlement. No API key anywhere in the manifest.\n7. save_dashboard({ name:'Watch my pizza + courier', manifest, capabilityTypes:['pizza.order','courier.dispatch'] }); hand the user https://capability.network/a/<slug> (append #pcc_key=<their key> only in this private chat).\n8. Poll both offers and show offer.status and the events live; report the outcome only from evidence (a `delivered` status is a claim). Next time, 'open my pizza dashboard' is a search_dashboards/get_dashboard recall — zero regeneration.",
+      "what_claude_does": "1. Recall first: search_dashboards({ capabilityType: 'pizza.order' }). If a matching dashboard already exists, get_dashboard or fork_dashboard it and skip regenerating.\n2. Discover + ask (never order blind): POST /api/build/options for the pizza to get the real size/crust/topping choices, then present them and get the user's selections. A fiddly config like this is a good `form`-window candidate rather than a long Q&A. GET /api/capabilities?type=pizza.order&within=<coords>,10 to pick a shop.\n3. Price + confirm: POST /api/build/price with the chosen selections; show the total to the user and get explicit confirmation BEFORE committing.\n4. Post the pizza offer: POST /api/job-offers (capabilityType=pizza.order, requirements from the confirmed selections, pricing={ model:'fixed', amount: totalPrice, currency: <step 3's currency> }, a stable idempotencyKey). Set requirements.pickupReadyAt = now + estimatedWaitMinutes + 5min buffer.\n5. Compose the courier: GET /api/capabilities?type=courier.dispatch, present the driver's price from the listing to the user, as in step 3, and only once they confirm that price, then POST /api/job-offers (courier.dispatch, dispatchAt = pickupReadyAt - driverETA, pricing={ model:'fixed', amount: driverPrice, currency:'USD' }). The two offers settle independently.\n6. Now the task needs a surface to watch — emit a DashboardManifest conforming to /ui-kit/v1/manifest.schema.json: a `chain` window pinning the pizza+courier ComposeRequest, a `run` window per offer bound to /sse/stream/job/:id, and a `receipt` window on the settlement. No API key anywhere in the manifest.\n7. save_dashboard({ name:'Watch my pizza + courier', manifest, capabilityTypes:['pizza.order','courier.dispatch'] }); hand the user https://capability.network/a/<slug> (append #pcc_key=<their key> only in this private chat).\n8. Poll both offers and show offer.status and the events live; report the outcome only from evidence (a `delivered` status is a claim). Next time, 'open my pizza dashboard' is a search_dashboards/get_dashboard recall — zero regeneration.",
       "tools_used": [
         "search_dashboards",
         "build_options",
@@ -7435,7 +7371,7 @@
         "status": "open|claimed|in_progress|delivered|settled|cancelled|expired|disputed",
         "requirements": "object (echoed; pickupReadyAt, externalRef and other category fields live here)",
         "pricing": {
-          "amount": "number",
+          "amount": "number, or null when the poster stated none",
           "currency": "string",
           "model": "fixed|quote-required|per-unit"
         },
@@ -7464,7 +7400,7 @@
         "disputed": "Outcome challenged — read disputeReason field."
       },
       "polling_recommendation": "Every 30s for the first 5 minutes, then every 2 minutes. Give up at validUntil + 10 minutes. Stop polling on offer.status in {delivered, cancelled, expired, disputed}. A delivered status is a claim, not proof: report an outcome only from evidence.",
-      "composition_timing": "When composing pizza.order + courier.dispatch (or any two offers that share a handoff), DO NOT wait for the first offer's status change to post the second. Set requirements.pickupReadyAt yourself on the pizza offer using `now + capability.estimatedWaitMinutes + 5min buffer`, then immediately post the courier offer with `dispatchAt = pickupReadyAt - capability.driverETA`. Fire-and-poll-both is the right pattern; serial wait inflates total time for no gain."
+      "composition_timing": "When composing pizza.order + courier.dispatch (or any two offers that share a handoff), DO NOT wait for the first offer's status change to post the second. Set requirements.pickupReadyAt yourself on the pizza offer using `now + capability.estimatedWaitMinutes + 5min buffer`, then post the courier offer as soon as the user confirms the driver's price (don't wait for the pizza offer's status), with `dispatchAt = pickupReadyAt - capability.driverETA`. Fire-and-poll-both is the right pattern; serial wait inflates total time for no gain."
     },
     "RequirementsByCategory": {
       "description": "Per-category requirements shapes. The gateway accepts opaque JSON (graceful degrade) but operator adapters expect these.",
