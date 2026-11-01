@@ -30,8 +30,8 @@ opt-in per-tool (via `pricing.perCallUsdc`) AND globally via env.
 |---|---|---|---|
 | POST | `/api/aggregator/ingest/mcp` | admin | Ingest an MCP source (URL → tools/list → IndexedTool entries) |
 | POST | `/api/aggregator/ingest/openapi` | admin | Ingest an OpenAPI document |
-| GET | `/api/aggregator/tools/search` | public | Search the registry |
-| POST | `/api/aggregator/invoke/:toolId` | public | Proxy a call + sign a receipt (x402-gated if priced) |
+| GET | `/api/aggregator/tools/search` | API key | Search the registry |
+| POST | `/api/aggregator/invoke/:toolId` | API key | Proxy a call + sign a receipt (x402-gated if priced) |
 | GET | `/api/aggregator/receipts/:cid` | public | Fetch a persisted receipt |
 | GET | `/api/aggregator/receipts/by-tool/:id` | public | Recent receipts for a tool |
 | GET | `/api/aggregator/receipts/by-caller/:agentId` | public | Recent receipts for a caller |

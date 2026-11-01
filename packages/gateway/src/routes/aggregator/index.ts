@@ -10,8 +10,8 @@
  *   POST  /api/aggregator/ingest/agntcy     — admin-gated AGNTCY ADS ingest
  *   POST  /api/aggregator/publish/agntcy    — admin-gated AGNTCY publish
  *   GET   /api/aggregator/agntcy/status     — AGNTCY bridge state + counters
- *   GET   /api/aggregator/tools/search      — public registry query
- *   POST  /api/aggregator/invoke/:toolId    — public invoke proxy + receipt
+ *   GET   /api/aggregator/tools/search      — registry query (API key required)
+ *   POST  /api/aggregator/invoke/:toolId    — keyed invoke proxy + receipt (API key required; x402-gated if priced)
  *   GET   /api/aggregator/receipts/:cid     — public receipt lookup
  *
  * The IndexedToolRegistry is process-singleton (Phase 1 in-memory).
