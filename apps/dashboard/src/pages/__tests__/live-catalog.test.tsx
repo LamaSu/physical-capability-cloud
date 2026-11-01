@@ -24,6 +24,7 @@ import {
 } from "../../api/hooks/use-pcc-data.js";
 import { KNOWN_KERNEL_STATUSES } from "../../api/wire-vocabulary.js";
 import { describeReadError, StaleNotice, UnavailableState } from "../../components/ReadState.js";
+import { useUIStore } from "../../stores/ui-store.js";
 
 // The dashboard's vite.config.ts aliases node:crypto to a SHA-256-only browser shim
 // (src/lib/node-crypto-shim.ts). A git blob id is SHA-1, so load Node's own module.
@@ -326,13 +327,15 @@ describe("B. data kept after a failed refresh is labelled", () => {
     const client = newClient();
     await renderPage(<KernelLeaderboardPage />, client);
     const capsUpdated = client.getQueryState(["capabilities", "all"])!.dataUpdatedAt;
-    const kernelsUpdated = client.getQueryState(["kernels", undefined])!.dataUpdatedAt;
+    const kernelsUpdated = capsUpdated - 120_000;
+    client.setQueryData(["kernels", undefined], client.getQueryData(["kernels", undefined]), { updatedAt: kernelsUpdated });
     stubFetch({});
     await act(async () => { await client.refetchQueries(); });
     await settle(client);
     expect(container.textContent).toContain("Couldn't refresh the leaderboard");
     expect(container.textContent).toContain("Kernel One");
-    expect(container.textContent).toContain(new Date(Math.min(capsUpdated, kernelsUpdated)).toLocaleTimeString());
+    expect(container.textContent).toContain(new Date(kernelsUpdated).toLocaleTimeString());
+    expect(container.textContent).not.toContain(new Date(capsUpdated).toLocaleTimeString());
   });
 
   it("Kernels: a failed refresh keeps the kernels and labels the earlier read", async () => {
@@ -457,6 +460,31 @@ describe("R4: live capabilities and readable rows", () => {
   });
 });
 
+describe("every listed row left out", () => {
+  it("Discover makes no empty-catalog claim", async () => {
+    stubFetch({ ...EMPTY, "/api/capabilities": { status: 200, body: page([{ name: "Template Only", capabilityType: "hplc" }]) } });
+    const text = await renderPage(<DiscoverPage />);
+    expect(text).toContain("1 listed capability couldn't be read and isn't shown.");
+    expect(text).toContain("0 capabilities found");
+    expect(text).not.toContain("No capabilities listed yet");
+    expect(text).not.toContain("Register a Kernel");
+  });
+
+  for (const { title, kernels } of [
+    { title: "the Leaderboard names no empty network beside a registered kernel", kernels: [{ id: "k1", status: "online", isStale: false }] },
+    { title: "the Leaderboard names no empty network when no kernel is registered", kernels: [] },
+  ]) it(title, async () => {
+    stubFetch({ ...EMPTY, "/api/kernels": { status: 200, body: { kernels } }, "/api/capabilities": { status: 200, body: page([{ id: "c1", kernelId: "k1", queueDepth: 0 }]) } });
+    const text = await renderPage(<KernelLeaderboardPage />);
+    expect(text).toContain("Nothing to rank yet");
+    expect(text).toContain("1 listed capability couldn't be read, so the ranking leaves it out.");
+    expect(text).not.toContain("1 kernel is registered, but none has listed a capability yet. Kernels are ranked by the capabilities they list.");
+    expect(text).not.toContain("No capability was read, so there is nothing to rank.");
+    expect(text).not.toContain("No kernels on the network yet");
+    expect(text).not.toContain("Onboard Equipment");
+  });
+});
+
 describe("the capability pager", () => {
   it("a total that changes between pages fails the read, even when the rows add up", async () => {
     stubCapabilityPages((offset) => offset === 0 ? page(caps(0, 200), 250) : page(caps(200, 50), 251, offset));
@@ -476,7 +504,7 @@ describe("the capability pager", () => {
   });
 
   it("more rows than the total fails the read", async () => {
-    stubCapabilityPages(() => page(caps(0, 2), 1));
+    stubCapabilityPages((offset) => page(offset === 0 ? caps(0, 2) : [], 1, offset));
     expect(await renderPage(<KernelLeaderboardPage />)).toContain("Couldn't load the leaderboard");
   });
 
@@ -493,6 +521,13 @@ describe("the capability pager", () => {
     expect(text).toContain("Showing the first 1 of the 3 capabilities the gateway lists; search and filters cover only these.");
     expect(text).toContain("1+ capability found");
     expect(text).toContain("Read in 2 pages; the gateway gives no snapshot across pages.");
+  });
+
+  it("Discover never calls an empty partial read an empty catalog", async () => {
+    stubCapabilityPages(() => page([], 3));
+    const text = await renderPage(<DiscoverPage />);
+    expect(text).toContain("Showing the first 0 of the 3 capabilities the gateway lists; search and filters cover only these.");
+    expect(text).not.toContain("No capabilities listed yet");
   });
 
   it("a read that changed between pages is never presented as complete", async () => {
@@ -813,9 +848,10 @@ describe("approved copy and wire vocabulary", () => {
     expect(container.textContent).not.toContain("x".repeat(161));
   });
 
-  it("T6: Discover's subtitle uses the approved literal", () => {
-    const source = readFileSync(`${__dirname}/../DiscoverPage.tsx`, "utf8");
-    expect(source).toContain('"Search the capabilities operators list on the network"');
+  it("T6: Discover's subtitle uses the approved literal", async () => {
+    stubFetch(EMPTY);
+    await renderPage(<DiscoverPage />);
+    expect(useUIStore.getState().currentPageSubtitle).toBe("Search the capabilities operators list on the network");
   });
 
   it("T7: wire-vocabulary.ts keeps the reference git blob bytes", () => {

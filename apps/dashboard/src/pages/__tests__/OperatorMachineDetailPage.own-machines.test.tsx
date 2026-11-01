@@ -193,6 +193,26 @@ describe("OperatorMachineDetailPage caller's own machines", () => {
     expectOnlyOwnRead();
   });
 
+  it("T8 a failed read shows the unavailable copy at once with one request, even under a client that retries", async () => {
+    client = new QueryClient({ defaultOptions: { queries: { retry: 3, gcTime: 0 } } });
+    authorizedFetch.mockResolvedValue(json({ error: "Unreadable response" }, 500));
+    await renderPage();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(UNAVAILABLE);
+    expect(authorizedFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed refetch replaces a loaded machine with the unavailable copy", async () => {
+    authorizedFetch.mockResolvedValueOnce(json(me([MACHINE])));
+    await renderPage();
+    expect(container.querySelector("h2")?.textContent).toBe(MACHINE.name);
+    expect(useUIStore.getState().currentPageTitle).toBe(MACHINE.name);
+    authorizedFetch.mockResolvedValueOnce(json({ error: "Unreadable response" }, 500));
+    await act(async () => { await client.refetchQueries(); });
+    await settle();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(UNAVAILABLE);
+    expect(useUIStore.getState().currentPageTitle).toBe("Machine Detail");
+  });
+
   it.each([
     ["unavailable section", () => json({ ok: true, kernels: { count: null, items: [], unavailable: "Section unavailable" } })],
     ["malformed 2xx", () => json({ ok: true, kernels: { count: 2, items: [MACHINE] } })],
