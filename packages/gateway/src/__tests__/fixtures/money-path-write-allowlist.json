@@ -1,0 +1,744 @@
+{
+  "schema": "pcc.money-path-write-allowlist/v1",
+  "methods": [
+    "writeContract",
+    "sendTransaction",
+    "sendRawTransaction",
+    "signTransaction",
+    "prepareTransactionRequest",
+    "deployContract",
+    "encodeDeployData",
+    "sendUserOp",
+    "sendUserOperation",
+    "sendCalls",
+    "writeContracts"
+  ],
+  "scope": [
+    "packages/*/src/**",
+    "packages/contracts/ts/**",
+    "apps/*/src/**"
+  ],
+  "entries": [
+    {
+      "file": "packages/agent-runtime/src/solana-wallet.ts",
+      "enclosing": "SolanaAgentWallet.transferSol",
+      "method": "sendRawTransaction",
+      "args": "transaction.serialize()",
+      "count": 1,
+      "signer": "the agent's own Solana key",
+      "payload": "SystemProgram.transfer is built locally, signed by this.keypair, then transaction.serialize() is sent.",
+      "why": "Transfers SOL using the agent-owned wallet and locally constructed instruction."
+    },
+    {
+      "file": "packages/agent-runtime/src/solana-wallet.ts",
+      "enclosing": "SolanaAgentWallet.transferSpl",
+      "method": "sendRawTransaction",
+      "args": "transaction.serialize()",
+      "count": 1,
+      "signer": "the agent's own Solana key",
+      "payload": "createTransferInstruction is built locally, signed by this.keypair, then transaction.serialize() is sent.",
+      "why": "Transfers SPL tokens using the agent-owned wallet and locally constructed instruction."
+    },
+    {
+      "file": "packages/agent-runtime/src/wallet.ts",
+      "enclosing": "AgentWallet.approveToken",
+      "method": "writeContract",
+      "args": "{ chain: this.chain, account: this.account, address: tokenAddress, abi: [ { name: \"approve\", type: \"function\", stateMutability: \"nonpayable\", inputs: [ { name: \"spender\", type: \"address\" }, { name: \"amount\", type: \"uint256\" }, ], outputs: [{ name: \"\", type: \"bool\" }], }, ] as const, functionName: \"approve\", args: [spender, parseUnits(amount, 6)], }",
+      "count": 1,
+      "functionName": "approve",
+      "nonLiteralFunctionName": false,
+      "abi": "[ { name: \"approve\", type: \"function\", stateMutability: \"nonpayable\", inputs: [ { name: \"spender\", type: \"address\" }, { name: \"amount\", type: \"uint256\" }, ], outputs: [{ name: \"\", type: \"bool\" }], }, ] as const",
+      "signer": "the agent's own key",
+      "why": "The agent-owned wallet invokes the literal approve selector with its fixed inline ABI."
+    },
+    {
+      "file": "packages/agent-runtime/src/wallet.ts",
+      "enclosing": "AgentWallet.callContract",
+      "method": "writeContract",
+      "args": "{ chain: this.chain, account: this.account, address, abi: abi as any, functionName, args: args as any, }",
+      "count": 1,
+      "functionName": "functionName",
+      "nonLiteralFunctionName": true,
+      "abi": "abi as any",
+      "signer": "the agent's own key",
+      "why": "The generic ABI and functionName parameters are signed only by the agent-owned wallet; no gateway key is involved.",
+      "bindings": {
+        "functionName": "param"
+      }
+    },
+    {
+      "file": "packages/agent-runtime/src/wallet.ts",
+      "enclosing": "AgentWallet.fundEscrow",
+      "method": "writeContract",
+      "args": "{ chain: this.chain, account: this.account, address: escrowAddress, abi: [ { name: \"fund\", type: \"function\", stateMutability: \"nonpayable\", inputs: [], outputs: [], }, ] as const, functionName: \"fund\", args: [], }",
+      "count": 1,
+      "functionName": "fund",
+      "nonLiteralFunctionName": false,
+      "abi": "[ { name: \"fund\", type: \"function\", stateMutability: \"nonpayable\", inputs: [], outputs: [], }, ] as const",
+      "signer": "the agent's own key",
+      "why": "The agent-owned wallet invokes the literal fund selector with its fixed inline ABI."
+    },
+    {
+      "file": "packages/agent-runtime/src/wallet.ts",
+      "enclosing": "sendUserOp",
+      "method": "sendUserOp",
+      "args": "callData",
+      "count": 1,
+      "signer": "the agent's own key",
+      "payload": "callData is the SmartAccountHandle parameter forwarded to the smart account configured from this AgentWallet.",
+      "why": "The agent controls this generic smart-account handle and supplies its own signing key.",
+      "bindings": {
+        "callData": "param"
+      }
+    },
+    {
+      "file": "packages/bundler/src/smart-account.ts",
+      "enclosing": "SmartAccountClient.sendUserOp",
+      "method": "sendUserOperation",
+      "args": "{ calls: [ { to: this.smartAccountAddress, data: callData, value: 0n, }, ], }",
+      "count": 1,
+      "signer": "the configured smart-account owner's key (gateway server key for batch settlement; agent key for agent handles)",
+      "payload": "callData parameter is wrapped in permissionless sendUserOperation calls to this.smartAccountAddress.",
+      "why": "Uses the configured owner key through permissionless; gateway batch settlement supplies PCC_GATEWAY_PRIVATE_KEY.",
+      "bindings": {
+        "callData": "param"
+      }
+    },
+    {
+      "file": "packages/bundler/src/user-op-queue.ts",
+      "enclosing": "UserOpQueue.flush",
+      "method": "sendUserOp",
+      "args": "callData",
+      "count": 1,
+      "signer": "the configured smart-account owner's key (gateway server key for batch settlement)",
+      "payload": "callData is built locally by encodeExecute or encodeBatch from queued operations encoded by encodeOperation.",
+      "why": "Encodes queued ABI operations before submission through the configured smart account.",
+      "bindings": {
+        "callData": "this.smartAccount.encodeBatch(calls)"
+      }
+    },
+    {
+      "file": "packages/gateway/src/auth/evm-signature.ts",
+      "enclosing": "verifyEvmMessageSignature",
+      "method": "encodeDeployData",
+      "args": "{ abi: erc6492SignatureValidatorAbi, bytecode: erc6492SignatureValidatorByteCode, args: [getAddress(address), hashMessage(message), hexSignature], }",
+      "count": 1,
+      "signer": "none: a deployless eth_call, never sent",
+      "payload": "viem erc6492SignatureValidatorByteCode is ABI-encoded with address, message hash and signature, then passed only to client().call.",
+      "why": "#641 verifies ERC-6492 signatures with a bounded read-only deployless eth_call; it never broadcasts a transaction.",
+      "bindings": {
+        "erc6492SignatureValidatorByteCode": "<unresolved>"
+      }
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "addMilestoneV2",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: MilestoneEscrowV2ABI, functionName: \"addMilestone\", args: [ params.stepId, params.operator, params.amount, params.operatorBond, BigInt(params.challengeWindowSeconds), params.requiredTier, params.jobId, ], gas: GAS_LIMITS.addMilestone, }",
+      "count": 1,
+      "functionName": "addMilestone",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowV2ABI",
+      "signer": "gateway server key",
+      "why": "Adds the typed V2 milestone tuple through the pinned MilestoneEscrowV2 ABI."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "approveAndReleaseV3",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: MilestoneEscrowV3ABI, functionName: \"approveAndRelease\", args: [BigInt(milestoneIndex)], gas: GAS_LIMITS.approveAndRelease, }",
+      "count": 1,
+      "functionName": "approveAndRelease",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowV3ABI",
+      "signer": "gateway server key",
+      "why": "The gateway is the payer of its Mode-A escrow and releases the indexed milestone through the fixed V3 ABI."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "approveToken",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address: token, abi: MockUSDCABI, functionName: \"approve\", args: [spender, parseUnits(amount, 6)], gas: GAS_LIMITS.approve, }",
+      "count": 1,
+      "functionName": "approve",
+      "nonLiteralFunctionName": false,
+      "abi": "MockUSDCABI",
+      "signer": "gateway server key",
+      "why": "Approves the specified spender and parsed token amount through the pinned token approve ABI."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "broadcastSignedTransaction",
+      "method": "sendRawTransaction",
+      "args": "{ serializedTransaction }",
+      "count": 1,
+      "signer": "gateway server key",
+      "payload": "serializedTransaction parameter comes from signReclaimAfterDeadlineV3 in reclaimEscrowV3; the signed transaction hash is known before broadcast.",
+      "why": "Broadcasts the gateway-signed fixed reclaim transaction through the reclaim service boundary.",
+      "bindings": {
+        "serializedTransaction": "param"
+      }
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "createEscrowV3",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address: factoryAddress, abi: PCCProtocolV3FactoryABI, functionName: \"createEscrowV3\", args: [payer, arbiter, token, cwmId], gas: GAS_LIMITS.createEscrow, }",
+      "count": 1,
+      "functionName": "createEscrowV3",
+      "nonLiteralFunctionName": false,
+      "abi": "PCCProtocolV3FactoryABI",
+      "signer": "gateway server key",
+      "why": "Creates a V3 clone using the fixed createEscrowV3 factory ABI and typed payer, arbiter, token and CWM arguments."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "depositBond",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: MilestoneEscrowABI, functionName: \"depositBond\", args: [BigInt(milestoneIndex)], gas: GAS_LIMITS.depositBond, }",
+      "count": 1,
+      "functionName": "depositBond",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowABI",
+      "signer": "gateway server key",
+      "why": "Deposits the indexed operator bond through the fixed escrow ABI."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "depositBondV2",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: MilestoneEscrowV2ABI, functionName: \"depositBond\", args: [BigInt(milestoneIndex)], gas: GAS_LIMITS.depositBond, }",
+      "count": 1,
+      "functionName": "depositBond",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowV2ABI",
+      "signer": "gateway server key",
+      "why": "Deposits the indexed operator bond with the literal depositBond selector and V2 ABI."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "fileDispute",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: MilestoneEscrowABI, functionName: \"fileDispute\", args: [ BigInt(milestoneIndex), parseUnits(challengerBond, 6), challengerEvidenceHash, reason, ], gas: GAS_LIMITS.fileDispute, }",
+      "count": 1,
+      "functionName": "fileDispute",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowABI",
+      "signer": "gateway server key",
+      "why": "Files the milestone dispute with typed bond, evidence hash and reason through the fixed escrow ABI."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "fileDisputeV2",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: MilestoneEscrowV2ABI, functionName: \"fileDispute\", args: [ BigInt(milestoneIndex), parseUnits(challengerBond, 6), challengerEvidenceHash, reason, ], gas: GAS_LIMITS.fileDispute, }",
+      "count": 1,
+      "functionName": "fileDispute",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowV2ABI",
+      "signer": "gateway server key",
+      "why": "Files an indexed typed dispute with the literal fileDispute selector and V2 ABI."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "fundEscrow",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: MilestoneEscrowABI, functionName: \"fund\", args: [], gas: GAS_LIMITS.fund, }",
+      "count": 1,
+      "functionName": "fund",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowABI",
+      "signer": "gateway server key",
+      "why": "Funds an escrow through the pinned MilestoneEscrow ABI and literal fund selector."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "fundEscrowV2",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: MilestoneEscrowV2ABI, functionName: \"fund\", args: [], gas: GAS_LIMITS.fund, }",
+      "count": 1,
+      "functionName": "fund",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowV2ABI",
+      "signer": "gateway server key",
+      "why": "Funds a V2 escrow with the literal fund selector and pinned V2 ABI."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "reclaimAfterDeadlineV3",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address: contractAddress, abi: MilestoneEscrowV3ABI, functionName: \"reclaimAfterDeadline\", args: [BigInt(milestoneIndex)], gas: GAS_LIMITS.reclaim, }",
+      "count": 1,
+      "functionName": "reclaimAfterDeadline",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowV3ABI",
+      "signer": "gateway server key",
+      "why": "Reclaims an indexed overdue milestone through the fixed V3 ABI from the gateway payer key."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "releaseMilestone",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: MilestoneEscrowABI, functionName: \"release\", args: [BigInt(milestoneIndex), attestation], gas: GAS_LIMITS.release, }",
+      "count": 1,
+      "functionName": "release",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowABI",
+      "signer": "gateway server key",
+      "why": "Releases the indexed milestone with its matching oracle attestation through the fixed escrow ABI."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "releaseMilestoneV2",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: MilestoneEscrowV2ABI, functionName: \"release\", args: [BigInt(milestoneIndex)], gas: GAS_LIMITS.release, }",
+      "count": 1,
+      "functionName": "release",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowV2ABI",
+      "signer": "gateway server key",
+      "why": "Releases the indexed attested V2 milestone through the pinned V2 ABI."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "releaseMilestoneV3",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: MilestoneEscrowV3ABI, functionName: \"release\", args: [BigInt(milestoneIndex)], gas: GAS_LIMITS.release, }",
+      "count": 1,
+      "functionName": "release",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowV3ABI",
+      "signer": "gateway server key",
+      "why": "Releases the indexed attested V3 milestone through the pinned V3 ABI."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "signReclaimAfterDeadlineV3",
+      "method": "prepareTransactionRequest",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), to: contractAddress, data: encodeReclaimAfterDeadlineV3(milestoneIndex), gas: GAS_LIMITS.reclaim, }",
+      "count": 1,
+      "signer": "gateway server key",
+      "payload": "encodeReclaimAfterDeadlineV3(milestoneIndex) builds fixed MilestoneEscrowV3 reclaimAfterDeadline calldata locally.",
+      "why": "Prepares and signs a fixed deadline reclaim transaction without broadcasting it."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "signReclaimAfterDeadlineV3",
+      "method": "signTransaction",
+      "args": "request as never",
+      "count": 1,
+      "signer": "gateway server key",
+      "payload": "request is prepared locally with encodeReclaimAfterDeadlineV3(milestoneIndex) and the gateway account before signing.",
+      "why": "Prepares and signs a fixed deadline reclaim transaction without broadcasting it.",
+      "bindings": {
+        "request": "await wallet.prepareTransactionRequest({ chain: resolveChainConfig().chain, account: getAccount(), to: contractAddress, data: encodeReclaimAfterDeadlineV3(milestoneIndex), gas: GAS_LIMITS.reclaim, })"
+      }
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "submitAttestation",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: MilestoneEscrowABI, functionName: \"submitAttestation\", args: [BigInt(milestoneIndex), attestation], gas: GAS_LIMITS.submitAttestation, }",
+      "count": 1,
+      "functionName": "submitAttestation",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowABI",
+      "signer": "gateway server key",
+      "why": "Submits the indexed oracle attestation through the fixed escrow ABI."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "submitAttestationV2",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: MilestoneEscrowV2ABI, functionName: \"submitAttestation\", args: [BigInt(milestoneIndex), easUid], gas: GAS_LIMITS.submitAttestation, }",
+      "count": 1,
+      "functionName": "submitAttestation",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowV2ABI",
+      "signer": "gateway server key",
+      "why": "Binds the indexed EAS attestation UID through the pinned V2 ABI."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "submitAttestationV3",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: MilestoneEscrowV3ABI, functionName: \"submitAttestation\", args: [BigInt(milestoneIndex), easUid], gas: GAS_LIMITS.submitAttestation, }",
+      "count": 1,
+      "functionName": "submitAttestation",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowV3ABI",
+      "signer": "gateway server key",
+      "why": "Binds the indexed EAS attestation UID through the pinned V3 ABI."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "submitEvidence",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: MilestoneEscrowABI, functionName: \"submitEvidence\", args: [BigInt(milestoneIndex), evidenceBundleHash], gas: GAS_LIMITS.submitEvidence, }",
+      "count": 1,
+      "functionName": "submitEvidence",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowABI",
+      "signer": "gateway server key",
+      "why": "Submits an indexed evidence commitment through the fixed escrow ABI."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "submitEvidenceV2",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: MilestoneEscrowV2ABI, functionName: \"submitEvidence\", args: [BigInt(milestoneIndex), evidenceBundleHash], gas: GAS_LIMITS.submitEvidence, }",
+      "count": 1,
+      "functionName": "submitEvidence",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowV2ABI",
+      "signer": "gateway server key",
+      "why": "Submits the indexed evidence hash through the pinned V2 ABI."
+    },
+    {
+      "file": "packages/gateway/src/contracts/escrow-client.ts",
+      "enclosing": "submitEvidenceV3",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: MilestoneEscrowV3ABI, functionName: \"submitEvidence\", args: [BigInt(milestoneIndex), evidenceBundleHash], gas: GAS_LIMITS.submitEvidence, }",
+      "count": 1,
+      "functionName": "submitEvidence",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowV3ABI",
+      "signer": "gateway server key",
+      "why": "Submits the indexed evidence hash through the pinned V3 ABI."
+    },
+    {
+      "file": "packages/gateway/src/contracts/protocol-client.ts",
+      "enclosing": "createEscrowViaProtocol",
+      "method": "writeContract",
+      "args": "{ chain: resolveChainConfig().chain, account: getAccount(), address, abi: PCCProtocolABI, functionName: \"createEscrow\", args: [payer, arbiter, token, cwmId], }",
+      "count": 1,
+      "functionName": "createEscrow",
+      "nonLiteralFunctionName": false,
+      "abi": "PCCProtocolABI",
+      "signer": "gateway server key",
+      "why": "Creates an escrow through the pinned PCCProtocol ABI and literal createEscrow selector."
+    },
+    {
+      "file": "packages/gateway/src/routes/capture.ts",
+      "enclosing": "client.anchorCapture",
+      "method": "writeContract",
+      "args": "{ chain: baseSepolia, account, address: registryAddress, abi: CAPTURE_CLASS_REGISTRY_ABI, functionName: \"anchor\", args: [anchor], }",
+      "count": 1,
+      "functionName": "anchor",
+      "nonLiteralFunctionName": false,
+      "abi": "CAPTURE_CLASS_REGISTRY_ABI",
+      "signer": "gateway server key",
+      "why": "Anchors the typed CaptureAnchor tuple through the fixed registry anchor ABI."
+    },
+    {
+      "file": "packages/gateway/src/routes/fiat-ramp.ts",
+      "enclosing": "<anonymous> in fiatRampRoutes",
+      "method": "sendTransaction",
+      "args": "{ to: MOCK_USDC as `0x${string}`, data: mintData, }",
+      "count": 1,
+      "signer": "testnet faucet key (DEPLOYER_PRIVATE_KEY or gateway server key)",
+      "payload": "mintData is encodeFunctionData of the literal mint ABI and selector, with the requested recipient and capped amount, to fixed Sepolia MockUSDC.",
+      "why": "The public faucet permits recipient and amount data but sends only a fixed testnet mint operation.",
+      "bindings": {
+        "mintData": "encodeFunctionData({ abi: [{ name: \"mint\", type: \"function\", inputs: [{ name: \"to\", type: \"address\" }, { name: \"amount\", type: \"uint256\" }], outputs: [] }], functionName: \"mint\", args: [body.walletAddress as `0x${string}`, amountRaw], })"
+      }
+    },
+    {
+      "file": "packages/gateway/src/routes/paid-job-flow.ts",
+      "enclosing": "<anonymous> in createJobFromSession",
+      "method": "writeContract",
+      "args": "{ address: addr as `0x${string}`, abi: MilestoneEscrowV2ABI, functionName: \"addMilestone\", args: [ stepIdBytes, account.address, parseUnits(ms.amount, 6), parseUnits(ms.bondAmount ?? \"0.00\", 6), BigInt(ms.challengeWindowSeconds ?? 0), assuranceTier, jobId, ], gas: GAS_LIMITS.addMilestone, }",
+      "count": 1,
+      "functionName": "addMilestone",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowV2ABI",
+      "signer": "gateway server key",
+      "why": "Adds a normalized V3 Mode-A job milestone through the fixed V2-compatible ABI; the gateway signer is operator."
+    },
+    {
+      "file": "packages/gateway/src/routes/paid-job-flow.ts",
+      "enclosing": "<anonymous> in createJobFromSession",
+      "method": "writeContract",
+      "args": "{ address: addr as `0x${string}`, abi: MilestoneEscrowV2ABI, functionName: \"addMilestone\", args: [ stepIdBytes, account.address, parseUnits(ms.amount, 6), parseUnits(ms.bondAmount ?? \"0.00\", 6), BigInt(ms.challengeWindowSeconds ?? 0), assuranceTier, jobId, ], nonce: nonce++, gas: GAS_LIMITS.addMilestone, }",
+      "count": 1,
+      "functionName": "addMilestone",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowV2ABI",
+      "signer": "gateway server key",
+      "why": "Adds a normalized V2 job milestone through the fixed V2-compatible ABI; the gateway signer is operator."
+    },
+    {
+      "file": "packages/gateway/src/routes/paid-job-flow.ts",
+      "enclosing": "<anonymous> in createJobFromSession",
+      "method": "writeContract",
+      "args": "{ address: addr as `0x${string}`, abi: MilestoneEscrowV3ABI, functionName: \"fund\", args: [], gas: GAS_LIMITS.fund, }",
+      "count": 1,
+      "functionName": "fund",
+      "nonLiteralFunctionName": false,
+      "abi": "MilestoneEscrowV3ABI",
+      "signer": "gateway server key",
+      "why": "Funds the gateway-owned Mode-A job escrow through the fixed V3 fund ABI."
+    },
+    {
+      "file": "packages/gateway/src/routes/paid-job-flow.ts",
+      "enclosing": "<anonymous> in createJobFromSession",
+      "method": "writeContract",
+      "args": "{ address: factoryAddr, abi: factoryAbi, functionName: createFn, args: [account.address, account.address, tokenAddr, cwmIdBytes], nonce: nonce++, gas: GAS_LIMITS.createEscrow, }",
+      "count": 1,
+      "functionName": "createEscrowV2|createEscrow",
+      "nonLiteralFunctionName": false,
+      "abi": "factoryAbi",
+      "signer": "gateway server key",
+      "why": "The V2 switch selects exactly createEscrowV2 or createEscrow and the corresponding factory ABI; the gateway is payer and arbiter.",
+      "bindings": {
+        "createFn": "v2 ? \"createEscrowV2\" : \"createEscrow\""
+      }
+    },
+    {
+      "file": "packages/gateway/src/routes/paid-job-flow.ts",
+      "enclosing": "<anonymous> in createJobFromSession",
+      "method": "writeContract",
+      "args": "{ address: tokenAddr, abi: MockUSDCABI, functionName: \"approve\", args: [addr as `0x${string}`, totalFundAmount], gas: GAS_LIMITS.approve, }",
+      "count": 1,
+      "functionName": "approve",
+      "nonLiteralFunctionName": false,
+      "abi": "MockUSDCABI",
+      "signer": "gateway server key",
+      "why": "Approves the normalized Mode-A job total to its escrow through the fixed MockUSDC ABI."
+    },
+    {
+      "file": "packages/gateway/src/services/erc8004-identity-write.ts",
+      "enclosing": "registerAgentOnChain",
+      "method": "writeContract",
+      "args": "{ chain: walletClient.chain ?? null, account: walletClient.account!, address: registryAddress, abi: identityRegistryAbi, functionName: \"register\", args: args as any, }",
+      "count": 1,
+      "functionName": "register",
+      "nonLiteralFunctionName": false,
+      "abi": "identityRegistryAbi",
+      "signer": "gateway identity key (PCC_GATEWAY_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY)",
+      "why": "Registers the normalized agent URI and typed metadata with the fixed ERC-8004 identity ABI."
+    },
+    {
+      "file": "packages/gateway/src/services/erc8004-identity-write.ts",
+      "enclosing": "setAgentWalletOnChain",
+      "method": "writeContract",
+      "args": "{ chain: walletClient.chain ?? null, account: walletClient.account!, address: registryAddress, abi: identityRegistryAbi, functionName: \"setAgentWallet\", args: [input.agentId, input.newWallet, deadline, signature], }",
+      "count": 1,
+      "functionName": "setAgentWallet",
+      "nonLiteralFunctionName": false,
+      "abi": "identityRegistryAbi",
+      "signer": "gateway identity key (PCC_GATEWAY_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY)",
+      "why": "Updates the fixed ERC-8004 agent wallet mapping with the new wallet consent signature."
+    },
+    {
+      "file": "packages/identity-8004/src/identity-registry.ts",
+      "enclosing": "IdentityRegistryClient.register",
+      "method": "writeContract",
+      "args": "{ chain: this.walletClient.chain ?? null, account: this.walletClient.account!, address: this.address, abi: identityRegistryAbi, functionName: \"register\", args: args as any, }",
+      "count": 1,
+      "functionName": "register",
+      "nonLiteralFunctionName": false,
+      "abi": "identityRegistryAbi",
+      "signer": "the caller-configured registry wallet's key",
+      "why": "The supplied wallet invokes the literal register selector through the fixed identityRegistryAbi."
+    },
+    {
+      "file": "packages/identity-8004/src/identity-registry.ts",
+      "enclosing": "IdentityRegistryClient.setAgentURI",
+      "method": "writeContract",
+      "args": "{ chain: this.walletClient.chain ?? null, account: this.walletClient.account!, address: this.address, abi: identityRegistryAbi, functionName: \"setAgentURI\", args: [agentId, newURI], }",
+      "count": 1,
+      "functionName": "setAgentURI",
+      "nonLiteralFunctionName": false,
+      "abi": "identityRegistryAbi",
+      "signer": "the caller-configured registry wallet's key",
+      "why": "The supplied wallet invokes the literal setAgentURI selector through the fixed identityRegistryAbi."
+    },
+    {
+      "file": "packages/identity-8004/src/identity-registry.ts",
+      "enclosing": "IdentityRegistryClient.setMetadata",
+      "method": "writeContract",
+      "args": "{ chain: this.walletClient.chain ?? null, account: this.walletClient.account!, address: this.address, abi: identityRegistryAbi, functionName: \"setMetadata\", args: [agentId, key, `0x${Buffer.from(value).toString(\"hex\")}`], }",
+      "count": 1,
+      "functionName": "setMetadata",
+      "nonLiteralFunctionName": false,
+      "abi": "identityRegistryAbi",
+      "signer": "the caller-configured registry wallet's key",
+      "why": "The supplied wallet invokes the literal setMetadata selector through the fixed identityRegistryAbi."
+    },
+    {
+      "file": "packages/identity-8004/src/reputation-registry.ts",
+      "enclosing": "ReputationRegistryClient.giveFeedback",
+      "method": "writeContract",
+      "args": "{ chain: this.walletClient.chain ?? null, account: this.walletClient.account!, address: this.address, abi: reputationRegistryAbi, functionName: \"giveFeedback\", args: [ feedback.agentId, feedback.value, feedback.valueDecimals, feedback.tag1 ?? \"\", feedback.tag2 ?? \"\", feedback.endpoint ?? \"\", feedback.feedbackURI ?? \"\", feedback.feedbackHash ?? \"0x0000000000000000000000000000000000000000000000000000000000000000\", ], }",
+      "count": 1,
+      "functionName": "giveFeedback",
+      "nonLiteralFunctionName": false,
+      "abi": "reputationRegistryAbi",
+      "signer": "the caller-configured registry wallet's key",
+      "why": "The supplied wallet invokes the literal giveFeedback selector through the fixed reputationRegistryAbi."
+    },
+    {
+      "file": "packages/identity-8004/src/reputation-registry.ts",
+      "enclosing": "ReputationRegistryClient.revokeFeedback",
+      "method": "writeContract",
+      "args": "{ chain: this.walletClient.chain ?? null, account: this.walletClient.account!, address: this.address, abi: reputationRegistryAbi, functionName: \"revokeFeedback\", args: [agentId, feedbackIndex], }",
+      "count": 1,
+      "functionName": "revokeFeedback",
+      "nonLiteralFunctionName": false,
+      "abi": "reputationRegistryAbi",
+      "signer": "the caller-configured registry wallet's key",
+      "why": "The supplied wallet invokes the literal revokeFeedback selector through the fixed reputationRegistryAbi."
+    },
+    {
+      "file": "packages/identity-8004/src/validation-registry.ts",
+      "enclosing": "ValidationRegistryClient.requestValidation",
+      "method": "writeContract",
+      "args": "{ chain: this.walletClient.chain ?? null, account: this.walletClient.account!, address: this.address, abi: validationRegistryAbi, functionName: \"validationRequest\", args: [validatorAddress, agentId, requestURI, requestHash], }",
+      "count": 1,
+      "functionName": "validationRequest",
+      "nonLiteralFunctionName": false,
+      "abi": "validationRegistryAbi",
+      "signer": "the caller-configured registry wallet's key",
+      "why": "The supplied wallet invokes the literal validationRequest selector through the fixed validationRegistryAbi."
+    },
+    {
+      "file": "packages/identity-8004/src/validation-registry.ts",
+      "enclosing": "ValidationRegistryClient.respondToValidation",
+      "method": "writeContract",
+      "args": "{ chain: this.walletClient.chain ?? null, account: this.walletClient.account!, address: this.address, abi: validationRegistryAbi, functionName: \"validationResponse\", args: [ requestHash, response, responseURI ?? \"\", responseHash ?? \"0x0000000000000000000000000000000000000000000000000000000000000000\", tag ?? \"\", ], }",
+      "count": 1,
+      "functionName": "validationResponse",
+      "nonLiteralFunctionName": false,
+      "abi": "validationRegistryAbi",
+      "signer": "the caller-configured registry wallet's key",
+      "why": "The supplied wallet invokes the literal validationResponse selector through the fixed validationRegistryAbi."
+    },
+    {
+      "file": "packages/print-host/src/chain.ts",
+      "enclosing": "submit",
+      "method": "sendRawTransaction",
+      "args": "{ serializedTransaction }",
+      "count": 1,
+      "signer": "the print host's operator key",
+      "payload": "serializedTransaction is returned by the scoped operator signSubmitEvidenceTx and parsed to verify chain, target, fixed submitEvidence data, nonce, fees and zero value before send.",
+      "why": "Broadcasts only the print host evidence transaction after local signed-byte checks and the durable beforeSend boundary.",
+      "bindings": {
+        "serializedTransaction": "await signTransaction.call(operator, { escrow: input.escrow, unitId: input.unitId, packageDigest: input.packageDigest, nonce, gas, maxFeePerGas, maxPriorityFeePerGas })"
+      }
+    },
+    {
+      "file": "packages/print-host/src/keys.ts",
+      "enclosing": "signSubmitEvidenceTx",
+      "method": "signTransaction",
+      "args": "transaction",
+      "count": 1,
+      "signer": "the print host's operator key",
+      "payload": "prepareSubmitEvidenceTx(input, chainId) builds submitEvidence(unitId, packageDigest) with a fixed ABI and guarded transaction fields.",
+      "why": "The operator key exposes only this scoped evidence transaction signing closure.",
+      "bindings": {
+        "transaction": "prepareSubmitEvidenceTx(input, chainId)"
+      }
+    },
+    {
+      "file": "packages/spec/src/funding/fund.ts",
+      "enclosing": "sendAndWait",
+      "method": "prepareTransactionRequest",
+      "args": "{ account: wallet.account, chain, to, data, nonceManager: wallet.account.nonceManager, }",
+      "count": 1,
+      "signer": "the payer's wallet",
+      "payload": "data parameter is locally encoded ERC20 approve(escrow, totalGross) or V-next ESCROW_ABI fund(configs, acceptance) from approveAndFund.",
+      "why": "Only the verified payer wallet funds the frozen prepared policy; send-time chain and local transaction checks bind the operation.",
+      "bindings": {
+        "data": "param"
+      }
+    },
+    {
+      "file": "packages/spec/src/funding/fund.ts",
+      "enclosing": "sendAndWait",
+      "method": "sendRawTransaction",
+      "args": "{ serializedTransaction }",
+      "count": 1,
+      "signer": "the payer's wallet",
+      "payload": "serializedTransaction is locally signed from exact simulated approve/fund data and parsed to check chain, target, data and zero value before broadcast.",
+      "why": "Only the verified payer wallet funds the frozen prepared policy; send-time chain and local transaction checks bind the operation.",
+      "bindings": {
+        "serializedTransaction": "await wallet.signTransaction({ ...request, account: wallet.account, chain })"
+      }
+    },
+    {
+      "file": "packages/spec/src/funding/fund.ts",
+      "enclosing": "sendAndWait",
+      "method": "sendTransaction",
+      "args": "{ account: wallet.account!, chain, to, data, dataSuffix: \"0x\" }",
+      "count": 1,
+      "signer": "the payer's wallet",
+      "payload": "data parameter is locally encoded ERC20 approve or V-next ESCROW_ABI fund, simulated and bound to the frozen prepared policy before send.",
+      "why": "Only the verified payer wallet funds the frozen prepared policy; send-time chain and local transaction checks bind the operation.",
+      "bindings": {
+        "data": "param"
+      }
+    },
+    {
+      "file": "packages/spec/src/funding/fund.ts",
+      "enclosing": "sendAndWait",
+      "method": "signTransaction",
+      "args": "{ ...request, account: wallet.account, chain }",
+      "count": 1,
+      "signer": "the payer's wallet",
+      "payload": "request is locally prepared from the exact simulated approve/fund data; signed bytes are checked for chain, target, data and zero value.",
+      "why": "Only the verified payer wallet funds the frozen prepared policy; send-time chain and local transaction checks bind the operation.",
+      "bindings": {
+        "request": "await wallet.prepareTransactionRequest({ account: wallet.account, chain, to, data, nonceManager: wallet.account.nonceManager, })"
+      }
+    },
+    {
+      "file": "packages/verifier/src/oracle/chainlink-adapter.ts",
+      "enclosing": "ChainlinkOracleAdapter.submitLive",
+      "method": "writeContract",
+      "args": "{ address: consumerAddress, abi: CONSUMER_ABI, functionName: \"sendEvidenceRequest\", args: [bundleHashBytes32, requiredTier as number], }",
+      "count": 1,
+      "functionName": "sendEvidenceRequest",
+      "nonLiteralFunctionName": false,
+      "abi": "CONSUMER_ABI",
+      "signer": "Chainlink oracle key (DEPLOYER_PRIVATE_KEY)",
+      "why": "Sends the normalized evidence hash and required assurance tier to the fixed consumer sendEvidenceRequest ABI."
+    },
+    {
+      "file": "packages/verifier/src/oracle/uma-adapter.ts",
+      "enclosing": "UMAOracleAdapter.settleAssertion",
+      "method": "writeContract",
+      "args": "{ address: oovAddress, abi: OOV3_ABI, functionName: \"settleAssertion\", args: [assertionId as `0x${string}`], }",
+      "count": 1,
+      "functionName": "settleAssertion",
+      "nonLiteralFunctionName": false,
+      "abi": "OOV3_ABI",
+      "signer": "UMA oracle key (UMA_ASSERTER_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY)",
+      "why": "Settles the specified assertion through the fixed UMA OOv3 ABI."
+    },
+    {
+      "file": "packages/verifier/src/oracle/uma-adapter.ts",
+      "enclosing": "UMAOracleAdapter.submitLive",
+      "method": "writeContract",
+      "args": "{ address: bondToken, abi: ERC20_ABI, functionName: \"approve\", args: [oovAddress, bondAmount], }",
+      "count": 1,
+      "functionName": "approve",
+      "nonLiteralFunctionName": false,
+      "abi": "ERC20_ABI",
+      "signer": "UMA oracle key (UMA_ASSERTER_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY)",
+      "why": "Approves the UMA oracle bond amount through the fixed ERC20 approve ABI."
+    },
+    {
+      "file": "packages/verifier/src/oracle/uma-adapter.ts",
+      "enclosing": "UMAOracleAdapter.submitLive",
+      "method": "writeContract",
+      "args": "{ address: oovAddress, abi: OOV3_ABI, functionName: \"assertTruthWithDefaults\", args: [claim as `0x${string}`, account.address], }",
+      "count": 1,
+      "functionName": "assertTruthWithDefaults",
+      "nonLiteralFunctionName": false,
+      "abi": "OOV3_ABI",
+      "signer": "UMA oracle key (UMA_ASSERTER_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY)",
+      "why": "Builds the evidence claim locally and asserts it through the fixed UMA assertTruthWithDefaults ABI."
+    }
+  ]
+}
