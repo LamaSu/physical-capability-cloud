@@ -119,8 +119,12 @@ describe("verdict 101 F2/F3: the kit exports no key-sending client and no kernel
       "AGENT_PACKAGE_PIN",
       "AGENT_TOOLS",
       "AdkToolError",
+      "OperatorSessionError",
       "buildManifest",
+      "buildOperatorSignInMessage",
       "checkAgentPackage",
+      "createOperatorSessionKeeper",
+      "mintOperatorSessionKey",
       "resolveToolRequest",
     ]);
   });
