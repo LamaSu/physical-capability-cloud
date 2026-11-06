@@ -213,7 +213,7 @@ The gateway service (`pcc-gateway` on Railway project
 |---|---|---|
 | `PCC_USE_EAS_V2` | `true` | Enables the V2 attestation-bridge path in `paid-job-flow.ts:72` |
 | `MOCK_SETTLEMENT` | `false` | Real escrow interactions. Off unless exactly `true`, and ignored when `NODE_ENV=production` (N133, `services/settlement-mode.ts`) |
-| `PCC_COMPOSE_EXECUTE_REAL` | `true` | Wires `/api/compose/execute` to real `@pcc/workflow` jobs (`compose.ts:615`) |
+| `PCC_COMPOSE_EXECUTE_REAL` | `true` | Wires `/api/compose/:id/execute` to real `@pcc/workflow` jobs (`compose.ts:737`, `:777`) |
 | `PCC_ORACLE_URL` | `https://<oracle-railway-url>` | From step 3 |
 | `PCC_ORACLE_KEY` | matching shared secret from step 3 | Without it, oracle-client.ts falls back to mock |
 | `PCC_EVIDENCE_SCHEMA_UID` | `0x...` from step 1 | Used by gateway's oracle-client encoder |
