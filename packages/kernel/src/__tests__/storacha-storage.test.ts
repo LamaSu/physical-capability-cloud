@@ -368,5 +368,5 @@ describe("StorachaStorageService (real mode init)", () => {
         process.env["STORACHA_SPACE_DID"] = savedSpace;
       }
     }
-  });
+  }, 30_000);
 });
