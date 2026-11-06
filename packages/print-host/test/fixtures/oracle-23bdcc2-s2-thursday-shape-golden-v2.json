@@ -1,0 +1,102 @@
+{
+  "schema": "pcc.oracle.s2-subject-block-thursday-shape-golden/v2",
+  "example": "EXAMPLE ONLY: Thursday policy shape with task E TEST identities, not a real unit policy",
+  "identitySource": "src/__tests__/fixtures/golden/assembly.ts: makeUnit(84532)",
+  "generationSource": "tmp/fold4c-golden-probe.mts; production computeTermsHash + computeAcceptedPolicyDigest, independently cross-checked with evidence",
+  "chainId": 84532,
+  "inputs": {
+    "label": "EXAMPLE: task E TEST identities; no real funded unit or deployment",
+    "payerAddress": "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+    "hostAddress": "0x5cbdd86a2fa8dc4bddd8a8f69dba48572eec07fb",
+    "kernelId": "kernel-hp-printer-golden",
+    "devicePublicKey": "0xd04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737"
+  },
+  "principals": {
+    "payer": {
+      "id": "eip155:84532:0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+      "word": "0x54f869890b644226a289546d7276852783d66fdcd22d16b300bd515b33f1785f"
+    },
+    "operator": {
+      "id": "eip155:84532:0x5cbdd86a2fa8dc4bddd8a8f69dba48572eec07fb",
+      "word": "0x2fa2ca73700c6990c982177315e83b6d119eecab8c1e222d821bbca2ec02caec"
+    },
+    "kernel": {
+      "id": "kernel-hp-printer-golden",
+      "word": "0x12e00cf7161d9ede970f48c1ca026eb93a84c6a2a75d278d8940dde362cc4d6c"
+    },
+    "device": {
+      "id": "ed25519:0xd04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+      "word": "0x000df964c6ff31189689e8b2526a06f587c77479e1313fea366f8cd1137cec2f"
+    }
+  },
+  "authorizedTuples": [
+    [
+      "0x2fa2ca73700c6990c982177315e83b6d119eecab8c1e222d821bbca2ec02caec",
+      "0x12e00cf7161d9ede970f48c1ca026eb93a84c6a2a75d278d8940dde362cc4d6c",
+      "0x000df964c6ff31189689e8b2526a06f587c77479e1313fea366f8cd1137cec2f"
+    ]
+  ],
+  "fieldLabels": {
+    "payer": "EXAMPLE: derived from task E TEST input identities (#8095, #8096)",
+    "operatorPrincipal": "EXAMPLE: derived from task E TEST input identities (#8095, #8096)",
+    "operatorSettlementAddress": "EXAMPLE: derived from task E TEST input identities (#8095, #8096)",
+    "authorizedTuplesRoot": "EXAMPLE: derived from task E TEST input identities (#8095, #8096)",
+    "expertSetRoot": "THURSDAY SHAPE: exact zero required by economics (#8095)",
+    "executorSetRoot": "THURSDAY SHAPE: exact zero required by economics (#8095)",
+    "expectedRecipient": "THURSDAY SHAPE: exact zero required by economics (#8095)",
+    "targetSystemIdentity": "THURSDAY SHAPE: exact zero required by economics (#8095)",
+    "committedProgramHash": "S2 PROGRAM PIN (field 10)",
+    "recipeRef": "THURSDAY SHAPE: exact zero required by economics (#8095)",
+    "sampleManifestRef": "THURSDAY SHAPE: exact zero required by economics (#8095)",
+    "childrenRoot": "THURSDAY SHAPE: exact zero required by economics (#8095)",
+    "operatingEnvelopeHash": "THURSDAY SHAPE: exact zero required by economics (#8095)",
+    "expectedRouteArea": "THURSDAY SHAPE: exact zero required by economics (#8095)",
+    "expectedLocationHash": "THURSDAY SHAPE: exact zero required by economics (#8095)",
+    "captureNonceAnchor": "THURSDAY SHAPE: exact zero required by economics (#8095)",
+    "challengeAnchor": "THURSDAY SHAPE: exact zero required by economics (#8095)",
+    "integrityGrade": "THURSDAY SHAPE: exact zero required by economics (#8095)"
+  },
+  "termsHash": "0x3f8dbb379a2ff55a557a24aba75661166d03898dec2b0745747b3755d69f64ae",
+  "termsHashSource": "#8165: ratified v2.1 computeTermsHash from the EXAMPLE terms inputs, position-pinned to funded UnitConfig[] order; #8032 is only a file-version digest, never a policy termsHash",
+  "subjects": {
+    "payer": "0x54f869890b644226a289546d7276852783d66fdcd22d16b300bd515b33f1785f",
+    "operatorPrincipal": "0x2fa2ca73700c6990c982177315e83b6d119eecab8c1e222d821bbca2ec02caec",
+    "operatorSettlementAddress": "0x5cbdd86a2fa8dc4bddd8a8f69dba48572eec07fb",
+    "authorizedTuplesRoot": "0xe6dbca35236d751bea6096dc49501a3d7bc266873563188b5768ba7cb16a7af5",
+    "expertSetRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "executorSetRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "expectedRecipient": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "targetSystemIdentity": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "committedProgramHash": "0x56c1897725442876a5b7adfde81b81c83b9ef09aade75aa3a81a911856330e4a",
+    "recipeRef": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "sampleManifestRef": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "childrenRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "operatingEnvelopeHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "expectedRouteArea": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "expectedLocationHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "captureNonceAnchor": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "challengeAnchor": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "integrityGrade": 0
+  },
+  "bindings": [],
+  "bindingLabel": "decided by economics (#8105): evidenceSubjectBindings = []",
+  "subjectBlockHash": "0x4f166a59dc4e7f8f805ca04b62005a3aade04ae4202ac936c2749d6355830cdf",
+  "bindingsRoot": "0x569e75fc77c1a856f6daaf9e69d8a9566ca34aa47f9133711ce065a571af0cfd",
+  "acceptedPolicyDigest": "0x6814b378016fd7f40c1e72aa98187b14656338f002ab2774fa86d9ed9361fe23",
+  "terms": {
+    "label": "EXAMPLE ONLY: funded UnitConfig-shaped terms; policyBuildTime and reclaimAt are example Unix seconds",
+    "policyBuildTime": 1792022400,
+    "reclaimDelaySeconds": 1814400,
+    "reclaimAt": 1793836800,
+    "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "assuranceTier": 1,
+    "milestones": [
+      {
+        "milestoneIndex": 0,
+        "stepId": "0x5151515151515151515151515151515151515151515151515151515151515151",
+        "amount": 750000,
+        "deadline": 1793836800
+      }
+    ]
+  }
+}

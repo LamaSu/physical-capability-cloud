@@ -4,8 +4,13 @@ import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { getStore } from "../db.js";
 import { schema, eq, and } from "@pcc/store";
 import { AUTHENTICATION_REQUIRED, authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
+import { SCOPE_AWAITING_ACCEPTANCE, SCOPE_AWAITING_FUNDING, scopeFundingVerdict } from "../services/scope-acceptance.js";
+import { reconcileAnswer, reconcileFundingRefusal, reconcilePaidScope, type ReconcileResult } from "../services/reconcile-paid-scope.js";
+import { paidScopeActivationTerms } from "../services/paid-scope-activation-terms.js";
+import { emergencyStopState, stopRefusal } from "./device-relay.js";
+import { scopeExpiryMs } from "../services/scope-expiry.js";
 
-const { operatorPolicies, pendingApprovals, toolCallRelay } = schema;
+const { operatorPolicies, pendingApprovals, toolCallRelay, executionScopes } = schema;
 
 /*
  * Board N31: every write here checks who may act on the kernel through auth/kernel-authority.ts
@@ -33,6 +38,11 @@ function notAvailable(what: string, why: string, see: string[]) {
  */
 function alreadyDecided(status: string) {
   return { error: "already_decided", status, message: `This approval is already ${status}; this request changed nothing.` };
+}
+
+/** The 409 body for an accept of a scope that is no longer awaiting acceptance (N133). */
+function scopeAlreadyDecided(status: string) {
+  return { error: "already_decided", status, message: `This scope is ${status}, not awaiting acceptance; this request changed nothing.` };
 }
 
 export async function operatorRoutes(app: FastifyInstance) {
@@ -484,4 +494,92 @@ export async function operatorRoutes(app: FastifyInstance) {
       }
     },
   );
+
+  // ═════════════════════════════════════════════════════════════════
+  // Paid write scopes: the kernel operator's acceptance (board N133)
+  // ═════════════════════════════════════════════════════════════════
+
+  /**
+   * POST /api/operator/scopes/:scopeId/accept: the kernel's operator accepts a paid job's write
+   * scope (N133 rule 2, the steward's DECISIONS 01:01). createJobFromSession mints it
+   * awaiting_acceptance unless the kernel's policy accepts the buyer itself. Accepting is a
+   * decision, as approving is: the admin, or a proven wallet that is the operator of the scope's
+   * kernel. Only from awaiting_acceptance, by compare-and-set; any other state is a 409 and this
+   * request changed nothing. Never once the scope has expired, nor while the kernel's emergency
+   * stop is engaged or cannot be read (no scope goes live then, as none is minted then). On
+   * acceptance the scope is live ("active") only on its buyer's own, real funding (rule 3);
+   * otherwise it waits in awaiting_funding, and the answer says why. To refuse a scope, revoke it
+   * (POST /api/relay/:kernelId/scope/:scopeId/revoke).
+   *
+   * Buyer funding S2.2: a test's mock escrow makes the scope live here, as before. A real escrow
+   * whose finalized verification record names this scope (scopeFundingVerdict) goes live through
+   * reconcilePaidScope, in the same transaction as the accept: the accept moves the scope to
+   * awaiting_funding, then reconcilePaidScope activates it and starts its TTL; the answer then
+   * carries the reconcile outcome as `activation`, without the verification record
+   * (reconcileAnswer: an activation is {kind, activatedAt, expiresAt, escrowAddress}). If
+   * reconcilePaidScope refuses, the accept stands and the scope waits in awaiting_funding.
+   * paidScopeActivationTerms supplies reconcilePaidScope's expected chain and post-activation TTL
+   * (the steward's rulings 4 and 5; see its module comment). The configured chain needs an explicit
+   * canonical record selection; the configured TTL is null until S1.1. No record store is configured
+   * in production (Q9), so there no record exists, neither input is read, and this answers exactly
+   * what it answered before.
+   */
+  app.post<{ Params: { scopeId: string } }>("/api/operator/scopes/:scopeId/accept", async (req, reply) => {
+    const authority = authorityOf(req);
+    if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+    try {
+      const { db } = getStore();
+      const scope = db.select().from(executionScopes).where(eq(executionScopes.id, req.params.scopeId)).get();
+      if (!scope) return reply.status(404).send({ error: "Scope not found", id: req.params.scopeId });
+      // The scope's kernel decides who may accept it.
+      const refusal = refuseKernelAction(req, authority, scope.kernelId, "decide");
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
+      if (scope.status !== SCOPE_AWAITING_ACCEPTANCE) return reply.status(409).send(scopeAlreadyDecided(scope.status));
+      // An expiry that can't be read is an expired one (N133 follow-up: fail closed).
+      if (scopeExpiryMs(scope.expiresAt) <= Date.now()) {
+        return reply.status(409).send({ error: "scope_expired", message: "This scope expired before it was accepted; this request changed nothing." });
+      }
+      // Nothing below awaits, so the stop read, the funding read and the update are one
+      // synchronous section (better-sqlite3): no stop request runs between them.
+      const stop = emergencyStopState(scope.kernelId);
+      if (stop !== "clear") return stopRefusal(reply, stop);
+      const funding = scopeFundingVerdict(scope);
+      const status = funding.kind === "mock_funded" ? "active" : SCOPE_AWAITING_FUNDING;
+      // The accept and, on a verification record, the activation: one transaction (reconcilePaidScope
+      // runs in a savepoint of it). A throw rolls both back, so a 500 changed nothing.
+      const { changes, activation } = db.transaction((tx) => {
+        const accepted = tx.update(executionScopes)
+          .set({ status })
+          .where(and(eq(executionScopes.id, scope.id), eq(executionScopes.status, SCOPE_AWAITING_ACCEPTANCE)))
+          .run();
+        const activated: ReconcileResult | null =
+          accepted.changes === 1 && funding.kind === "record_funded"
+            ? reconcilePaidScope(scope.id, funding.record, paidScopeActivationTerms(scope))
+            : null;
+        return { changes: accepted.changes, activation: activated };
+      });
+      if (changes === 0) {
+        const current = db.select({ status: executionScopes.status }).from(executionScopes).where(eq(executionScopes.id, scope.id)).get();
+        return reply.status(409).send(scopeAlreadyDecided(current?.status ?? "unknown"));
+      }
+      if (activation) {
+        // Live on either outcome that leaves the scope active (already_active is unreachable here
+        // today: the accept itself moves the scope to awaiting_funding).
+        const live = activation.kind === "activated" || activation.kind === "already_active";
+        return {
+          accepted: true,
+          scopeId: scope.id,
+          kernelId: scope.kernelId,
+          jobId: scope.jobId,
+          status: live ? "active" : SCOPE_AWAITING_FUNDING,
+          fundingRefusal: reconcileFundingRefusal(activation),
+          activation: reconcileAnswer(activation),
+        };
+      }
+      const fundingRefusal = funding.kind === "refused" ? funding.reason : null;
+      return { accepted: true, scopeId: scope.id, kernelId: scope.kernelId, jobId: scope.jobId, status, fundingRefusal };
+    } catch {
+      return reply.status(500).send({ error: "Failed to accept the scope" });
+    }
+  });
 }

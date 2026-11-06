@@ -46,8 +46,19 @@ export function isTelemetrySinkRequest(rawUrl: string): boolean {
   return canonicalRequestPath(rawUrl).startsWith(TELEMETRY_SINK_PATH);
 }
 
-/** The URL a gateway-wide sink may record: the route template for the sink, otherwise the raw URL. */
+/** Wallet ceremony requests and lookalikes never expose URL parameters to sinks. */
+export function isWalletRequest(rawUrl: string): boolean {
+  let path = rawUrl.replace(/^[A-Z]+\s+/, "");
+  if (/^https?:\/\//i.test(path)) {
+    try { path = new URL(path).pathname; } catch { return false; }
+  }
+  const canonical = canonicalRequestPath(path);
+  return canonical === "/api/wallets" || canonical.startsWith("/api/wallets/");
+}
+
+/** Sensitive sinks record a route template; other URLs retain the existing logging policy. */
 export function auditableUrl(rawUrl: string, routeUrl: string | undefined): string {
+  if (isWalletRequest(rawUrl)) return routeUrl || "/api/wallets";
   return isTelemetrySinkRequest(rawUrl) ? (routeUrl || TELEMETRY_SINK_PATH) : rawUrl;
 }
 
@@ -62,12 +73,11 @@ interface LoggedRequest {
 }
 
 /**
- * Fastify's request serializer, unchanged for every route but the telemetry
- * sink, whose log line carries the method and route path only.
+ * Sensitive telemetry and wallet routes carry only the method and route template.
  */
 export function requestLogSerializer(req: LoggedRequest): Record<string, unknown> {
   const rawUrl = req.url ?? "";
-  if (isTelemetrySinkRequest(rawUrl)) {
+  if (isTelemetrySinkRequest(rawUrl) || isWalletRequest(rawUrl)) {
     return { method: req.method, url: auditableUrl(rawUrl, req.routeOptions?.url) };
   }
   return {
@@ -84,12 +94,12 @@ export function requestLogSerializer(req: LoggedRequest): Record<string, unknown
 export const GATEWAY_LOGGER_OPTIONS = { serializers: { req: requestLogSerializer } };
 
 /**
- * onRequest hook: an unrouted request that imitates the sink gets a fixed 404
+ * onRequest hook: an unrouted sensitive-path lookalike gets a fixed 404
  * here, before Fastify's default not-found handler can log
  * "Route <method>:<raw url> not found" with the caller's path in it.
  */
 export async function telemetryLookalikeHook(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-  if (request.is404 && isTelemetrySinkRequest(request.url)) {
+  if (request.is404 && (isTelemetrySinkRequest(request.url) || isWalletRequest(request.url))) {
     await reply.code(404).send({ error: "not_found" });
   }
 }

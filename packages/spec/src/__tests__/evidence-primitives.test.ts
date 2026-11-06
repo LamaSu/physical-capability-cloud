@@ -33,18 +33,18 @@ const LIVE_FIRST_CLASS = [
 ];
 
 // The locked golden manifest hash of the shipped vocabulary (v1 16 + the
-// v1.5-industrial #52-#55 = 20 active defs). Any contract change (adding/removing
-// a primitive, changing tierSupport, auth, params, deps, gates, status) moves
-// this — the golden test then fails on purpose. Recomputed for the additive
-// v1.5-industrial cut (was 0x499f3a5d… for the v1-only 16-primitive contract).
+// v1.5-industrial #52-#55 + input.hash_bound #56 = 21 active defs). Any contract
+// change (adding/removing a primitive, changing tierSupport, auth, params, deps,
+// gates, status) moves this — the golden test then fails on purpose. Recomputed for the additive
+// input.hash_bound cut (was 0x9e034dd9… for the 20-primitive contract).
 const GOLDEN_VOCAB_MANIFEST_HASH =
-  "0x9e034dd9df85748de1bac4d199bd3928f6c4477b81eb20a83264bcd7fdd441ed";
+  "0x069ff08c4b39cc2b0ce808d0e8dcb3ba6eb57349c709e73b454bda2994c59582";
 
 // ── 1. The registry validates ───────────────────────────────────────
 
 describe("evidence vocabulary — registry validates", () => {
-  it("ships the 16 v1 + 4 v1.5-industrial primitives (20), all status:active", () => {
-    expect(EVIDENCE_PRIMITIVES).toHaveLength(20);
+  it("ships the 16 v1 + 4 v1.5-industrial + input.hash_bound primitives (21), all status:active", () => {
+    expect(EVIDENCE_PRIMITIVES).toHaveLength(21);
     for (const d of EVIDENCE_PRIMITIVES) expect(d.status).toBe("active");
   });
 
@@ -227,6 +227,24 @@ describe("eligibility — an unknown primitive caps at tier 0", () => {
     expect(report.cappedReason).toMatch(/unknown primitive "unknown\.bogus_primitive"/);
   });
 
+  it("an unknown primitive in tier k caps the CSD below k, not at 0 (the aggregate is the rule)", () => {
+    const deeper: Pick<CSD, "url" | "evidence"> = {
+      url: "pcc://capabilities/vocab-unknown-deep/v1",
+      evidence: {
+        tier0: unknownCsd.evidence!.tier0!,
+        tier1: { description: "fine", required: ["jobId"], primitives: [{ id: "artifact.hash" }] },
+        tier2: {
+          description: "references an unknown primitive",
+          required: ["jobId"],
+          primitives: [{ id: "approval.payer" }, { id: "unknown.bogus_primitive" }],
+        },
+      },
+    };
+    const report = computeCsdEligibility(deeper);
+    expect(report.eligibleTier).toBe(1);
+    expect(report.cappedReason).toBe('tier2: unknown primitive "unknown.bogus_primitive" — caps the CSD below tier 2');
+  });
+
   it("stays listable (tier 0 is the permissionless floor)", () => {
     const report = computeCsdEligibility(unknownCsd);
     // eligibleTier never drops below 0 — the CSD is still listable.
@@ -235,6 +253,49 @@ describe("eligibility — an unknown primitive caps at tier 0", () => {
 });
 
 describe("eligibility — tier floors (§5)", () => {
+  it("an unknown primitive at tier 0 reports the listable floor and blocks ascent", () => {
+    const report = computeCsdEligibility({
+      url: "pcc://capabilities/unknown-at-floor/v1",
+      evidence: {
+        tier0: { description: "", required: [], primitives: [{ id: "unknown.floor" }] },
+        tier1: { description: "", required: [], primitives: [{ id: "artifact.hash" }] },
+      },
+    });
+
+    expect(report.eligibleTier).toBe(0);
+    expect(report.verdict).toBe("CAPPED");
+    expect(report.perTier.find((t) => t.tier === 0)?.eligible).toBe(false);
+    expect(report.cappedReason).toBe(
+      'tier0: unknown primitive "unknown.floor" — blocks ascent above the listable tier-0 floor',
+    );
+    expect(report.cappedReason).not.toContain("below tier 0");
+  });
+
+  it("a reserved primitive at tier 0 reports the listable floor and blocks ascent", () => {
+    const reserved: EvidencePrimitiveDef = {
+      ...getPrimitive("decl.self_attested")!,
+      id: "reserved.floor",
+      status: "reserved",
+    };
+    const index = new Map(EVIDENCE_PRIMITIVES.map((def) => [def.id, def]));
+    index.set(reserved.id, reserved);
+    const report = computeCsdEligibility({
+      url: "pcc://capabilities/reserved-at-floor/v1",
+      evidence: {
+        tier0: { description: "", required: [], primitives: [{ id: reserved.id }] },
+        tier1: { description: "", required: [], primitives: [{ id: "artifact.hash" }] },
+      },
+    }, { index });
+
+    expect(report.eligibleTier).toBe(0);
+    expect(report.verdict).toBe("CAPPED");
+    expect(report.perTier.find((t) => t.tier === 0)?.eligible).toBe(false);
+    expect(report.cappedReason).toBe(
+      'tier0: primitive "reserved.floor" is status:reserved — blocks ascent above the listable tier-0 floor',
+    );
+    expect(report.cappedReason).not.toContain("below tier 0");
+  });
+
   it("tier ≥ 1 with only decl.self_attested caps below that tier", () => {
     const report = computeCsdEligibility({
       url: "pcc://capabilities/only-decl/v1",
@@ -305,9 +366,9 @@ describe("eligibility — requireImplementedVerifier caps below report-only", ()
 // ── 5. Backward-compat regression (existing CSDs still validate) ────
 
 describe("backward-compat — existing CSDs still validate", () => {
-  it("all 9 built-in CSDs still load (additive primitives[] is optional)", () => {
+  it("all 10 built-in CSDs still load (additive primitives[] is optional)", () => {
     const registry = loadBuiltinCsds();
-    expect(registry.size).toBe(9);
+    expect(registry.size).toBe(10);
   });
 
   it("built-in CSD JSON with no primitives[] still parses under CsdSchema", () => {

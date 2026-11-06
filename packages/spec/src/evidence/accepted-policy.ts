@@ -26,8 +26,10 @@
  * the sealed deal bytes, or a units manifest. That is what lets a units manifest sit
  * inside the sealed v3 preimage without circularity (oracle N37).
  *
- * `termsHash` is an INPUT here, never derived: the oracle has not confirmed a public
- * derivation for it (composition #4720 item 2), so this module does not compute it.
+ * `termsHash` is a plain INPUT to computeAcceptedPolicyDigest. Its ratified v2.1
+ * derivation is available separately as computeTermsHash: per policy, over the funded
+ * UnitConfig[] in funded order (bus #8158/#8165). A terms-file byte digest is only a
+ * file-version digest, never this termsHash.
  *
  * ── Layer 1 (this file, shipped): the pure encodings, byte-exact with the #270 mirror ──
  *   computeSubjectBlockHash  — the 18 already-committed subject fields -> subjectBlockHash.
@@ -476,9 +478,116 @@ function keccakUtf8(label: string): Bytes32Hex {
 export const SUBJECT_DOMAIN: Bytes32Hex = keccakUtf8("PCC:vnext:accepted-policy-subjects:v1");
 export const POLICY_DOMAIN: Bytes32Hex = keccakUtf8("PCC:vnext:accepted-job-policy:v1");
 export const PLANUNIT_DOMAIN: Bytes32Hex = keccakUtf8("PCC:vnext:plan-unit-key:v1");
+/** Ratified termsHash v2.1 keeps the v1 domain label; deadlines are per milestone. */
+export const TERMS_DOMAIN: Bytes32Hex = keccakUtf8("PCC:vnext:job-terms:v1");
 export const POLICY_VERSION = 1;
 
 // ── Layer 1: the pure encodings ──────────────────────────────────────────────────────
+
+/** One funded UnitConfig, in the position it occupies in the funded array. */
+export interface CanonicalMilestoneTermsV1 {
+  milestoneIndex: UintInput;
+  /**
+   * lowercase only: 0x + lowercase hex. An EIP-55 (checksummed) or uppercase form is
+   * refused with AcceptedPolicyDigestInputError, so lowercase it first.
+   */
+  stepId: Bytes32Hex;
+  /** UnitConfig.g, already expressed in settlement-token base units (uint256). */
+  amount: UintInput;
+  /** UnitConfig.reclaimAt, UTC Unix seconds (uint64), independently per milestone. */
+  deadline: UintInput;
+}
+
+/** Ratified termsHash v2.1 inputs; milestones preserve the funded UnitConfig[] order. */
+export interface CanonicalJobTermsV1 {
+  /**
+   * lowercase only: 0x + lowercase hex. An EIP-55 (checksummed) or uppercase form is
+   * refused with AcceptedPolicyDigestInputError, so lowercase it first.
+   */
+  token: AddressHex;
+  assuranceTier: UintInput;
+  milestones: readonly CanonicalMilestoneTermsV1[];
+}
+
+const MILESTONE_TERMS_KEYS = ["milestoneIndex", "stepId", "amount", "deadline"] as const satisfies readonly (keyof CanonicalMilestoneTermsV1)[];
+const JOB_TERMS_KEYS = ["token", "assuranceTier", "milestones"] as const satisfies readonly (keyof CanonicalJobTermsV1)[];
+type MilestoneTermsMissingFromKeyList = AssertNever<Exclude<keyof CanonicalMilestoneTermsV1, (typeof MILESTONE_TERMS_KEYS)[number]>>;
+type JobTermsMissingFromKeyList = AssertNever<Exclude<keyof CanonicalJobTermsV1, (typeof JOB_TERMS_KEYS)[number]>>;
+
+/**
+ * milestonesRoot = keccak256(abi.encode(
+ *   (uint256 milestoneIndex, bytes32 stepId, uint256 amount, uint64 deadline)[])):
+ * uint256(0x20) || uint256(length) || each milestone's four left-padded ABI words.
+ *
+ * POSITION-PINNED: the order IS the funded UnitConfig[] order. NEVER sort, deduplicate,
+ * or rematch milestones. Distinct legal funding orders must produce distinct roots.
+ * Require at least one milestone and unique (milestoneIndex, stepId) pairs; reject
+ * duplicates rather than deduplicating. amount is UnitConfig.g in token base units;
+ * deadline is that unit's own UnitConfig.reclaimAt in UTC Unix seconds.
+ *
+ * The dense, non-Proxy array and every plain milestone object are read once into
+ * snapshots. Validation and hashing read only those snapshots, never caller data again.
+ */
+export function computeMilestonesRoot(milestones: readonly CanonicalMilestoneTermsV1[]): Bytes32Hex {
+  const list = admitPlainArray(milestones, "milestones");
+  if (list.length === 0) {
+    throw new AcceptedPolicyDigestInputError("milestones", "expected at least one funded milestone");
+  }
+  const words: Uint8Array[] = [encodeUint(32n), encodeUint(toBigInt(list.length))];
+  const seen = new Set<string>();
+  for (let i = 0; i < list.length; i++) {
+    const field = `milestones[${i}]`;
+    const admitted = admitPlainObject(list[i], field);
+    const snapshot = checkExactKeys(admitted, field, MILESTONE_TERMS_KEYS);
+    const f = (key: (typeof MILESTONE_TERMS_KEYS)[number]) => requiredField(snapshot, field, key);
+    const indexWord = uintWord(`${field}.milestoneIndex`, f("milestoneIndex"), 256);
+    const stepWord = bytes32Word(`${field}.stepId`, f("stepId"));
+    const amountWord = uintWord(`${field}.amount`, f("amount"), 256);
+    const deadlineWord = uintWord(`${field}.deadline`, f("deadline"), 64);
+    // Fixed-width words make the pair unambiguous and normalize all admitted uint forms.
+    const pair = bytesToHex(indexWord) + bytesToHex(stepWord);
+    if (seen.has(pair)) {
+      throw new AcceptedPolicyDigestInputError(field, "duplicate (milestoneIndex, stepId) pair");
+    }
+    seen.add(pair);
+    words.push(indexWord, stepWord, amountWord, deadlineWord);
+  }
+  return keccakWords(words);
+}
+
+/**
+ * Ratified termsHash v2.1 = keccak256(abi.encode(
+ *   bytes32 TERMS_DOMAIN, address token, uint8 assuranceTier, bytes32 milestonesRoot)).
+ * Pure and chain/factory/escrow-independent; assuranceTier is restricted to 0..3.
+ * token and each stepId are lowercase only: 0x + lowercase hex. An EIP-55 (checksummed)
+ * or uppercase form is refused with AcceptedPolicyDigestInputError, so lowercase it first.
+ * The top-level terms, milestone list, and every milestone are admitted as snapshots;
+ * hashing never re-reads the caller's objects or invokes their accessors or Proxy traps.
+ *
+ * The oracle's pre-sign gate refuses any policy whose termsHash differs from this
+ * derivation over its funded UnitConfig[] (bus #8158/#8165). Per position, milestoneIndex,
+ * stepId, amount, and deadline must equal the funded unit's milestoneIndex, stepId, g,
+ * and reclaimAt; token must be the settlement token and assuranceTier the funded tier.
+ * A terms-file byte digest is a file-version digest and must never be used as termsHash.
+ * Pass the result as a plain input to computeAcceptedPolicyDigest.
+ */
+export function computeTermsHash(terms: CanonicalJobTermsV1): Bytes32Hex {
+  const admitted = admitPlainObject(terms, "terms");
+  const snapshot = checkExactKeys(admitted, "terms", JOB_TERMS_KEYS);
+  const f = (key: (typeof JOB_TERMS_KEYS)[number]) => requiredField(snapshot, "terms", key);
+  const tokenWord = addressWord("terms.token", f("token"));
+  const tierWord = uintWord("terms.assuranceTier", f("assuranceTier"), 8);
+  if (tierWord[31]! > 3) {
+    throw new AcceptedPolicyDigestInputError("terms.assuranceTier", "expected an assurance tier in 0..3");
+  }
+  const root = computeMilestonesRoot(f("milestones") as readonly CanonicalMilestoneTermsV1[]);
+  return keccakWords([
+    bytes32Word("TERMS_DOMAIN", TERMS_DOMAIN),
+    tokenWord,
+    tierWord,
+    bytes32Word("milestonesRoot", root),
+  ]);
+}
 
 /** The 18 already-committed fields `computeSubjectBlockHash` hashes, in ABI order (bus #1174, #4569). */
 export interface SubjectBlockFields {
@@ -564,6 +673,112 @@ export function computeSubjectBlockHash(subject: SubjectBlockFields): Bytes32Hex
     bytes32Word("subject.challengeAnchor", f("challengeAnchor")),
     uintWord("subject.integrityGrade", f("integrityGrade"), 8),
   ]);
+}
+
+interface PinnedAuthorizedTuple {
+  tuple: readonly [Bytes32Hex, Bytes32Hex, Bytes32Hex];
+  words: readonly [Uint8Array, Uint8Array, Uint8Array];
+}
+
+/** Validate and snapshot both the outer list and each exactly-three-word tuple. */
+function pinAuthorizedTuples(tuples: unknown): PinnedAuthorizedTuple[] {
+  const admittedArray = admitPlainArray(tuples, "tuples");
+  const pinned: PinnedAuthorizedTuple[] = [];
+  for (let i = 0; i < admittedArray.length; i++) {
+    const field = `tuples[${i}]`;
+    const snapshot = admitPlainArray(admittedArray[i], field);
+    if (snapshot.length !== 3) {
+      throw new AcceptedPolicyDigestInputError(field, "expected exactly three words (operator, kernel, device)");
+    }
+    const operator = snapshot[0];
+    const kernel = snapshot[1];
+    const device = snapshot[2];
+    const words: PinnedAuthorizedTuple["words"] = [
+      bytes32Word(`${field}[0]`, operator),
+      bytes32Word(`${field}[1]`, kernel),
+      bytes32Word(`${field}[2]`, device),
+    ];
+    pinned.push({
+      tuple: [operator as Bytes32Hex, kernel as Bytes32Hex, device as Bytes32Hex],
+      words,
+    });
+  }
+  return pinned;
+}
+
+/** Fixed-width lowercase words have the same lexicographic order as their bytes. */
+function compareAuthorizedTuples(a: PinnedAuthorizedTuple, b: PinnedAuthorizedTuple): number {
+  for (let i = 0; i < 3; i++) {
+    if (a.tuple[i]! < b.tuple[i]!) return -1;
+    if (a.tuple[i]! > b.tuple[i]!) return 1;
+  }
+  return 0;
+}
+
+/**
+ * authorizedTuplesRoot = keccak256(abi.encode((bytes32,bytes32,bytes32)[] tuples)):
+ * uint256(0x20), uint256(length), then each (operator, kernel, device) word in order.
+ * Each word must be 0x + 64 lowercase hex characters. The list must already be strictly
+ * ascending lexicographically by (operator, kernel, device); unsorted or duplicate tuples
+ * are refused, never silently sorted, because the oracle re-hashes the funded list as given.
+ *
+ * This is the funded root the oracle requires a bundle's (operator, kernel, device) triple
+ * to belong to. Under principal-id v1 semantics, each word hashes the UTF-8 principal id:
+ * an operator's canonical chain-and-address id, a kernel's validated registry id, or a
+ * device's canonical Ed25519 id; the principal kind is not part of the hash preimage.
+ * Pass words produced by `principalTupleWord` / `authorizedTuple`, after authenticating the
+ * kernel registry row. An empty list is allowed and hashes uint256(0x20) || uint256(0),
+ * but an empty funded list makes every bundle unauthorized.
+ *
+ * Both array levels are admitted as dense, non-Proxy arrays and read once into snapshots;
+ * validation, ordering, and hashing use only those snapshots, never the caller's arrays.
+ */
+export function computeAuthorizedTuplesRoot(
+  tuples: readonly (readonly [Bytes32Hex, Bytes32Hex, Bytes32Hex])[],
+): Bytes32Hex {
+  const pinned = pinAuthorizedTuples(tuples);
+  for (let i = 1; i < pinned.length; i++) {
+    const order = compareAuthorizedTuples(pinned[i - 1]!, pinned[i]!);
+    if (order >= 0) {
+      throw new AcceptedPolicyDigestInputError(
+        `tuples[${i}]`,
+        order === 0
+          ? "duplicate tuple (operator, kernel, device)"
+          : "tuples must be strictly ascending lexicographically by (operator, kernel, device)",
+      );
+    }
+  }
+  const words: Uint8Array[] = [encodeUint(32n), encodeUint(toBigInt(pinned.length))];
+  for (const entry of pinned) words.push(...entry.words);
+  return keccakWords(words);
+}
+
+/**
+ * Return a new list of new (operator, kernel, device) tuples, sorted strictly ascending
+ * lexicographically by those three words, without mutating the input. Every word is
+ * validated as 0x + 64 lowercase hex characters; duplicate tuples are refused.
+ *
+ * Submit this canonical list as the funded list and to `computeAuthorizedTuplesRoot`,
+ * which hashes abi.encode((bytes32,bytes32,bytes32)[]): uint256(0x20), uint256(length),
+ * then the ordered words. Its root is the one the oracle requires the bundle's triple to
+ * belong to. Principal-id v1 words hash the UTF-8 canonical operator chain-and-address id,
+ * validated kernel registry id, and canonical device Ed25519 id, without the principal kind
+ * in the preimage; use `principalTupleWord` / `authorizedTuple` after authenticating the
+ * kernel registry row. An empty list is allowed, producing the root of uint256(0x20) ||
+ * uint256(0), but an empty funded list makes every bundle unauthorized.
+ */
+export function canonicalAuthorizedTuples(
+  tuples: readonly (readonly [Bytes32Hex, Bytes32Hex, Bytes32Hex])[],
+): (readonly [Bytes32Hex, Bytes32Hex, Bytes32Hex])[] {
+  const pinned = pinAuthorizedTuples(tuples).sort(compareAuthorizedTuples);
+  const canonical: (readonly [Bytes32Hex, Bytes32Hex, Bytes32Hex])[] = [];
+  for (let i = 0; i < pinned.length; i++) {
+    if (i > 0 && compareAuthorizedTuples(pinned[i - 1]!, pinned[i]!) === 0) {
+      throw new AcceptedPolicyDigestInputError(`tuples[${i}]`, "duplicate tuple (operator, kernel, device)");
+    }
+    canonical.push(pinned[i]!.tuple);
+  }
+  return canonical;
 }
 
 /** One `evidenceSubjectBindings` entry: which requirement backs a plan unit, and where its value comes from. */
@@ -671,7 +886,7 @@ function concatWords(words: readonly Uint8Array[]): Uint8Array {
 
 /** The three already-computed roots `computeAcceptedPolicyDigest` combines. */
 export interface AcceptedPolicyDigestInputs {
-  /** An INPUT, never derived here: the oracle has not confirmed a public termsHash derivation (bus #4720 item 2). */
+  /** Ratified v2.1 derivation: computeTermsHash (bus #8158/#8165); still a plain INPUT to computeAcceptedPolicyDigest. */
   termsHash: Bytes32Hex;
   subjectBlockHash: Bytes32Hex;
   bindingsRoot: Bytes32Hex;

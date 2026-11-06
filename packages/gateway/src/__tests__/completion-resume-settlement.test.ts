@@ -68,9 +68,18 @@ vi.mock("../contracts/batch-settlement.js", () => ({
 const KERNEL = "kernel-biolab-01";
 const CAP = "liquid-handler";
 
+// N133 (the steward's DECISIONS 01:01): a paid job's buyer is the caller's proven wallet, or the
+// gateway admin acts for it. This suite has no caller stand-in and its buyers are not wallets, so
+// the admin submits each fast-track job for its buyer.
+const ADMIN = "completion-resume-settlement-admin";
+const asAdmin = { "x-admin-key": ADMIN };
+let savedAdminKey: string | undefined;
+
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   process.env.MOCK_SETTLEMENT = "true";
+  savedAdminKey = process.env.PCC_ADMIN_KEY;
+  process.env.PCC_ADMIN_KEY = ADMIN;
   initStore({ seed: true });
   const app = Fastify({ logger: false });
   await app.register(paidJobFlowRoutes);
@@ -89,6 +98,8 @@ describe("resume-settlement recovers a trapped completion (finding #2 / A-2)", (
   afterEach(async () => {
     await app.close();
     closeStore();
+    if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = savedAdminKey;
   });
 
   /**
@@ -100,6 +111,7 @@ describe("resume-settlement recovers a trapped completion (finding #2 / A-2)", (
     const ft = await app.inject({
       method: "POST",
       url: "/api/jobs/submit-from-discovery",
+      headers: asAdmin,
       payload: { kernelId: KERNEL, capabilityType: CAP, userAgentId: agent },
     });
     expect(ft.statusCode).toBe(201);
@@ -174,6 +186,7 @@ describe("resume-settlement recovers a trapped completion (finding #2 / A-2)", (
     const ft = await app.inject({
       method: "POST",
       url: "/api/jobs/submit-from-discovery",
+      headers: asAdmin,
       payload: { kernelId: KERNEL, capabilityType: CAP, userAgentId: "a2-notrap" },
     });
     const jobId = ft.json().jobId as string;

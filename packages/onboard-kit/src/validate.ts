@@ -99,6 +99,22 @@ export function validate(options: ValidationOptions): ValidationResult {
     checks.push(checkRequired(`${prefix}.adapterId`, adapter.adapterId));
     checks.push(checkRequired(`${prefix}.className`, adapter.className));
 
+    if (adapter.adapterType === "machine") {
+      const classes = [...new Set(config.capabilities
+        .filter(cap => cap.adapterId === adapter.adapterId)
+        .map(cap => cap.type))];
+      checks.push({
+        name: `${prefix}.capabilityClass`,
+        passed: classes.length === 1,
+        message: classes.length === 0
+          ? `Adapter "${adapter.adapterId}": add exactly one capability class for it`
+          : classes.length > 1
+            ? `Adapter "${adapter.adapterId}" has several capability classes: ${classes.join(", ")}; add exactly one capability class for it`
+            : `Adapter "${adapter.adapterId}" has capability class ${classes[0]}`,
+        severity: "error",
+      });
+    }
+
     if (!VALID_ADAPTER_TYPES.has(adapter.adapterType)) {
       checks.push({
         name: `${prefix}.adapterType`,
@@ -238,21 +254,21 @@ export function validate(options: ValidationOptions): ValidationResult {
       }
     }
 
-    // Tier requirements
-    if (cap.assuranceTiers.includes(1 as any) && !hasSensorAdapter) {
+    // Only the FDM default ladder supplies these hints; other CSD ladders decide.
+    if (cap.type === "fdm" && cap.assuranceTiers.includes(1 as any) && !hasSensorAdapter) {
       checks.push({
         name: `${prefix}.tier1.sensors`,
         passed: false,
-        message: "Assurance Tier 1 requires at least one sensor adapter",
+        message: "The FDM default ladder's Assurance Tier 1 requires at least one sensor adapter",
         severity: "warning",
       });
     }
 
-    if (cap.assuranceTiers.includes(2 as any) && !hasCameraAdapter) {
+    if (cap.type === "fdm" && cap.assuranceTiers.includes(2 as any) && !hasCameraAdapter) {
       checks.push({
         name: `${prefix}.tier2.camera`,
         passed: false,
-        message: "Assurance Tier 2 requires a camera adapter",
+        message: "The FDM default ladder's Assurance Tier 2 requires a camera adapter",
         severity: "warning",
       });
     }

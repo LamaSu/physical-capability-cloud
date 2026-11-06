@@ -13,7 +13,10 @@ import type { FastifyInstance } from "fastify";
 import { v4 as uuidv4 } from "uuid";
 import { getRepos } from "../db.js";
 import { getKernelFacade, getJobFacade } from "../facades/index.js";
-import { getKernelService } from "../services/kernel-service.js";
+import { getKernelService, type LocalRunQueueReason } from "../services/kernel-service.js";
+import { jobSubmitQueueOnly, localJobDispatchDecision } from "../services/local-job-dispatch.js";
+import { authorityOf, refuseKernelAction } from "../auth/kernel-authority.js";
+import { emergencyStopState } from "./device-relay.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
 import { recordOperatorStage } from "../services/funnel-tracker.js";
@@ -123,6 +126,7 @@ interface TestJobBody {
   kernelId?: string;
   deviceId?: string;
   assuranceTier?: number;
+  queueOnly?: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -320,11 +324,14 @@ export async function setupRoutes(app: FastifyInstance) {
 
     // Check KernelService
     let kernelServiceReady = false;
+    let localDispatch = false;
     let kernelServiceDevices: Array<{ id: string; type: string; adapterType: string; healthy: boolean }> = [];
     try {
       const svc = getKernelService();
       kernelServiceReady = true;
       const devices = await svc.listDevices();
+      localDispatch = localJobDispatchDecision(svc.kernelId, svc.kernelId, svc.hasExplicitConfig).ok
+        && devices.some((d) => d.type === "machine" && svc.hasRunner(d.id));
       kernelServiceDevices = devices.map((d) => ({
         id: d.id,
         type: d.type,
@@ -358,6 +365,7 @@ export async function setupRoutes(app: FastifyInstance) {
         ready: kernelServiceReady,
         devices: kernelServiceDevices,
       },
+      jobs: { queueOnly: jobSubmitQueueOnly(), localDispatch },
       chain: {
         connected: chainConfigured,
         network: process.env.PCC_NETWORK ?? null,
@@ -744,7 +752,7 @@ export async function setupRoutes(app: FastifyInstance) {
 
   app.post<{ Body: TestJobBody }>("/api/setup/test-job", async (req, reply) => {
    try {
-    const { kernelId, deviceId, assuranceTier = 0 } = req.body ?? {};
+    const { kernelId, deviceId, assuranceTier = 0, queueOnly } = req.body ?? {};
 
     // N59 (board) / ADK item 8: a test job must exercise the OPERATOR's own
     // machine, or say plainly that it did not. So it is owner-gated and honest:
@@ -802,6 +810,17 @@ export async function setupRoutes(app: FastifyInstance) {
       });
     }
 
+    let svc;
+    try {
+      svc = getKernelService();
+    } catch {
+      // Preserve the existing device checks before the service-not-ready reply.
+    }
+    if (svc?.hasExplicitConfig === true && svc.kernelId === kernelId && kernelId !== "kernel_dev_001") {
+      const refusal = refuseKernelAction(req, authorityOf(req), kernelId, "decide");
+      if (refusal) return reply.code(refusal.status).send({ ...refusal.body, ran: false, passed: false });
+    }
+
     // The test must name a device on this kernel.
     if (!deviceId || typeof deviceId !== "string") {
       return reply.code(400).send({
@@ -821,10 +840,7 @@ export async function setupRoutes(app: FastifyInstance) {
       });
     }
 
-    let svc;
-    try {
-      svc = getKernelService();
-    } catch {
+    if (!svc) {
       return reply.code(503).send({
         error: "kernel_service_not_ready",
         message: "KernelService is not initialized",
@@ -864,24 +880,37 @@ export async function setupRoutes(app: FastifyInstance) {
         // fall through to the not-runnable answer below
       }
     }
-    if (!svc.hasRunner(deviceId)) {
-      return reply.code(409).send({
-        error: "device_not_runnable_here",
-        message:
-          `This gateway does not run device "${deviceId}" on kernel "${kernelId}". ` +
-          "Run the test job on the node that operates this kernel (for example `pcc-node`), " +
-          "which submits real evidence back to the gateway.",
-        kernelId,
-        deviceId,
-        ran: false,
-        passed: false,
-      });
-    }
+    const notRunnableHere = () => reply.code(409).send({
+      error: "device_not_runnable_here",
+      message:
+        `This gateway does not run device "${deviceId}" on kernel "${kernelId}". ` +
+        "Run the test job on the node that operates this kernel (for example `pcc-node`), " +
+        "which submits real evidence back to the gateway.",
+      kernelId,
+      deviceId,
+      ran: false,
+      passed: false,
+    });
+    if (!svc.hasRunner(deviceId)) return notRunnableHere();
 
     const jobId = `test-job-${uuidv4()}`;
     const stepId = `setup-test-${Date.now()}`;
     const resolvedKernelId = kernelId;
     const startTime = Date.now();
+    const queuedResponse = (reason: LocalRunQueueReason) => ({
+      jobId,
+      deviceId: null,
+      status: "queued",
+      reason,
+      ran: false,
+      passed: false,
+      duration: Date.now() - startTime,
+    });
+    // A stopped or unreadable test must leave no claimable job to run on resume.
+    const stopState = emergencyStopState(kernelId);
+    if (stopState !== "clear") {
+      return queuedResponse(stopState === "stopped" ? "emergency_stop" : "policy_unavailable");
+    }
 
     // Insert a job record into the DB so status polling works
     try {
@@ -917,11 +946,18 @@ export async function setupRoutes(app: FastifyInstance) {
     // it for real; there is no self-attest fallback.
 
     // Submit the job
-    let submitResult: { jobId: string; deviceId: string; status: string };
+    // A setup test is also a physical job: queue-only mode and the kernel's
+    // emergency stop apply before entering the in-process runtime.
+    const dispatch = localJobDispatchDecision(svc.kernelId, kernelId, svc.hasExplicitConfig, queueOnly);
+    if (!dispatch.ok) return queuedResponse(dispatch.reason);
+
+    let submitResult: Awaited<ReturnType<typeof svc.submitJob>>;
     try {
       submitResult = await svc.submitJob({
         jobId,
+        kernelId,
         stepId,
+        localRunAuthority: "decide",
         deviceId,
         assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
       });
@@ -935,13 +971,16 @@ export async function setupRoutes(app: FastifyInstance) {
         duration: Date.now() - startTime,
       });
     }
+    if (submitResult.status === "refused") return notRunnableHere();
+    // The runtime repeats the guard after its asynchronous admission check.
+    if (submitResult.status === "queued") return queuedResponse(submitResult.reason);
 
     // Poll for completion (up to 10 seconds)
     const POLL_INTERVAL_MS = 250;
     const MAX_WAIT_MS = 10_000;
     const deadline = Date.now() + MAX_WAIT_MS;
 
-    let finalStatus = submitResult.status;
+    let finalStatus: string = submitResult.status;
     let evidenceBundleId: string | undefined;
     let consecutiveUnknown = 0;
 

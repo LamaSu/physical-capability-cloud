@@ -69,40 +69,34 @@ function statusColor(status: Job["status"]): string {
 }
 
 // ---------------------------------------------------------------------------
-// Mock API fetchers (real calls would hit /api/*)
+// API fetchers
 // ---------------------------------------------------------------------------
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isScore(value: unknown, max = 1): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= max;
+}
+
 async function fetchActiveJobs(): Promise<Job[]> {
-  try {
-    const res = await authorizedFetch("/api/jobs?status=active");
-    if (res.ok) return res.json() as Promise<Job[]>;
-  } catch {
-    // fall through to mock
+  const res = await authorizedFetch("/api/jobs?status=active");
+  if (!res.ok) throw new Error("Active jobs couldn't be loaded.");
+  const jobs: unknown = await res.json();
+  if (!Array.isArray(jobs) || !jobs.every((job: unknown): job is Job =>
+    isRecord(job) && isNonEmptyString(job.id) && isNonEmptyString(job.title) &&
+    ["active", "pending", "completed", "failed"].includes(job.status as string) &&
+    isScore(job.progress, 100) && isNonEmptyString(job.startedAt) &&
+    Number.isFinite(Date.parse(job.startedAt))
+  )) {
+    throw new Error("Active jobs couldn't be loaded.");
   }
-  // Mock fallback
-  return [
-    {
-      id: "job-001",
-      title: "FDM Print — Bracket v3",
-      status: "active",
-      progress: 62,
-      startedAt: new Date(Date.now() - 1_800_000).toISOString(),
-    },
-    {
-      id: "job-002",
-      title: "CNC Mill — Plate A",
-      status: "active",
-      progress: 88,
-      startedAt: new Date(Date.now() - 3_600_000).toISOString(),
-    },
-    {
-      id: "job-003",
-      title: "Laser Engrave — Logo Run",
-      status: "pending",
-      progress: 0,
-      startedAt: new Date(Date.now() - 120_000).toISOString(),
-    },
-  ];
+  return jobs;
 }
 
 async function uploadPhoto(
@@ -110,37 +104,31 @@ async function uploadPhoto(
   hash: string,
   notes: string
 ): Promise<UploadResult> {
-  try {
-    const res = await authorizedFetch("/api/photo/upload", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: base64, sha256: hash, notes }),
-    });
-    if (res.ok) return res.json() as Promise<UploadResult>;
-  } catch {
-    // fall through to mock
+  const res = await authorizedFetch("/api/photo/upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image: base64, sha256: hash, notes }),
+  });
+  if (!res.ok) throw new Error("The photo couldn't be confirmed as stored.");
+  const result: unknown = await res.json();
+  if (!isRecord(result) || !isNonEmptyString(result.cid) || !isScore(result.antiSpoofScore)) {
+    throw new Error("The photo couldn't be confirmed as stored.");
   }
-  // Mock response
-  await new Promise((r) => setTimeout(r, 600));
-  return {
-    cid: `bafybei${hash.slice(0, 36)}`,
-    antiSpoofScore: 0.94,
-  };
+  return { cid: result.cid, antiSpoofScore: result.antiSpoofScore };
 }
 
 async function comparePhoto(base64: string, jobId: string): Promise<CompareResult> {
-  try {
-    const res = await authorizedFetch("/api/photo/compare", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: base64, jobId }),
-    });
-    if (res.ok) return res.json() as Promise<CompareResult>;
-  } catch {
-    // fall through to mock
+  const res = await authorizedFetch("/api/photo/compare", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image: base64, jobId }),
+  });
+  if (!res.ok) throw new Error("No comparison result came back.");
+  const result: unknown = await res.json();
+  if (!isRecord(result) || typeof result.match !== "boolean" || !isScore(result.similarity)) {
+    throw new Error("No comparison result came back.");
   }
-  await new Promise((r) => setTimeout(r, 800));
-  return { match: true, similarity: 0.91 };
+  return { match: result.match, similarity: result.similarity };
 }
 
 async function reportIssue(
@@ -148,18 +136,17 @@ async function reportIssue(
   text: string,
   jobId: string | null
 ): Promise<{ issueId: string }> {
-  try {
-    const res = await authorizedFetch("/api/issues", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: base64, text, jobId }),
-    });
-    if (res.ok) return res.json() as Promise<{ issueId: string }>;
-  } catch {
-    // fall through
+  const res = await authorizedFetch("/api/issues", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image: base64, text, jobId }),
+  });
+  if (!res.ok) throw new Error("The issue couldn't be confirmed as submitted.");
+  const result: unknown = await res.json();
+  if (!isRecord(result) || !isNonEmptyString(result.issueId)) {
+    throw new Error("The issue couldn't be confirmed as submitted.");
   }
-  await new Promise((r) => setTimeout(r, 400));
-  return { issueId: `issue-${Date.now()}` };
+  return { issueId: result.issueId };
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +157,8 @@ type CameraMode = "idle" | "preview" | "uploading" | "result";
 
 function CameraTab() {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Invalidate pending work whenever its photo or action context changes.
+  const requestTag = useRef(0);
   const [mode, setMode] = useState<CameraMode>("idle");
   const [preview, setPreview] = useState<string | null>(null);
   const [hash, setHash] = useState<string>("");
@@ -178,25 +167,32 @@ function CameraTab() {
   const [compareResult, setCompareResult] = useState<CompareResult | null>(null);
   const [issueText, setIssueText] = useState("");
   const [issueJobId, setIssueJobId] = useState("");
-  const [issueSent, setIssueSent] = useState(false);
+  const [issueId, setIssueId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionMode, setActionMode] = useState<"upload" | "compare" | "issue">("upload");
+
+  useEffect(() => () => { requestTag.current++; }, []);
 
   const handleFileChange = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
+      const tag = ++requestTag.current;
       setError(null);
+      setUploadResult(null);
+      setCompareResult(null);
+      setIssueId(null);
+      setPreview(null);
+      setHash("");
+      setMode("idle");
       const reader = new FileReader();
       reader.onload = async (ev) => {
         const dataUrl = ev.target?.result as string;
-        setPreview(dataUrl);
         const h = await sha256B64(dataUrl);
+        if (tag !== requestTag.current) return;
+        setPreview(dataUrl);
         setHash(h);
         setMode("preview");
-        setUploadResult(null);
-        setCompareResult(null);
-        setIssueSent(false);
       };
       reader.readAsDataURL(file);
     },
@@ -205,51 +201,72 @@ function CameraTab() {
 
   const handleUpload = useCallback(async () => {
     if (!preview) return;
+    const tag = ++requestTag.current;
+    setError(null);
+    setUploadResult(null);
     setMode("uploading");
     try {
       const result = await uploadPhoto(preview, hash, notes);
+      if (tag !== requestTag.current) return;
       setUploadResult(result);
       setMode("result");
-    } catch (err) {
-      setError("Upload failed. Please try again.");
+    } catch {
+      if (tag !== requestTag.current) return;
+      setError("The photo couldn't be confirmed as stored.");
       setMode("preview");
     }
   }, [preview, hash, notes]);
 
   const handleCompare = useCallback(async () => {
     if (!preview) return;
+    const jobId = issueJobId.trim();
+    if (!jobId) {
+      setError("Enter the Job ID to verify against.");
+      return;
+    }
+    const tag = ++requestTag.current;
+    setError(null);
+    setCompareResult(null);
     setMode("uploading");
     try {
-      const result = await comparePhoto(preview, issueJobId || "default-job");
+      const result = await comparePhoto(preview, jobId);
+      if (tag !== requestTag.current) return;
       setCompareResult(result);
       setMode("result");
-    } catch (err) {
-      setError("Compare failed.");
+    } catch {
+      if (tag !== requestTag.current) return;
+      setError("No comparison result came back.");
       setMode("preview");
     }
   }, [preview, issueJobId]);
 
   const handleReportIssue = useCallback(async () => {
     if (!issueText.trim()) return;
+    const tag = ++requestTag.current;
+    setError(null);
+    setIssueId(null);
     setMode("uploading");
     try {
-      await reportIssue(preview, issueText, issueJobId || null);
-      setIssueSent(true);
+      const result = await reportIssue(preview, issueText, issueJobId || null);
+      if (tag !== requestTag.current) return;
+      setIssueId(result.issueId);
       setMode("result");
-    } catch (err) {
-      setError("Failed to send report.");
+    } catch {
+      if (tag !== requestTag.current) return;
+      setError("The issue couldn't be confirmed as submitted.");
       setMode("preview");
     }
   }, [preview, issueText, issueJobId]);
 
   const reset = () => {
+    requestTag.current++;
     setMode("idle");
     setPreview(null);
     setHash("");
     setNotes("");
     setUploadResult(null);
     setCompareResult(null);
-    setIssueSent(false);
+    setIssueId(null);
     setError(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
@@ -267,8 +284,9 @@ function CameraTab() {
         {(["upload", "compare", "issue"] as const).map((m) => (
           <button
             key={m}
+            disabled={mode === "uploading"}
             onClick={() => { setActionMode(m); reset(); }}
-            className={`flex-1 py-2 rounded-xl text-xs font-medium transition-all ${
+            className={`flex-1 py-2 rounded-xl text-xs font-medium transition-all disabled:opacity-50 ${
               actionMode === m
                 ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
                 : "bg-white/[0.04] text-white/40 border border-white/[0.06]"
@@ -345,7 +363,7 @@ function CameraTab() {
                 className="w-full py-4 rounded-2xl bg-emerald-500 text-black font-semibold
                            text-base active:scale-[0.97] transition-transform disabled:opacity-50"
               >
-                Upload to IPFS
+                Record photo
               </button>
             </>
           )}
@@ -355,14 +373,15 @@ function CameraTab() {
               <input
                 value={issueJobId}
                 onChange={(e) => setIssueJobId(e.target.value)}
-                placeholder="Job ID (optional)"
+                placeholder="Job ID"
+                disabled={mode === "uploading"}
                 className="w-full rounded-xl bg-white/[0.04] border border-white/[0.06]
                            px-3 py-2 text-sm text-white/80 placeholder:text-white/20
                            focus:outline-none focus:border-emerald-500/40"
               />
               <button
                 onClick={handleCompare}
-                disabled={mode === "uploading"}
+                disabled={mode === "uploading" || !issueJobId.trim()}
                 className="w-full py-4 rounded-2xl bg-sky-500 text-black font-semibold
                            text-base active:scale-[0.97] transition-transform disabled:opacity-50"
               >
@@ -419,10 +438,10 @@ function CameraTab() {
                 <div className="w-5 h-5 rounded-full bg-emerald-500 flex items-center justify-center text-black text-xs font-bold">
                   ✓
                 </div>
-                <span className="text-sm font-semibold text-emerald-400">Uploaded</span>
+                <span className="text-sm font-semibold text-emerald-400">Photo recorded</span>
               </div>
               <div>
-                <div className="text-[10px] text-white/30 mb-1">IPFS CID</div>
+                <div className="text-[10px] text-white/30 mb-1">Photo ID</div>
                 <div className="text-xs font-mono text-white/60 break-all">{uploadResult.cid}</div>
               </div>
               <div>
@@ -484,8 +503,8 @@ function CameraTab() {
             </div>
           )}
 
-          {/* Issue sent */}
-          {issueSent && (
+          {/* Issue recorded */}
+          {issueId && (
             <div className="rounded-2xl bg-amber-500/10 border border-amber-500/30 p-4">
               <div className="flex items-center gap-2">
                 <div className="w-5 h-5 rounded-full bg-amber-500 flex items-center justify-center text-black text-xs font-bold">
@@ -494,7 +513,7 @@ function CameraTab() {
                 <span className="text-sm font-semibold text-amber-400">Issue Reported</span>
               </div>
               <p className="text-xs text-white/40 mt-2">
-                Your report has been sent to the agent.
+                Your report was recorded (ID {issueId}).
               </p>
             </div>
           )}
@@ -552,7 +571,7 @@ function JobCard({ job, onTap }: { job: Job; onTap: (id: string) => void }) {
 
 function JobsTab() {
   const [expandedJob, setExpandedJob] = useState<string | null>(null);
-  const { data: jobs, isLoading, error } = useQuery({
+  const { data: jobs, isLoading, error, refetch } = useQuery({
     queryKey: ["mobile-active-jobs"],
     queryFn: fetchActiveJobs,
     refetchInterval: 15_000,
@@ -570,7 +589,10 @@ function JobsTab() {
     return (
       <div className="px-4 py-4">
         <div className="rounded-xl bg-red-500/10 border border-red-500/30 px-4 py-3 text-sm text-red-400">
-          Failed to load jobs.
+          Active jobs couldn't be loaded.
+          <button onClick={() => { void refetch(); }} className="block mt-2 underline">
+            Retry
+          </button>
         </div>
       </div>
     );
@@ -585,10 +607,13 @@ function JobsTab() {
     );
   }
 
+  const activeCount = jobs.filter((job) => job.status === "active").length;
+
   return (
     <div className="flex flex-col gap-3 px-4 py-4">
       <div className="text-xs text-white/30 mb-1">
-        {jobs.length} active job{jobs.length !== 1 ? "s" : ""}
+        {jobs.length} job{jobs.length !== 1 ? "s" : ""}
+        {" · "}{activeCount} active job{activeCount !== 1 ? "s" : ""}
       </div>
       {jobs.map((job) => (
         <div key={job.id}>
@@ -597,23 +622,8 @@ function JobsTab() {
             onTap={(id) => setExpandedJob(expandedJob === id ? null : id)}
           />
           {expandedJob === job.id && (
-            <div className="mt-1 ml-4 rounded-b-2xl bg-white/[0.02] border border-t-0 border-white/[0.06] p-4 space-y-2">
-              <div className="text-[10px] text-white/30 uppercase tracking-wider mb-2">
-                Evidence Timeline
-              </div>
-              {[
-                { label: "Job queued", time: "0s" },
-                { label: "Material loaded", time: "+2m" },
-                { label: "Printing started", time: "+3m" },
-                { label: "Layer 42 snapshot", time: "+12m" },
-                { label: "Layer 88 snapshot", time: "+24m" },
-              ].map((evt, i) => (
-                <div key={i} className="flex items-center gap-3">
-                  <div className="w-1.5 h-1.5 rounded-full bg-emerald-500/60 shrink-0" />
-                  <div className="flex-1 text-xs text-white/50">{evt.label}</div>
-                  <div className="text-[10px] font-mono text-white/30">{evt.time}</div>
-                </div>
-              ))}
+            <div className="mt-1 ml-4 text-xs text-white/30">
+              No evidence timeline is available here.
             </div>
           )}
         </div>
@@ -629,21 +639,6 @@ function JobsTab() {
 function SettingsTab() {
   return (
     <div className="flex flex-col gap-4 px-4 py-4">
-      <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] divide-y divide-white/[0.04]">
-        {[
-          { label: "Kernel ID", value: "kern-alpha-01" },
-          { label: "Operator", value: "op-9f3a2b" },
-          { label: "Network", value: "Base Sepolia" },
-          { label: "Agent Status", value: "Online" },
-          { label: "App Version", value: "v0.1.0-pwa" },
-        ].map(({ label, value }) => (
-          <div key={label} className="flex items-center justify-between px-4 py-3">
-            <span className="text-sm text-white/40">{label}</span>
-            <span className="text-sm font-mono text-white/70">{value}</span>
-          </div>
-        ))}
-      </div>
-
       <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 space-y-3">
         <div className="text-xs text-white/30 uppercase tracking-wider">Quick Links</div>
         {[
@@ -738,10 +733,6 @@ export function OperatorMobilePage() {
             </svg>
           </div>
           <span className="text-sm font-semibold text-white/80">PCC Operator</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-          <span className="text-[10px] text-emerald-400/70">Live</span>
         </div>
       </div>
 

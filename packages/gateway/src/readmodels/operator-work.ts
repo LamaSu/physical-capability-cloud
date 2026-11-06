@@ -110,8 +110,16 @@ export interface OffersReader {
 }
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
-const sameWallet = (recorded: unknown, wallet: string) =>
-  typeof recorded === "string" && ADDRESS.test(recorded.trim()) && recorded.trim().toLowerCase() === wallet.toLowerCase();
+// Mirror auth/kernel-authority.ts UNOWNED placeholders.
+const UNOWNED = new Set(["", "0x0000000000000000000000000000000000000000"]);
+const sameWallet = (recorded: unknown, wallet: string) => {
+  if (
+    typeof recorded !== "string" ||
+    UNOWNED.has(recorded.trim().toLowerCase()) ||
+    UNOWNED.has(wallet.trim().toLowerCase())
+  ) return false;
+  return ADDRESS.test(recorded.trim()) && recorded.trim().toLowerCase() === wallet.toLowerCase();
+};
 
 const nonEmpty = (v: unknown): string | null => (typeof v === "string" && v.trim() !== "" ? v : null);
 

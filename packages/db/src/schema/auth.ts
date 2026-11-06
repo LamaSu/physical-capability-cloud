@@ -30,14 +30,9 @@ export const apiKeys = sqliteTable("api_keys", {
   metadata: text("metadata"),
   /**
    * Raw Ed25519 public key the agent signs evidence + heartbeats with.
-   * Hex-encoded 32 bytes (64 hex chars), no `0x` prefix. Nullable for
-   * backward compatibility with pre-migration rows.
-   *
-   * Set at provision time:
-   *   - server-generated when `POST /api/auth/provision` runs without a
-   *     `publicKey` field (the matching private key is returned ONCE in
-   *     the response body, then forgotten).
-   *   - bring-your-own when the agent provides `publicKey` in the request.
+   * Hex-encoded 32 bytes (64 hex chars), no `0x` prefix. Set only from
+   * the caller's `publicKey`; NULL otherwise. The gateway never generates
+   * or returns the private half.
    *
    * See `POST /api/agents/:id/verify` for the verification surface.
    */
@@ -52,16 +47,9 @@ export const apiKeys = sqliteTable("api_keys", {
   onchainChainId: integer("onchain_chain_id"),
   onchainAttemptedAt: text("onchain_attempted_at"),
   onchainError: text("onchain_error"),
-  // ── Operator operational wallet (option A ownership stopgap) ──────
-  // Per-operator EOA generated at provision. Gateway custodies the key
-  // at bootstrap (`operatorWalletCustody = "gateway"`) so the operator
-  // never touches a private key; the wallet address gets written to the
-  // ERC-8004 `agentWallet` field via best-effort setAgentWallet.
-  // A future export endpoint lets the operator claim their key + move
-  // to `operatorWalletCustody = "operator"`; a future v2 replaces this
-  // with an ERC-4337 smart wallet + passkey (see coord bulletin 235).
+  // The gateway stores no wallet private key; the physical operator wallet
+  // private key column is kept NULL by the boot scrub.
   operatorWalletAddress: text("operator_wallet_address"),
-  operatorWalletPrivateKey: text("operator_wallet_private_key"), // hex, custodial at bootstrap
   operatorWalletCustody: text("operator_wallet_custody").default("gateway"), // gateway | operator
   agentWalletOnchainStatus: text("agent_wallet_onchain_status").default("pending"), // pending | written | failed
   agentWalletOnchainTxHash: text("agent_wallet_onchain_tx_hash"),

@@ -72,6 +72,7 @@ COPY packages/template-data-product/package.json packages/template-data-product/
 # master image build since #64).
 COPY packages/a2a-signing/package.json packages/a2a-signing/
 COPY packages/adapter-pylabrobot/package.json packages/adapter-pylabrobot/
+COPY packages/adk/package.json packages/adk/
 COPY packages/aggregator/package.json packages/aggregator/
 COPY packages/bridge-directory/package.json packages/bridge-directory/
 COPY packages/connectors-airbyte-bridge/package.json packages/connectors-airbyte-bridge/
@@ -110,7 +111,8 @@ RUN mkdir -p /opt/pcc && sh scripts/source-digest.sh /app > /opt/pcc/source-dige
 ARG BUILD_BUST=7
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 # Build all packages except dashboard and mcp-server (tsc only — turbo handles deps)
-RUN rm -rf .turbo node_modules/.cache && npx turbo build --force --filter='!@pcc/dashboard' --filter='!@pcc/mcp-server' --filter='!@pcc/onboard-kit' --filter='!@pcc/onboard' --concurrency=1
+# print-host source enters through COPY . .; only the build skips it via the turbo filter.
+RUN rm -rf .turbo node_modules/.cache && npx turbo build --force --filter='!@pcc/dashboard' --filter='!@pcc/mcp-server' --filter='!@pcc/onboard-kit' --filter='!@pcc/onboard' --filter='!@pcc/print-host' --concurrency=1
 # Build dashboard with vite only (skip tsc -b which OOMs on large workspace)
 RUN cd apps/dashboard && npx vite build
 

@@ -1,6 +1,7 @@
 /**
- * Board N43 (found again by the #533 door sweep, bus #6070): api-gate listed "/api/capabilities"
- * in PUBLIC_EXACT, which isPublicRoute applies to EVERY method. So an anonymous POST reached
+ * Board N43 (found again by the #533 door sweep, bus #6070): api-gate's old allowlist listed
+ * "/api/capabilities" for EVERY method. Its replacement PUBLIC_READ_EXACT limits that entry to
+ * reads. Previously an anonymous POST reached
  * routes/capabilities.ts, which creates a capability on any kernel id with no caller check: a
  * stranger could publish listings under another operator's kernel.
  *

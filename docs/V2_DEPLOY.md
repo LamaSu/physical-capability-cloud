@@ -212,7 +212,7 @@ The gateway service (`pcc-gateway` on Railway project
 | Env var | Value | What it controls |
 |---|---|---|
 | `PCC_USE_EAS_V2` | `true` | Enables the V2 attestation-bridge path in `paid-job-flow.ts:72` |
-| `MOCK_SETTLEMENT` | `false` | Required for real escrow interactions (`paid-job-flow.ts:63`) |
+| `MOCK_SETTLEMENT` | `false` | Real escrow interactions. Off unless exactly `true`, and ignored when `NODE_ENV=production` (N133, `services/settlement-mode.ts`) |
 | `PCC_COMPOSE_EXECUTE_REAL` | `true` | Wires `/api/compose/execute` to real `@pcc/workflow` jobs (`compose.ts:615`) |
 | `PCC_ORACLE_URL` | `https://<oracle-railway-url>` | From step 3 |
 | `PCC_ORACLE_KEY` | matching shared secret from step 3 | Without it, oracle-client.ts falls back to mock |
@@ -308,9 +308,11 @@ curl -s https://capability.network/api/oracle/status | jq '.signingAddress'
 
 The V2 cutover is reversible at three layers, in order of speed (fastest first):
 
-1. **Env-toggle (instant)** — flip `MOCK_SETTLEMENT=true` on Railway, redeploy.
-   Falls back to V1 mock-settlement loop. Use this as the kill-switch if
-   anything goes wrong post-cutover.
+1. **Gateway image rollback (fast)** — retag the previous gateway image to
+   `:prod` (docs/DEPLOY.md, "Rollback = retag"). There is no settlement
+   env-toggle: since N133 a production gateway ignores `MOCK_SETTLEMENT`
+   (`NODE_ENV=production`), and a mock escrow never funds a write scope
+   outside a test process, so flipping it cannot be a kill-switch.
 
 2. **Oracle service rollback** — if the oracle is producing bad
    attestations, redeploy the oracle service to a previous Railway build

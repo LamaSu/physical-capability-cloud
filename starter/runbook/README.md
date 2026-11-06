@@ -22,7 +22,7 @@ When something happens mid-phase (the human says "don't know", a register call a
 ## Four rules for the whole runbook
 1. **Use the gateway you were given** (`.pcc/base`). Never call production unless told to.
 2. **Ask the human only for what you cannot do or find yourself** (class C), in one batch per phase, each with why. **Money and safety are never defaulted.**
-3. **Keep secrets out of logs, chat and command lines.** Keys live only in `.pcc/`, mode 600. curl sends the API key from `.pcc/auth.header` (`-H @file`), and nothing prints it.
+3. **Keep secrets out of logs, chat and command lines.** Secrets live in `.pcc/`, mode 600, except the node's signing key at the selected key location: default `~/.pcc-node/keys.json` or `PCC_NODE_KEY_PATH` outside every checkout. curl sends the API key from `.pcc/auth.header` (`-H @file`), and nothing prints it.
 4. **Report every phase**, success or failure: `bin/pcc-report <phase> <outcome> "<one line>"`. Reports never block you.
 
 ## Reading "on the current code" and "coming"

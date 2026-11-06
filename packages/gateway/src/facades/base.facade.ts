@@ -79,7 +79,7 @@ export abstract class BaseFacade {
               return err(code, message, 400) as Result<T>;
             }
             if (error.name === "ForbiddenError") {
-              return err("FORBIDDEN", message, 403) as Result<T>;
+              return err((error as any).code ?? "FORBIDDEN", message, 403) as Result<T>;
             }
             if (error.name === "ConflictError") {
               // Preserve an attached code (e.g. "settlement_owned_status"); the default is the signer-bind conflict.

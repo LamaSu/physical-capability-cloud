@@ -79,6 +79,8 @@ vi.mock("../services/kernel-service.js", async (importActual) => {
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   process.env.MOCK_SETTLEMENT = "true";
+  savedAdminKey = process.env.PCC_ADMIN_KEY;
+  process.env.PCC_ADMIN_KEY = ADMIN;
   initStore({ seed: true });
   const app = Fastify({ logger: false });
   await app.register(paidJobFlowRoutes);
@@ -89,6 +91,15 @@ async function buildApp(): Promise<FastifyInstance> {
 }
 
 const KERNEL = "kernel-nyc";
+// N133 (#591): a paid job's buyer must be the caller's proven wallet, or the admin acts for it. These
+// pricing tests submit as the admin, so the buyer they name stands.
+const ADMIN = "submit-from-discovery-quote-admin";
+let savedAdminKey: string | undefined;
+
+afterEach(() => {
+  if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = savedAdminKey;
+});
 
 /** Register a capability the way an operator does; `pricing` is stored as given (adk sends numbers). */
 function registerCapability(id: string, type: string, pricing: Record<string, unknown> | null) {
@@ -112,6 +123,7 @@ async function submit(app: FastifyInstance, capabilityType: string, parameters?:
   return app.inject({
     method: "POST",
     url: "/api/jobs/submit-from-discovery",
+    headers: { "x-admin-key": ADMIN },
     payload: { kernelId: KERNEL, capabilityType, userAgentId: "buyer-n98", ...(parameters ? { parameters } : {}) },
   });
 }

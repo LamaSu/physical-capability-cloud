@@ -7,7 +7,7 @@
  *         GET  /api/operators/:id/ratings         (public — reputation surface)
  *
  * The /api/operators/* prefix is auth-gated by default via apiGate. The GET
- * /ratings endpoint opts back out via PUBLIC_EXACT so reputation is readable
+ * /ratings endpoint opts back out via PUBLIC_READ_REGEX so reputation is readable
  * without a key (parity with on-chain reputation reads).
  */
 

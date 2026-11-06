@@ -16,15 +16,35 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import { randomUUID } from "node:crypto";
 import { a2aTasksRoutes, __resetA2ATasksForTest } from "../routes/a2a-tasks.js";
-import { initStore, closeStore, getStore } from "../db.js";
+import { initStore, closeStore, getStore, getRepos } from "../db.js";
 import { schema, eq } from "@pcc/store";
 
 const { shopKernels, capabilities } = schema;
 
+// N133 (the steward's DECISIONS 01:01): pcc-quote/pcc-submit bind the session's buyer to the
+// caller's proven identity, its SIWE session's wallet (or the admin acts for it), even with A2A
+// auth switched off. The buyer here is a wallet signed in by SIWE, naming itself.
+const BUYER = `0x${"a2".repeat(20)}`;
+function siweSession(wallet: string) {
+  const token = randomUUID();
+  const now = new Date();
+  getRepos().sessions.insert({
+    id: randomUUID(), walletAddress: wallet, token, createdAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 3_600_000).toISOString(), lastActiveAt: now.toISOString(),
+  });
+  return { authorization: `Bearer ${token}` };
+}
+let asBuyer: Record<string, string>;
+// pcc-submit's commit wires an escrow through mock settlement, which N133 turned off by default.
+let savedMockSettlement: string | undefined;
+
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   process.env.PCC_A2A_AUTH_DISABLED = "true"; // Default: auth-off so most tests can run
+  savedMockSettlement = process.env.MOCK_SETTLEMENT;
+  process.env.MOCK_SETTLEMENT = "true"; // explicit: N133 turned the default off
   initStore({ seed: true });
 
   // Always have at least one online kernel for pcc-quote
@@ -78,12 +98,15 @@ describe("POST /a2a/tasks/send (A2A v1.0 JSON-RPC adapter)", () => {
 
   beforeAll(async () => {
     app = await buildApp();
+    asBuyer = siweSession(BUYER);
   });
 
   afterAll(async () => {
     await app.close();
     closeStore();
     delete process.env.PCC_A2A_AUTH_DISABLED;
+    if (savedMockSettlement === undefined) delete process.env.MOCK_SETTLEMENT;
+    else process.env.MOCK_SETTLEMENT = savedMockSettlement;
   });
 
   beforeEach(() => {
@@ -188,13 +211,13 @@ describe("POST /a2a/tasks/send (A2A v1.0 JSON-RPC adapter)", () => {
       payload: rpcRequest("rpc-5", "tasks/send", {
         skill: "pcc-quote",
         params: {
-          userAgentId: "test-agent",
+          userAgentId: BUYER,
           kernelId: "kernel-a2a-test",
           capabilityType: "fdm",
           selections: { quantity: 1, evidenceTier: "basic" },
         },
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...asBuyer },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -214,13 +237,13 @@ describe("POST /a2a/tasks/send (A2A v1.0 JSON-RPC adapter)", () => {
       payload: rpcRequest("rpc-6", "tasks/send", {
         skill: "pcc-submit",
         params: {
-          userAgentId: "test-agent",
+          userAgentId: BUYER,
           kernelId: "kernel-a2a-test",
           capabilityType: "fdm",
           selections: { quantity: 1, evidenceTier: "basic" },
         },
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...asBuyer },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -278,13 +301,13 @@ describe("POST /a2a/tasks/send (A2A v1.0 JSON-RPC adapter)", () => {
       payload: rpcRequest("rpc-9a", "tasks/send", {
         skill: "pcc-quote",
         params: {
-          userAgentId: "test-agent",
+          userAgentId: BUYER,
           kernelId: "kernel-a2a-test",
           capabilityType: "fdm",
           selections: { quantity: 1 },
         },
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...asBuyer },
     });
     const taskId = createRes.json().result.id;
 
@@ -378,13 +401,13 @@ describe("POST /a2a/tasks/send (A2A v1.0 JSON-RPC adapter)", () => {
       payload: rpcRequest("rpc-s3a", "tasks/send", {
         skill: "pcc-submit",
         params: {
-          userAgentId: "test-agent",
+          userAgentId: BUYER,
           kernelId: "kernel-a2a-test",
           capabilityType: "fdm",
           selections: { quantity: 1, evidenceTier: "basic" },
         },
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...asBuyer },
     });
     const commit = submit.json().result.artifacts.find((a: any) => a.type === "pcc.commit");
     expect(commit).toBeDefined();
@@ -472,9 +495,9 @@ describe("POST /a2a/tasks/send (A2A v1.0 JSON-RPC adapter)", () => {
       url: "/a2a/tasks/send",
       payload: rpcRequest("rpc-q-err", "tasks/send", {
         skill: "pcc-quote",
-        params: { userAgentId: "x" }, // missing kernelId + capabilityType
+        params: { userAgentId: BUYER }, // missing kernelId + capabilityType
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...asBuyer },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();

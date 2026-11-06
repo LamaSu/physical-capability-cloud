@@ -20,13 +20,16 @@ import {
   type EvidenceSubjectBindingInput,
   type EvidenceSubjectBindingResult,
 } from "../evidence/subject-binding.js";
-import { hashBundle, hashEvent } from "../util/canonical.js";
+import { hashBundle, hashEvent, hashKernelWrittenEvent } from "../util/canonical.js";
 import type { EvidenceEvent } from "../types/evidence.js";
 
 const JOB_A = "job-realm-a";
 const JOB_B = "job-realm-b";
 const NODE = "kernel-realm";
 const OUTPUT = "sha256:" + "5e".repeat(32);
+const INPUT = "sha256:" + "ab".repeat(32);
+const OTHER_INPUT = "sha256:" + "cd".repeat(32);
+const ZERO_INPUT = "sha256:" + "00".repeat(32);
 const U3 = "0x" + "03".repeat(32);
 const U4 = "0x" + "04".repeat(32);
 const N3 = "0x" + "a3".repeat(32);
@@ -35,7 +38,10 @@ const N4 = "0x" + "a4".repeat(32);
 type RawEvent = Omit<EvidenceEvent, "id" | "hash">;
 
 async function seal(raw: RawEvent[]): Promise<EvidenceEvent[]> {
-  return Promise.all(raw.map(async (e, i) => ({ ...e, id: `ev-${i}`, hash: await hashEvent(e) })));
+  return Promise.all(raw.map(async (e, i) => ({
+    ...e, id: `ev-${i}`,
+    hash: await (e.source.writer === "kernel" ? hashKernelWrittenEvent(e) : hashEvent(e)),
+  })));
 }
 
 async function bundleFor(jobId: string, unit?: { settlementUnitId: string; challengeNonce: string }) {
@@ -44,6 +50,21 @@ async function bundleFor(jobId: string, unit?: { settlementUnitId: string; chall
     { type: "gcode_hash_verified", timestamp: "2026-09-24T10:00:00.000Z", source, payload: { jobId, kernelId: NODE, ...unit } },
     { type: "execution_started", timestamp: "2026-09-24T10:00:01.000Z", source, payload: { jobId, kernelId: NODE, stepCount: 2, ...unit } },
     { type: "execution_completed", timestamp: "2026-09-24T10:00:05.000Z", source, payload: { jobId, kernelId: NODE, outputHash: OUTPUT, ...unit } },
+  ]);
+  return { events, bundleHash: await hashBundle(events) };
+}
+
+async function inputBundleFor(inputHash?: string, otherInputHash?: string) {
+  const source = { deviceId: NODE, deviceType: "digital_agent" as const, kernelId: NODE };
+  const events = await seal([
+    {
+      type: "method_loaded", timestamp: "2026-09-24T10:00:00.000Z", source: { ...source, writer: "kernel" },
+      payload: { jobId: JOB_A, deviceJobId: "device-job-realm", ...(inputHash !== undefined ? { inputHash } : {}) },
+    },
+    {
+      type: "execution_completed", timestamp: "2026-09-24T10:00:05.000Z", source,
+      payload: { jobId: JOB_A, deviceJobId: "device-job-realm", ...(otherInputHash !== undefined ? { inputHash: otherInputHash } : {}) },
+    },
   ]);
   return { events, bundleHash: await hashBundle(events) };
 }
@@ -59,6 +80,11 @@ beforeAll(async () => {
   const A = await bundleFor(JOB_A);
   const B = await bundleFor(JOB_B);
   const M3 = await bundleFor(JOB_A, { settlementUnitId: U3, challengeNonce: N3 });
+  const matchingInput = await inputBundleFor(INPUT);
+  const zeroInput = await inputBundleFor(ZERO_INPUT);
+  const missingInput = await inputBundleFor();
+  const mismatchingInput = await inputBundleFor(OTHER_INPUT);
+  const mismatchingOtherInput = await inputBundleFor(INPUT, OTHER_INPUT);
   A_SORTED_HASHES = A.events.map((e) => e.hash).sort();
   // Job A's events relabelled to job B and re-hashed: they open B's own digest, never A's.
   const relabelled = await seal(
@@ -72,13 +98,19 @@ beforeAll(async () => {
     ["honest", { ...A, subject: subjectA }],
     ["honest, events reversed (hashBundle sorts)", { bundleHash: A.bundleHash, events: [...A.events].reverse(), subject: subjectA }],
     ["honest, output named", { ...A, subject: { ...subjectA, outputHash: OUTPUT } }],
+    ["honest, input named", { ...matchingInput, subject: { ...subjectA, inputHash: INPUT } }],
+    ["uppercase input subject", { ...matchingInput, subject: { ...subjectA, inputHash: INPUT.toUpperCase() } }],
+    ["zero input subject with a matching kernel-written load", { ...zeroInput, subject: { ...subjectA, inputHash: ZERO_INPUT } }],
+    ["method_loaded omits inputHash", { ...missingInput, subject: { ...subjectA, inputHash: INPUT } }],
+    ["method_loaded commits a different input", { ...mismatchingInput, subject: { ...subjectA, inputHash: INPUT } }],
+    ["another event commits a different input", { ...mismatchingOtherInput, subject: { ...subjectA, inputHash: INPUT } }],
     ["job A's evidence for job B", { ...A, subject: { jobId: JOB_B, kernelId: NODE } }],
     ["relabelled to B and re-hashed, under A's digest", { bundleHash: A.bundleHash, events: relabelled, subject: { jobId: JOB_B, kernelId: NODE } }],
     ["B's content carrying A's event hashes", { bundleHash: A.bundleHash, events: B.events.map((e, i) => ({ ...e, hash: A.events[i]!.hash })), subject: { jobId: JOB_B, kernelId: NODE } }],
     ["U3/N3 evidence at the legacy subject (E11 F1)", { ...M3, subject: subjectA }],
     ["U3/N3 evidence for unit U4/N4", { ...M3, subject: { ...subjectA, settlementUnitId: U4, challengeNonce: N4 } }],
     ["U3/N3 evidence for its own unit", { ...M3, subject: { ...subjectA, settlementUnitId: U3, challengeNonce: N3 } }],
-    // #438's step 10: the events are at 2026-09-24T10:00:00Z (1790244000) .. +5 s.
+    // #438's step 10 (step 11 since Q-E5b): the events are at 2026-09-24T10:00:00Z (1790244000) .. +5 s.
     ["a window that covers the events", { ...A, subject: { ...subjectA, eventTimeWindow: { notBefore: 1790244000, notAfter: 1790244005 } } }],
     ["a window that ends before them", { ...A, subject: { ...subjectA, eventTimeWindow: { notBefore: 1790200000, notAfter: 1790240000 } } }],
   ];
@@ -94,6 +126,12 @@ it("the baseline is what LO-EV-9 says", () => {
     "ok",
     "ok",
     "ok",
+    "ok",
+    "malformed-subject@-",
+    "malformed-subject@-",
+    "input-not-committed@0",
+    "input-mismatch@0",
+    "input-mismatch@1",
     "job-mismatch@0",
     "bundle-hash-mismatch@-",
     "event-hash-mismatch@0",

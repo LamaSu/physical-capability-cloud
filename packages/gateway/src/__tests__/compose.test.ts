@@ -900,6 +900,7 @@ describe("createProductionBinding", () => {
     expect(submitMock).toHaveBeenCalledOnce();
     expect(submitMock).toHaveBeenCalledWith(
       expect.objectContaining({ capabilityId: "cap-prod", kernelId: expect.any(String) }),
+      "none",
     );
     expect(result.status).toBe("completed");
     expect(result.stepsExecuted).toBe(1);

@@ -7,10 +7,12 @@
  */
 
 import crypto from "node:crypto";
+import type { FastifyRequest } from "fastify";
 import { recoverMessageAddress } from "viem";
 import { kernelSigningProofMessage } from "@pcc/kernel";
 import { type Result, type RegisteredSigner, ok, err, Errors } from "@pcc/spec";
 import { verifyEd25519Signature, normalizePublicKeyHex } from "../auth/ed25519.js";
+import { EXPLICIT_CREDENTIAL_REQUIRED, provenByCookieOnly } from "../auth/kernel-authority.js";
 import { BaseFacade } from "./base.facade.js";
 import type {
   KernelDTO,
@@ -108,17 +110,19 @@ export interface CreateKernelInput {
  * Who may publish a kernel's exact location (board N68). It is the one change that reveals where
  * an operator is, so a claimed identity is not enough (anyone can self-provision a key that names
  * an email or an id): it needs the gateway's admin secret, or a wallet the caller PROVED that
- * equals the kernel's operator. WP-A (#326) sets `provenWallet` for a SIWE session or a key minted
- * from one; until it merges, only the admin secret can opt a kernel in.
+ * equals the kernel's operator, carried by an explicit key or bearer session. A sign-in cookie
+ * alone cannot opt a kernel in.
  */
 export interface LocationOptInAuthority {
   /** The request carried a valid X-Admin-Key. */
   admin: boolean;
   /** The wallet the caller proved control of; null when none. */
   provenWallet: string | null;
+  /** The credential that supplied the proof, recorded by the gate. */
+  provenWalletCarrier: FastifyRequest["provenWalletCarrier"] | null;
 }
 
-export const NO_OPT_IN_AUTHORITY: LocationOptInAuthority = { admin: false, provenWallet: null };
+export const NO_OPT_IN_AUTHORITY: LocationOptInAuthority = { admin: false, provenWallet: null, provenWalletCarrier: null };
 
 const WALLET_RE = /^0x[0-9a-fA-F]{40}$/;
 const ZERO_WALLET = "0x0000000000000000000000000000000000000000";
@@ -141,6 +145,12 @@ function exactLocationRefusal(kernelId: string): Error {
     ),
     { name: "ForbiddenError" },
   );
+}
+
+function explicitCredentialRefusal(): Error {
+  return Object.assign(new Error(EXPLICIT_CREDENTIAL_REQUIRED.message), {
+    name: "ForbiddenError", code: EXPLICIT_CREDENTIAL_REQUIRED.error,
+  });
 }
 
 /** The stored point's numbers as they are (even {0,0}); {0,0} when the stored value has none. */
@@ -379,7 +389,10 @@ export class KernelFacade extends BaseFacade {
         // not mutate someone else's kernel. When actorId is absent (a facade-level
         // unit test with no apiGate wired) there is no owner to check against; the
         // SET-ONCE signer bind still fail-closes via the CAS below.
-        if (actorId && hasRecordedOwner && existing.operatorAddress !== actorId) {
+        if (actorId && (
+          (hasRecordedOwner && existing.operatorAddress !== actorId) ||
+          (!hasRecordedOwner && !authority.admin)
+        )) {
           throw Object.assign(
             new Error(`Authenticated actor does not own kernel '${id}'`),
             { name: "ForbiddenError" },
@@ -390,10 +403,9 @@ export class KernelFacade extends BaseFacade {
           lastHeartbeat: new Date().toISOString(),
           status: "online",
         };
-        // Legacy rows may carry the historical zero-address placeholder rather
-        // than an owner. Their first authenticated mutation claims ownership;
-        // subsequent heartbeats/profile updates are owner-only like new rows.
-        if (actorId && !hasRecordedOwner) updates.operatorAddress = actorId;
+        // Unowned rows are owned by nobody, so non-admin actors are refused above.
+        // Only an admin's update may assign its actor as the operator of such a row.
+        if (actorId && authority.admin && !hasRecordedOwner) updates.operatorAddress = actorId;
         if (body.name) updates.name = body.name;
         // Upsert: physicalAddress accepts the literal string OR the legacy string
         // form of `location`. Object location goes to the `location` column below.
@@ -404,11 +416,12 @@ export class KernelFacade extends BaseFacade {
         }
         // N68: the operator's location choice survives an update that does not name it, so
         // re-registering (as pcc-node does) never silently un-publishes a storefront. A change
-        // to "exact" needs LocationOptInAuthority for the kernel's operator (after a legacy
-        // claim, the claimant); nothing is written when it is refused.
+        // to "exact" needs LocationOptInAuthority for the kernel's operator;
+        // nothing is written when it is refused.
         const currentVisibility = locationVisibilityOf(existing.location);
         const visibility = (requestedVisibility as LocationVisibility | undefined) ?? currentVisibility;
         if (visibility === "exact" && currentVisibility !== "exact") {
+          if (provenByCookieOnly(authority)) throw explicitCredentialRefusal();
           const owner = (updates.operatorAddress as string | undefined) ?? existing.operatorAddress;
           if (!mayPublishExactLocation(authority, owner)) throw exactLocationRefusal(id);
         }
@@ -493,8 +506,9 @@ export class KernelFacade extends BaseFacade {
       const operatorAddress = actorId || body.operatorAddress || "0x0000000000000000000000000000000000000000";
       // N68: a new kernel reads coarse unless it opts in, which needs LocationOptInAuthority.
       const visibility = (requestedVisibility as LocationVisibility | undefined) ?? "approximate";
-      if (visibility === "exact" && !mayPublishExactLocation(authority, operatorAddress)) {
-        throw exactLocationRefusal(id);
+      if (visibility === "exact") {
+        if (provenByCookieOnly(authority)) throw explicitCredentialRefusal();
+        if (!mayPublishExactLocation(authority, operatorAddress)) throw exactLocationRefusal(id);
       }
 
       // Proof-of-possession: verify the kernel's signing-key proof and resolve
@@ -627,6 +641,8 @@ export class KernelFacade extends BaseFacade {
           const capId = `cap-${kernelId}-${capType}`;
           try {
             const existing = repos.capabilities.findById(capId);
+            // Kernel/type pairs can share a generated id; never refresh another kernel's row.
+            if (existing && existing.kernelId !== kernelId) continue;
             if (!existing) {
               repos.capabilities.insert({
                 id: capId,

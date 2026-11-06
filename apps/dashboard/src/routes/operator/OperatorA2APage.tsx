@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import { GlassPanel, GlowBadge, cn } from "@pcc/ui";
 import { useUIStore } from "../../stores/ui-store.js";
 import { authorizedFetch } from "../../lib/authorized-fetch.js";
+import { scopeErrorMessage } from "../../lib/scope-notice.js";
 import {
   ChatThread,
   type ChatMessage,
@@ -287,7 +288,8 @@ export function OperatorA2APage() {
           // Failure is still informative; surface it as a chat message.
           pushMsg(
             "bot",
-            `Escrow lock failed (${res.status}). Try again, or check that wave2-alpha's gateway has /api/escrow/fund wired.`,
+            (await scopeErrorMessage(res, "/api/escrow/fund", "POST")) ??
+              `Escrow lock failed (${res.status}). Try again, or check that wave2-alpha's gateway has /api/escrow/fund wired.`,
           );
         }
       } catch (err) {

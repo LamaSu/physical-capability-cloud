@@ -1,11 +1,10 @@
 /**
- * Ed25519 keypair helpers for agent provisioning.
+ * Ed25519 keypair and signature helpers.
  *
- * Server-side, agents get an Ed25519 verify key issued at provision time
- * (or bring their own). Public key (32 raw bytes, hex-encoded) is stored
- * on the api_keys row; the matching private key is shown ONCE in the
- * provision response body and then forgotten — same convention as AWS
- * access keys, Stripe restricted keys, GitHub PATs.
+ * Provisioning stores only a caller-supplied public key (32 raw bytes,
+ * hex-encoded) on the api_keys row. Without one, no signing key is on
+ * file. The gateway never generates or returns a private key during
+ * provisioning.
  *
  * Verification is a separate POST route. The verify endpoint takes a
  * raw message + signature, recomputes the verification against the
