@@ -173,6 +173,21 @@ describe("/api/onboard/chat — no API key path (placeholder mode)", () => {
     expect(body.toolCalls).toEqual([]);
   });
 
+  it("states that registration is unavailable when no API key is configured", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/onboard/chat",
+      payload: { message: "I fix bikes" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.assistant).toBe(
+      "Onboarding chat isn't fully configured on this gateway yet \u2014 the operator hasn't set ANTHROPIC_API_KEY. " +
+      "Registration isn't available here yet.",
+    );
+    expect(body.needsApiKey).toBe(true);
+  });
+
   it("persists the placeholder turn so a follow-up call sees history", async () => {
     const first = await app.inject({
       method: "POST",
