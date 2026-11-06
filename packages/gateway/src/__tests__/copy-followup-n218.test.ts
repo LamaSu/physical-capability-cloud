@@ -165,6 +165,46 @@ describe("gateway copy follow-up", () => {
       "send_enterprise_payout",
     ]);
   });
+  it.each(["options", "price", "contract"])("T5: build/%s sends one missing-capability 404 without a second send or rejection", async (route) => {
+    const warnings: unknown[][] = [];
+    const rejections: unknown[] = [];
+    const observed = new Set<FastifyInstance["log"]>();
+    const spies: Array<{ mockRestore(): void }> = [];
+    // Fastify requests use child loggers: capture warn on the root AND every child.
+    const capture = (logger: FastifyInstance["log"]) => {
+      if (observed.has(logger)) return;
+      observed.add(logger);
+      spies.push(vi.spyOn(logger, "warn").mockImplementation((...args: unknown[]) => { warnings.push(args); }));
+      const child = logger.child.bind(logger);
+      spies.push(vi.spyOn(logger, "child").mockImplementation((...args: Parameters<typeof child>) => {
+        const result = child(...args);
+        capture(result);
+        return result;
+      }));
+    };
+    capture(app.log);
+    const onRejection = (reason: unknown) => { rejections.push(reason); };
+    process.on("unhandledRejection", onRejection);
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/build/${route}`,
+        headers: { authorization: `Bearer ${adminKey}` },
+        payload: { type: "copy-followup-unknown-type", selections: {}, ...(route === "contract" ? { assuranceTier: 0 } : {}) },
+      });
+      // The base's rejection is emitted AFTER inject resolves.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(response.statusCode).toBe(404);
+      expect(response.json().error).toBe("capability_not_buildable");
+      expect(response.json().message).toEqual(expect.any(String));
+      expect(warnings).toEqual([]);
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+      for (const spy of spies.reverse()) spy.mockRestore();
+    }
+  });
+
 });
 
 const SEARCH_TEXT = "List the built-in capability type templates: each type's name, version, description, parameter count, parameter group names and a base price hint. NOTE: these describe types, not operators' offerings, and carry no assurance tiers or availability. The gateway does not read the query, so it never narrows the list. Registered capabilities of a type are listed by GET /api/capabilities?type=<type>.";
