@@ -110,21 +110,9 @@ describe("populateEscrowDTO()", () => {
     expect(dto.totalAmount).toBe("9999999");
   });
 
-  it("totalAmount defaults to '0' when not present", () => {
-    const escrow = makeRawEscrow({ totalAmount: undefined });
-    const dto = populateEscrowDTO(escrow, [], makeCtx());
-    expect(dto.totalAmount).toBe("0");
-  });
-
-  it("currency defaults to ctx.currency when not on escrow", () => {
-    const escrow = makeRawEscrow({ currency: undefined });
+  it("currency comes from the escrow row, never from ctx", () => {
+    const escrow = makeRawEscrow({ currency: "USDC" });
     const dto = populateEscrowDTO(escrow, [], makeCtx({ currency: "ETH" }));
-    expect(dto.currency).toBe("ETH");
-  });
-
-  it("currency defaults to USDC when not in ctx either", () => {
-    const escrow = makeRawEscrow({ currency: undefined });
-    const dto = populateEscrowDTO(escrow, [], makeCtx({ currency: undefined }));
     expect(dto.currency).toBe("USDC");
   });
 

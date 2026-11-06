@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { closeStore } from "../db.js";
+import { closeStore, getRepos } from "../db.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { suggestTools } from "../services/tool-suggestions.js";
 
@@ -203,6 +203,33 @@ describe("gateway copy follow-up", () => {
       process.off("unhandledRejection", onRejection);
       for (const spy of spies.reverse()) spy.mockRestore();
     }
+  });
+
+  it("T8: lists a stored escrow without inventing a jobId", async () => {
+    const now = new Date().toISOString();
+    const row = getRepos().escrows.insert({
+      id: "copy-followup-escrow",
+      cwmId: "copy-followup-cwm",
+      contractAddress: "0x1111111111111111111111111111111111111111",
+      payer: "0x2222222222222222222222222222222222222222",
+      totalAmount: "1000000",
+      currency: "USDC",
+      status: "created",
+      createdAt: now,
+      deadline: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    expect(row).toBeDefined();
+    expect(row).not.toHaveProperty("jobId");
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/escrow",
+      headers: { authorization: `Bearer ${adminKey}` },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().escrows).toHaveLength(1);
+    const escrow = response.json().escrows[0];
+    expect(escrow.id).toBe("copy-followup-escrow");
+    expect(escrow).not.toHaveProperty("jobId");
   });
 
 });
