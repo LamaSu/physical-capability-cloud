@@ -817,6 +817,7 @@ describe("N31 route inventory: packages/gateway/src", () => {
       "PATCH /api/operator/policy/:kernelId",
       "POST /api/kernels/:kernelId/capabilities",
       "POST /api/kernels/:kernelId/heartbeat",
+      "POST /api/operator/payout/:kernelId/revoke",
       "POST /api/relay/:kernelId/camera/frame",
       "POST /api/relay/:kernelId/chat",
       "POST /api/relay/:kernelId/chat/respond",
@@ -826,6 +827,7 @@ describe("N31 route inventory: packages/gateway/src", () => {
       "POST /api/relay/:kernelId/tool-call/:callId/start",
       "POST /api/relay/:kernelId/tool-result",
       "PUT /api/kernels/:kernelId/agent-package/configure",
+      "PUT /api/operator/payout/:kernelId",
       "PUT /api/operator/policy/:kernelId",
     ]);
   });
