@@ -677,8 +677,9 @@ export async function setupRoutes(app: FastifyInstance) {
         }
 
         // Auto-create capability rows for each capability the device contributes to
-        if (capabilities && capabilities.length > 0) {
+        if (Array.isArray(capabilities)) {
           for (const capType of capabilities) {
+            if (typeof capType !== "string" || capType === "") continue;
             const capId = `cap-${kernelId}-${capType}`;
             // Only insert if it doesn't already exist
             const existingCap = repos.capabilities.findById(capId);
