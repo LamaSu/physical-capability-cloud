@@ -13,7 +13,7 @@ import { z } from "zod";
 import { compileEconomics, type CompileOptions } from "./compile.js";
 import { cmpStr } from "./hash.js";
 import { snapshotJson } from "./input.js";
-import { refusal, type Refusal } from "./refusals.js";
+import { refusal, sortRefusals, type Refusal } from "./refusals.js";
 import { AmountSchema, EconomicAgreementSchema, IdSchema, LabelSchema, MAX_AGREEMENT_UNITS, type EconomicAgreement } from "./types.js";
 
 export const MAX_SCENARIOS = 64;
@@ -114,8 +114,15 @@ export function simulateEconomics(
     }
     const s = parsed.data;
     if (parsedAgreement === null || !parsedAgreement.success) {
-      const r = compileEconomics(agreement, options);
-      return { scenarioId: s.scenarioId, label: s.label, ok: false, refusals: r.ok ? [] : r.refusals };
+      if (agreementCopy.ok) {
+        const r = compileEconomics(agreementCopy.value, options);
+        return { scenarioId: s.scenarioId, label: s.label, ok: false, refusals: r.ok ? [] : r.refusals };
+      }
+      const r = compileEconomics(null, options);
+      // Compiling null also checks options; sorting keeps our copy's reason at the same (code, path)
+      // while preserving every options refusal, exactly as a compile of the refused input would.
+      const refusals = sortRefusals([refusal("SCHEMA_INVALID", agreementCopy.reason, []), ...(r.ok ? [] : r.refusals)]);
+      return { scenarioId: s.scenarioId, label: s.label, ok: false, refusals };
     }
     const variant = applyOverrides(parsedAgreement.data, s);
     if (Array.isArray(variant)) return { scenarioId: s.scenarioId, label: s.label, ok: false, refusals: variant };
