@@ -2585,6 +2585,22 @@ describe("R12 r2d F1 (lane review, MEDIUM): a name that states money or verifica
     }
   });
 
+  it("array provider name matching the prose claim rule is withheld in approval context", async () => {
+    for (const mode of ["live", "snapshot"] as const) {
+      await r2dPaint([{ kind: "approval", binding: { path: "/api/jobs/j1" }, approve: { method: "POST", path: "/api/feedback" } }],
+        { "/api/jobs/j1": { id: "j1", provider: { name: ["Paid in full - verified $250"] } } }, mode);
+      expect.soft(r2dTexts(".pcc-approval-line .pcc-mono"), mode).toEqual(["bound record reports payee: name withheld: stated money or verification"]);
+    }
+  });
+
+  it("array provider name matching the identifier claim rule is withheld in approval context", async () => {
+    for (const mode of ["live", "snapshot"] as const) {
+      await r2dPaint([{ kind: "approval", binding: { path: "/api/jobs/j1" }, approve: { method: "POST", path: "/api/feedback" } }],
+        { "/api/jobs/j1": { id: "j1", provider: { name: ["Payment team: we build parts, then delivery is completed"] } } }, mode);
+      expect.soft(r2dTexts(".pcc-approval-line .pcc-mono"), mode).toEqual(["bound record reports payee: withheld: stated money or verification"]);
+    }
+  });
+
   it("the lane review's repro (live and snapshot): on money data a list's title and meta and a metric naming money or verification read 'name withheld: stated money or verification', never the name attributed", async () => {
     for (const mode of ["live", "snapshot"] as const) {
       await r2dPaint([r2dList("/api/escrow", "name", ["payeeName"])], { "/api/escrow": [REPRO_ROW] }, mode);
@@ -3070,6 +3086,7 @@ describe("settlement reads use unqueried sources and route-specific attribution"
       expect.soft(document.querySelector(".pcc-pin-ref")).not.toBeNull();
       expect.soft(document.querySelector(".pcc-arrow")).toBeNull();
       expect.soft(document.querySelector(".pcc-receipt-parties")).toBeNull();
+      expect.soft(document.querySelector(".pcc-receipt-claims")).toBeNull();
       expect.soft(document.querySelector(".pcc-win")!.textContent).not.toContain(PAYEE);
       expect.soft(document.querySelector(".pcc-receipt-amount")!.textContent).not.toContain("refunded amount");
     });
@@ -3081,6 +3098,7 @@ describe("settlement reads use unqueried sources and route-specific attribution"
     expect.soft(document.querySelector(".pcc-pin-ref")).not.toBeNull();
     expect.soft(document.querySelector(".pcc-arrow")).toBeNull();
     expect.soft(document.querySelector(".pcc-receipt-parties")).toBeNull();
+    expect.soft(document.querySelector(".pcc-receipt-claims")).toBeNull();
     expect.soft(document.querySelector(".pcc-win")!.textContent).not.toContain(PAYEE);
     expect.soft(document.querySelector(".pcc-receipt-amount")!.textContent).not.toContain("refunded amount");
   });
@@ -3118,6 +3136,7 @@ describe("settlement reads use unqueried sources and route-specific attribution"
     expect.soft(document.querySelector(".pcc-receipt-num")!.textContent).toBe("250000000 base units (decimals not reported)");
     expect.soft(document.querySelector(".pcc-arrow")).toBeNull();
     expect.soft(document.querySelector(".pcc-receipt-parties")).toBeNull();
+    expect.soft(document.querySelector(".pcc-receipt-claims")).toBeNull();
     expect.soft(document.querySelector(".pcc-win")!.textContent).not.toContain(PAYEE);
     expect.soft(document.querySelector(".st-refunded")).not.toBeNull();
     expect.soft(document.querySelector(".pcc-pin-ref")).not.toBeNull();

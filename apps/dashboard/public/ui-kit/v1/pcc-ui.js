@@ -968,7 +968,7 @@
       return isProseClaim(t) ? WITHHELD_FIELD : kitText('unrecognised value');
     }
     if (sourceKind === 'name') {
-      if (isProseClaim(t)) return nameText(raw);
+      if (isProseClaim(t)) return nameText(t);
       if (!CLAIM_DETECTOR || CLAIM_DETECTOR.identifier(t)) return WITHHELD_FIELD;
       return mintText(t);
     }
