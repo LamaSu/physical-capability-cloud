@@ -3,7 +3,7 @@ import { existsSync, statSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import ts from "typescript";
 
-export const WRITE_METHODS = ["writeContract", "sendTransaction", "sendRawTransaction", "signTransaction", "prepareTransactionRequest", "deployContract", "encodeDeployData", "sendUserOp", "sendUserOperation", "sendCalls", "writeContracts"] as const;
+export const WRITE_METHODS = ["writeContract", "sendTransaction", "sendRawTransaction", "signTransaction", "prepareTransactionRequest", "deployContract", "encodeDeployData", "sendUserOp", "sendUserOperation", "sendCalls", "writeContracts", "writeContractSync", "sendTransactionSync", "sendRawTransactionSync", "sendCallsSync", "signAuthorization"] as const;
 export const WRITE_SCOPE = ["packages/*/src/**", "packages/contracts/ts/**", "apps/*/src/**"];
 export interface Finding { rule: string; file: string; enclosing: string; expression: string; line?: number; detail?: string }
 export interface WriteRecord { file: string; enclosing: string; method: string; args: string; functionName?: string; nonLiteralFunctionName?: boolean; abi?: string; bindings?: Record<string, string>; count: number }
@@ -135,32 +135,35 @@ function destructured(name: string, pattern: ts.Node, base: ts.Expression): ts.E
 function declaresName(pattern: ts.Node, name: string): boolean {
   return !!destructured(name, pattern, ts.factory.createIdentifier("binding"));
 }
+function isVarDeclaration(node: ts.Node): node is ts.VariableDeclaration {
+  return ts.isVariableDeclaration(node) && ts.isVariableDeclarationList(node.parent) && !(node.parent.flags & ts.NodeFlags.BlockScoped);
+}
 function shadows(scope: ts.Node, name: string): boolean {
   let found = false;
   const visit = (node: ts.Node): void => {
     if (node !== scope && isScope(node)) return;
-    if ((ts.isVariableDeclaration(node) || ts.isParameter(node)) && declaresName(node.name, name)) found = true;
+    if (((ts.isVariableDeclaration(node) && !isVarDeclaration(node)) || ts.isParameter(node)) && declaresName(node.name, name)) found = true;
     ts.forEachChild(node, visit);
   };
   visit(scope);
   return found;
 }
 
-/** Nearest preceding binding/assignment in each lexical scope, outward through the module.
+/** All preceding value candidates in the first lexical scope that binds the name.
  * Closures can capture an outer binding; sibling blocks/functions cannot supply it.
- * Initializers are inspected once only: aliases in them are never resolved recursively.
+ * Lookup returns initializers without evaluating them; consumers choose how to follow aliases.
  */
-function binding(name: string, at: ts.Node): Binding {
+function binding(name: string, at: ts.Node): Binding[] {
   const source = at.getSourceFile();
   for (let scope: ts.Node | undefined = at.parent; scope; scope = scope.parent) {
     if (!isScope(scope)) continue;
-    let found: { position: number; result: Binding } | undefined;
+    const found: { position: number; result: Binding }[] = [];
     const candidate = (pattern: ts.Node, initializer: ts.Expression | undefined, position: number): void => {
       const expression = initializer && destructured(name, pattern, initializer);
       const matches = expression || declaresName(pattern, name);
-      if (matches && (!found || position > found.position)) found = {
+      if (matches) found.push({
         position, result: { ...(expression ? { expression } : {}), printed: expression ? printNode(expression, source) : "<unresolved>", declaration: pattern.parent ?? pattern },
-      };
+      });
     };
     const walk = (node: ts.Node, nested = false): void => {
       if (node.pos >= at.pos) return;
@@ -171,29 +174,37 @@ function binding(name: string, at: ts.Node): Binding {
         // escape those scopes; their own local declarations never do.
         nested = true;
       }
-      if (!nested && ts.isVariableDeclaration(node)) candidate(node.name, node.initializer, node.pos);
+      if ((!nested || isVarDeclaration(node)) && ts.isVariableDeclaration(node)) {
+        const loop = ts.isVariableDeclarationList(node.parent) && ts.isForOfStatement(node.parent.parent) ? node.parent.parent : undefined;
+        candidate(node.name, loop ? ts.factory.createElementAccessExpression(loop.expression, ts.factory.createIdentifier("number")) : node.initializer, node.pos);
+      }
       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) candidate(unwrap(node.left), node.right, node.pos);
       ts.forEachChild(node, child => walk(child, nested));
     };
     walk(scope);
-    if (found) return found.result;
+    if (found.length) {
+      const ordered = found.sort((a, b) => a.position - b.position).map(item => item.result);
+      // A declaration without an initializer establishes scope, but contributes no
+      // runtime value when this scope also supplies explicit assignments.
+      return ordered.some(item => item.expression) ? ordered.filter(item => item.expression) : ordered;
+    }
     if (ts.isFunctionLike(scope)) {
       for (const parameter of scope.parameters) {
         if (ts.isIdentifier(parameter.name)) {
-          if (parameter.name.text === name) return { printed: "param", declaration: parameter };
+          if (parameter.name.text === name) return [{ printed: "param", declaration: parameter }];
         } else {
           // Destructured request parameters have no source identifier. Preserve
           // their body/query/params/headers projection for the unallowlistable rule.
           const expression = destructured(name, parameter.name, ts.factory.createIdentifier("request"));
-          if (expression) return { expression, printed: "param", declaration: parameter };
+          if (expression) return [{ expression, printed: "param", declaration: parameter }];
         }
       }
     }
   }
-  return { printed: "<unresolved>" };
+  return [{ printed: "<unresolved>" }];
 }
 /** Shared lexical initializer lookup for schema inspection; still exactly one hop. */
-export function resolveBinding(name: string, at: ts.Node): Binding { return binding(name, at); }
+export function resolveBinding(name: string, at: ts.Node): Binding[] { return binding(name, at); }
 function property(object: ts.ObjectLiteralExpression, name: string): ts.Expression | undefined {
   for (const p of object.properties) if ((ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) && (ts.isIdentifier(p.name) || ts.isStringLiteralLike(p.name)) && p.name.text === name) return ts.isShorthandPropertyAssignment(p) ? p.name : p.initializer;
   return undefined;
@@ -211,31 +222,99 @@ function literalName(expression: ts.Expression | undefined): string | undefined 
 function location(rule: string, file: string, node: ts.Node, detail?: string): Finding {
   return { rule, file, enclosing: enclosingName(node), expression: printNode(node), line: node.getSourceFile().getLineAndCharacterOfPosition(node.getStart()).line + 1, ...(detail ? { detail } : {}) };
 }
-function requestMember(node: ts.Node): boolean {
-  let hit = false;
-  const walk = (n: ts.Node) => {
-    if (ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n)) {
+const requestRoots = new Set(["req", "request", "reply", "ctx"]);
+const requestFields = new Set(["body", "query", "params", "headers"]);
+const payloadMember = (name: string): boolean => /data|calldata|bytecode/i.test(name);
+
+/** Resolve identifiers and member roots at their capture location. The same walk
+ * inspects a payload's initializer; typed ABI arguments only flag raw-byte names.
+ */
+function requestMember(node: ts.Node, at: ts.Node = node, typedArgument = false, seen = new Set<ts.Node>()): boolean {
+  if (ts.isExpression(node)) node = unwrap(node);
+  if (seen.has(node)) return false;
+  seen.add(node);
+  const reference = node.parent && node.pos >= 0 ? node : at;
+  try {
+    if (ts.isIdentifier(node)) {
+      return binding(node.text, reference).some(value => value.expression && requestMember(value.expression, value.declaration ?? reference, typedArgument, seen));
+    }
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
       const names: string[] = [];
-      let cursor: ts.Expression = n;
+      let cursor: ts.Expression = node;
       while (ts.isPropertyAccessExpression(cursor) || ts.isElementAccessExpression(cursor)) {
-        const name = ts.isPropertyAccessExpression(cursor) ? cursor.name.text : cursor.argumentExpression && ts.isStringLiteralLike(cursor.argumentExpression) ? cursor.argumentExpression.text : "";
-        names.unshift(name);
+        names.unshift(ts.isPropertyAccessExpression(cursor) ? cursor.name.text : cursor.argumentExpression && ts.isStringLiteralLike(cursor.argumentExpression) ? cursor.argumentExpression.text : "");
         cursor = unwrap(cursor.expression);
       }
-      if (ts.isIdentifier(cursor) && ["req", "request", "reply", "ctx"].includes(cursor.text) && names.some(name => ["body", "query", "params", "headers"].includes(name))) hit = true;
+      if (ts.isIdentifier(cursor)) {
+        if (requestRoots.has(cursor.text) && names.some(name => requestFields.has(name))) return !typedArgument || names.some(payloadMember);
+        const values = binding(cursor.text, reference);
+        if (values.some(value => value.expression && requestMember(value.expression, value.declaration ?? reference, false, seen))) {
+          return !typedArgument || names.some(payloadMember) || values.some(value => value.expression && requestMember(value.expression, value.declaration ?? reference, true, seen));
+        }
+      }
+      return false;
     }
-    ts.forEachChild(n, walk);
-  };
-  walk(node);
-  return hit;
+    if (ts.isCallExpression(node) && calleeName(node.expression) === "encodeFunctionData") {
+      const config = node.arguments.map(unwrap).find(ts.isObjectLiteralExpression);
+      const abi = config && property(config, "abi"), name = config && property(config, "functionName");
+      if (config && abi && literalName(name) !== undefined && !requestMember(abi, reference, false, seen)) {
+        // A fixed encoder's ordinary address/amount args are data. Raw-byte args
+        // retain the same guard as writeContract args, regardless of alias spelling.
+        return config.properties.some(item => ts.isPropertyAssignment(item) && requestMember(item.initializer, reference, item.name.getText() === "args", seen));
+      }
+    }
+    // Object keys, declaration names and callee names are not payload values.
+    if (ts.isPropertyAssignment(node)) return requestMember(node.initializer, reference, typedArgument, seen);
+    if (ts.isShorthandPropertyAssignment(node)) return requestMember(node.name, reference, typedArgument, seen);
+    let hit = false;
+    ts.forEachChild(node, child => { if (requestMember(child, reference, typedArgument, seen)) hit = true; });
+    return hit;
+  } finally { seen.delete(node); }
 }
-function memberHasPayloadName(node: ts.Node): boolean {
-  let hit = false;
-  const walk = (n: ts.Node) => {
-    if ((ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n)) && /calldata|callData|data|bytecode/.test(ts.isPropertyAccessExpression(n) ? n.name.text : n.argumentExpression ? printNode(n.argumentExpression) : "") && requestMember(n)) hit = true;
-    ts.forEachChild(n, walk);
-  };
-  walk(node); return hit;
+function memberHasPayloadName(node: ts.Node): boolean { return requestMember(node, node, true); }
+// Scanner-only provenance is not serialized into the reviewed fixture.
+const importedPayloadBindings = new WeakMap<WriteRecord, Set<string>>();
+function importedName(name: string, at: ts.Node): boolean {
+  return at.getSourceFile().statements.some(statement => {
+    if (!ts.isImportDeclaration(statement) || statement.importClause?.isTypeOnly) return false;
+    const clause = statement.importClause;
+    return clause?.name?.text === name || (clause?.namedBindings && (ts.isNamespaceImport(clause.namedBindings) ? clause.namedBindings.name.text === name : clause.namedBindings.elements.some(item => !item.isTypeOnly && item.name.text === name)));
+  });
+}
+const writeMethods = new Set<string>(WRITE_METHODS);
+const isContractWrite = (method: string): boolean => method === "writeContract" || method === "writeContractSync";
+/** Callable provenance is independent of payload bindings: imports, destructured
+ * members and bound aliases preserve the method they captured in this file.
+ */
+function writeCallees(expression: ts.Expression, at: ts.Node, seen = new Set<ts.Node>()): string[] {
+  expression = unwrap(expression);
+  if (seen.has(expression)) return [];
+  seen.add(expression);
+  const reference = expression.parent && expression.pos >= 0 ? expression : at;
+  try {
+    if (ts.isIdentifier(expression)) {
+      const values = binding(expression.text, reference);
+      if (values.some(value => value.declaration)) return [...new Set(values.flatMap(value => value.expression && value.printed !== "param" ? writeCallees(value.expression, value.declaration ?? reference, seen) : []))];
+      for (const statement of reference.getSourceFile().statements) if (ts.isImportDeclaration(statement) && ts.isStringLiteralLike(statement.moduleSpecifier) && /^viem(?:\/|$)/.test(statement.moduleSpecifier.text) && !statement.importClause?.isTypeOnly) {
+        const imports = statement.importClause?.namedBindings;
+        if (imports && ts.isNamedImports(imports)) {
+          const item = imports.elements.find(item => !item.isTypeOnly && item.name.text === expression.text);
+          const name = item && (item.propertyName ?? item.name).text;
+          if (name && writeMethods.has(name)) return [name];
+        }
+      }
+      return writeMethods.has(expression.text) ? [expression.text] : [];
+    }
+    if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
+      const key = ts.isPropertyAccessExpression(expression) ? [expression.name.text]
+        : expression.argumentExpression ? ts.isIdentifier(unwrap(expression.argumentExpression))
+          ? binding((unwrap(expression.argumentExpression) as ts.Identifier).text, reference).flatMap(value => { const name = literalName(value.expression); return name === undefined ? [] : name.split("|"); })
+          : [literalName(expression.argumentExpression) ?? ""] : [];
+      return [...new Set(key.flatMap(name => ["call", "apply", "bind"].includes(name) ? writeCallees(expression.expression, reference, seen) : writeMethods.has(name) ? [name] : []))];
+    }
+    if (ts.isCallExpression(expression) && calleeName(expression.expression) === "bind" && ts.isPropertyAccessExpression(unwrap(expression.expression))) return writeCallees((unwrap(expression.expression) as ts.PropertyAccessExpression).expression, reference, seen);
+    return [];
+  } finally { seen.delete(expression); }
 }
 export function scanWrites(root: string, files: string[]): { records: WriteRecord[]; findings: Finding[] } {
   const records: WriteRecord[] = [], findings: Finding[] = [];
@@ -246,30 +325,35 @@ export function scanWrites(root: string, files: string[]): { records: WriteRecor
     const source = parseSource(file, text);
     const walk = (node: ts.Node) => {
       if (ts.isCallExpression(node)) {
-        const method = calleeName(node.expression);
-        if (method && (WRITE_METHODS as readonly string[]).includes(method)) {
+        for (const method of writeCallees(node.expression, node)) {
           const bindings: Record<string, string> = {};
+          const importedBindings = new Set<string>();
           const payloads: ts.Expression[] = [];
           const addBinding = (expr: ts.Expression, inspectPayload = true) => {
             expr = unwrap(expr);
             if (ts.isIdentifier(expr)) {
               const value = binding(expr.text, node);
-              bindings[expr.text] = value.printed;
-              if (inspectPayload && value.expression && requestMember(value.expression)) findings.push(location("E2-R4", file, node, `one-hop ${expr.text}: ${value.printed}`));
+              bindings[expr.text] = value.map(candidate => candidate.printed).join(" | ");
+              if (value.every(candidate => !candidate.declaration) && importedName(expr.text, node)) importedBindings.add(expr.text);
+              if (inspectPayload && value.some(candidate => candidate.expression && requestMember(candidate.expression, candidate.declaration ?? node))) findings.push(location("E2-R4", file, node, `one-hop ${expr.text}: ${bindings[expr.text]}`));
             }
           };
           const record: WriteRecord = { file, enclosing: enclosingName(node), method, args: node.arguments.map(a => printNode(a)).join(", "), count: 1 };
-          const first = node.arguments[0] && unwrap(node.arguments[0]);
-          if (method === "writeContract") {
+          const wrapper = calleeName(node.expression);
+          let argumentsToInspect: readonly ts.Expression[] = ["call", "apply", "bind"].includes(wrapper ?? "") ? node.arguments.slice(1) : node.arguments;
+          if (wrapper === "apply" && argumentsToInspect[0] && ts.isArrayLiteralExpression(unwrap(argumentsToInspect[0]))) argumentsToInspect = (unwrap(argumentsToInspect[0]) as ts.ArrayLiteralExpression).elements;
+          const first = argumentsToInspect[0] && unwrap(argumentsToInspect[0]);
+          if (isContractWrite(method)) {
             // Both wallet.writeContract({...}) and viem's bare writeContract(client, {...}).
-            const object = node.arguments.map(unwrap).find(ts.isObjectLiteralExpression);
+            const object = argumentsToInspect.map(unwrap).find(ts.isObjectLiteralExpression);
             let name = object && property(object, "functionName");
+            let names = name ? [name] : [];
             if (name && ts.isIdentifier(unwrap(name))) {
               addBinding(name, false);
-              const value = binding((unwrap(name) as ts.Identifier).text, node);
-              if (value.expression) name = value.expression;
+              names = binding((unwrap(name) as ts.Identifier).text, node).map(value => value.expression ?? name!);
             }
-            const literal = literalName(name);
+            const literals = names.map(literalName);
+            const literal = literals.length && literals.every(value => value !== undefined) ? literals.join("|") : undefined;
             record.functionName = literal ?? (name ? printNode(name) : "<missing>");
             record.nonLiteralFunctionName = literal === undefined;
             record.abi = object && property(object, "abi") ? printNode(property(object, "abi")!) : "<missing>";
@@ -288,21 +372,24 @@ export function scanWrites(root: string, files: string[]): { records: WriteRecor
               if (ts.isSpreadAssignment(n)) payloads.push(n.expression);
               ts.forEachChild(n, collect);
             };
-            for (const arg of node.arguments) collect(arg);
-            if (first && !ts.isObjectLiteralExpression(first) && ["sendUserOp", "sendRawTransaction"].includes(method)) payloads.push(first);
-            // Preparing/signing a named request still inspects its one-hop request object.
-            if (first && ts.isIdentifier(first) && ["signTransaction", "prepareTransactionRequest", "sendTransaction"].includes(method)) {
-              addBinding(first, false);
-              const value = binding(first.text, node);
-              if (value.expression) {
-                collect(value.expression);
-                const resolved = unwrap(value.expression);
-                if ((ts.isPropertyAccessExpression(resolved) || ts.isElementAccessExpression(resolved)) && requestMember(resolved)) findings.push(location("E2-R4", file, node, `request object from ${value.printed}`));
+            for (const arg of argumentsToInspect) collect(arg);
+            if (first && !ts.isObjectLiteralExpression(first) && ["sendUserOp", "sendRawTransaction", "sendRawTransactionSync"].includes(method)) payloads.push(first);
+            // Every raw method inspects named request objects. Bare viem actions
+            // put the client first and the request second; the client is not payload.
+            for (const argument of argumentsToInspect.map(unwrap).filter(ts.isIdentifier)) {
+              const values = binding(argument.text, node);
+              const requestValues = values.filter(value => value.expression && (ts.isObjectLiteralExpression(unwrap(value.expression)) || requestMember(value.expression, value.declaration ?? node)));
+              if (argument === first || requestValues.length) addBinding(argument, false);
+              for (const candidate of requestValues) if (candidate.expression) {
+                collect(candidate.expression);
+                const resolved = unwrap(candidate.expression);
+                if ((ts.isPropertyAccessExpression(resolved) || ts.isElementAccessExpression(resolved)) && requestMember(resolved, candidate.declaration ?? node)) findings.push(location("E2-R4", file, node, `request object from ${candidate.printed}`));
               }
             }
             for (const payload of payloads) { addBinding(payload); if (requestMember(payload)) findings.push(location("E2-R4", file, node, `payload ${printNode(payload)}`)); }
           }
           if (Object.keys(bindings).length) record.bindings = Object.fromEntries(Object.entries(bindings).sort(([a], [b]) => a.localeCompare(b)));
+          importedPayloadBindings.set(record, importedBindings);
           records.push(record);
         }
       }
@@ -330,7 +417,7 @@ export function compareWrites(records: WriteRecord[], allowlist: WriteAllowlist)
   for (const record of records) {
     const matching = allowlist.entries.filter(entry => identity(entry) === identity(record));
     const count = matching.reduce((sum, entry) => sum + entry.count, 0);
-    if (count !== record.count) findings.push(finding("E2-R1", record, `expected ${record.count}, allowlisted ${count}; ready-to-paste: ${JSON.stringify({ ...record, signer: "REVIEW", ...(record.method === "writeContract" ? {} : { payload: "REVIEW" }), why: "REVIEW" })}`));
+    if (count !== record.count) findings.push(finding("E2-R1", record, `expected ${record.count}, allowlisted ${count}; ready-to-paste: ${JSON.stringify({ ...record, signer: "REVIEW", ...(isContractWrite(record.method) ? {} : { payload: "REVIEW" }), why: "REVIEW" })}`));
     for (const entry of matching) if (entry.nonLiteralFunctionName !== record.nonLiteralFunctionName) findings.push(finding("E2-R3", record, "nonLiteralFunctionName differs from the one-hop AST result"));
   }
   for (const entry of allowlist.entries) {
@@ -341,9 +428,16 @@ export function compareWrites(records: WriteRecord[], allowlist: WriteAllowlist)
       if (allowedCount > scannedCount) findings.push(finding("E2-R2", entry, `stale multiplicity: allowlisted ${allowedCount}, scanned ${scannedCount}`));
     }
     if (!reviewed(entry.signer) || !reviewed(entry.why)) findings.push(finding("E2-R3", entry, "signer and why must be non-empty reviewed explanations"));
-    if (entry.method !== "writeContract" && !reviewed(entry.payload)) findings.push(finding("E2-R3", entry, "raw payload requires a non-empty reviewed provenance line"));
+    if (!isContractWrite(entry.method) && !reviewed(entry.payload)) findings.push(finding("E2-R3", entry, "raw payload requires a non-empty reviewed provenance line"));
+    if (!isContractWrite(entry.method)) for (const [name, value] of Object.entries(entry.bindings ?? {})) {
+      const record = records.find(record => identity(record) === identity(entry));
+      if (!value.includes("<unresolved>") || (record && importedPayloadBindings.get(record)?.has(name))) continue;
+      // A precise, auditable source note is required when static inspection stops.
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (!new RegExp(`\\bsource\\s+${escaped}:\\s*\\S`, "i").test(entry.payload ?? "")) findings.push(finding("E2-R3", entry, `unresolved raw payload ${name} requires a reviewed 'Source ${name}: ...' note`));
+    }
     if (!Number.isSafeInteger(entry.count) || entry.count < 1) findings.push(finding("E2-R3", entry, "count must be a positive integer"));
-    if (entry.method === "writeContract" && typeof entry.nonLiteralFunctionName !== "boolean") findings.push(finding("E2-R3", entry, "writeContract requires the exact nonLiteralFunctionName flag"));
+    if (isContractWrite(entry.method) && typeof entry.nonLiteralFunctionName !== "boolean") findings.push(finding("E2-R3", entry, "writeContract requires the exact nonLiteralFunctionName flag"));
   }
   return findings;
 }
@@ -357,14 +451,15 @@ function moduleImport(node: ts.Node): string | undefined {
 }
 const subprocessMethods = new Set(["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork", "execa"]);
 const execaMethods = new Set(["default", "execa", "execaSync", "execaCommand", "execaCommandSync", "$", "sync", "command", "commandSync"]);
-type SubprocessModule = "child_process" | "execa" | "util";
+type SubprocessModule = "child_process" | "execa" | "util" | "zx" | "bun";
 interface SubprocessBinding { module: SubprocessModule; member?: string }
 function subprocessModule(name: string | undefined): SubprocessModule | undefined {
   if (name === "child_process" || name === "node:child_process") return "child_process";
   if (name === "util" || name === "node:util") return "util";
-  return name === "execa" ? "execa" : undefined;
+  return name === "execa" || name === "zx" || name === "bun" ? name : undefined;
 }
 function subprocessExport(module: SubprocessModule, name: string): SubprocessBinding | undefined {
+  if (module === "zx" || module === "bun") return name === "$" ? { module, member: name } : undefined;
   if ((module === "child_process" || module === "util") && name === "default") return { module };
   if (module === "util") return name === "promisify" ? { module, member: name } : undefined;
   return (module === "child_process" ? subprocessMethods.has(name) && name !== "execa" : execaMethods.has(name)) ? { module, member: name } : undefined;
@@ -389,61 +484,65 @@ function subprocessNameShadowed(name: string, at: ts.Node): boolean {
 /** Resolve callable provenance with lexical bindings, preserving the location at
  * which an alias captured its initializer. This is separate from E2's one-hop rule.
  */
-function subprocessBinding(expression: ts.Expression, at: ts.Node, seen = new Set<ts.Node>()): SubprocessBinding | undefined {
+function subprocessBinding(expression: ts.Expression, at: ts.Node, seen = new Set<ts.Node>()): SubprocessBinding[] {
   expression = unwrap(expression);
-  if (seen.has(expression)) return undefined;
+  if (seen.has(expression)) return [];
   seen.add(expression);
   const reference = expression.parent && expression.pos >= 0 ? expression : at;
   try {
     if (ts.isIdentifier(expression)) {
-      const value = binding(expression.text, reference);
-      if (value.printed === "param") return undefined;
-      if (value.expression) return subprocessBinding(value.expression, value.declaration ?? reference, seen);
-      if (value.declaration || subprocessNameShadowed(expression.text, reference)) return undefined;
+      const values = binding(expression.text, reference);
+      const targets = values.flatMap(value => value.expression && value.printed !== "param" ? subprocessBinding(value.expression, value.declaration ?? reference, seen) : []);
+      if (values.some(value => value.declaration) || subprocessNameShadowed(expression.text, reference)) return targets;
       for (const statement of reference.getSourceFile().statements) {
         if (ts.isImportDeclaration(statement) && ts.isStringLiteralLike(statement.moduleSpecifier)) {
           const module = subprocessModule(statement.moduleSpecifier.text);
           const clause = statement.importClause;
           if (!module || !clause || clause.isTypeOnly) continue;
-          if (clause.name?.text === expression.text) return module === "execa" ? { module, member: "default" } : { module };
-          if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings) && clause.namedBindings.name.text === expression.text) return { module };
+          if (clause.name?.text === expression.text) return [module === "execa" ? { module, member: "default" } : { module }];
+          if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings) && clause.namedBindings.name.text === expression.text) return [{ module }];
           if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
             const imported = clause.namedBindings.elements.find(item => !item.isTypeOnly && item.name.text === expression.text);
-            if (imported) return subprocessExport(module, (imported.propertyName ?? imported.name).text);
+            const target = imported && subprocessExport(module, (imported.propertyName ?? imported.name).text);
+            if (target) return [target];
           }
         }
         if (ts.isImportEqualsDeclaration(statement) && statement.name.text === expression.text) {
           const module = subprocessModule(moduleImport(statement));
-          if (module && !statement.isTypeOnly) return { module };
+          if (module && !statement.isTypeOnly) return [{ module }];
         }
       }
     } else if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
-      const owner = subprocessBinding(expression.expression, reference, seen);
+      const owners = subprocessBinding(expression.expression, reference, seen);
       const member = calleeName(expression);
-      if (owner && member && (!owner.member || owner.member === "default" || (owner.module === "execa" && owner.member === "$" && member === "sync"))) return subprocessExport(owner.module, member);
+      return owners.flatMap(owner => {
+        const target = member && (!owner.member || owner.member === "default" || (owner.module === "execa" && owner.member === "$" && member === "sync")) ? subprocessExport(owner.module, member) : undefined;
+        return target ? [target] : [];
+      });
     } else if (ts.isCallExpression(expression)) {
       const module = subprocessModule(moduleImport(expression));
-      if (module) return { module };
-      const wrapper = subprocessBinding(expression.expression, reference, seen);
-      if (wrapper?.module === "util" && wrapper.member === "promisify" && expression.arguments[0]) {
-        const target = subprocessBinding(expression.arguments[0], reference, seen);
-        if (target && (target.module === "execa" || (target.module === "child_process" && target.member))) return target;
+      if (module) return [{ module }];
+      const wrappers = subprocessBinding(expression.expression, reference, seen);
+      if (wrappers.some(wrapper => wrapper.module === "util" && wrapper.member === "promisify") && expression.arguments[0]) {
+        const targets = subprocessBinding(expression.arguments[0], reference, seen).filter(target => target.module === "execa" || (target.module === "child_process" && target.member));
+        if (targets.length) return targets;
         // Preserve the same bare subprocess-name compatibility as direct calls.
         const name = calleeName(expression.arguments[0]);
-        if (name && subprocessMethods.has(name)) return { module: name === "execa" ? "execa" : "child_process", member: name };
+        if (name && subprocessMethods.has(name)) return [{ module: name === "execa" ? "execa" : "child_process", member: name }];
       }
     } else if (ts.isAwaitExpression(expression)) {
       return subprocessBinding(expression.expression, reference, seen);
     }
-    return undefined;
+    return [];
   } finally { seen.delete(expression); }
 }
 function isSubprocessCall(node: ts.CallExpression): boolean {
   if (subprocessMethods.has(calleeName(node.expression) ?? "")) return true;
-  const target = subprocessBinding(node.expression, node);
-  return !!target && (target.module === "execa" || (target.module === "child_process" && !!target.member));
+  return subprocessBinding(node.expression, node).some(target => target.module === "execa" || (target.module === "child_process" && !!target.member));
 }
-// Does not resolve commands imported from other modules, returned from functions, held in object properties or joined from arrays.
+// Known limits: commands imported from other modules, returned from functions,
+// held in object properties or joined from arrays; words split across + operands,
+// nested node -e programs, and shell redirects glued to a tool word (forge>out).
 function commandLiteralParts(expression: ts.Expression, at: ts.Node, seen = new Set<ts.Node>(), argvOnly = false): string[] {
   expression = unwrap(expression);
   if (seen.has(expression)) return [];
@@ -452,12 +551,30 @@ function commandLiteralParts(expression: ts.Expression, at: ts.Node, seen = new 
   try {
     if (ts.isIdentifier(expression)) {
       const value = binding(expression.text, reference);
-      return value.expression && value.printed !== "param" ? commandLiteralParts(value.expression, value.declaration ?? reference, seen, argvOnly) : [];
+      return value.flatMap(candidate => candidate.expression && candidate.printed !== "param" ? commandLiteralParts(candidate.expression, candidate.declaration ?? reference, seen, argvOnly) : []);
     }
     if (ts.isArrayLiteralExpression(expression)) return expression.elements.flatMap(element => commandLiteralParts(element, reference, seen));
+    if (ts.isConditionalExpression(expression)) return [...commandLiteralParts(expression.whenTrue, reference, seen, argvOnly), ...commandLiteralParts(expression.whenFalse, reference, seen, argvOnly)];
+    if (ts.isBinaryExpression(expression) && [ts.SyntaxKind.QuestionQuestionToken, ts.SyntaxKind.BarBarToken].includes(expression.operatorToken.kind)) return [...commandLiteralParts(expression.left, reference, seen, argvOnly), ...commandLiteralParts(expression.right, reference, seen, argvOnly)];
+    if (ts.isElementAccessExpression(expression) && expression.argumentExpression && ts.isNumericLiteral(unwrap(expression.argumentExpression))) {
+      const index = Number((unwrap(expression.argumentExpression) as ts.NumericLiteral).text);
+      const owner = unwrap(expression.expression);
+      const arrays = ts.isIdentifier(owner) ? binding(owner.text, reference).flatMap(value => value.expression ? [{ expression: unwrap(value.expression), at: value.declaration ?? reference }] : []) : [{ expression: owner, at: reference }];
+      return arrays.flatMap(value => ts.isArrayLiteralExpression(value.expression) && value.expression.elements[index] ? commandLiteralParts(value.expression.elements[index], value.at, seen, argvOnly) : []);
+    }
     if (argvOnly) return [];
+    if (ts.isTaggedTemplateExpression(expression) && ts.isPropertyAccessExpression(expression.tag) && ts.isIdentifier(expression.tag.expression) && expression.tag.expression.text === "String" && expression.tag.name.text === "raw") return commandLiteralParts(expression.template, reference, seen);
     if (ts.isStringLiteralLike(expression)) return [expression.text];
-    if (ts.isTemplateExpression(expression)) return [expression.head.text, ...expression.templateSpans.map(span => span.literal.text)];
+    if (ts.isTemplateExpression(expression)) {
+      let candidates = [expression.head.text];
+      for (const span of expression.templateSpans) {
+        const values = commandLiteralParts(span.expression, reference, seen);
+        // Unknown substitutions separate known words; known spans must be joined
+        // before tokenization so `for${suffix}` is inspected as one command word.
+        candidates = candidates.flatMap(prefix => (values.length ? values : [" "]).map(value => prefix + value + span.literal.text));
+      }
+      return candidates;
+    }
     if (ts.isBinaryExpression(expression) && expression.operatorToken.kind === ts.SyntaxKind.PlusToken) return [...commandLiteralParts(expression.left, reference, seen), ...commandLiteralParts(expression.right, reference, seen)];
     return [];
   } finally { seen.delete(expression); }
@@ -466,14 +583,18 @@ function solidityCommandWords(parts: string[]): string[] {
   const tools = new Set(["solc", "solcjs", "forge", "cast", "anvil", "chisel"]);
   // These are command values obtained through the AST, never source-code matches.
   return parts.flatMap(part => part.split(/\s+|&&|\|\||[;|`]|\$\(/))
-    .map(word => basename(word.replace(/^["'`(]+|["'`)]+$/g, "")))
+    .map(word => {
+      word = word.replace(/^["'`(]+|["'`)]+$/g, "");
+      const version = word.lastIndexOf("@");
+      if (version > 0) word = word.slice(0, version);
+      return word.startsWith("@") ? word : basename(word);
+    })
     .filter(word => tools.has(word));
 }
 export function scanForbiddenRuntime(root: string, files: string[]): Finding[] {
   const findings: Finding[] = [];
   for (const file of files.filter(isRuntimeFile)) {
     const text = readFileSync(join(root, file), "utf8");
-    if (!text.includes("\\") && !["ethers", "web3", "getContract", "eth_", "wallet_sendCalls", "solc", "forge", "cast", "anvil", "chisel"].some(s => text.includes(s))) continue;
     const walk = (node: ts.Node) => {
       const imported = moduleImport(node);
       if (imported && (imported === "ethers" || imported.startsWith("@ethersproject/") || imported === "web3")) findings.push(location("E2-R5", file, node));
@@ -488,7 +609,7 @@ export function scanForbiddenRuntime(root: string, files: string[]): Finding[] {
       }
       if (ts.isTaggedTemplateExpression(node)) {
         const words = solidityCommandWords(commandLiteralParts(node.template, node));
-        if (words.length && subprocessBinding(node.tag, node)?.module === "execa") findings.push(location("E3-R2", file, node, `Solidity command words: ${words.join(", ")}`));
+        if (words.length && subprocessBinding(node.tag, node).some(target => ["execa", "zx", "bun"].includes(target.module))) findings.push(location("E3-R2", file, node, `Solidity command words: ${words.join(", ")}`));
       }
       ts.forEachChild(node, walk);
     }; walk(parseSource(file, text));

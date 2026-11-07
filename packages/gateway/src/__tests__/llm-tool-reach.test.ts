@@ -48,7 +48,7 @@ function plainToolCount(text: string): number {
     tokens.push({ kind, text: kind === ts.SyntaxKind.Identifier ? scanner.getTokenValue() : scanner.getTokenText() });
   }
   let count = 0;
-  for (let i = 0; i + 3 < tokens.length; i++) if (tokens[i].kind === ts.SyntaxKind.DotToken && tokens[i + 1].text === "tool" && tokens[i + 2].kind === ts.SyntaxKind.OpenParenToken && [ts.SyntaxKind.StringLiteral, ts.SyntaxKind.NoSubstitutionTemplateLiteral].includes(tokens[i + 3].kind)) count++;
+  for (let i = 0; i + 2 < tokens.length; i++) if ([ts.SyntaxKind.DotToken, ts.SyntaxKind.QuestionDotToken].includes(tokens[i].kind) && ["tool", "registerTool"].includes(tokens[i + 1].text) && tokens[i + 2].kind === ts.SyntaxKind.OpenParenToken) count++;
   return count;
 }
 
@@ -62,15 +62,33 @@ export function scanToolReach(root: string, files: string[]): ToolScan {
   for (const tool of pkg.tools) {
     if (!object(tool) || typeof tool.name !== "string" || !object(tool.input_schema)) throw new Error("E4b-R1: every agent tool needs a name and input_schema");
     agentToolCount++;
+    const active = new Set<unknown>();
+    const schemaFailure = (schema: unknown, why: string) => findings.push({ rule: "E4b-R1", file: AGENT_PACKAGE, enclosing: tool.name as string, expression: JSON.stringify(schema), detail: why });
     const walk = (schema: unknown, path: string, name: string) => {
+      if (active.has(schema)) { schemaFailure(schema, "cyclic schema reference cannot be inspected"); return; }
       if (path) parameters.push({ source: "agent-package", tool: tool.name as string, path, name, description: object(schema) && typeof schema.description === "string" ? schema.description : "", file: AGENT_PACKAGE, enclosing: tool.name as string, expression: JSON.stringify(schema) });
       // JSON Schema boolean schemas still declare a parameter name.
       if (!object(schema)) return;
-      if (object(schema.properties)) for (const [key, child] of Object.entries(schema.properties)) walk(child, path ? `${path}.${key}` : key, key);
-      if (object(schema.items)) walk(schema.items, `${path}[]`, name);
-      if (Array.isArray(schema.items)) for (const child of schema.items) if (object(child)) walk(child, `${path}[]`, name);
-      for (const key of ["anyOf", "oneOf", "allOf"]) if (Array.isArray(schema[key])) for (const child of schema[key]) if (object(child)) walk(child, path, name);
-      if (object(schema.additionalProperties)) walk(schema.additionalProperties, path ? `${path}.*` : "*", name);
+      active.add(schema);
+      try {
+        if (typeof schema.$ref === "string") {
+          let target: unknown = tool.input_schema;
+          if (!schema.$ref.startsWith("#/")) schemaFailure(schema, "nonlocal schema reference cannot be inspected");
+          else {
+            for (const key of schema.$ref.slice(2).split("/").map(key => key.replace(/~1/g, "/").replace(/~0/g, "~"))) target = object(target) ? target[key] : undefined;
+            if (target === undefined) schemaFailure(schema, "unresolved schema reference cannot be inspected");
+            else walk(target, path, name);
+          }
+        }
+        if (object(schema.properties)) for (const [key, child] of Object.entries(schema.properties)) walk(child, path ? `${path}.${key}` : key, key);
+        if (object(schema.items)) walk(schema.items, `${path}[]`, name);
+        if (Array.isArray(schema.items)) for (const child of schema.items) if (object(child)) walk(child, `${path}[]`, name);
+        for (const key of ["anyOf", "oneOf", "allOf"]) if (Array.isArray(schema[key])) for (const child of schema[key]) if (object(child)) walk(child, path, name);
+        if (object(schema.additionalProperties)) walk(schema.additionalProperties, path ? `${path}.*` : "*", name);
+        for (const key of ["if", "then", "else", "not"]) if (object(schema[key])) walk(schema[key], path, name);
+        if (Array.isArray(schema.prefixItems)) for (const child of schema.prefixItems) walk(child, `${path}[]`, name);
+        for (const key of ["patternProperties", "dependentSchemas"]) if (object(schema[key])) for (const child of Object.values(schema[key])) walk(child, key === "patternProperties" ? (path ? `${path}.*` : "*") : path, name);
+      } finally { active.delete(schema); }
     };
     walk(tool.input_schema, "", "");
   }
@@ -82,10 +100,14 @@ export function scanToolReach(root: string, files: string[]): ToolScan {
     if (!source) { source = parseSource(file, readFileSync(join(root, file), "utf8")); sourceCache.set(file, source); }
     return source;
   };
-  const resolve = (identifier: ts.Identifier): ts.Expression | undefined => {
+  const resolve = (identifier: ts.Identifier, reportAmbiguity = true): ts.Expression | undefined => {
     const source = identifier.getSourceFile();
-    const value = resolveBinding(identifier.text, identifier).expression;
-    if (value) return value;
+    const values = resolveBinding(identifier.text, identifier);
+    if (values.length > 1) {
+      if (reportAmbiguity) findings.push({ rule: "E4b-R1", file: source.fileName, enclosing: enclosingName(identifier), expression: printNode(identifier), detail: "ambiguous schema alias cannot be inspected" });
+      return undefined;
+    }
+    if (values[0].expression) return values[0].expression;
     // The MCP capture tool uses an imported Zod object. Inspect its declaration too,
     // so nested schema keys are covered without importing code or invoking getters.
     for (const statement of source.statements) if (ts.isImportDeclaration(statement) && ts.isStringLiteralLike(statement.moduleSpecifier) && statement.importClause?.namedBindings && ts.isNamedImports(statement.importClause.namedBindings)) {
@@ -102,17 +124,63 @@ export function scanToolReach(root: string, files: string[]): ToolScan {
     }
     return undefined;
   };
+  // Overload probing must not report findings on a description expression.
+  // Once selected, a schema still goes through the full, fail-loudly walker.
+  const schemaArgument = (expression: ts.Expression, seen = new Set<ts.Node>()): boolean => {
+    expression = unwrap(expression);
+    if (seen.has(expression)) return false;
+    seen.add(expression);
+    try {
+      if (ts.isObjectLiteralExpression(expression)) return true;
+      if (ts.isIdentifier(expression)) {
+        const initializer = resolve(expression, false);
+        return !!initializer && schemaArgument(initializer, seen);
+      }
+      if (ts.isPropertyAccessExpression(expression) && expression.name.text === "shape") return schemaArgument(expression.expression, seen);
+      if (ts.isCallExpression(expression) && ts.isPropertyAccessExpression(unwrap(expression.expression))) {
+        const callee = unwrap(expression.expression) as ts.PropertyAccessExpression;
+        const owner = unwrap(callee.expression);
+        return (ts.isIdentifier(owner) && owner.text === "z") || schemaArgument(owner, seen);
+      }
+      return false;
+    } finally { seen.delete(expression); }
+  };
   for (const file of files.filter(file => file.startsWith("packages/mcp-server/src/") && isRuntimeFile(file))) {
     const text = readFileSync(join(root, file), "utf8");
-    if (!text.includes("tool") && !text.includes("\\")) continue;
+    if (!text.includes("tool") && !text.includes("registerTool") && !text.includes("\\")) continue;
     mcpPlainCallCount += plainToolCount(text);
     const source = sourceFor(file);
     const visit = (node: ts.Node) => {
-      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(unwrap(node.expression)) && (unwrap(node.expression) as ts.PropertyAccessExpression).name.text === "tool" && node.arguments[0] && ts.isStringLiteralLike(unwrap(node.arguments[0]))) {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(unwrap(node.expression)) && ["tool", "registerTool"].includes((unwrap(node.expression) as ts.PropertyAccessExpression).name.text)) {
         mcpToolCount++;
-        const tool = (unwrap(node.arguments[0]) as ts.StringLiteralLike).text;
-        const shape = node.arguments[2];
-        if (!shape) throw new Error(`E4b-R1: ${file}:${tool} has no shape`);
+        const registration = (unwrap(node.expression) as ts.PropertyAccessExpression).name.text;
+        const name = node.arguments[0] && unwrap(node.arguments[0]);
+        let tool = name ? printNode(name) : "<missing>";
+        if (name && ts.isStringLiteralLike(name)) tool = name.text;
+        else {
+          // Resolve a const name to retain useful paths, but require literal names
+          // so both enumeration mechanisms cover dynamic registrations too.
+          const candidates = name && ts.isIdentifier(name) ? resolveBinding(name.text, name) : [];
+          if (candidates.length === 1 && candidates[0].expression && ts.isStringLiteralLike(unwrap(candidates[0].expression))) tool = (unwrap(candidates[0].expression) as ts.StringLiteralLike).text;
+          findings.push({ rule: "E4b-R1", file, enclosing: enclosingName(node), expression: printNode(node), detail: "non-literal tool name cannot be reviewed statically" });
+        }
+        // Four arguments are description + shape + callback, except the SDK's
+        // schema + annotations + callback form (D2). Descriptions need not be literals.
+        // Three arguments may be a schema or a description for a zero-argument tool.
+        const second = node.arguments[1];
+        const secondIsSchema = second && registration === "tool" && schemaArgument(second);
+        let shape: ts.Expression | undefined = registration === "registerTool" ? second
+          : node.arguments.length >= 5 || (node.arguments.length === 4 && !secondIsSchema) ? node.arguments[2]
+          : secondIsSchema ? second : ts.factory.createObjectLiteralExpression();
+        if (registration === "registerTool" && shape) {
+          let config = unwrap(shape);
+          if (ts.isIdentifier(config)) config = resolve(config) ?? config;
+          shape = ts.isObjectLiteralExpression(config) ? config.properties.flatMap(item => ts.isPropertyAssignment(item) && propertyName(item.name) === "inputSchema" ? [item.initializer] : [])[0] : undefined;
+        }
+        if (!shape) {
+          findings.push({ rule: "E4b-R1", file, enclosing: enclosingName(node), expression: printNode(node), detail: `${tool}: missing or opaque input shape` });
+          return;
+        }
         const seen = new Set<ts.Node>();
         const opaque = (expression: ts.Expression, path: string, why: string) => findings.push({ rule: "E4b-R1", file, enclosing: enclosingName(node), expression: printNode(expression, source), detail: `${tool}:${path || "<shape>"}: ${why}` });
         const walkShape = (expression: ts.Expression, path: string, name: string, descriptions: string[] = []) => {
@@ -178,7 +246,7 @@ export function scanToolReach(root: string, files: string[]): ToolScan {
     };
     visit(source);
   }
-  if (mcpToolCount !== mcpPlainCallCount) findings.push({ rule: "E4b-R1", file: "packages/mcp-server/src/**", enclosing: "<module>", expression: `.tool(<literal>): AST=${mcpToolCount}, lexical=${mcpPlainCallCount}`, detail: "MCP registration counts must agree" });
+  if (mcpToolCount !== mcpPlainCallCount) findings.push({ rule: "E4b-R1", file: "packages/mcp-server/src/**", enclosing: "<module>", expression: `.tool/.registerTool calls: AST=${mcpToolCount}, lexical=${mcpPlainCallCount}`, detail: "MCP registration counts must agree" });
   for (const parameter of parameters) if (FORBIDDEN.has(normalize(parameter.name)) || FORBIDDEN_DESCRIPTION.test(parameter.description)) findings.push(finding("E4b-R1", parameter, `forbidden name or description ${JSON.stringify(parameter.description)}`));
   const grouped = new Map<string, AddressTool>();
   for (const parameter of parameters.filter(addressLike)) {
@@ -384,4 +452,155 @@ describe("E4b: LLM tool parameter boundary", () => {
     expect(scan.findings, formatFindings(scan.findings)).toEqual([]);
     expect(compareAddressReview(scan, fixtureCopy({ schema: "pcc-llm-money-address-tools/1", entries: [] }))).toEqual([]);
   }, TIMEOUT);
+});
+
+describe("verdict controls for E4b", () => {
+  for (const [name, text] of [
+    ["D1 registerTool", 'server.registerTool("planted", { inputSchema: { calldata: z.string(), recipient: z.string() } }, h);'],
+    ["D2 shape and annotations", 'server.tool("planted", { calldata: z.string(), recipient: z.string() }, {title: "Relay"}, h);'],
+    ["D4 const name", 'const NAME = "planted"; server.tool(NAME, "Relay", {calldata: z.string(), recipient: z.string()}, h);'],
+  ]) it(`E4b-R1/R2 verdict ${name}: both forbidden bytes and address paths are inspected`, () => {
+    const {root, files} = synthetic([], text);
+    const scan = scanToolReach(root, files);
+    expect(scan.mcpToolCount).toBe(1); expect(scan.mcpPlainCallCount).toBe(1);
+    expect(scan.parameters.some(parameter => parameter.path === "calldata"), formatFindings(scan.findings)).toBe(true);
+    expect(scan.findings.some(hit => hit.rule === "E4b-R1" && hit.detail?.includes("calldata"))).toBe(true);
+    expect(scan.addresses).toEqual([{source: "mcp", tool: "planted", params: ["recipient"]}]);
+    expect(compareAddressReview(scan, fixtureCopy({schema: "pcc-llm-money-address-tools/1", entries: []})).some(hit => hit.rule === "E4b-R2")).toBe(true);
+    if (name.startsWith("D4")) expect(scan.findings.some(hit => hit.detail?.includes("non-literal tool name"))).toBe(true);
+  });
+
+  for (const registration of ["tool", "registerTool"]) it(`E4b-R1 verdict dynamic ${registration} name: both counters count and fail loudly`, () => {
+    const {root, files} = synthetic([], `server.${registration}(chooseName(), ${registration === "registerTool" ? '{inputSchema: {safe:z.string()}}' : '{safe:z.string()}'}, h);`);
+    const scan = scanToolReach(root, files);
+    expect(scan.mcpToolCount).toBe(1); expect(scan.mcpPlainCallCount).toBe(1);
+    expect(scan.findings.some(hit => hit.detail?.includes("non-literal tool name"))).toBe(true);
+  });
+
+  for (const defs of ["$defs", "definitions"]) it(`E4b-R1/R2 verdict D3 ${defs} ref: nested keys are reached`, () => {
+    const {root, files} = synthetic([{name: "planted", input_schema: {properties: {tx: {$ref: `#/${defs}/Tx`}}, [defs]: {Tx: {properties: {calldata: {}, recipient: {}}}}}}], "");
+    const scan = scanToolReach(root, files);
+    expect(scan.findings.some(hit => hit.rule === "E4b-R1" && hit.detail?.includes("tx.calldata"))).toBe(true);
+    expect(scan.addresses).toEqual([{source: "agent-package", tool: "planted", params: ["tx.recipient"]}]);
+  });
+
+  for (const keyword of ["if", "then", "else", "not", "prefixItems", "patternProperties", "dependentSchemas"]) it(`E4b-R1 verdict JSON ${keyword}: hidden properties cannot pass`, () => {
+    const child = {properties: {calldata: {}}};
+    const branch = keyword === "prefixItems" ? [child] : ["patternProperties", "dependentSchemas"].includes(keyword) ? {entry: child} : child;
+    const {root, files} = synthetic([{name: "planted", input_schema: {[keyword]: branch}}], "");
+    expect(scanToolReach(root, files).findings.some(hit => hit.rule === "E4b-R1")).toBe(true);
+  });
+
+  it("E4b-R1 verdict F1: multiple schema candidates are an ambiguous schema alias", () => {
+    const {root, files} = synthetic([], 'let shape = {calldata: z.string()}; if (safe) shape = {safe: z.string()}; server.tool("planted", "", shape, h);');
+    const scan = scanToolReach(root, files);
+    expect(scan.findings.some(hit => hit.detail?.includes("ambiguous schema alias")), formatFindings(scan.findings)).toBe(true);
+  });
+});
+
+
+describe("E4b nonliteral description overload controls", () => {
+  it("E4b-R1 overload control: const-identifier description selects the evidence shape", () => {
+    const { root, files } = synthetic([], `const GET_EVIDENCE_DESCRIPTION =
+  "Get evidence by bundle or by job. With bundleId: one bundle's summary " +
+  "(id, jobId, stepId, assuranceTier, eventCount, bundleHash, createdAt, verified, storageCid). " +
+  "With jobId: every bundle recorded for that job, each with its events. " +
+  "Pass exactly one of them. It returns what the gateway stored; it does not fetch IPFS content or run a verification.";
+server.tool(
+  "pcc_get_evidence",
+  GET_EVIDENCE_DESCRIPTION,
+  {
+    bundleId: z.string().optional().describe("One evidence bundle's ID (for example ev-…)"),
+    jobId: z.string().optional().describe("A job ID: returns every bundle recorded for that job"),
+  },
+  h,
+);`);
+    const scan = scanToolReach(root, files);
+    expect(scan.findings, formatFindings(scan.findings)).toEqual([]);
+    expect(scan.parameters.map(parameter => parameter.path)).toEqual(["bundleId", "jobId"]);
+    expect(scan.addresses).toEqual([]);
+  });
+
+  it("E4b-R1/R2 overload control: joined description selects the revenue-split shape", () => {
+    const { root, files } = synthetic([], `server.tool(
+  "pcc_ip_set_splits",
+  [
+    "Configure revenue splits (Royalty Token distribution) for a Story Protocol IP Asset.",
+    "Splits must sum to 100. Each collaborator's role determines their share of all future revenue from this IP.",
+    "",
+    "ContributorRole taxonomy (ADR-12 §4 — see role responsibility table):",
+    "  • operator             — runs the physical machine; residual share (typically 80-95% after others)",
+    "  • verifier             — evaluates evidence, signs attestations; slashable (1-5%)",
+    "  • insurer              — underwrites job failure coverage; opt-in (0-3%)",
+    "  • integrator           — authored the machine-type adapter (OctoPrint, Bambu, ROS); 0-100 bps",
+    "  • protocol-author      — authored the capability schema (CSD) + test vectors; 0-50 bps",
+    "  • model-author         — trained the AI model invoked at execution time; 0-80 bps",
+    "  • dataset-contributor  — pilot who collected training demonstrations; resolved via TrainingManifest",
+    "  • curator              — organizes/audits a collection of contributions; 0-5%",
+    "  • assembler            — composed multiple capabilities into a workflow; 0-50 bps",
+    "  • network-treasury     — per-network protocol treasury (verification, grants, security); 0-3%",
+    "",
+    "Legacy aliases kept for backward decoding only — prefer the canonical names above:",
+    "  • \`designer\` → use \`protocol-author\` / \`assembler\` / \`integrator\` depending on CSD kind",
+    "  • \`network\`  → use \`network-treasury\`",
+    "",
+    "Recommended starting splits:",
+    "  • Standard job (no AI):   operator 92, verifier 3, protocol-author 2, integrator 2, network-treasury 1",
+    "  • Job with AI model:      operator 87, verifier 3, protocol-author 2, integrator 2, model-author 4, network-treasury 2",
+  ].join("\\n"),
+  {
+    ipId: z.string().describe("Story Protocol IP Asset address (0x...)"),
+    splits: z
+      .array(
+        z.object({
+          address: z.string().describe("Recipient wallet address (0x...)"),
+          role: z
+            .enum([
+              // Canonical ContributorRole values (ADR-12 §2.1)
+              "operator",
+              "verifier",
+              "insurer",
+              "integrator",
+              "protocol-author",
+              "model-author",
+              "dataset-contributor",
+              "curator",
+              "assembler",
+              "network-treasury",
+              // Deprecated legacy aliases — kept so older callers still validate.
+              // Prefer \`protocol-author\`/\`assembler\`/\`integrator\` over \`designer\`,
+              // and \`network-treasury\` over \`network\`.
+              "designer",
+              "network",
+            ])
+            .describe(
+              "Collaborator role — see tool description for the full ContributorRole taxonomy and migration map for legacy values (\`designer\`, \`network\`).",
+            ),
+          percentage: z
+            .number()
+            .min(1)
+            .max(100)
+            .describe("Integer percentage (1-100). All splits must sum to 100."),
+          label: z.string().describe("Human-readable label (e.g. 'CSD Author', 'Machine Operator')"),
+        }),
+      )
+      .describe("Revenue splits — must sum to 100"),
+  },
+  h,
+);`);
+    const scan = scanToolReach(root, files);
+    expect(scan.findings, formatFindings(scan.findings)).toEqual([]);
+    expect(scan.addresses).toEqual([{ source: "mcp", tool: "pcc_ip_set_splits", params: ["ipId", "splits[].address"] }]);
+  });
+
+  it("E4b-R1 overload control: an unresolved shape after a nonliteral description fails loudly", () => {
+    const { root, files } = synthetic([], `const GET_EVIDENCE_DESCRIPTION =
+  "Get evidence by bundle or by job. With bundleId: one bundle's summary " +
+  "(id, jobId, stepId, assuranceTier, eventCount, bundleHash, createdAt, verified, storageCid). " +
+  "With jobId: every bundle recorded for that job, each with its events. " +
+  "Pass exactly one of them. It returns what the gateway stored; it does not fetch IPFS content or run a verification.";
+server.tool("opaque_shape", GET_EVIDENCE_DESCRIPTION, UnresolvedShape, h);`);
+    const scan = scanToolReach(root, files);
+    expect(scan.findings.some(hit => hit.rule === "E4b-R1" && hit.expression === "UnresolvedShape" && hit.detail?.includes("unresolved schema alias cannot be inspected")), formatFindings(scan.findings)).toBe(true);
+  });
 });

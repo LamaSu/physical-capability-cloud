@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { initStore, closeStore } from "../db.js";
 import { onboardChatRoutes, _resetAgentPackageCache, _resetAnthropicCache } from "../routes/onboard-chat.js";
-import { calleeName, enclosingName, isRuntimeFile, listRepoFiles, parseSource, printNode, unwrap } from "./helpers/negative-proof-scan.js";
+import { calleeName, enclosingName, isRuntimeFile, listRepoFiles, parseSource, printNode, resolveBinding, unwrap } from "./helpers/negative-proof-scan.js";
 
 const sdk = vi.hoisted(() => ({ create: vi.fn() }));
 vi.mock("@anthropic-ai/sdk", () => ({
@@ -32,7 +32,7 @@ function credentialHeaders(headers: Headers): string[] {
   return Object.keys(headers).filter((key) => forbidden.has(key.toLowerCase()) || key.toLowerCase().startsWith("x-pcc-"));
 }
 
-/** Pure tree scan: loopback injection must never acquire authority from auth code. */
+/** Pure tree scan: no gateway runtime file may grant authority to loopback injection. */
 function scanLoopbackTrust(root: string, files: readonly string[]): Finding[] {
   const findings: Finding[] = [];
   const loopbacks = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"]);
@@ -50,13 +50,30 @@ function scanLoopbackTrust(root: string, files: readonly string[]): Finding[] {
     const expr = unwrap(node);
     return ts.isStringLiteralLike(expr) && loopbacks.has(expr.text);
   };
+  const holdsLoopback = (node: ts.Expression, at: ts.Node = node, seen = new Set<ts.Node>()): boolean => {
+    node = unwrap(node);
+    if (seen.has(node)) return false;
+    seen.add(node);
+    try {
+      if (isLoopback(node)) return true;
+      if (ts.isIdentifier(node)) return resolveBinding(node.text, node.parent && node.pos >= 0 ? node : at).some(value => value.expression && holdsLoopback(value.expression, value.declaration ?? at, seen));
+      let hit = false;
+      ts.forEachChild(node, child => { if (ts.isExpression(child) && holdsLoopback(child, at, seen)) hit = true; });
+      return hit;
+    } finally { seen.delete(node); }
+  };
   for (const file of files) {
-    if (!isRuntimeFile(file) || !["packages/gateway/src/middleware/", "packages/gateway/src/auth/"].some((prefix) => file.startsWith(prefix))) continue;
+    if (!isRuntimeFile(file) || !file.startsWith("packages/gateway/src/")) continue;
     const source = readFileSync(join(root, file), "utf8");
-    if (!source.includes("\\") && !["127.0.0.1", "::1", "localhost", "isLoopback", "isLocalRequest"].some((word) => source.includes(word))) continue;
+    if (!source.includes("\\") && !["127.", "::1", "localhost", "isLoopback", "isLocalRequest"].some((word) => source.includes(word))) continue;
     const ast = parseSource(file, source);
     const visit = (node: ts.Node): void => {
-      if ((ts.isBinaryExpression(node) && comparisons.has(node.operatorToken.kind)
+      const callee = ts.isCallExpression(node) ? unwrap(node.expression) : undefined;
+      const receiver = callee && (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) ? callee.expression : undefined;
+      const member = callee && calleeName(callee);
+      const collectionTrust = ts.isCallExpression(node) && receiver && ["has", "includes"].includes(member ?? "") && node.arguments.some(isIp) && holdsLoopback(receiver, node);
+      const prefixTrust = ts.isCallExpression(node) && receiver && member === "startsWith" && isIp(receiver) && node.arguments.some(arg => ts.isStringLiteralLike(unwrap(arg)) && (unwrap(arg) as ts.StringLiteralLike).text === "127.");
+      if (collectionTrust || prefixTrust || (ts.isBinaryExpression(node) && comparisons.has(node.operatorToken.kind)
         && ((isIp(node.left) && isLoopback(node.right)) || (isLoopback(node.left) && isIp(node.right))))
         || (ts.isCallExpression(node) && ["isLoopback", "isLocalRequest"].includes(calleeName(node.expression) ?? ""))) {
         findings.push({ rule: "E4a-R2", file, enclosing: enclosingName(node), expression: printNode(node, ast) });
@@ -213,4 +230,22 @@ describe("E4a onboard-chat injection carries no credentials", () => {
       rmSync(root, { recursive: true, force: true });
     }
   }, TIMEOUT);
+});
+
+describe("verdict controls for E4a loopback trust", () => {
+  for (const [name, file, source] of [
+    ["E1 Set.has", "middleware/planted.ts", 'function trust(req) { return new Set(["127.0.0.1", "::1"]).has(req.ip); }'],
+    ["array includes", "auth/planted.ts", 'const local = ["127.0.0.1", "::1"]; function trust(req) { return local.includes(req.ip); }'],
+    ["loopback prefix", "auth/planted.ts", 'function trust(req) { return req.ip.startsWith("127."); }'],
+    ["E2 route comparison", "routes/planted.ts", 'function trust(req) { return req.ip === "127.0.0.1"; }'],
+    ["SSE comparison", "sse/planted.ts", 'function trust(req) { return req.socket.remoteAddress === "::1"; }'],
+  ]) it(`E4a-R2 verdict ${name}: loopback cannot acquire authority`, () => {
+    const root = mkdtempSync(join(tmpdir(), "pcc-loopback-verdict-"));
+    const path = `packages/gateway/src/${file}`;
+    try {
+      mkdirSync(dirname(join(root, path)), {recursive: true});
+      writeFileSync(join(root, path), source);
+      expect(scanLoopbackTrust(root, [path])).toHaveLength(1);
+    } finally { rmSync(root, {recursive: true, force: true}); }
+  });
 });

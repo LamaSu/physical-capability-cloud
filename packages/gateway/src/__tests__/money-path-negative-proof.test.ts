@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import {
-  WRITE_METHODS, WRITE_SCOPE, compareWrites, formatFindings, listRepoFiles,
+  WRITE_METHODS, WRITE_SCOPE, compareWrites, formatFindings, isTestPath, listRepoFiles,
   readAllowlist, scanBytecode, scanForbiddenRuntime, scanPythonWrites,
   scanRuntimeSolcDependencies, scanWrites,
   type Finding, type WriteAllowlist, type WriteRecord,
@@ -13,6 +13,12 @@ import {
 
 const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
 const ALLOWLIST = fileURLToPath(new URL("./fixtures/money-path-write-allowlist.json", import.meta.url));
+// Known limits: this is a one-file static proof, not interprocedural taint analysis.
+// E3's unresolved command forms are pinned below and listed in the helper.
+// Generic EIP-712 signers (e.g. AgentWallet.signTypedData, using the agent key)
+// can authorize token moves and are outside the enumerated write-method surface.
+// E4b covers agent-package.json and mcp-server/src, not future inline tools in
+// agent-chat, dashboard agent-tools, agent-onboarder, or docs-mcp-server schemas.
 const TIMEOUT = 60_000;
 const temporary: string[] = [];
 function tree(contents: Record<string, string | Buffer>): { root: string; files: string[] } {
@@ -33,7 +39,7 @@ function clean(findings: Finding[], rule: string): void {
 function reviewed(records: WriteRecord[]): WriteAllowlist {
   return {
     schema: "pcc.money-path-write-allowlist/v1", methods: [...WRITE_METHODS], scope: [...WRITE_SCOPE],
-    entries: records.map(record => ({ ...record, signer: "synthetic control key", why: "Synthetic fixed operation.", ...(record.method === "writeContract" ? {} : { payload: "Synthetic bytes built locally." }) })),
+    entries: records.map(record => ({ ...record, signer: "synthetic control key", why: "Synthetic fixed operation.", ...(record.method === "writeContract" ? {} : { payload: "Synthetic bytes built locally. " + Object.entries(record.bindings ?? {}).filter(([, value]) => value.includes("<unresolved>")).map(([name]) => `Source ${name}: supplied by this synthetic control.`).join(" ") }) })),
   };
 }
 // The real-repo assertion and self-mutants use the same path-parameter loader.
@@ -165,8 +171,8 @@ describe("E2 fixed runtime write surface", () => {
   }, TIMEOUT);
 
   const callerPayloads = [
-    ["direct PM3", `function send(req) { w.sendTransaction({data:req.body.x}); }`],
-    ["destructured PM3", `function send(req) { const { x } = req.body; w.sendTransaction({data:x}); }`],
+    ["direct body member", `function send(req) { w.sendTransaction({data:req.body.x}); }`],
+    ["destructured body member", `function send(req) { const { x } = req.body; w.sendTransaction({data:x}); }`],
     ["shorthand", `function send(req) { const { data } = req.body; w.sendTransaction({data}); }`],
     ["destructured parameter", `function send({body: {x}}: any) { w.sendTransaction({data:x}); }`],
     ["closure captured", `function send(req) { const data = req.body.x; lock(() => w.sendTransaction({data})); }`],
@@ -238,7 +244,7 @@ describe("E3 no unverifiable bytecode or runtime Solidity toolchain", () => {
     const includingTests = scanBytecode(REPO, files, true);
     expect(includingTests.some(finding => finding.file === fundingTest), formatFindings(includingTests)).toBe(true);
     expect(scanBytecode(REPO, [fundingTest])).toEqual([]);
-    expect(new Set(includingTests.map(finding => finding.file)), formatFindings(includingTests)).toEqual(new Set([fundingTest]));
+    expect(includingTests.every(finding => isTestPath(finding.file)), formatFindings(includingTests)).toBe(true);
   }, TIMEOUT);
 
   it("E3-R1 controls: bytecode fails; test paths, Foundry outputs, binary files and short data pass", () => {
@@ -367,12 +373,19 @@ describe("E3 no unverifiable bytecode or runtime Solidity toolchain", () => {
     ["promisify parameter shadows import", 'import { promisify } from "node:util"; function call(promisify: any) { const run = promisify(exec); run("forge build"); }'],
     ["unrelated execa-like tag", 'import { $ } from "./adapter"; $`forge build`;'],
     ["parameter shadows execa tag", 'import { $ } from "execa"; function call($: any) { $`forge build`; }'],
+  ];
+  for (const [name, source] of commandNearMisses) it(`E3-R2 near miss ${name}: unrelated executable words pass`, () => {
+    const t = tree({ "packages/sample/src/a.ts": source });
+    clean(scanForbiddenRuntime(t.root, t.files), "E3-R2");
+  }, TIMEOUT);
+
+  const commandKnownLimits: Array<[string, string]> = [
     ["command imported from another module", 'import command from "./commands"; execSync(command);'],
     ["command returned from function", 'function command() { return "forge build"; } execSync(command());'],
     ["command held in object property", 'const commands = { build: "forge build" }; execSync(commands.build);'],
     ["command joined from array", 'const command = ["forge", "build"].join(" "); execSync(command);'],
   ];
-  for (const [name, source] of commandNearMisses) it(`E3-R2 near miss ${name}: unrelated executable words pass`, () => {
+  for (const [name, source] of commandKnownLimits) it(`E3-R2 known limit ${name}: not resolved by the one-file static scan`, () => {
     const t = tree({ "packages/sample/src/a.ts": source });
     clean(scanForbiddenRuntime(t.root, t.files), "E3-R2");
   }, TIMEOUT);
@@ -423,4 +436,114 @@ describe("scanner enumeration and real-repo fixture self-mutants", () => {
     expect(result.length).toBeGreaterThan(0);
     clean(moneyPathFindings(REPO, files, ALLOWLIST), rule);
   }, TIMEOUT);
+});
+
+// Verdict controls are kept separate so each previously missed form has its own failure.
+describe("verdict controls for E2 and E3", () => {
+  const raw: Array<[string, string]> = [
+    ["R13 fallback reassignment", 'function h(request) { let data = request.body.calldata; if (!data) data = "0x"; w.sendTransaction({ to, data }); }'],
+    ["R13b single-expression fallback", 'function h(request) { const data = request.body.calldata ?? "0x"; w.sendTransaction({ to, data }); }'],
+    ["two-branch payload", 'function h(req) { let data; if (ok) { data = req.body.calldata; } else { data = "0x"; } w.sendTransaction({ to, data }); }'],
+    ["B1 body alias member", 'function h(req) { const body = req.body as { calldata: string }; w.sendTransaction({ to, data: (body as any).calldata }); }'],
+    ["R3 destructured body parameter", 'const h = async ({ body }: any) => w.sendTransaction({ to, data: body.calldata });'],
+    ["R4 for-of request iterable", 'async function h(request) { for (const tx of request.body.txs) await c.sendRawTransaction({ serializedTransaction: tx }); }'],
+    ["R6 function-scoped var", 'function h(request) { if (ok) { var data = request.body.data; } w.sendTransaction({ to, data }); }'],
+    ["R7 identifier writeContract argument", 'function h(request) { const { data } = request.body; w.writeContract({ abi: ABI, functionName: "execute", args: [data] }); }'],
+    ["R8 named user operation", 'function h(request) { const op = { callData: request.body.callData }; b.sendUserOperation(op); }'],
+    ["request alias inside payload expression", 'function h(req) { const body = req.body; w.sendTransaction({ data: body.calldata ?? "0x" }); }'],
+    ["fixed ABI encoded raw argument", 'function h(req) { const { calldata } = req.body; const data = encodeFunctionData({abi: ABI, functionName: "relay", args: [calldata]}); w.sendTransaction({data}); }'],
+  ];
+  for (const [name, source] of raw) it(`E2-R4 verdict ${name}: caller bytes fail even when exactly allowlisted`, () => {
+    const t = tree({ "packages/sample/src/a.ts": source });
+    const scan = scanWrites(t.root, t.files);
+    expect(scan.records.length).toBeGreaterThan(0);
+    expect(codes(moneyPathFindings(t.root, t.files, join(tree({ "allowlist.json": JSON.stringify(reviewed(scan.records)) }).root, "allowlist.json"))), formatFindings(scan.findings)).toContain("E2-R4");
+  });
+
+  it("E2-R3 verdict R14: a fallback cannot hide a caller-chosen selector", () => {
+    const t = tree({ "packages/sample/src/a.ts": 'function h(request) { let fn = request.body.fn; if (!fn) fn = "fund"; w.writeContract({ abi: ABI, functionName: fn }); }' });
+    expect(scanWrites(t.root, t.files).records[0]).toMatchObject({ nonLiteralFunctionName: true, bindings: { fn: 'request.body.fn | "fund"' } });
+  });
+
+  it("E2-R3 verdict F1: every literal selector candidate is recorded in source order", () => {
+    const t = tree({ "packages/sample/src/a.ts": 'function h() { let fn; if (ok) fn = "fund"; else fn = "release"; w.writeContract({ abi: ABI, functionName: fn }); }' });
+    expect(scanWrites(t.root, t.files).records[0]).toMatchObject({ functionName: "fund|release", nonLiteralFunctionName: false, bindings: { fn: '"fund" | "release"' } });
+  });
+
+  it("E2-R4 verdict B2: fixed-ABI mint arguments may read req.body.walletAddress directly", () => {
+    const t = tree({ "packages/sample/src/a.ts": 'function h(req) { const mintData = encodeFunctionData({ abi: ABI, functionName: "mint", args: [(req.body as any).walletAddress, amountRaw] }); w.sendTransaction({ to, data: mintData }); }' });
+    clean(scanWrites(t.root, t.files).findings, "E2-R4");
+  });
+
+  const callees: Array<[string, string, string]> = [
+    ["A1 Sync contract", 'c.writeContractSync({ abi: ABI, functionName: "fund" });', "writeContractSync"],
+    ["A2 viem import alias", 'import { writeContract as plantedSubmit } from "viem/actions"; plantedSubmit(c, { abi: ABI, functionName: "fund" });', "writeContract"],
+    ["A3 Sync request bytes", 'function h(req) { c.sendTransactionSync({ to, data: req.body.calldata }); }', "sendTransactionSync"],
+    ["Sync raw transaction", 'c.sendRawTransactionSync({serializedTransaction: raw});', "sendRawTransactionSync"],
+    ["Sync calls", 'c.sendCallsSync({calls: []});', "sendCallsSync"],
+    ["authorization", 'c.signAuthorization({contractAddress: impl});', "signAuthorization"],
+    ["W5 call", 'w.writeContract.call(w, {abi: ABI, functionName: "fund"});', "writeContract"],
+    ["W5 apply", 'w.writeContract.apply(w, [{abi: ABI, functionName: "fund"}]);', "writeContract"],
+    ["W6 computed literal binding", 'const m = "writeContract"; w[m]({abi: ABI, functionName: "fund"});', "writeContract"],
+    ["W7 bound alias", 'const send = w.sendTransaction.bind(w); send({to, data: "0x"});', "sendTransaction"],
+    ["W8 destructured rename", 'const { writeContract: wc } = w; wc({abi: ABI, functionName: "fund"});', "writeContract"],
+    ["namespace import rename", 'import * as actions from "viem/actions"; const submit = actions.writeContract; submit(c, {abi: ABI, functionName: "fund"});', "writeContract"],
+  ];
+  for (const [name, source, method] of callees) it(`E2-R1 verdict ${name}: write provenance is scanned`, () => {
+    const t = tree({ "packages/sample/src/a.ts": source });
+    const scan = scanWrites(t.root, t.files);
+    expect(scan.records.some(record => record.method === method)).toBe(true);
+    expect(codes(compareWrites(scan.records, reviewed([])))).toContain("E2-R1");
+    if (method.startsWith("writeContract")) expect(scan.records.every(record => record.functionName === "fund" && !record.nonLiteralFunctionName)).toBe(true);
+    if (name.startsWith("A3")) expect(codes(scan.findings)).toContain("E2-R4");
+  });
+
+  for (const declaration of ['function data() {}', 'class data {}']) it(`E2-R4 verdict N1: ${declaration} shadows an outer request binding`, () => {
+    const t = tree({ "packages/sample/src/a.ts": `function h(req) { const data = req.body.calldata; function send() { ${declaration} w.sendTransaction({data}); } }` });
+    const scan = scanWrites(t.root, t.files);
+    clean(scan.findings, "E2-R4");
+    expect(scan.records[0].bindings).toEqual({data: "<unresolved>"});
+  });
+
+  it("E2-R3 verdict N3: unresolved raw bytes require a source note; imports are exempt", () => {
+    const t = tree({ "packages/sample/src/a.ts": 'import { importedCode } from "viem"; w.sendTransaction({data: unknownBytes}); w.sendTransaction({data: importedCode});' });
+    const scan = scanWrites(t.root, t.files);
+    const list = reviewed(scan.records);
+    for (const entry of list.entries) entry.payload = "Locally built bytes.";
+    const hits = compareWrites(scan.records, list);
+    expect(hits.filter(hit => hit.rule === "E2-R3")).toHaveLength(1);
+    expect(hits[0].detail).toContain("unknownBytes");
+    list.entries.find(entry => entry.bindings?.unknownBytes)!.payload = "Source unknownBytes: supplied by the synthetic caller for review.";
+    clean(compareWrites(scan.records, list), "E2-R3");
+  });
+
+  const commands: Array<[string, string]> = [
+    ["C1 template const", 'import { execSync as plantedExec } from "node:child_process"; const PLANTED_FORGE = "forge"; plantedExec(`${PLANTED_FORGE} build`);'],
+    ["template literal substitution", 'execSync(`${"forge"} build`);'],
+    ["template joins a split word", 'const suffix = "ge"; execSync(`for${suffix} build`);'],
+    ["C2 nullish default", 'execFileSync(process.env.FORGE_BIN ?? "forge", ["build"]);'],
+    ["logical default", 'const cmd = process.env.FORGE_BIN || "forge"; execFileSync(cmd, ["build"]);'],
+    ["conditional command", 'execSync(useSolc ? "solc --bin x.sol" : "true");'],
+    ["C3 versioned npx", 'execSync("npx solc@0.8.26 --bin planted.sol");'],
+    ["versioned pnpm dlx", 'execSync("pnpm dlx solc@0.8.26 --bin x.sol");'],
+    ["zx dollar tag", 'import { $ } from "zx"; $`forge build`;'],
+    ["bun dollar tag", 'import { $ as shell } from "bun"; shell`forge build`;'],
+    ["String.raw template", 'execSync(String.raw`forge build`);'],
+    ["literal array index", 'const tools = ["forge"]; execFileSync(tools[0], ["build"]);'],
+    ["F1 command assignment union", 'let cmd = "forge build"; if (safe) cmd = "git status"; execSync(cmd);'],
+    ["F1 subprocess assignment union", 'import {execSync} from "node:child_process"; let run = execSync; if (safe) run = unrelated; run("forge build");'],
+  ];
+  for (const [name, source] of commands) it(`E3-R2 verdict ${name}: Solidity command is rejected`, () => {
+    const t = tree({ "packages/sample/src/a.ts": source });
+    expect(codes(scanForbiddenRuntime(t.root, t.files))).toContain("E3-R2");
+  });
+
+  for (const [name, source] of [
+    ["split words", 'execSync("for" + "ge build");'],
+    ["nested node eval", 'execFileSync("node", ["-e", "require(\'child_process\').execSync(\'forge build\')"]);'],
+    ["glued redirect", 'execSync("forge>out.log");'],
+  ]) it(`E3-R2 known limit ${name}: not resolved by the one-file static scan`, () => {
+    const t = tree({ "packages/sample/src/a.ts": source });
+    clean(scanForbiddenRuntime(t.root, t.files), "E3-R2");
+  });
 });

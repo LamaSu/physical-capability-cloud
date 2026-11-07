@@ -11,7 +11,12 @@
     "sendUserOp",
     "sendUserOperation",
     "sendCalls",
-    "writeContracts"
+    "writeContracts",
+    "writeContractSync",
+    "sendTransactionSync",
+    "sendRawTransactionSync",
+    "sendCallsSync",
+    "signAuthorization"
   ],
   "scope": [
     "packages/*/src/**",
@@ -114,7 +119,7 @@
       "payload": "callData is built locally by encodeExecute or encodeBatch from queued operations encoded by encodeOperation.",
       "why": "Encodes queued ABI operations before submission through the configured smart account.",
       "bindings": {
-        "callData": "this.smartAccount.encodeBatch(calls)"
+        "callData": "this.smartAccount.encodeExecute(calls[0].target, calls[0].value, calls[0].data) | this.smartAccount.encodeBatch(calls)"
       }
     },
     {

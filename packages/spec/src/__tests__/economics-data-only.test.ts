@@ -59,8 +59,11 @@ function recipient(value: string | null, nullable = false): void {
 }
 
 function dataOnly(value: unknown): void {
-  // This also rejects undefined, bigint, functions, symbols, Maps and class
-  // instances: JSON must round-trip to exactly the original data, recursively.
+  // This walk checks the five template and three edge fixture outputs (and their
+  // scenarios/refusals), not every accepted input. IDs are opaque printable ASCII
+  // up to 128 characters and pass through unchanged as data, never calldata.
+  // JSON must round-trip exactly, rejecting undefined, bigint, functions, symbols,
+  // Maps and class instances. The fixture strings below contain no long hex.
   expect(JSON.parse(JSON.stringify(value))).toStrictEqual(value);
   const walk = (node: unknown, path: string): void => {
     if (typeof node === "string") {
@@ -277,4 +280,15 @@ describe("E1 economics outputs contain only declared data", () => {
     expect(out.refusals.some((refusal) => refusal.code === "RIGHTS_INCOMPATIBLE")).toBe(true);
     dataOnly(out);
   });
+});
+
+it("E1 verdict F7: an opaque hex-looking agreement id passes through as data", () => {
+  const agreement = examplePrintAndMail();
+  agreement.agreementId = `0x${"ab".repeat(63)}`;
+  const out = compileEconomics(agreement);
+  expect(out.ok).toBe(true);
+  if (!out.ok) throw new Error(JSON.stringify(out.refusals));
+  expect(out.agreementId).toBe(agreement.agreementId);
+  exactKeys(out, COMPILED_KEYS);
+  expect(JSON.parse(JSON.stringify(out))).toStrictEqual(out);
 });
