@@ -71,6 +71,27 @@ describe("PX-12 economics routes", () => {
     ]);
   });
 
+  it("exposes template version, hash and scalar slot declarations without their paths", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/economics/templates" });
+    expect(res.statusCode).toBe(200);
+    const listed = res.json<{ templates: Array<{
+      templateId: string; version: number; templateHash: string;
+      slots: Array<{ name: string; kind: string; default: string | number }>;
+    }> }>().templates;
+    expect(listed.map((x) => x.templateId)).toEqual(economics.AGREEMENT_TEMPLATES_V1.map((x) => x.template.templateId));
+    for (const [i, entry] of listed.entries()) {
+      const catalog = economics.AGREEMENT_TEMPLATES_V1[i]!;
+      expect(entry.version).toBe(1);
+      expect(entry.templateHash).toBe(catalog.templateHash);
+      expect(entry.slots).toHaveLength(catalog.template.slots.length);
+      for (const [j, item] of entry.slots.entries()) {
+        expect(Object.keys(item).sort()).toEqual(["default", "kind", "name"]);
+        const declared = catalog.template.slots[j]!;
+        expect(item).toEqual({ name: declared.name, kind: declared.kind, default: declared.default });
+      }
+    }
+  });
+
   it("previews a template with the server's fee checked, and default what-if scenarios", async () => {
     const { status, preview: p } = await preview({ templateId: "deck-milestones" });
     expect(status).toBe(200);

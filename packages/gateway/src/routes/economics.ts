@@ -19,6 +19,7 @@
 import type { FastifyInstance } from "fastify";
 import {
   AGREEMENT_TEMPLATES,
+  AGREEMENT_TEMPLATES_V1,
   buildEconomicPreview,
   compileEconomics,
   simulateEconomics,
@@ -156,7 +157,14 @@ function defaultScenarios(ag: EconomicAgreement): unknown[] {
 
 export async function economicsRoutes(app: FastifyInstance) {
   app.get("/api/economics/templates", async () => ({
-    templates: AGREEMENT_TEMPLATES.map((t) => ({ templateId: t.templateId, title: t.title, summary: t.summary })),
+    templates: AGREEMENT_TEMPLATES_V1.map(({ template, templateHash }) => ({
+      templateId: template.templateId,
+      title: template.title,
+      summary: template.summary,
+      version: template.version,
+      templateHash,
+      slots: template.slots.map(({ name, kind, default: defaultValue }) => ({ name, kind, default: defaultValue })),
+    })),
   }));
 
   app.post<{ Body: PreviewBody }>("/api/economics/preview", async (req, reply) => {
