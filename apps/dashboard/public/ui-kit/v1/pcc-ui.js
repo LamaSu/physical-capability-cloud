@@ -846,14 +846,19 @@
   function isLegacyEscrowRecord(o) {
     return !!o && typeof o === 'object' && !Array.isArray(o) && typeof o.status === 'string' && (ownKey(o, 'contractAddress') || ownKey(o, 'escrowAddress') || Array.isArray(o.milestones) || ownKey(o, 'cwmId') || ownKey(o, 'totalAmount'));
   }
+  var LEGACY_ESCROW_RECORD_ROUTE = /^\/api\/escrow\/(?!chain(?:[/?]|$))[^/?]+$/;
+  var LEGACY_ESCROW_LIST_ROUTE = /^\/api\/escrow(\?|$)/;
+  function isLegacyEscrowRead(o, bindingPath) {
+    return isLegacyEscrowRecord(o) && typeof bindingPath === 'string' && (LEGACY_ESCROW_RECORD_ROUTE.test(bindingPath) || LEGACY_ESCROW_LIST_ROUTE.test(bindingPath));
+  }
   function settlementReadClass(o, bindingPath, live) {
     var rc = settlementRecordClass(o);
     if (!isVNextRecord(o)) {
-      // settlementRecordClass labels no word outside a legacy escrow record, so a label here is exactly
-      // "a legacy record with a flat-table word".
-      return rc[1] !== null && isLegacyEscrowRecord(o) ? ['st-unknown', ESCROW_SERVICE_REPORTS + rc[1] + NOT_CONFIRMED_ON_CHAIN, rc[2]] : rc;
+      // A legacy shape speaks for the escrow service only on that service's own route.
+      if (isLegacyEscrowRecord(o) && !isLegacyEscrowRead(o, bindingPath)) return ['st-unknown', 'not a settlement record', rc[2]];
+      return rc[1] !== null && isLegacyEscrowRead(o, bindingPath) ? ['st-unknown', ESCROW_SERVICE_REPORTS + rc[1] + NOT_CONFIRMED_ON_CHAIN, rc[2]] : rc;
     }
-    var p = typeof bindingPath === 'string' ? bindingPath.split('?')[0] : '';
+    var p = typeof bindingPath === 'string' ? bindingPath : '';
     if (!(live === true && SETTLEMENT_READ_ROUTE.test(p))) return ['st-unknown', 'state not shown - not a live read of a settlement route', rc[2]];
     if (chainPin(o, p) === null) return ['st-waiting', 'pending - not confirmed at a finalized block', rc[2]];
     return rc;
@@ -882,7 +887,7 @@
   var freezePin = Object.freeze.bind(null);
   function chainPin(o, bindingPath) {
     if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
-    var p = typeof bindingPath === 'string' ? bindingPath.split('?')[0] : '';
+    var p = typeof bindingPath === 'string' ? bindingPath : '';
     var m = SETTLEMENT_ROUTE_UNIT_RE.exec(p);
     if (!m) return null;
     var chainId = o.chainId;
@@ -982,7 +987,7 @@
         return rc[1] ? mintText(rc[1]) : statusPillText(s, false, true);
       }
       var label = settlementLabel(s);
-      if (label !== null) return mintText((isLegacyEscrowRecord(row) ? ESCROW_SERVICE_REPORTS : BOUND_RECORD_REPORTS) + label + NOT_CONFIRMED_ON_CHAIN);
+      if (label !== null) return mintText((isLegacyEscrowRead(row, bindingPath) ? ESCROW_SERVICE_REPORTS : BOUND_RECORD_REPORTS) + label + NOT_CONFIRMED_ON_CHAIN);
       return statusPillText(s, false, true);
     }
     return statusPillText(s, false, false);
@@ -1578,6 +1583,16 @@
     return ctx.mode === 'host' ? new HostTransport(ctx.apiBase) : new Transport(ctx.apiBase, false);
   }
 
+  // Any later asOf stitching must take it only from the kit's own unqueried read in this render,
+  // never from the manifest.
+  function hasBindingQuery(binding) {
+    var query = binding && binding.query;
+    if (query == null || typeof query !== 'object') return false;
+    var keys = Object.getOwnPropertyNames(query);
+    for (var i = 0; i < keys.length; i++) if (dataAt(query, dataAt(keys, i)) != null) return true;
+    return false;
+  }
+
   // Resolve a binding to data. In snapshot mode, look the path up in the baked
   // store (stale). In live modes, fetch. Returns {data, stale, error}.
   function resolveBinding(ctx, binding) {
@@ -1984,7 +1999,7 @@
     var held = { latest: null, feed: null };
     function paintLatest(verified) {
       var h = held.latest;
-      if (h) setText(latest, h.isStatus ? statusPillText(h.raw, verified, h.money) : reportedText(h.raw, verified, h.money));
+      if (h) setText(latest, h.isStatus ? statusPillText(h.raw, verified, h.money) : reportedText(h.raw, false, h.money));
     }
     function paintFeed(verified) {
       var f = held.feed;
@@ -2067,7 +2082,7 @@
     function poll(delay) {
       if (stopped) return;
       ctx.tx.getJSON(w.binding.path, w.binding.query).then(function (d) {
-        var payeeVerified = apply(dot(d, w.statusFrom), dot(d, w.latestFrom), d, true, true);
+        var payeeVerified = apply(dot(d, w.statusFrom), dot(d, w.latestFrom), d, true, !hasBindingQuery(w.binding));
         // Timeline feed, if the response carries one. Each entry (its type, or the raw entry) is a label:
         // the closed vocabulary, plain only on a verified payee payment (astra r6 F10, F11). It is held,
         // so a later unverified read requalifies it (astra r7 F10).
@@ -2265,9 +2280,11 @@
       // (or any nested object) never inherits the route's provenance (astra r7 F13).
       var bpath = w.binding && w.binding.path;
       var recTopLevel = r.raw !== undefined && e === r.raw;
-      var liveRead = !r.stale && ctx.mode !== 'snapshot' && recTopLevel;
+      var liveRead = !r.stale && ctx.mode !== 'snapshot' && recTopLevel && !hasBindingQuery(w.binding);
       var vnext = isVNextRecord(e);
-      var legacy = !vnext && isLegacyEscrowRecord(e);
+      var legacyBody = recTopLevel || (ctx.mode === 'snapshot' && e === dataAt(ctx.snapshot, bpath));
+      var legacy = !vnext && legacyBody && isLegacyEscrowRecord(e) && typeof bpath === 'string' && LEGACY_ESCROW_RECORD_ROUTE.test(bpath);
+      var readPath = vnext || legacy ? bpath : null;
       // R12: a money FACT (the amount, the payee, a state) comes only from a live, pinned, finalized read of
       // this unit's own settlement route; anything else money-shaped is attributed.
       var pin = vnext && liveRead ? chainPin(e, bpath) : null;
@@ -2275,7 +2292,7 @@
       // settlement record"), never by a bare status word. Never inferred from a count or from the receipt's
       // existence (contract rule 12). R12 r2 D: a V-next state, final or not, shows only with THIS read's pin,
       // and only a readable record's facts are facts: statePin is the pin of a pinned read whose fields agree.
-      var rec = settlementReadClass(e, bpath, liveRead);
+      var rec = settlementReadClass(e, readPath, liveRead);
       var statePin = vnext && pin !== null && rec[0] !== 'st-unknown' ? pin : null;
       if (legacy) wrap._body.appendChild(el('p', 'pcc-muted pcc-receipt-source', kitText('Reported by the PCC escrow service - not a chain read.')));
       // R12 r2 B: a record that is not a settlement record (a job, an A2A task, any other shape) is presented
@@ -2289,7 +2306,9 @@
       var reporter = legacy ? kitText('PCC escrow service') : kitText('bound record');
       var claimText = function (role, valueText) { return joinText(reporter, kitText(' reports '), role, kitText(': '), valueText); };
       var econ = (e.economics && typeof e.economics === 'object') ? e.economics : {};
+      var refunded = statePin !== null && rec[0] === 'st-refunded';
       var amtRow = el('div', 'pcc-receipt-amount pcc-tnum');
+      if (refunded) amtRow.appendChild(el('span', 'pcc-receipt-cur', kitText('refunded amount')));
       if (vnext) {
         // economics.amount is in the token's BASE units: never through fmtUsd, never with an invented currency.
         if (econ.amount == null) amtRow.appendChild(el('span', 'pcc-receipt-num pcc-muted', kitText('amount not reported')));
@@ -2308,12 +2327,12 @@
         }
       }
       wrap._body.appendChild(amtRow);
-      // R12 r2 B: a party is a bare chain fact ONLY on a live, pinned, readable V-next read, where the payee is
-      // economics.recipient from that pinned response (contract rule 16) and the payer->payee layout is used.
+      // R12 r2 B: a party is a bare chain fact ONLY on a live, pinned, readable V-next read, where the payer->payee
+      // layout uses economics.recipient. A refund establishes no recipient and paints no party line.
       // The settlement read carries no payer, so a payer in its body is a claim even there. Every other
       // receipt lists its parties as claims naming their source, never laid out as a payer->payee payment.
       var payer = e.payer || e.funder;
-      if (statePin) {
+      if (statePin && !refunded) {
         var pay = el('div', 'pcc-receipt-parties');
         pay.appendChild(payer ? el('span', 'pcc-mono pcc-receipt-claim', claimText(kitText('payer'), partyText(payer))) : el('span', 'pcc-mono', kitText('payer not reported')));
         pay.appendChild(el('span', 'pcc-arrow', kitText('→')));
@@ -2321,7 +2340,7 @@
         else if (typeof econ.recipient === 'string' && PLAIN_HEX_RE.test(econ.recipient)) pay.appendChild(moneyFactEl('span', 'pcc-mono', chainFactText(hexText(econ.recipient), statePin)));
         else pay.appendChild(el('span', 'pcc-mono pcc-muted', hexText(econ.recipient)));
         wrap._body.appendChild(pay);
-      } else {
+      } else if (!statePin) {
         var claims = el('div', 'pcc-receipt-claims');
         // A settlement record (V-next or legacy) says when a party is missing; a neutral record lists only what it has.
         if (payer) claims.appendChild(el('div', 'pcc-mono pcc-receipt-claim', claimText(kitText('payer'), partyText(payer))));
@@ -2343,12 +2362,12 @@
       // settlement state" is PCC's own text.
       var payeePaid = statePin !== null && rec[0] === 'st-settled'; // secondary text: payee payment only
       if (statePin) railRow.appendChild(moneyFactEl('span', 'pcc-pill ' + rec[0], chainFactText(statusPillText(rec[2], true, true), statePin)));
-      else if (vnext) railRow.appendChild(el('span', 'pcc-pill ' + rec[0], settlementCaptionText(e, bpath, liveRead)));
+      else if (vnext) railRow.appendChild(el('span', 'pcc-pill ' + rec[0], settlementCaptionText(e, readPath, liveRead)));
       else if (legacy) railRow.appendChild(el('span', 'pcc-pill ' + rec[0], joinText(kitText('PCC escrow service reports: '), reportedText(e.status, false, false, 'id'))));
       else railRow.appendChild(el('span', 'pcc-pill ' + rec[0], statusPillText(rec[2], e.status == null, true)));
       if (pin) { var badge = assetBadgeText(e.assetReality); if (badge) railRow.appendChild(el('span', 'pcc-pill st-unknown pcc-asset-badge', badge)); }
-      if (statePin) railRow.appendChild(moneyFactEl('span', 'pcc-muted pcc-settle-label', chainFactText(joinText(kitText(' '), settlementCaptionText(e, bpath, liveRead)), statePin)));
-      else if (!vnext && rec[1]) railRow.appendChild(el('span', 'pcc-muted pcc-settle-label', joinText(kitText(' '), settlementCaptionText(e, bpath, liveRead))));
+      if (statePin) railRow.appendChild(moneyFactEl('span', 'pcc-muted pcc-settle-label', chainFactText(joinText(kitText(' '), settlementCaptionText(e, readPath, liveRead)), statePin)));
+      else if (!vnext && rec[1]) railRow.appendChild(el('span', 'pcc-muted pcc-settle-label', joinText(kitText(' '), settlementCaptionText(e, readPath, liveRead))));
       if (e.rail) railRow.appendChild(el('span', 'pcc-muted', joinText(kitText(' · '), claimText(kitText('rail'), reportedText(e.rail, false, false, 'id'))))); // never in a settlement read
       wrap._body.appendChild(railRow);
       if (pin) {

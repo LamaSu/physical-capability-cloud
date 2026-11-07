@@ -304,7 +304,7 @@ const PIN_BLOCK_RE = /^(?:0|[1-9][0-9]{0,15})$/;
  * The pin of a settlement read, or null. Valid only when ALL hold: `chainId` is in SETTLEMENT_NETWORKS
  * (and equals `network.chainId` when the body carries one); `escrow` is an address; `unitId` is a 32-byte
  * word equal (ignoring case) to the unit in `routePath`, which must match SETTLEMENT_READ_ROUTE exactly,
- * so a body for another unit is never this binding's fact; `asOfBlock` is a canonical decimal string
+ * without a query, so a body for another unit is never this binding's fact; `asOfBlock` is a canonical decimal string
  * that is a safe integer; `asOfBlockHash` is a 32-byte word; and `finality === "finalized"` (the route
  * already refuses other heads, settlement-read.ts; the kit checks again). This checks shape only;
  * provenance (a LIVE read of that route, its unprojected body) is the caller's to establish.
@@ -312,7 +312,7 @@ const PIN_BLOCK_RE = /^(?:0|[1-9][0-9]{0,15})$/;
 export function chainPin(read: unknown, routePath: unknown): SettlementPin | null {
   if (read === null || typeof read !== "object" || Array.isArray(read)) return null;
   const o = read as Record<string, unknown>;
-  const path = typeof routePath === "string" ? routePath.split("?")[0]! : "";
+  const path = typeof routePath === "string" ? routePath : "";
   const routeUnit = SETTLEMENT_ROUTE_UNIT_RE.exec(path)?.[1];
   if (routeUnit === undefined) return null;
   const { chainId, escrow, unitId, asOfBlock, asOfBlockHash, finality } = o;
@@ -372,6 +372,9 @@ const PENDING_FINALITY = (): MoneyStatusClassification =>
  *  stream event, a projection, another route): no state is shown, final or not (R12 r2, D). */
 const NOT_A_LIVE_SETTLEMENT_READ = (): MoneyStatusClassification => UNKNOWN("", "state not shown - not a live read of a settlement route");
 
+const LEGACY_ESCROW_RECORD_ROUTE = /^\/api\/escrow\/(?!chain(?:[/?]|$))[^/?]+$/;
+const LEGACY_ESCROW_LIST_ROUTE = /^\/api\/escrow(\?|$)/;
+
 /** R12 rule 4: the attribution of a word the PCC escrow service reports (a legacy escrow record). */
 export const ESCROW_SERVICE_REPORTS = "PCC escrow service reports: ";
 export const NOT_CONFIRMED_ON_CHAIN = " (not confirmed on chain)";
@@ -384,7 +387,8 @@ export const NOT_CONFIRMED_ON_CHAIN = " (not confirmed on chain)";
  *    CARRIES A VALID PIN (chainPin; R12, and R12 r2 D: a non-final state is a money claim too, e.g. state 1
  *    says "funds committed"). A live read of that route without a valid pin is pending; anything else (a
  *    baked snapshot, a fallback, a stream event, a projection, another route) is unknown.
- *  - A legacy escrow record's word, in ANY state, is the PCC escrow service's report, not a chain read
+ *  - A legacy escrow record's word on its own escrow record or list route, in ANY state, is the PCC
+ *    escrow service's report, not a chain read
  *    (R12 rule 4; r2 D, the same class): attributed, and it takes no money tone (unknown, never running,
  *    waiting, failed or refunded).
  *  - Anything else ("not a settlement record") passes through: it is already unknown.
@@ -396,11 +400,12 @@ export function classifySettlementRead(
   const c = classifySettlementRecord(record);
   const o = record !== null && typeof record === "object" && !Array.isArray(record) ? (record as Record<string, unknown>) : null;
   if (o === null || !(has(o, "unitState") || has(o, "finalState"))) {
-    // classifySettlementRecord knows no word outside a legacy escrow record, so `known` is exactly "a
-    // legacy record with a flat-table word".
+    // A legacy shape speaks for the escrow service only on that service's own route.
+    const path = source && typeof source.path === "string" ? source.path : "";
+    if (o !== null && isLegacyEscrowRecord(o) && !(LEGACY_ESCROW_RECORD_ROUTE.test(path) || LEGACY_ESCROW_LIST_ROUTE.test(path))) return NOT_A_SETTLEMENT_RECORD();
     return c.known ? Object.freeze({ key: c.key, tone: "unknown" as const, label: ESCROW_SERVICE_REPORTS + (c.label ?? c.key) + NOT_CONFIRMED_ON_CHAIN, known: true }) : c;
   }
-  const path = source && typeof source.path === "string" ? source.path.split("?")[0]! : "";
+  const path = source && typeof source.path === "string" ? source.path : "";
   if (!(source && source.live === true && SETTLEMENT_READ_ROUTE.test(path))) return NOT_A_LIVE_SETTLEMENT_READ();
   return chainPin(record, path) === null ? PENDING_FINALITY() : c;
 }

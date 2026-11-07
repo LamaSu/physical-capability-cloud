@@ -684,6 +684,10 @@ describe("astra r2 (#313 @8f946499): settlement green needs a LIVE read of an ex
     const bodies: unknown[] = [pinnedReceipt(), ...BAD_PINS.map(([, bad]) => ({ ...pinnedReceipt(), ...bad })), null, [], "x", { ...pinnedReceipt(), network: null }];
     const paths: unknown[] = [RC_LIVE, LC_LIVE, RC_LIVE + "?asOf=x", "/api/settlement/units/" + "0x" + "ef".repeat(32) + "/receipt", "/api/jobs/j1", undefined];
     for (const b of bodies) for (const p of paths) {
+      if (typeof p === "string" && p.includes("?")) {
+        expect(kit.chainPin(b, p), "queried kit pin").toBeNull();
+        expect(chainPin(b, p), "queried spec pin").toBeNull();
+      }
       expect(JSON.stringify(kit.chainPin(b, p)), JSON.stringify(b) + " @ " + String(p)).toBe(JSON.stringify(chainPin(b, p)));
     }
   });
@@ -707,9 +711,9 @@ describe("astra r2 (#313 @8f946499): settlement green needs a LIVE read of an ex
     expect(document.querySelector(".pcc-receipt-rail")!.textContent).toContain("payout distribution discharged");
   });
 
-  it("F1: only the exact per-unit route counts (the route's own unit-id format; a query such as ?asOf is fine)", async () => {
+  it("F1: only the exact unqueried per-unit route counts (the route's own unit-id format)", async () => {
     const cases: Array<[string, boolean]> = [
-      [LC_LIVE, true], [RC_LIVE + "?asOf=0x" + "cd".repeat(32), true],
+      [LC_LIVE, true], [RC_LIVE + "?asOf=0x" + "cd".repeat(32), false],
       ["/api/settlement/units/u1/receipt", false], ["/api/settlement/units/" + UNIT + "/receipt/x", false],
       ["/api/settlement/units/" + UNIT + "/provenance", false], ["/API/settlement/units/" + UNIT + "/receipt", false],
     ];
@@ -731,6 +735,9 @@ describe("astra r2 (#313 @8f946499): settlement green needs a LIVE read of an ex
       { path: "/api/jobs/j1", live: true }, { path: RC_LIVE + "?asOf=x", live: true }, { path: RC_LIVE, live: "true" }, null, undefined, {}];
     for (const r of records) for (const src of sources) {
       const spec = classifySettlementRead(r, src as never);
+      if ((r !== null && typeof r === "object" && ("unitState" in r || "finalState" in r)) && typeof (src as { path?: unknown } | null)?.path === "string" && String((src as { path: string }).path).includes("?")) {
+        expect(spec.label).toBe("state not shown - not a live read of a settlement route");
+      }
       const [cls, label] = kit.settlementReadClass(r, (src as { path?: unknown } | null)?.path, (src as { live?: unknown } | null)?.live);
       const tag = JSON.stringify(r) + " @ " + JSON.stringify(src);
       expect(cls, tag).toBe("st-" + spec.tone);
@@ -1390,8 +1397,8 @@ describe("astra r7 (#313 @9f3f75af): F13 provenance and F10 over time (verify be
   });
 
   it("F10 over time (HIGH): a later UNVERIFIED read requalifies the latest line a verified read left plain", async () => {
-    bootScript(man([{ kind: "run", binding: { path: LC_LIVE, pollMs: 5 }, statusFrom: "finalState", latestFrom: "message" }]),
-      [{ status: 200, body: { ...LC8, message: "PAID" } }, { status: 200, body: LC1 }]);
+    bootScript(man([{ kind: "run", binding: { path: LC_LIVE, pollMs: 5 }, statusFrom: "finalState", latestFrom: "status" }]),
+      [{ status: 200, body: { ...LC8, status: "PAID" } }, { status: 200, body: LC1 }]);
     await flush();
     expect(latestText()).toBe("PAID"); // verified payee payment: plain
     await wait(60);
@@ -1400,8 +1407,8 @@ describe("astra r7 (#313 @9f3f75af): F13 provenance and F10 over time (verify be
   });
 
   it("F10 over time (HIGH): a FAILED read requalifies the latest line too", async () => {
-    bootScript(man([{ kind: "run", binding: { path: LC_LIVE, pollMs: 5 }, statusFrom: "finalState", latestFrom: "message" }]),
-      [{ status: 200, body: { ...LC8, message: "PAID" } }, "reject"]);
+    bootScript(man([{ kind: "run", binding: { path: LC_LIVE, pollMs: 5 }, statusFrom: "finalState", latestFrom: "status" }]),
+      [{ status: 200, body: { ...LC8, status: "PAID" } }, "reject"]);
     await flush();
     expect(latestText()).toBe("PAID");
     await wait(60);
@@ -1486,10 +1493,10 @@ const R2_BROKEN_PINS: Array<[string, (b: Record<string, unknown>) => Record<stri
   ["not finalized (latest)", (b) => ({ ...b, finality: "latest" })],
   ["not finalized (missing)", (b) => r2Without(b, ["finality"])],
 ];
-/** Live reads of the unit's own exact routes (a query such as ?asOf is fine). */
-const R2_LIVE_ROUTES: Array<{ path: string; live: true }> = [{ path: R2_LC, live: true }, { path: R2_RC, live: true }, { path: R2_LC + "?asOf=0x" + "cd".repeat(32), live: true }];
+/** Live reads of the unit's own exact, unqueried routes. */
+const R2_LIVE_ROUTES: Array<{ path: string; live: true }> = [{ path: R2_LC, live: true }, { path: R2_RC, live: true }];
 /** Not a live read of the exact route: a snapshot, a stringly "live", another route, the provenance route, no source. */
-const R2_NOT_LIVE: unknown[] = [{ path: R2_LC, live: false }, { path: R2_RC, live: "true" }, { path: "/api/jobs/j1", live: true },
+const R2_NOT_LIVE: unknown[] = [{ path: R2_LC + "?asOf=0x" + "cd".repeat(32), live: true }, { path: R2_LC, live: false }, { path: R2_RC, live: "true" }, { path: "/api/jobs/j1", live: true },
   { path: `/api/settlement/units/${R2_UNIT}/provenance`, live: true }, { path: `/api/settlement/units/${R2_OTHER_UNIT}/lifecycle`, live: false }, null, undefined, {}];
 const R2_PENDING = { tone: "waiting", label: "pending - not confirmed at a finalized block" } as const;
 const R2_NOT_SHOWN = { tone: "unknown", label: "state not shown - not a live read of a settlement route" } as const;
@@ -1624,7 +1631,7 @@ describe("R12 r2 D (run 2 F1 HIGH): EVERY chain-derived money state needs a live
           const tag = JSON.stringify(rec) + " @ " + JSON.stringify(s);
           const spec = classifySettlementRead(rec, src(s));
           expect(spec.tone, tag).toBe("unknown");
-          expect(spec.label, tag).toBe(ESCROW_SERVICE_REPORTS + MONEY_STATUS_MAP[k]!.label + NOT_CONFIRMED_ON_CHAIN);
+          expect(spec.label, tag).toBe(src(s)?.path === "/api/escrow/e1" ? ESCROW_SERVICE_REPORTS + MONEY_STATUS_MAP[k]!.label + NOT_CONFIRMED_ON_CHAIN : "not a settlement record");
           expect(kit.settlementReadClass(rec, src(s)?.path, src(s)?.live), tag).toEqual(["st-unknown", spec.label, rec.status]);
         }
       }
@@ -2907,5 +2914,150 @@ describe("R12 r2f B1: approval args qualify only money data", () => {
     }
     await paint(mode, { envelope: { amount: 250, job: record } }, "/api/jobs/j1", "envelope.job");
     expect(r2dTexts(".pcc-approval .pcc-args-v"), "money on projection path").toEqual([r2dRep("go")]);
+  });
+});
+
+// Body review F1-F4: source queries, escrow attribution, latest values and refunded parties.
+describe("settlement reads use unqueried sources and route-specific attribution", () => {
+  const PAYEE = "0x" + "34".repeat(20);
+  const ECON = { amount: "250000000", recipient: PAYEE };
+  const JOB = { status: "running", amount: "250", currency: "USDC", payee: PAYEE };
+  const LEGACY = { ...JOB, status: "REFUNDED", totalAmount: "250", contractAddress: "0x" + "99".repeat(20) };
+  const SNAPSHOT_TEXT = "state not shown - not a live read of a settlement route";
+  const kit = extractRegion();
+
+  it("queried spec chain pins are null", () => {
+    expect(chainPin(r2Receipt(8), R2_RC + "?asOf=" + PIN_FIELDS.asOfBlockHash)).toBeNull();
+    expect(chainPin(r2Receipt(8), R2_RC + "?")).toBeNull();
+  });
+
+  it("queried kit chain pins are null", () => {
+    expect(kit.chainPin(r2Receipt(8), R2_RC + "?asOf=" + PIN_FIELDS.asOfBlockHash)).toBeNull();
+    expect(kit.chainPin(r2Receipt(8), R2_RC + "?")).toBeNull();
+  });
+
+  it("queried settlement classifiers show the snapshot refusal", () => {
+    for (const p of [R2_RC + "?asOf=" + PIN_FIELDS.asOfBlockHash, R2_LC + "?"]) {
+      expect(classifySettlementRead(r2Lifecycle(8), { path: p, live: true }).label).toBe(SNAPSHOT_TEXT);
+      expect(kit.settlementReadClass(r2Lifecycle(8), p, true).slice(0, 2)).toEqual(["st-unknown", SNAPSHOT_TEXT]);
+    }
+  });
+
+  for (const kind of ["run", "receipt"] as const) {
+    for (const querySource of ["path", "binding.query"] as const) {
+      it(`${kind} with ${querySource} asOf withholds money facts and shows the snapshot refusal`, async () => {
+        const path = R2_RC + (querySource === "path" ? "?asOf=" + PIN_FIELDS.asOfBlockHash : "");
+        const binding = { path, ...(querySource === "binding.query" ? { query: { asOf: PIN_FIELDS.asOfBlockHash } } : {}) };
+        await r2dPaint([{ kind, binding, statusFrom: "finalState", latestFrom: "finalState" }],
+          { [path]: r2Receipt(8, { economics: ECON }) }, "live");
+        expect.soft(document.querySelectorAll(".st-settled, .st-refunded, .st-running, .st-waiting, .st-failed").length).toBe(0);
+        expect.soft(document.querySelector(".pcc-pin-ref")).toBeNull();
+        expect.soft(document.querySelector(".pcc-win")!.textContent).toContain(SNAPSHOT_TEXT);
+        expect.soft(document.querySelector(".pcc-receipt-num")?.textContent || "").not.toContain(ECON.amount);
+        expect.soft(document.querySelector(".pcc-win")!.textContent).not.toContain(PAYEE);
+      });
+    }
+    it(`${kind} treats every own non-null query value as queried, while null and empty queries keep the live read`, async () => {
+      for (const query of [{ asOf: "" }, { asOf: 0 }, { asOf: false }, { other: "x" }, { asOf: null, other: "x" }]) {
+        await r2dPaint([{ kind, binding: { path: R2_RC, query }, statusFrom: "finalState" }], { [R2_RC]: r2Receipt(8) }, "live");
+        expect.soft(document.querySelector(".pcc-win")!.textContent, JSON.stringify(query)).toContain(SNAPSHOT_TEXT);
+        expect.soft(document.querySelector(".pcc-pin-ref"), JSON.stringify(query)).toBeNull();
+      }
+      for (const query of [{}, { asOf: null }]) {
+        await r2dPaint([{ kind, binding: { path: R2_RC, query }, statusFrom: "finalState" }], { [R2_RC]: r2Receipt(8) }, "live");
+        expect(document.querySelector(".st-settled"), JSON.stringify(query)).not.toBeNull();
+        expect(document.querySelector(".pcc-pin-ref"), JSON.stringify(query)).not.toBeNull();
+      }
+    });
+  }
+
+  for (const [name, body, select] of [
+    ["extra totalAmount", { ...JOB, totalAmount: "250" }, undefined],
+    ["extra contractAddress", { ...JOB, contractAddress: "0x" + "99".repeat(20) }, undefined],
+    ["metadata projection", { id: "j1", status: "running", metadata: { ...LEGACY, status: "RELEASED", totalAmount: "1000000" } }, "metadata"],
+  ] as const) {
+    it(`job receipt with ${name} stays a bound Record`, async () => {
+      for (const mode of ["live", "snapshot"] as const) {
+        await r2dPaint([{ kind: "receipt", binding: { path: "/api/jobs/j1", select } }], { "/api/jobs/j1": body }, mode);
+        expect.soft(document.querySelector(".pcc-win-title")!.textContent, mode).toBe("Record");
+        expect.soft(document.querySelector(".pcc-win")!.textContent, mode).toContain("bound record reports payee: " + PAYEE);
+        expect.soft(document.querySelector(".pcc-win")!.textContent, mode).not.toContain("PCC escrow service");
+        expect.soft(document.querySelector(".pcc-arrow"), mode).toBeNull();
+      }
+    });
+  }
+
+  it("escrow receipt projections stay bound records even on the escrow record route", async () => {
+    for (const mode of ["live", "snapshot"] as const) {
+      await r2dPaint([{ kind: "receipt", binding: { path: "/api/escrow/e1", select: "metadata" } }],
+        { "/api/escrow/e1": { status: "funded", metadata: LEGACY } }, mode);
+      expect.soft(document.querySelector(".pcc-win-title")!.textContent, mode).toBe("Record");
+      expect.soft(document.querySelector(".pcc-win")!.textContent, mode).toContain("bound record reports payee: " + PAYEE);
+      expect.soft(document.querySelector(".pcc-win")!.textContent, mode).not.toContain("PCC escrow service");
+    }
+  });
+
+  it("job list rows and run pills attribute legacy-shaped values to the bound record", async () => {
+    for (const mode of ["live", "snapshot"] as const) {
+      await r2dPaint([r2dList("/api/jobs", "id", [], "status"), { kind: "run", binding: { path: "/api/jobs/j1" }, statusFrom: "status" }],
+        { "/api/jobs": [{ id: "j1", status: "REFUNDED", totalAmount: "250" }], "/api/jobs/j1": LEGACY }, mode);
+      expect.soft(r2dTexts(".pcc-list-row .pcc-pill"), mode).toEqual(["bound record reports: payer refunded - operator NOT paid (not confirmed on chain)"]);
+      expect.soft(r2dTexts(".pcc-win-head .pcc-pill"), mode).toEqual(["bound record reports: payer refunded - operator NOT paid (not confirmed on chain)"]);
+      expect.soft(document.querySelector("#pcc-root")!.textContent, mode).not.toContain("PCC escrow service");
+    }
+  });
+
+  it("chain escrow routes exclude both the exact chain segment and its descendants", async () => {
+    for (const p of ["/api/escrow/chain", "/api/escrow/chain/e1"]) {
+      await r2dPaint([{ kind: "receipt", binding: { path: p } }, { kind: "run", binding: { path: p }, statusFrom: "status" }], { [p]: LEGACY }, "live");
+      expect.soft(document.querySelector(".pcc-win-title")!.textContent, p).toBe("Record");
+      expect.soft(document.querySelector("#pcc-root")!.textContent, p).not.toContain("PCC escrow service");
+      expect.soft(document.querySelector(".pcc-receipt-claim")!.textContent, p).toBe("bound record reports payee: " + PAYEE);
+    }
+  });
+
+  it("noncanonical escrow paths keep the bound Record layout", async () => {
+    for (const p of ["/api/escrow/e1/", "/API/escrow/e1", "/api//escrow/e1", "https://capability.network/api/escrow/e1", "/api/escrow/e1?asOf=x", "/api/escrow"]) {
+      await r2dPaint([{ kind: "receipt", binding: { path: p } }], { [p]: LEGACY }, "snapshot");
+      expect.soft(document.querySelector(".pcc-win-title")!.textContent, p).toBe("Record");
+      expect.soft(document.querySelector(".pcc-win")!.textContent, p).not.toContain("PCC escrow service");
+    }
+  });
+
+  it("legacy display classifiers require their own escrow route in the spec and kit", () => {
+    for (const p of ["/api/jobs/j1", "/api/escrow/chain", "/api/escrow/chain/e1", "/api/escrow/e1/", "/API/escrow/e1", "/api//escrow/e1", "https://capability.network/api/escrow/e1", "/api/escrow/e1?x=1"]) {
+      expect.soft(classifySettlementRead(LEGACY, { path: p, live: true }).label, p).toBe("not a settlement record");
+      expect.soft(kit.settlementReadClass(LEGACY, p, true).slice(0, 2), p).toEqual(["st-unknown", "not a settlement record"]);
+      expect.soft(kit.dataStatusText(p, LEGACY, LEGACY.status, true).t, p).toContain("bound record reports: ");
+    }
+    for (const p of ["/api/escrow/e1", "/api/escrow", "/api/escrow?limit=10", "/api/escrow/chain-id"]) {
+      expect(classifySettlementRead(LEGACY, { path: p, live: true }).label, p).toContain("PCC escrow service reports: ");
+      expect(kit.settlementReadClass(LEGACY, p, true)[1], p).toContain("PCC escrow service reports: ");
+    }
+  });
+
+  for (const latestFrom of ["economics.amount", "assetReality.value"]) {
+    it(`pinned run latest ${latestFrom} is reported independently of a verified status`, async () => {
+      await r2dPaint([{ kind: "run", binding: { path: R2_RC }, statusFrom: "finalState", latestFrom }],
+        { [R2_RC]: r2Receipt(8, { economics: { ...ECON, amount: "1000000" }, assetReality: r2Without({ ...VALID_REAL_ASSET }, ["revision"]) }) }, "live");
+      expect.soft(r2dTexts(".pcc-run-latest")).toEqual([r2dRep(latestFrom === "economics.amount" ? "1000000" : "real")]);
+      expect.soft(document.querySelector(".st-settled")).not.toBeNull();
+      expect.soft(document.querySelector(".pcc-pin-ref")).not.toBeNull();
+    });
+  }
+
+  it("pinned refunded receipts label the refunded amount and omit the payment arrow and recipient, while released receipts retain the payee", async () => {
+    await r2dPaint([{ kind: "receipt", binding: { path: R2_RC } }], { [R2_RC]: r2Receipt(9, { economics: ECON }) }, "live");
+    expect.soft(document.querySelector(".pcc-receipt-amount")!.textContent).toContain("refunded amount");
+    expect.soft(document.querySelector(".pcc-receipt-num")!.textContent).toBe("250000000 base units (decimals not reported)");
+    expect.soft(document.querySelector(".pcc-arrow")).toBeNull();
+    expect.soft(document.querySelector(".pcc-receipt-parties")).toBeNull();
+    expect.soft(document.querySelector(".pcc-win")!.textContent).not.toContain(PAYEE);
+    expect.soft(document.querySelector(".st-refunded")).not.toBeNull();
+    expect.soft(document.querySelector(".pcc-pin-ref")).not.toBeNull();
+    await r2dPaint([{ kind: "receipt", binding: { path: R2_RC } }], { [R2_RC]: r2Receipt(8, { economics: ECON }) }, "live");
+    expect(document.querySelector(".pcc-arrow")!.textContent).toBe("→");
+    expect(document.querySelector(".pcc-receipt-parties")!.textContent).toContain(PAYEE);
+    expect(document.querySelector(".pcc-receipt-amount")!.textContent).not.toContain("refunded amount");
   });
 });
