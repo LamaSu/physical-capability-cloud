@@ -28,7 +28,14 @@ export interface SnapshotOptions {
   canonical?: boolean;
 }
 
-class NotPlainData extends Error {}
+const ownRefusals = new WeakSet<object>();
+
+class NotPlainData extends Error {
+  constructor(message: string) {
+    super(message);
+    ownRefusals.add(this);
+  }
+}
 
 export function snapshotJson(value: unknown, options: SnapshotOptions = {}): SnapshotResult {
   const canonical = options.canonical === true;
@@ -92,7 +99,12 @@ export function snapshotJson(value: unknown, options: SnapshotOptions = {}): Sna
     return { ok: true, value: copy(value, 0, "input") };
   } catch (e) {
     // A Proxy trap or an engine limit can throw anything; none of it escapes as an exception.
-    return { ok: false, reason: e instanceof NotPlainData ? e.message : "the input could not be read as JSON data" };
+    return {
+      ok: false,
+      reason:
+        typeof e === "object" && e !== null && ownRefusals.has(e)
+          ? (e as NotPlainData).message
+          : "the input could not be read as JSON data",
+    };
   }
 }
-

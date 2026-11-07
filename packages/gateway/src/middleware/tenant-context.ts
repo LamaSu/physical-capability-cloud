@@ -33,7 +33,7 @@ declare module "fastify" {
   interface FastifyRequest {
     /**
      * Tenant identity for the authenticated request, OR null for anonymous
-     * /api/* routes that opt into being public via PUBLIC_PREFIXES.
+     * /api/* routes declared public in PUBLIC_ROUTES.
      *
      * Source priority: API key operatorId > SIWE wallet address > null.
      */

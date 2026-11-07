@@ -1,7 +1,8 @@
 import { createPublicKey, verify } from "node:crypto";
 import { canonicalize } from "@pcc/spec";
-import { getAddress, recoverMessageAddress, type Hex } from "viem";
+import { getAddress } from "viem";
 import { createSiweMessage } from "viem/siwe";
+import { SignatureVerifierUnavailableError, verifyEvmMessageSignature } from "../../auth/evm-signature.js";
 import { CONSENT_SHA256, CONSENT_VERSION } from "./consent.js";
 import type { WalletLinkConfig } from "./config.js";
 
@@ -77,9 +78,12 @@ export async function verifyProofMessage(
     if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt) || issuedAt > now || now - issuedAt > 600_000 || expiresAt <= now) return false;
     if (request.message !== composeProofMessage(request, config)) return false;
     if (request.key_type === "secp256k1") {
-      if (!/^0x(?:[0-9a-fA-F]{130}|[0-9a-fA-F]{128})$/.test(signature)) return false;
-      const signer = await recoverMessageAddress({ message: request.message, signature: signature as Hex });
-      return signer.toLowerCase() === request.address_or_pubkey.toLowerCase();
+      const result = await verifyEvmMessageSignature({ address: request.address_or_pubkey,
+        message: request.message, signature, chainId: request.chain_id });
+      if (!result.ok && (result.reason === "unconfigured" || result.reason === "unavailable")) {
+        throw new SignatureVerifierUnavailableError();
+      }
+      return result.ok;
     }
     if (!/^[0-9a-f]{64}$/.test(request.address_or_pubkey) || !/^[0-9a-fA-F]{128}$/.test(signature)) return false;
     const key = createPublicKey({
@@ -88,7 +92,8 @@ export async function verifyProofMessage(
       type: "spki",
     });
     return verify(null, Buffer.from(request.message, "utf8"), key, Buffer.from(signature, "hex"));
-  } catch {
+  } catch (error) {
+    if (error instanceof SignatureVerifierUnavailableError) throw error;
     return false;
   }
 }

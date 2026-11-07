@@ -116,9 +116,9 @@ export abstract class BaseFacade {
             this.emitTelemetry(operation, "failed", { error: facadeErrorTelemetryCode(error) });
             outcome = err(code, message, 400) as Result<T>;
           } else if (error instanceof ForbiddenError) {
-            code = "FORBIDDEN";
+            code = (error as ForbiddenError & { code?: string }).code ?? "FORBIDDEN";
             this.emitTelemetry(operation, "failed", { error: facadeErrorTelemetryCode(error) });
-            outcome = err("FORBIDDEN", message, 403) as Result<T>;
+            outcome = err(code, message, 403) as Result<T>;
           } else if (error instanceof ConflictError) {
             // Merge-up (master, N85(a)): a ConflictError may carry its own attached
             // code (e.g. "settlement_owned_status" from job.facade.ts's

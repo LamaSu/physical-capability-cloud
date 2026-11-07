@@ -2,6 +2,9 @@ import { create } from "zustand";
 import { fetchWithKey, gatewayUrl } from "../lib/gateway-base.js";
 import { authorizedFetch, hasStoredApiKey, onStoredKeyChange, setStoredApiKey } from "../lib/authorized-fetch.js";
 import { configureSessionKeyRecovery } from "../lib/session-key-recovery.js";
+import { OPERATOR_SIGN_IN_NOTICE } from "../lib/auth-notices.js";
+
+const walletSignInNotice = `Your wallet is signed in. ${OPERATOR_SIGN_IN_NOTICE}`;
 
 /**
  * Sign-in state. The API key itself is not here, not in the state and not in
@@ -17,7 +20,7 @@ interface AuthState {
   keyEpoch: number;
   login: (key: string) => Promise<boolean>;
   logout: () => void;
-  signOutWallet: () => Promise<void>;
+  signOutWallet: (options?: { keepPersisted?: boolean }) => Promise<void>;
   mintSessionKey: () => Promise<boolean>;
 
   // -- Wallet/SIWE auth (secondary, for on-chain features) --
@@ -58,6 +61,8 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
   },
 
+  // For pasted keys, logout clears this tab's key only and leaves the wallet's
+  // cookie session live; user-facing Sign-out must call signOutWallet().
   logout: () => {
     // The key change below clears the wallet fields in the same set(), so the
     // identity change is reported once (onIdentityChange).
@@ -114,6 +119,7 @@ let mintFlight: Promise<boolean> | null = null;
 let mintKeyEpoch = -1;
 let mintSessionEpoch = -1;
 let signOutFlight: Promise<void> | null = null;
+let clearPersistedOnSignOut = false;
 let signingOut = false;
 
 function scheduleRenewal(expiresAt: string): void {
@@ -124,25 +130,30 @@ function scheduleRenewal(expiresAt: string): void {
 
 function mintSessionKey(checkSession: boolean): Promise<boolean> {
   const state = useAuthStore.getState();
-  if (signingOut || !state.sessionToken || (hasStoredApiKey() && !state.sessionKeyId)) return Promise.resolve(false);
+  if (signingOut || (hasStoredApiKey() && !state.sessionKeyId)) return Promise.resolve(false);
+  if (!state.sessionToken || state.sessionToken === "cookie") {
+    useAuthStore.setState({ authNotice: walletSignInNotice });
+    return Promise.resolve(false);
+  }
   if (mintFlight && mintKeyEpoch === state.keyEpoch && mintSessionEpoch === state.sessionEpoch) return mintFlight;
   const epoch = state.keyEpoch;
   const session = state.sessionToken;
   const sessionEpoch = state.sessionEpoch;
   const address = state.address;
-  const current = () => !signingOut && useAuthStore.getState().keyEpoch === epoch && useAuthStore.getState().sessionEpoch === sessionEpoch && useAuthStore.getState().sessionToken === session && useAuthStore.getState().address === address;
+  const currentSession = () => !signingOut && useAuthStore.getState().keyEpoch === epoch && useAuthStore.getState().sessionEpoch === sessionEpoch && useAuthStore.getState().sessionToken === session;
+  const current = () => currentSession() && useAuthStore.getState().address === address;
   mintKeyEpoch = epoch;
   mintSessionEpoch = sessionEpoch;
   const flight = (async () => {
     try {
       if (checkSession) {
-        const me = await fetch(gatewayUrl("/api/auth/me"), { credentials: "include" });
+        const me = await fetchWithKey("/api/auth/me", session, { credentials: "omit" });
         if (!current()) return false;
         const data = me.ok ? await me.json().catch(() => null) : null;
         if (!current()) return false;
         if (!me.ok || typeof data?.address !== "string" || !state.address || data.address.toLowerCase() !== state.address.toLowerCase()) {
           if (me.status === 401 || me.status === 403 || me.ok) {
-            adoptApiKey(null);
+            adoptApiKey(null, false);
             useAuthStore.setState({ authNotice: "Please sign in again to continue." });
           } else {
             useAuthStore.setState({ authNotice: "Your wallet is signed in. Operator access is temporarily unavailable; try again shortly." });
@@ -151,12 +162,17 @@ function mintSessionKey(checkSession: boolean): Promise<boolean> {
         }
       }
       for (let attempt = 0; attempt < 2; attempt++) {
-        const response = await fetch(gatewayUrl("/api/auth/session-key"), {
+        const response = await fetchWithKey("/api/auth/session-key", session, {
           method: "POST",
-          credentials: "include",
+          credentials: "omit",
         });
         const data = await response.json().catch(() => ({}));
-        if (!current()) return false;
+        if (!current()) {
+          if (currentSession() && useAuthStore.getState().address !== address) {
+            useAuthStore.setState({ authNotice: walletSignInNotice });
+          }
+          return false;
+        }
         if (response.status === 201 && typeof data.operator_id === "string" && address && data.operator_id.toLowerCase() === address.toLowerCase() && typeof data.api_key === "string" && typeof data.key_id === "string" && typeof data.expires_at === "string" && Number.isFinite(Date.parse(data.expires_at))) {
           adoptApiKey(data.api_key, false);
           useAuthStore.setState({ sessionKeyId: data.key_id, sessionKeyExpiresAt: data.expires_at, authNotice: null });
@@ -167,7 +183,7 @@ function mintSessionKey(checkSession: boolean): Promise<boolean> {
         const notice = data.error === "too_many_keys"
           ? "Your wallet is signed in. You have reached the active-key limit; remove an unused key to enable operator actions."
           : data.error === "session_required" || data.error === "api_key_required"
-            ? "Your wallet is signed in. Sign in again to enable operator actions."
+            ? walletSignInNotice
             : "Your wallet is signed in. Operator access is temporarily unavailable; try again shortly.";
         useAuthStore.setState({ authNotice: notice });
         return false;
@@ -181,7 +197,8 @@ function mintSessionKey(checkSession: boolean): Promise<boolean> {
   return flight;
 }
 
-function signOutWallet(): Promise<void> {
+function signOutWallet({ keepPersisted = false }: { keepPersisted?: boolean } = {}): Promise<void> {
+  if (!keepPersisted) clearPersistedOnSignOut = true;
   if (signOutFlight) return signOutFlight;
   signingOut = true;
   if (renewalTimer !== undefined) clearTimeout(renewalTimer);
@@ -198,7 +215,8 @@ function signOutWallet(): Promise<void> {
         await fetch(gatewayUrl("/api/auth/logout"), { method: "POST", credentials: "include" });
       } catch { /* Clear local credentials even when the gateway is unavailable. */ }
     } finally {
-      adoptApiKey(null);
+      adoptApiKey(null, clearPersistedOnSignOut);
+      clearPersistedOnSignOut = false;
       signingOut = false;
     }
   })().finally(() => { signOutFlight = null; });

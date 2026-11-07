@@ -70,6 +70,41 @@ describe("operator inbox panel", () => {
     expect(host.textContent).toContain(notice);
   });
 
+  it("re-reads an already approved decision and keeps both buttons disabled until it settles", async () => {
+    vi.useFakeTimers();
+    type Response = { status: number; json(): Promise<unknown> };
+    const current = { id: "approval:a", phase: "awaiting_me", capabilityType: "fdm", actions: [
+      { op: "approve", allowed: true, reasonIfNot: null, route: { method: "POST", path: "/api/operator/approvals/a/approve" } },
+      { op: "reject", allowed: true, reasonIfNot: null, route: { method: "POST", path: "/api/operator/approvals/a/reject" } },
+    ] };
+    const response = (items: unknown[]): Response => ({ status: 200, json: async () => ({
+      schemaId: "pcc.operator-work/v1", sources: { approval: { state: "read" } }, items,
+    }) });
+    let resolve!: (value: Response) => void;
+    const reread = new Promise<Response>((r) => { resolve = r; });
+    let reads = 0;
+    const fetch = vi.fn(async (_path: string, init?: RequestInit): Promise<Response> => {
+      if (init?.method === "POST") return { status: 409, json: async () => ({ error: "already_decided", status: "approved" }) };
+      if (++reads === 1) return response([current]);
+      return reread;
+    });
+    const { host } = await mount([createOperatorWorkSource({ fetch })]);
+    expect(button(host, "Approve")?.disabled).toBe(false);
+    expect(button(host, "Reject")?.disabled).toBe(false);
+    await act(async () => { button(host, "Approve")!.click(); });
+    expect(host.textContent).toContain("Already approved.");
+    expect(fetch.mock.calls.map(([, init]) => init?.method ?? "GET")).toEqual(["GET", "POST", "GET"]);
+    expect(reads).toBe(2);
+    expect(host.querySelector("h3")).not.toBeNull();
+    expect(button(host, "Approve")?.disabled).toBe(true);
+    expect(button(host, "Reject")?.disabled).toBe(true);
+    await act(async () => { resolve(response([])); await reread; });
+    expect(host.querySelector("h3")).toBeNull();
+    expect(button(host, "Approve")).toBeUndefined();
+    expect(button(host, "Reject")).toBeUndefined();
+    expect(host.textContent).toContain("Nothing needs you right now.");
+  });
+
   it("reads again after a pre-decision poll and keeps decisions disabled until the fresh read settles", async () => {
     vi.useFakeTimers();
     type Response = { status: number; json(): Promise<unknown> };

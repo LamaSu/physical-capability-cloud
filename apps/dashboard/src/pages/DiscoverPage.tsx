@@ -1,15 +1,26 @@
 import React from "react";
 import { GlassPanel, GlowBadge, EmptyState, LoadingShell } from "@pcc/ui";
-import type { CapabilityType } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
-import { useCapabilityTemplates, useKernels } from "../api/hooks/use-pcc-data.js";
+import { useAllCapabilities, useKernels } from "../api/hooks/use-pcc-data.js";
+import type { CapabilityDTO } from "../types/dto.js";
+import { formatCount, isKernelOnline } from "../lib/live-list.js";
 import { useNavigate } from "react-router-dom";
+import { UnavailableState, StaleNotice, CAPABILITY_PAGES_NOTICE } from "../components/ReadState.js";
 import {
   AssuranceScoreBadge,
   scoreToColor,
 } from "../components/assurance/index.js";
 
-const capabilityTypes: CapabilityType[] = ["hplc", "pcr", "microscopy", "mass-spec", "sequencing", "cell-culture"];
+const SUBTITLE = "Search the capabilities operators list on the network";
+const SEARCH_PLACEHOLDER = "Search by name, type or description";
+const SITE_NAMES_UNAVAILABLE = "Site names couldn't be loaded, so the cards don't say where each capability runs.";
+const PARTIAL_NOTICE = (n: number, total: number) =>
+  `Showing the first ${n} of the ${total} capabilities the gateway lists; search and filters cover only these.`;
+const ONLINE = " · online";
+const NOT_ONLINE = " · not online";
+const EMPTY_TITLE = "No capabilities listed yet";
+const SKIPPED_ONE = "1 listed capability couldn't be read and isn't shown.";
+const SKIPPED_MANY = (n: number) => `${n} listed capabilities couldn't be read and aren't shown.`;
 
 type SortMode = "default" | "assurance-desc" | "assurance-asc";
 
@@ -17,18 +28,17 @@ export function DiscoverPage() {
   const navigate = useNavigate();
   const setPageMeta = useUIStore((s) => s.setPageMeta);
   const [search, setSearch] = React.useState("");
-  const [typeFilter, setTypeFilter] = React.useState<CapabilityType | "all">("all");
+  const [typeFilter, setTypeFilter] = React.useState<string>("all");
   const [sortMode, setSortMode] = React.useState<SortMode>("default");
   const [minScoreInput, setMinScoreInput] = React.useState<string>("");
 
-  React.useEffect(() => { setPageMeta("Discover Capabilities", "Search and browse available capabilities"); }, [setPageMeta]);
+  React.useEffect(() => { setPageMeta("Discover Capabilities", SUBTITLE); }, [setPageMeta]);
 
-  const { data: templatesData, isLoading: templatesLoading } = useCapabilityTemplates();
-  const { data: kernels = [], isLoading: kernelsLoading } = useKernels();
-
-  const templates = (templatesData?.templates ?? []) as any[];
+  const capabilitiesQ = useAllCapabilities();
+  const kernelsQ = useKernels();
 
   // Parse min-score: accepts "0.7" or "70" (percent). Empty → no filter.
+  // (Called before any early return: hooks must run in the same order on every render.)
   const minScore: number | null = React.useMemo(() => {
     const raw = minScoreInput.trim();
     if (!raw) return null;
@@ -38,7 +48,27 @@ export function DiscoverPage() {
     return n > 1 ? n / 100 : n;
   }, [minScoreInput]);
 
-  const filtered = templates.filter((cap: any) => {
+  if (capabilitiesQ.isLoading || kernelsQ.isLoading) return <LoadingShell rows={4} />;
+
+  // A failed capability read is the page's whole answer. Kernels only add a
+  // site name to each card; when they couldn't be read the page says so
+  // instead of leaving the names silently blank.
+  if (!capabilitiesQ.data) {
+    return (
+      <GlassPanel padding="lg">
+        <UnavailableState what="capabilities" error={capabilitiesQ.error} onRetry={() => void capabilitiesQ.refetch()} />
+      </GlassPanel>
+    );
+  }
+
+  // The capabilities operators list (GET /api/capabilities, every page), not
+  // the template catalog: a template describes a kind of work, not anyone
+  // offering it (astra 18b F2). useAllCapabilities validates every row.
+  const { items: capabilities, total, complete, pages, skipped } = capabilitiesQ.data;
+  const kernels = kernelsQ.isSuccess ? kernelsQ.data : undefined;
+  const capabilityTypes = [...new Set(capabilities.map((cap) => cap.type))].sort();
+
+  const filtered = capabilities.filter((cap) => {
     if (typeFilter !== "all" && cap.type !== typeFilter) return false;
     if (minScore != null) {
       // Drop capabilities whose score is unknown or below the threshold.
@@ -56,31 +86,42 @@ export function DiscoverPage() {
     return true;
   });
 
-  const sorted = React.useMemo(() => {
+  // Plain computation, not a hook: this runs after the early returns above.
+  const sorted = (() => {
     if (sortMode === "default") return filtered;
     const copy = [...filtered];
-    copy.sort((a: any, b: any) => {
+    copy.sort((a, b) => {
       const av = typeof a.assuranceScore === "number" ? a.assuranceScore : -Infinity;
       const bv = typeof b.assuranceScore === "number" ? b.assuranceScore : -Infinity;
       return sortMode === "assurance-desc" ? bv - av : av - bv;
     });
     return copy;
-  }, [filtered, sortMode]);
-
-  // Every hook above must run before this early return: a hook called after
-  // an early return changes the hook count between the loading and loaded
-  // renders on a cold load (React #310).
-  if (templatesLoading || kernelsLoading) return <LoadingShell rows={4} />;
+  })();
 
   return (
     <div className="space-y-6">
+      {capabilitiesQ.isError && (
+        <StaleNotice what="capabilities" updatedAt={capabilitiesQ.dataUpdatedAt} onRetry={() => void capabilitiesQ.refetch()} />
+      )}
+      {!kernels && (
+        <p className="text-xs text-amber-200/70">{SITE_NAMES_UNAVAILABLE}</p>
+      )}
+      {skipped > 0 && (
+        <p role="status" className="text-xs text-amber-200/70">{skipped === 1 ? SKIPPED_ONE : SKIPPED_MANY(skipped)}</p>
+      )}
+      {!complete && (
+        <p role="status" className="text-xs text-amber-200/70">{PARTIAL_NOTICE(capabilities.length + skipped, total)}</p>
+      )}
+      {pages > 1 && (
+        <p className="text-xs text-white/30">{CAPABILITY_PAGES_NOTICE(pages)}</p>
+      )}
       {/* Search + filters */}
       <GlassPanel padding="md">
         <input
           type="text"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Describe what you need... (e.g., HPLC purity analysis, CNC machining, 3D printing)"
+          placeholder={SEARCH_PLACEHOLDER}
           className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-4 py-3 text-sm text-white/80 placeholder-white/25 outline-none focus:border-teal-500/40 transition-colors"
         />
         <div className="flex gap-2 mt-3 flex-wrap">
@@ -160,10 +201,10 @@ export function DiscoverPage() {
         </div>
       </GlassPanel>
 
-      {templates.length === 0 ? (
+      {capabilities.length === 0 && complete ? (
         <GlassPanel padding="lg">
           <EmptyState
-            title="No capabilities available"
+            title={EMPTY_TITLE}
             description="Capabilities will appear here as operators onboard equipment and register kernels on the network."
             action={{ label: "Register a Kernel", onClick: () => navigate("/onboard") }}
           />
@@ -171,21 +212,22 @@ export function DiscoverPage() {
       ) : (
         <>
           <div className="text-xs text-white/30">
-            {sorted.length} capabilit{sorted.length === 1 ? "y" : "ies"} found
+            {formatCount(sorted.length, !complete)} capabilit{sorted.length === 1 ? "y" : "ies"} found
             {typeFilter !== "all" && <> in <GlowBadge color="teal">{typeFilter}</GlowBadge></>}
             {minScore != null && (
               <> with assurance ≥ <span className="font-mono text-teal-400">{minScore.toFixed(2)}</span></>
             )}
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {sorted.map((cap: any) => {
-              const kernel = kernels.find((k: any) => k.id === cap.kernelId);
+            {sorted.map((cap: CapabilityDTO) => {
+              const kernel = kernels?.find((k) => k.id === cap.kernelId);
               const color = scoreToColor(cap.assuranceScore);
               return (
                 <GlassPanel
                   key={cap.id}
                   padding="md"
                   hover
+                  onClick={() => navigate(`/kernels/${cap.kernelId}`)}
                   glow={color === "green" ? "green" : color === "yellow" ? "gold" : undefined}
                 >
                   <div className="flex items-start justify-between mb-2 gap-2">
@@ -199,12 +241,12 @@ export function DiscoverPage() {
                     </div>
                   </div>
                   {cap.description && <p className="text-xs text-white/40 mb-2">{cap.description}</p>}
-                  {kernel && <div className="text-[10px] text-white/20 font-mono">at {kernel.name}</div>}
+                  {kernel && <div className="text-[10px] text-white/20 font-mono">at {kernel.name}{isKernelOnline(kernel) ? ONLINE : NOT_ONLINE}</div>}
                 </GlassPanel>
               );
             })}
           </div>
-          {sorted.length === 0 && (search || minScore != null) && (
+          {sorted.length === 0 && (search || typeFilter !== "all" || minScore != null) && (
             <EmptyState
               title="No capabilities match your filters"
               description="Try different keywords, relax the minimum score, or clear the filter."

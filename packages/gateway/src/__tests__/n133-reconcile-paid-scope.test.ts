@@ -21,6 +21,7 @@ import { __setFundingRecordStoreForTest, fundingRecordStore, isWellFormedFunding
 import { isMockSettlement, mockFundsWrites } from "../services/settlement-mode.js";
 import { acceptanceFor, escrowForJob } from "../services/scope-acceptance.js";
 import { projectFundingStatus } from "../readmodels/funding-status.js";
+import { testnetBuyerAllowance } from "../services/funding-binding.js";
 import {
   installCaseExactFundingRecordStore,
   installFinalityBlindFundingRecordStore,
@@ -178,7 +179,7 @@ describe("rulings 4 and 5: the expected chain and the post-activation TTL are re
     const { scopeId } = await paidScope(f);
     const findByScope = vi.spyOn(store, "findByScope");
     const malformed = { ...verification(scopeId), finality: "latest" } as never;
-    const none = { expectedChainId: null, postActivationTtlMs: null };
+    const none = { expectedChainId: null, postActivationTtlMs: null, testnetOnly: false };
     // Each case also fails every later check, so each answer is the first check that fails.
     __setFundingRecordStoreForTest(null);
     expect(reconcilePaidScope(scopeId, malformed, none)).toEqual(refused("funding_record_store_unavailable"));
@@ -590,7 +591,7 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     __setFundingRecordStoreForTest(null);
     expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("funding_record_store_unavailable"));
     // The store is checked before the activation terms (production, which has no store, answers this).
-    expect(reconcilePaidScope(scopeId, verification(scopeId), { expectedChainId: null, postActivationTtlMs: null })).toEqual(
+    expect(reconcilePaidScope(scopeId, verification(scopeId), { expectedChainId: null, postActivationTtlMs: null, testnetOnly: false })).toEqual(
       refused("funding_record_store_unavailable"),
     );
     expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_funding", expiresAt: iso(T0 + TTL) });
@@ -606,7 +607,7 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
         set("VITEST", vitest);
         const label = `NODE_ENV=${nodeEnv} VITEST=${vitest}`;
         expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS), label).toEqual(refused("funding_record_store_unavailable"));
-        expect(reconcilePaidScope(scopeId, verification(scopeId), { expectedChainId: null, postActivationTtlMs: null }), label).toEqual(
+        expect(reconcilePaidScope(scopeId, verification(scopeId), { expectedChainId: null, postActivationTtlMs: null, testnetOnly: false }), label).toEqual(
           refused("funding_record_store_unavailable"),
         );
         expect(() => __setFundingRecordStoreForTest(store), label).toThrow();
@@ -982,7 +983,7 @@ describe("gateway's condition (iii), accepted in bulletin 7195: mock settlement 
     const s = scopeRow(scopeId);
     const scopeIn = { id: s.id, jobId: s.jobId, createdBy: s.createdBy, status: s.status, createdAt: s.createdAt, expiresAt: s.expiresAt };
     const rowIn = { contractAddress: mockRow.contractAddress, payer: mockRow.payer, status: mockRow.status };
-    expect(projectFundingStatus(scopeIn, verification(scopeId), rowIn, CHAIN_ID, new Date().toISOString())).toMatchObject({
+    expect(projectFundingStatus(scopeIn, verification(scopeId), rowIn, CHAIN_ID, new Date().toISOString(), testnetBuyerAllowance(TERMS))).toMatchObject({
       state: "unknown",
       binding: "record_escrow_not_scope_escrow",
       verification: null,

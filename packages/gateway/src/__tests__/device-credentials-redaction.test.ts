@@ -42,6 +42,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import { createRequire } from "node:module";
+import { randomUUID } from "node:crypto";
 import { safeServerEventDistinctId } from "../services/posthog-policy.js";
 
 const analyticsCapture = vi.hoisted(() => vi.fn());
@@ -108,13 +109,13 @@ function seedKey(operatorId: string): string {
   return rawKey;
 }
 
-const inj = (method: string, url: string, raw: string, payload?: unknown) =>
+const inj = (method: string, url: string, raw: string, payload?: unknown, headers: Record<string, string> = {}) =>
   app.inject({
     method: method as never,
     url,
     remoteAddress: `10.97.${Math.floor(++ipSeq / 250)}.${ipSeq % 250}`,
     payload: payload as never,
-    headers: { authorization: `Bearer ${raw}` },
+    headers: { authorization: `Bearer ${raw}`, ...headers },
   });
 
 /**
@@ -1139,10 +1140,11 @@ describe("N71 round 3 (astra pack 83b): the setup catch blocks answer with fixed
       lastUpdated: new Date().toISOString(), adapterType: "mock",
     });
     const spy = vi.spyOn(getKernelService(), "submitJob").mockRejectedValue(new Error(THROWN));
+    const admin = randomUUID();
     try {
-      const { result: res, lines } = await captureAppLog(() =>
-        inj("POST", "/api/setup/test-job", keyA, { kernelId: localKernelId, deviceId: "dev_fdm_001" }),
-      );
+      const { result: res, lines } = await withEnv({ PCC_ADMIN_KEY: admin }, () => captureAppLog(() =>
+        inj("POST", "/api/setup/test-job", keyA, { kernelId: localKernelId, deviceId: "dev_fdm_001" }, { "x-admin-key": admin }),
+      ));
       expect(res.statusCode).toBe(500);
       expect(res.body).not.toContain(SENTINEL);
       const body = bodyOf(res);
@@ -1185,10 +1187,11 @@ describe("N71 round 3 (astra pack 83b): the setup catch blocks answer with fixed
     const completion = vi.spyOn(svc, "jobRanSimulated").mockImplementation(() => { throw new RangeError(THROWN); });
     const findDevice = vi.spyOn(getRepos().kernels, "findDeviceById");
     findDevice.mockReturnValue({ id: "dev_fdm_001", kernelId: localKernelId, type: "machine", adapterType: "generic-http" } as never);
+    const admin = randomUUID();
     try {
-      const { result: res, lines } = await captureAppLog(() =>
-        inj("POST", "/api/setup/test-job", keyA, { kernelId: localKernelId, deviceId: "dev_fdm_001" }),
-      );
+      const { result: res, lines } = await withEnv({ PCC_ADMIN_KEY: admin }, () => captureAppLog(() =>
+        inj("POST", "/api/setup/test-job", keyA, { kernelId: localKernelId, deviceId: "dev_fdm_001" }, { "x-admin-key": admin }),
+      ));
       expect(submit).toHaveBeenCalledOnce();
       expect(status).toHaveBeenCalled();
       expect(completion).toHaveBeenCalledOnce();
@@ -1238,7 +1241,7 @@ describe("N71 round 8: analytics capture policy", () => {
     const result = await getJobFacade().submit({
       jobId: `analytics-job-${++seq}`, stepId: "analytics-step", kernelId,
       capabilityId: `pcc_live_${SENTINEL}`, queueOnly: true,
-    }, `pcc_live_${SENTINEL}`);
+    }, "none", `pcc_live_${SENTINEL}`);
     expect(result.success).toBe(true);
     const captured = analyticsCapture.mock.calls.map(([event]) => event).filter((event) => event.event === "job_submitted");
     expect(captured).toHaveLength(1);

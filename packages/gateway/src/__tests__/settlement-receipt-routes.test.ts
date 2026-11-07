@@ -72,7 +72,10 @@ describe("durable settlement receipts through the gateway app", () => {
     // binding test; ordinary route tests authenticate with the admin secret.
     app.addHook("onRequest", async (req) => {
       const wallet = req.headers["x-test-proven-wallet"];
-      if (typeof wallet === "string") req.provenWallet = wallet;
+      if (typeof wallet === "string") {
+        req.provenWallet = wallet;
+        req.provenWalletCarrier = "key";
+      }
       if (req.headers["x-test-duplicate-admin"] === "true") req.raw.rawHeaders.push("X-Admin-Key", ADMIN);
     });
     await app.ready();
@@ -455,6 +458,26 @@ describe("durable settlement receipts through the gateway app", () => {
     expect(minted.statusCode).toBe(200);
     const read = await app.inject({ method: "GET", url: url(), headers: { "x-admin-key": ADMIN } });
     expect(read.json()).toEqual(minted.json());
+  });
+
+  it.each(["absent", "stored"] as const)("E2: HEAD with the admin secret alone matches GET when the receipt is %s", async (state) => {
+    if (state === "stored") {
+      const minted = await post(await envelope(await issued()));
+      expect(minted.statusCode).toBe(200);
+    }
+    const headers = { "x-admin-key": ADMIN };
+    const read = await app.inject({ method: "GET", url: url(), headers });
+    const head = await app.inject({ method: "HEAD", url: url(), headers });
+    expect(read.statusCode).toBe(state === "stored" ? 200 : 404);
+    expect(head.statusCode).toBe(read.statusCode);
+    expect(head.statusCode).not.toBe(401);
+    expect(head.body).toBe("");
+  });
+
+  it.each(["/api/operator/jobs", "/api/admin/demand/status"])("E3: the admin secret alone cannot authenticate GET %s", async (path) => {
+    const result = await app.inject({ method: "GET", url: path, headers: { "x-admin-key": ADMIN } });
+    expect(result.statusCode).toBe(401);
+    expect(result.json().error).toBe("api_key_required");
   });
 
   it("the issuer creates a gateway nonce and reference with a 24 hour default TTL", async () => {

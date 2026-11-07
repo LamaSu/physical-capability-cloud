@@ -75,6 +75,7 @@ function locationOptInAuthority(req: FastifyRequest): LocationOptInAuthority {
   return {
     admin: hasAdminSecret(req.headers["x-admin-key"]),
     provenWallet: typeof proven === "string" && proven.length > 0 ? proven : null,
+    provenWalletCarrier: req.provenWalletCarrier ?? null,
   };
 }
 

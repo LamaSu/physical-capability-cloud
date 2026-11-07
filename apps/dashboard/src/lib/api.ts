@@ -86,8 +86,11 @@ export interface RegisterDeviceResponse {
 
 export interface TestJobResponse {
   jobId: string;
-  deviceId: string;
+  deviceId: string | null;
   status: string;
+  ran?: boolean;
+  passed?: boolean;
+  simulated?: boolean;
   evidenceBundleId: string | null;
   duration: number;
 }

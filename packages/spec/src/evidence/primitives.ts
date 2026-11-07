@@ -10,7 +10,9 @@
  * This ships the v1 cut (16 primitives, §7.1) PLUS the additive v1.5-industrial
  * cut (#52-#55, Family L `record` + Family C telemetry — the sensor/machine-log
  * primitives that bind already-built verifiers; see
- * ai/research/pcc-evidence-vocab-sensor-machinelog.md). All `status:"active"`.
+ * ai/research/pcc-evidence-vocab-sensor-machinelog.md), plus #56
+ * `input.hash_bound` (funded-input binding, fail-closed stub).
+ * All `status:"active"`.
  * The full space is 51+ primitives; further v1.5 / v2 primitives are appended to
  * EVIDENCE_PRIMITIVES as their verifiers land (§7.2 / §7.3), each an independent
  * commitment. The vocabulary grows in DATA (registry entries), never in code
@@ -779,11 +781,32 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     verifierStatus: "stub",
     dependsOn: ["artifact.hash"],
   },
+
+  // #56 — Family E (confirm). Funded-input modifier; subject.recipeRef (#8812/#8815).
+  {
+    id: "input.hash_bound",
+    wire: "pcc.ev.input.hash_bound.v1",
+    family: "confirm",
+    status: "active",
+    proves:
+      "The device took exactly the funded input: at least one method_loaded event exists on the same deviceJobId as the completion, and EVERY method_loaded in the bundle is kernel-written (source.writer \"kernel\", event hash v2) and carries payload.inputHash equal to the nonzero SHA-256 commitment in the funded subject block's recipeRef, read only from the authenticated subjects object. Every method_loaded carries the same non-empty string payload.deviceJobId; at least one execution_completed exists and EVERY execution_completed carries that exact deviceJobId. LO-EV-9 step 8 and the oracle's input.hash_bound verifier both enforce this binding, failing closed when absent.",
+    paramsSchema: { type: "object", properties: {}, additionalProperties: false },
+    authRequirement: "inherited",
+    tierSupport: [
+      { tier: 1, conditions: "modifier: binds the run to the funded input; grants no tier alone" },
+      { tier: 2, conditions: "modifier" },
+      { tier: 3, conditions: "modifier" },
+    ],
+    objectivityBand: "B1",
+    verifierStatus: "stub",
+    dependsOn: ["receipt.kernel_signed"],
+  },
 ];
 
 // ── Version + manifest hash ─────────────────────────────────────────
 
 /** Vocabulary version. Bumps when the contract (§5.1 fields) changes.
+ *  An additive entry keeps the version; VOCAB_MANIFEST_HASH names the exact vocabulary.
  *  v2 = the additive v1.5-industrial cut (#52-#55 + Family L `record`); no v1
  *  primitive changed, so the bump is purely additive. */
 export const VOCAB_VERSION = 2 as const;

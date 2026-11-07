@@ -20,6 +20,10 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { fetchWithKey, gatewayUrl } from "../lib/gateway-base.js";
+import { authorizedFetch, hasStoredApiKey } from "../lib/authorized-fetch.js";
+import { useAuthStore } from "../stores/auth-store.js";
+import { useAuth } from "../hooks/use-auth.js";
+import { SignInAgainButton } from "../components/ConnectWallet.js";
 import { scopeErrorMessage } from "../lib/scope-notice.js";
 
 const sg = "'Space Grotesk', sans-serif";
@@ -79,6 +83,11 @@ type QuickstartResponse = {
 
 type Stage = "form" | "loading" | "backup" | "done" | "error";
 
+function QuickstartSignInAgain() {
+  const { login, isVerifying } = useAuth();
+  return <SignInAgainButton login={login} isVerifying={isVerifying} />;
+}
+
 export function EarnFromYourWorkPage(): React.JSX.Element {
   const [stage, setStage] = useState<Stage>("form");
   const [email, setEmail] = useState("");
@@ -87,6 +96,7 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
   const [contributionDescription, setContributionDescription] = useState("");
   const [name, setName] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [sessionRequired, setSessionRequired] = useState(false);
   const [response, setResponse] = useState<QuickstartResponse | null>(null);
   const [mnemonicConfirmed, setMnemonicConfirmed] = useState(false);
 
@@ -105,9 +115,10 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
   async function handleSubmit(e: React.FormEvent): Promise<void> {
     e.preventDefault();
     setErrorMessage(null);
+    setSessionRequired(false);
     setStage("loading");
     try {
-      const res = await fetch(gatewayUrl("/api/contributors/quickstart"), {
+      const init: RequestInit = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -117,9 +128,17 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
           contributionDescription: contributionDescription || undefined,
           name: name || undefined,
         }),
-      });
+      };
+      const bearer = useAuthStore.getState().sessionToken;
+      // Prefer a held key; otherwise use a real SIWE bearer, never the cookie placeholder.
+      const res = hasStoredApiKey()
+        ? await authorizedFetch("/api/contributors/quickstart", init)
+        : bearer && bearer !== "cookie"
+          ? await fetchWithKey("/api/contributors/quickstart", bearer, { ...init, credentials: "omit" })
+          : await fetch(gatewayUrl("/api/contributors/quickstart"), init);
       if (!res.ok) {
-        const err = (await res.json().catch(() => ({}))) as { message?: string };
+        const err = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+        if (res.status === 401 && err.error === "session_required") setSessionRequired(true);
         throw new Error(err.message ?? `Signup failed (${res.status})`);
       }
       const data = (await res.json()) as QuickstartResponse;
@@ -294,6 +313,7 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
         <div style={card}>
           <h1 style={{ ...h1, color: AMBER }}>Hit a snag</h1>
           <p style={sub}>{errorMessage ?? "Unknown error."}</p>
+          {sessionRequired && <QuickstartSignInAgain />}
           <button type="button" style={button} onClick={() => setStage("form")}>
             Try again
           </button>

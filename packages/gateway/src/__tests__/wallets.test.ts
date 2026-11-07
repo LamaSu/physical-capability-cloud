@@ -120,8 +120,15 @@ async function signIn(account = privateKeyToAccount(generatePrivateKey())) {
   return { account, headers, token: response.json().token as string };
 }
 
+function explicitSession(headers: Record<string, string>): Record<string, string> {
+  const signed = headers.cookie?.slice("pcc_session=".length);
+  const token = signed ? app.unsignCookie(signed).value : null;
+  expect(token).toBeTruthy();
+  return { ...headers, authorization: `Bearer ${token}` };
+}
+
 async function mintSessionKey(headers: Record<string, string>, context?: string) {
-  const response = await app.inject({ method: "POST", url: "/api/auth/session-key", headers });
+  const response = await app.inject({ method: "POST", url: "/api/auth/session-key", headers: explicitSession(headers) });
   expect(response.statusCode, context).toBe(201);
   return { headers: { authorization: `Bearer ${response.json().api_key}` }, id: response.json().key_id as string };
 }
@@ -307,11 +314,11 @@ describe("W1 wallet ceremony", () => {
     expect(getLinkRequest(chosenId)).toBeUndefined();
   });
 
-  it("anonymous create and cookie approval store null key ids on the request and link", async () => {
+  it("anonymous create and cookie-plus-bearer approval store null key ids on the request and link", async () => {
     const { request } = await proved();
     expect(getStore().db.get<any>(sql`SELECT * FROM wallet_link_requests WHERE id = ${request.requestId}`).created_by_key_id).toBeNull();
     const headers = sessionHeaders("cookie-approval");
-    const response = await approve(request, headers);
+    const response = await approve(request, explicitSession(headers));
     expect(response.statusCode).toBe(200);
     expect(getStore().db.get<any>(sql`SELECT * FROM wallet_link_requests WHERE id = ${request.requestId}`))
       .toMatchObject({ created_by_key_id: null, approved_by_key_id: null });
@@ -605,7 +612,7 @@ describe("W1 wallet ceremony", () => {
     const linkIds: string[] = [];
     for (let i = 0; i < 2; i++) {
       const { request } = await proved();
-      const approval = await approve(request, headers);
+      const approval = await approve(request, explicitSession(headers));
       expect(approval.statusCode).toBe(200);
       linkIds.push(approval.json().linkId);
     }
@@ -677,7 +684,7 @@ describe("W1 wallet ceremony", () => {
   it("cookie-session revoke accepts the configured public Origin", async () => {
     const headers = sessionHeaders("cookie-revoke-public-origin");
     const { account, request } = await proved();
-    const approval = await approve(request, headers);
+    const approval = await approve(request, explicitSession(headers));
     expect(approval.statusCode).toBe(200);
     const response = await revoke(approval.json().linkId, headers);
     expect(response.statusCode).toBe(200);
@@ -707,13 +714,13 @@ describe("W1 wallet ceremony", () => {
     expect(revoke.statusCode).toBe(200); expect(revoke.json().status).toBe("revoked");
   });
 
-  it("cookie-approved links are manageable by same-account cookie sessions and hidden from its API keys", async () => {
+  it("cookie-plus-bearer-approved links are manageable by same-account cookie sessions and hidden from its API keys", async () => {
     const accountId = privateKeyToAccount(generatePrivateKey()).address;
     const approvingSession = sessionHeaders("cookie-manages-first", accountId);
     const anotherSession = sessionHeaders("cookie-manages-second", accountId);
     getStore().db.run(sql`UPDATE api_keys SET operator_id = ${accountId} WHERE id = 'same-account-key'`);
     const { request } = await proved();
-    const { linkId } = (await approve(request, approvingSession)).json();
+    const { linkId } = (await approve(request, explicitSession(approvingSession))).json();
     expect((await app.inject({ url: "/api/wallets", headers: anotherSession })).json().links).toHaveLength(1);
     expect((await app.inject({ url: "/api/wallets", headers: sameAccount })).json()).toEqual({ links: [] });
     const keyRevoke = await app.inject({ method: "POST", url: `/api/wallets/${linkId}/revoke`, headers: sameAccount, payload: {} });
@@ -826,7 +833,7 @@ describe("W1 wallet ceremony", () => {
     const caller = principal === "cookie" ? session : principal === "session-key"
       ? await mintSessionKey(session.headers) : await provisionClaimedKey(session.account.address);
     const { account, request } = await proved();
-    const approval = await approve(request, caller.headers);
+    const approval = await approve(request, principal === "cookie" ? explicitSession(caller.headers) : caller.headers);
     expect(approval.statusCode).toBe(200);
     expect(await resolveActiveWalletLink({ address: account.address, chainId: 84532 }))
       .toMatchObject({ accountProof: principal === "claimed-key" ? "claimed" : "siwe" });
@@ -997,7 +1004,7 @@ describe("W1 wallet ceremony", () => {
     expect(response.statusCode).toBe(429); expect(response.json()).toEqual({ error: "rate_limited" });
   });
 
-  it("cookie approval requires configured Origin; bearer sessions do not", async () => {
+  it("cookie-plus-bearer approval requires configured Origin; bearer sessions do not", async () => {
     const address = privateKeyToAccount(generatePrivateKey()).address;
     getRepos().sessions.insert({ id: "session-owner", token: "session-owner", walletAddress: address,
       createdAt: new Date(clockNow).toISOString(), lastActiveAt: new Date(clockNow).toISOString(),
@@ -1006,7 +1013,8 @@ describe("W1 wallet ceremony", () => {
     const sessionCookie = { cookie: `pcc_session=${app.signCookie("session-owner")}` };
     expect((await approve(request, sessionCookie)).statusCode).toBe(403);
     expect((await approve(request, { ...sessionCookie, origin: "https://evil.example" })).statusCode).toBe(403);
-    expect((await approve(request, { ...sessionCookie, origin: "https://capability.network" })).statusCode).toBe(200);
+    expect((await approve(request, explicitSession({ ...sessionCookie, origin: "https://evil.example" }))).statusCode).toBe(403);
+    expect((await approve(request, explicitSession({ ...sessionCookie, origin: "https://capability.network" }))).statusCode).toBe(200);
     const second = await proved();
     expect((await approve(second.request, { authorization: "Bearer session-owner" })).statusCode).toBe(200);
   });
@@ -1062,7 +1070,7 @@ describe("the linked key's own SIWE principal cannot list or revoke its link", (
   it("the linked EOA signs in as itself (cookie and minted key) and gets [] and 404", async () => {
     const a = await signIn();
     const { account, request } = await proved({ role: "device" });
-    const approval = await approve(request, a.headers);
+    const approval = await approve(request, explicitSession(a.headers));
     expect(approval.statusCode).toBe(200);
     const self = await signIn(account);
     const skSelf = await mintSessionKey(self.headers);
@@ -1074,12 +1082,29 @@ describe("the linked key's own SIWE principal cannot list or revoke its link", (
   });
 });
 
-describe("SIWE principals: near-miss addresses and cookie-approved links", () => {
-  it("near-miss addresses at every hex position and another account cannot list or revoke A's key- and cookie-approved links", async () => {
+describe("the linked key's own SIWE principal cannot list or revoke a key-approved agent link", () => {
+  it("the linked agent EOA signs in as itself (cookie and minted key) and gets [] and 404", async () => {
+    const a = await signIn();
+    const skA = await mintSessionKey(a.headers);
+    const { account, request } = await proved({ role: "agent" });
+    const approval = await approve(request, skA.headers);
+    expect(approval.statusCode).toBe(200);
+    const self = await signIn(account);
+    const skSelf = await mintSessionKey(self.headers);
+    for (const headers of [self.headers, skSelf.headers]) {
+      expect((await app.inject({ url: "/api/wallets", headers })).json()).toEqual({ links: [] });
+      expect((await revoke(approval.json().linkId, headers)).statusCode).toBe(404);
+    }
+    expect(await resolveActiveWalletLink({ address: account.address, chainId: 84532 })).toMatchObject({ linkId: approval.json().linkId, role: "agent" });
+  });
+});
+
+describe("SIWE principals: near-miss addresses and cookie-plus-bearer-approved links", () => {
+  it("near-miss addresses at every hex position and another account cannot list or revoke A's key- and cookie-plus-bearer-approved links", async () => {
     const a = await signIn();
     const skA = await mintSessionKey(a.headers);
     const viaKey = await approve((await proved({ role: "device" })).request, skA.headers);
-    const viaCookie = await approve((await proved({ role: "device" })).request, a.headers);
+    const viaCookie = await approve((await proved({ role: "device" })).request, explicitSession(a.headers));
     expect([viaKey.statusCode, viaCookie.statusCode]).toEqual([200, 200]);
     const linkIds = [viaKey.json().linkId, viaCookie.json().linkId];
     async function cannotAccess(headers: Record<string, string>, context: string) {
@@ -1104,6 +1129,7 @@ describe("SIWE principals: near-miss addresses and cookie-approved links", () =>
     }
     const b = await signIn();
     await cannotAccess(b.headers, "B cookie");
+    expect((await app.inject({ url: "/api/wallets", headers: a.headers })).json().links).toHaveLength(2);
     expect((await app.inject({ url: "/api/wallets", headers: a.headers })).json().links.map((link: { status: string }) => link.status)).toEqual(["active", "active"]);
   });
 });
@@ -1116,5 +1142,31 @@ describe("X-PCC-API-Key never changes the lookup principal", () => {
     expect(withHeader.statusCode).toBe(200);
     expect(withHeader.json()).toEqual(plain.json());
     expect(withHeader.json().consent.text).toContain("account-a");
+  });
+});
+
+describe("the linked key's own SIWE principal cannot list or revoke its link, for each role and approver", () => {
+  // sessionHeaders() inserts the session row directly: /api/auth/verify's 30-per-minute
+  // limiter is module state that the per-test reset leaves alone, and this file shares it.
+  it.each([
+    ["agent", "cookie"], ["agent", "session key"], ["agent", "claimed key"],
+    ["device", "cookie"], ["device", "session key"], ["device", "claimed key"],
+  ] as const)("a %s link approved by a %s: the linked EOA's cookie and minted key get [] and 404", async (role, approver) => {
+    const a = sessionHeaders(`cells-owner-${role}-${approver}`);
+    const approverHeaders = approver === "cookie" ? explicitSession(a) : approver === "session key" ? (await mintSessionKey(a)).headers : owner;
+    const { account, request } = await proved({ role });
+    const approval = await approve(request, approverHeaders);
+    expect(approval.statusCode).toBe(200);
+    const linkId = approval.json().linkId;
+    const stored = getStore().db.get<{ approved_by_key_id: string | null }>(sql`SELECT approved_by_key_id FROM wallet_links WHERE id = ${linkId}`);
+    expect(stored?.approved_by_key_id === null).toBe(approver === "cookie");
+    const self = sessionHeaders(`cells-self-${role}-${approver}`, account.address);
+    const skSelf = await mintSessionKey(self);
+    for (const headers of [self, skSelf.headers]) {
+      expect((await app.inject({ url: "/api/wallets", headers })).json()).toEqual({ links: [] });
+      expect((await revoke(linkId, headers)).statusCode).toBe(404);
+    }
+    expect(await resolveActiveWalletLink({ address: account.address, chainId: 84532 }))
+      .toMatchObject({ linkId, role, accountProof: approver === "claimed key" ? "claimed" : "siwe" });
   });
 });

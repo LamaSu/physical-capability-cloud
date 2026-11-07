@@ -46,7 +46,11 @@ const digestOf = (root: string) => execFileSync("sh", [DIGEST_SH, root], { encod
 /** An independent implementation of pcc.source-digest/v1 (not the script). */
 function independentDigest(root: string): string {
   const pruneNames = new Set(["node_modules", "dist", ".git"]);
-  const prunePaths = new Set(["packages/contracts/out", "packages/contracts/cache", "packages/contracts/lib"]);
+  const prunePaths = new Set([
+    "packages/contracts/out", "packages/contracts/cache",
+    "packages/contracts/out-testnet", "packages/contracts/cache-testnet",
+    "packages/contracts/lib", "packages/contracts/tmp",
+  ]);
   const files: string[] = [];
   const walk = (rel: string) => {
     const base = rel.split("/").pop()!;
@@ -92,6 +96,9 @@ describe("scripts/source-digest.sh (pcc.source-digest/v1)", () => {
       "apps/dashboard/dist/index.html": "4",
       "packages/contracts/out/A.json": "5",
       "packages/contracts/cache/c": "6",
+      "packages/contracts/out-testnet/A.json": "testnet build",
+      "packages/contracts/cache-testnet/c": "testnet cache",
+      "packages/contracts/tmp/vnext-record-test/x/base-sepolia/DRYRUN-CANONICAL.json": "{}",
       "packages/contracts/lib/forge-std/.git": "gitdir: x",
       "packages/some/.git/HEAD": "ref",
       "scripts/tool.sh": "7",
@@ -125,6 +132,10 @@ describe("scripts/source-digest.sh (pcc.source-digest/v1)", () => {
       const covered = p.startsWith("**/") ? names.includes(p.slice(3)) : paths.includes(p);
       expect(covered, `.dockerignore ${p} must be excluded by source-digest.sh`).toBe(true);
     }
+    for (const p of paths) {
+      expect(inScope, `source-digest.sh -path ${p} must appear verbatim in .dockerignore`).toContain(p);
+    }
+    // Do not reverse-check -name: the script prunes .git at any depth; .dockerignore deliberately lists it only at root.
     expect(inScope.length).toBeGreaterThan(0);
   });
 });

@@ -5,6 +5,9 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "print-host": "dist/cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -18,9 +21,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@pcc/contracts": "workspace:*",
     "@pcc/kernel": "workspace:*",
     "@pcc/kernel-sdk": "workspace:*",
-    "@pcc/spec": "workspace:*"
+    "@pcc/spec": "workspace:*",
+    "viem": "^2.21.0",
+    "zod": "^3.23.0"
   },
   "devDependencies": {
     "typescript": "^5.4.0",

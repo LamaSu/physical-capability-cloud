@@ -110,6 +110,10 @@
     ],
     "Sentry.init": [
       {
+        "argText": "beforeBreadcrumb(breadcrumb) {\n      if ([breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message].some(isOutboundSecretUrl)) return null;\n      const urls = [breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message];\n      return urls.some((url) => typeof url === \"string\" && isWalletRequest(url)) ? null : withoutWalletHeader(breadcrumb);\n    }",
+        "fingerprint": "0d4d7ee5372c5ff65184bfefcb5e4a650a68e072d2ff3fb504631f3d1474baed"
+      },
+      {
         "argText": "walletSafeSentryEvent",
         "fingerprint": "2cf1564940827109dfbae3c41059b3b6de24bd6073114565158f6ffa78f3fc14"
       },
@@ -118,12 +122,8 @@
         "fingerprint": "3738b018b0011001cab90df6064f8f5478a9b4e065aeaedd5941d21aa85c3cd3"
       },
       {
-        "argText": "beforeSendSpan(span) {\n      const urls = [span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])];\n      const route = span.data[\"http.route\"];\n      return urls.some((url) => typeof url === \"string\" && isWalletRequest(url))\n        ? { ...span, description: typeof route === \"string\" && WALLET_ROUTE_TEMPLATES.has(route)\n          ? route : \"/api/wallets/<redacted>\", data: {} }\n        : withoutWalletHeader(span);\n    }",
-        "fingerprint": "87a553475b6e01a18703a033ed32e74d98e2743f30f3dca9b22f1b52dc614ce0"
-      },
-      {
-        "argText": "beforeBreadcrumb(breadcrumb) {\n      const urls = [breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message];\n      return urls.some((url) => typeof url === \"string\" && isWalletRequest(url)) ? null : withoutWalletHeader(breadcrumb);\n    }",
-        "fingerprint": "a4fd63e30a6ee8ae2f49708e24f3016ee63512f3c6c5976c5041d03e58c225fa"
+        "argText": "beforeSendSpan(span) {\n      if ([span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])].some(isOutboundSecretUrl)) return { ...span, description: \"outbound/<redacted>\", data: {} };\n      const urls = [span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])];\n      const route = span.data[\"http.route\"];\n      return urls.some((url) => typeof url === \"string\" && isWalletRequest(url))\n        ? { ...span, description: typeof route === \"string\" && WALLET_ROUTE_TEMPLATES.has(route)\n          ? route : \"/api/wallets/<redacted>\", data: {} }\n        : withoutWalletHeader(span);\n    }",
+        "fingerprint": "984ebecc58c9d81b6bacbed75db848c60df751067ac08287a479a2de572d7f41"
       },
       {
         "argText": "SENTRY_DSN",
@@ -150,16 +150,24 @@
         "fingerprint": "1001ecff0eca5f098902ef28439abd07edb14b6ee46bbb01c2f9971f30899d20"
       },
       {
-        "argText": "beforeBreadcrumb(breadcrumb) {\n      const urls = [breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message];\n      return urls.some((url) => typeof url === \"string\" && isWalletRequest(url)) ? null : withoutWalletHeader(breadcrumb);\n    }",
-        "fingerprint": "2c2e766702add1a72c3bcc9f40af3b05b9109b168afb58dde21d4b93f292eafb"
+        "argText": "beforeSendSpan(span) {\n      if ([span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])].some(isOutboundSecretUrl)) return { ...span, description: \"outbound/<redacted>\", data: {} };\n      const urls = [span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])];\n      const route = span.data[\"http.route\"];\n      return urls.some((url) => typeof url === \"string\" && isWalletRequest(url))\n        ? { ...span, description: typeof route === \"string\" && WALLET_ROUTE_TEMPLATES.has(route)\n          ? route : \"/api/wallets/<redacted>\", data: {} }\n        : withoutWalletHeader(span);\n    }",
+        "fingerprint": "3006ac948c70d1076d53b105a5db2cd9c16e0d66b4d692d3b3cd4303d8873672"
       },
       {
-        "argText": "beforeSendSpan(span) {\n      const urls = [span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])];\n      const route = span.data[\"http.route\"];\n      return urls.some((url) => typeof url === \"string\" && isWalletRequest(url))\n        ? { ...span, description: typeof route === \"string\" && WALLET_ROUTE_TEMPLATES.has(route)\n          ? route : \"/api/wallets/<redacted>\", data: {} }\n        : withoutWalletHeader(span);\n    }",
-        "fingerprint": "3cb7909426daf5e3edcd2edcfddeab60ba7390fa7eec4eb92c1a8b4a162c92a9"
+        "argText": "key => span.data[key]",
+        "fingerprint": "5d4f918aea75fec377064f0d8516395c06f394d5cd1c17e16a887d41fdb229c7"
       },
       {
         "argText": "walletSafeSentryEvent",
         "fingerprint": "7f7dc8ddb26ee924377f75ccae78b3771bfd7c5c5981e52b4a937e010dccdbb3"
+      },
+      {
+        "argText": "beforeBreadcrumb(breadcrumb) {\n      if ([breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message].some(isOutboundSecretUrl)) return null;\n      const urls = [breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message];\n      return urls.some((url) => typeof url === \"string\" && isWalletRequest(url)) ? null : withoutWalletHeader(breadcrumb);\n    }",
+        "fingerprint": "953d5dda7d743211b34ed6e3592eded516ecc056b5e8b4f36ab18d2ad098083b"
+      },
+      {
+        "argText": "{\n    dsn: SENTRY_DSN,\n    environment: process.env.NODE_ENV || \"development\",\n    // 100 % sample rate for the hackathon demo; reduce in production\n    tracesSampleRate: 1.0,\n    profilesSampleRate: 0.1,\n    beforeSend: walletSafeSentryEvent,\n    beforeSendTransaction: walletSafeSentryEvent,\n    beforeBreadcrumb(breadcrumb) {\n      if ([breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message].some(isOutboundSecretUrl)) return null;\n      const urls = [breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message];\n      return urls.some((url) => typeof url === \"string\" && isWalletRequest(url)) ? null : withoutWalletHeader(breadcrumb);\n    },\n    beforeSendSpan(span) {\n      if ([span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])].some(isOutboundSecretUrl)) return { ...span, description: \"outbound/<redacted>\", data: {} };\n      const urls = [span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])];\n      const route = span.data[\"http.route\"];\n      return urls.some((url) => typeof url === \"string\" && isWalletRequest(url))\n        ? { ...span, description: typeof route === \"string\" && WALLET_ROUTE_TEMPLATES.has(route)\n          ? route : \"/api/wallets/<redacted>\", data: {} }\n        : withoutWalletHeader(span);\n    },\n    // Tag every event with the service name so Sentry dashboards can filter\n    initialScope: {\n      tags: { service: \"pcc-gateway\" },\n    },\n  }",
+        "fingerprint": "b9f55219f7fb82b44f26f1620259d847a78cde8442cd1fd3a665a1b1b8ec55a9"
       },
       {
         "argText": "(url) => typeof url === \"string\" && isWalletRequest(url)",
@@ -168,10 +176,6 @@
       {
         "argText": "(url) => typeof url === \"string\" && isWalletRequest(url)",
         "fingerprint": "d60e6c2278fbb0d4456db67719eec1cc75a8301ef9c5793bcf2ad2f02f13e250"
-      },
-      {
-        "argText": "{\n    dsn: SENTRY_DSN,\n    environment: process.env.NODE_ENV || \"development\",\n    // 100 % sample rate for the hackathon demo; reduce in production\n    tracesSampleRate: 1.0,\n    profilesSampleRate: 0.1,\n    beforeSend: walletSafeSentryEvent,\n    beforeSendTransaction: walletSafeSentryEvent,\n    beforeBreadcrumb(breadcrumb) {\n      const urls = [breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message];\n      return urls.some((url) => typeof url === \"string\" && isWalletRequest(url)) ? null : withoutWalletHeader(breadcrumb);\n    },\n    beforeSendSpan(span) {\n      const urls = [span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])];\n      const route = span.data[\"http.route\"];\n      return urls.some((url) => typeof url === \"string\" && isWalletRequest(url))\n        ? { ...span, description: typeof route === \"string\" && WALLET_ROUTE_TEMPLATES.has(route)\n          ? route : \"/api/wallets/<redacted>\", data: {} }\n        : withoutWalletHeader(span);\n    },\n    // Tag every event with the service name so Sentry dashboards can filter\n    initialScope: {\n      tags: { service: \"pcc-gateway\" },\n    },\n  }",
-        "fingerprint": "daf445661207afc5c8ee50ac7c9a65fedae46d851a0c5705bd8a2762bc96322e"
       },
       {
         "argText": "walletSafeSentryEvent",
@@ -400,47 +404,11 @@
   "routes/agent-feedback.ts": {
     "otel.setAttribute": [
       {
-        "argText": "body.confused_about",
-        "fingerprint": "0724e753b81697e0f30c2cc298cbe7fcf8f8856bef0f1cc4fa9ef1e0b365ddb8"
-      },
-      {
-        "argText": "body.last_error_code",
-        "fingerprint": "0b25f2f35ff1872789e533dcdd38f0e62188fa10c064abb6a651f9827472de8a"
-      },
-      {
-        "argText": "trace_id",
-        "fingerprint": "1525eaccd2248822b365490c204e56ac607eb7c8172f7ee3da516a32a1c921f6"
-      },
-      {
-        "argText": "body.last_endpoint",
-        "fingerprint": "26a05aab5375a379bf8e162c57dee30badc938ab1f033fbc63a1cd2e1511837b"
-      },
-      {
         "argText": "report_id",
         "fingerprint": "63ef3ab41876ac32da76b9b41b05a9a6666d9aac82de9b2b230961a894248f76"
-      },
-      {
-        "argText": "body.agent_kind",
-        "fingerprint": "ac6cae7bbcc661a07f889f63ccdb14ded1d8a32200ee7e272d6d2c3874ee7d00"
       }
     ],
     "trackServerEvent": [
-      {
-        "argText": "body.last_error_code",
-        "fingerprint": "015ee94a6a8cce6ccb97a87875c7305ce24063d62cbc846e8efb665851b4d27e"
-      },
-      {
-        "argText": "trace_id",
-        "fingerprint": "2194b79ef53781d0099ddcb7ed67488dfc2bf8d0479fddb575bea44d2f519680"
-      },
-      {
-        "argText": "body.agent_kind",
-        "fingerprint": "dddd111184df5d818da22b14b6ff7649e49a6e8e8e0631458531d6045fc44452"
-      },
-      {
-        "argText": "body.confused_about",
-        "fingerprint": "e7503bec166322312bb1e30784ccc448dd4d49257e190de1f97cce88257675e8"
-      },
       {
         "argText": "report_id",
         "fingerprint": "f3eba53473bdae3b628fb65a017e6ea1b6be5e3367c1744cccc20b9598db62da"
@@ -448,22 +416,8 @@
     ],
     "otel.addEvent": [
       {
-        "argText": "trace_id",
-        "fingerprint": "37d43395f77de239c4bfc3d8f67a71293c820114d016181a322391827782c01b"
-      },
-      {
         "argText": "report_id",
         "fingerprint": "9365705b09b713f3854578e9be0a106c4b614ec98c82d7d5f5c932e559187bae"
-      },
-      {
-        "argText": "body.summary.length",
-        "fingerprint": "fd0e41fadc9d0e24e37cb9b5a91b1146b827a0733e26d7c84611ab49e0db7a94"
-      }
-    ],
-    "<unresolved-callee>": [
-      {
-        "argText": "async (req, reply) => {\n    // Rate-limit by IP — protect from a stuck agent in a loop.\n    if (!canReport(req.ip)) {\n      return reply.status(429).send({\n        error: \"rate_limited\",\n        message: `Too many agent reports from this IP. Limit ${REPORT_LIMIT}/hour.`,\n        retry_after_seconds: Math.ceil(REPORT_WINDOW_MS / 1000),\n      });\n    }\n\n    const v = validate(req.body);\n    if (!v.ok) {\n      return reply.status(400).send({\n        error: \"invalid_body\",\n        message: v.error,\n        hint: \"Provide at minimum `{summary: \\\"...\\\"}`. trace_id, detail, last_endpoint, last_error_code, agent_kind, and confused_about are optional.\",\n        docs: \"/docs/AGENT_ONBOARDING_OBSERVABILITY.md#3-pcc_report-feedback-tool\",\n      });\n    }\n\n    const body = v.data;\n    const report_id = `agr_${randomBytes(8).toString(\"hex\")}`;\n\n    // Prefer the trace_id surfaced by the trace-id middleware on the\n    // request. The body's trace_id takes precedence when present (the\n    // agent may know its own journey better than the request itself).\n    const reqTraceId = (req as unknown as { traceId?: string }).traceId;\n    const trace_id = body.trace_id ?? reqTraceId;\n\n    return tracer.startActiveSpan(\n      \"pcc.feedback.agent_report\",\n      async (span) => {\n        try {\n          span.setAttribute(\"pcc.report_id\", report_id);\n          if (trace_id) span.setAttribute(\"pcc.trace_id\", trace_id);\n          if (body.agent_kind) span.setAttribute(\"pcc.agent_kind\", body.agent_kind);\n          if (body.last_endpoint) span.setAttribute(\"pcc.last_endpoint\", body.last_endpoint);\n          if (body.last_error_code) span.setAttribute(\"pcc.last_error_code\", body.last_error_code);\n          if (body.confused_about) span.setAttribute(\"pcc.confused_about\", body.confused_about);\n\n          // Persist to the audit log (temporary sink until piece 5 lands).\n          auditService.log({\n            eventType: \"agent.report\",\n            actor: (req as unknown as { operatorId?: string; apiKeyId?: string }).operatorId\n              ?? (req as unknown as { apiKeyId?: string }).apiKeyId\n              ?? `anonymous:${req.ip}`,\n            resourceType: \"agent_report\",\n            resourceId: report_id,\n            action: \"create\",\n            metadata: {\n              trace_id,\n              summary: body.summary,\n              detail: body.detail,\n              last_endpoint: body.last_endpoint,\n              last_error_code: body.last_error_code,\n              agent_kind: body.agent_kind,\n              confused_about: body.confused_about,\n            },\n            ip: req.ip,\n            userAgent: req.headers[\"user-agent\"],\n          });\n\n          // PostHog event for the live dashboard.\n          trackServerEvent(\"agent_report_filed\", {\n            report_id,\n            trace_id,\n            agent_kind: body.agent_kind,\n            last_error_code: body.last_error_code,\n            confused_about: body.confused_about,\n          });\n\n          // Add a span event so any OTel collector subscribed to the\n          // pcc.feedback.* namespace can stream it into the centralized\n          // sink (piece 5).\n          span.addEvent(\"agent_report_received\", {\n            \"pcc.report_id\": report_id,\n            \"pcc.trace_id\": trace_id ?? \"\",\n            \"pcc.summary_length\": body.summary.length,\n          });\n\n          return reply.status(201).send({\n            ok: true,\n            report_id,\n            trace_id,\n            message:\n              \"Thanks — your friction report has been recorded. Quote `trace_id` and `report_id` if you need to follow up.\",\n          });\n        } finally {\n          span.end();\n        }\n      },\n    );\n  }",
-        "fingerprint": "395b74f3426899d4edcc9b8cf13e4d4ba0e903f5773d6dc8790e487e0fda341d"
       }
     ]
   },
@@ -593,115 +547,15 @@
       }
     ]
   },
-  "routes/capture-sim.ts": {
-    "pipelineTelemetry.emit": [
-      {
-        "argText": "jobId",
-        "fingerprint": "0d50cb51c9feca1dd47893c84d55de55279c31a288d447856703f9c275c7f89d"
-      },
-      {
-        "argText": "jobId",
-        "fingerprint": "12370b1e10361b43e44236e698ef499a2e8b948500439b70f14d31cdd7e95cc1"
-      },
-      {
-        "argText": "err.message",
-        "fingerprint": "316d7f8412339bd7308b63dbc30b17a37cafbfd93ac41f2d1d033b00c6c3e431"
-      },
-      {
-        "argText": "jobId",
-        "fingerprint": "638234db64063ed06a88eba3df9f99e978dff03de33299788b64940ca34314ca"
-      },
-      {
-        "argText": "result.stubbed",
-        "fingerprint": "70907b22f094082ec145e376e37a62d815731ab8dd052da07abc6b6596dfa611"
-      },
-      {
-        "argText": "err.code",
-        "fingerprint": "74f0d31de27c40438ba0d1c04ef8ccbf339975a26ecf06c98099285321edaa65"
-      },
-      {
-        "argText": "result.trace.scene.simulator",
-        "fingerprint": "84d434a326d14add2550e1eda9cb0764c4b529e138546459f15db0fd4e7266aa"
-      },
-      {
-        "argText": "result.trace.scene.taskId",
-        "fingerprint": "e8e0a022f6a07028446b7b2fa6c0ee94914214d0a044d840c49dcb1847f93818"
-      },
-      {
-        "argText": "jobId",
-        "fingerprint": "f1031880e13e34daadea6824940d78bdd5a1d910690e5369a81f7620eb952d3c"
-      },
-      {
-        "argText": "result.trace.model",
-        "fingerprint": "f1b7f78e626ef705bafbe0fd0c62c51c4feea86c4b4f1ea0ee3715ee7d2e98cd"
-      },
-      {
-        "argText": "result.durationMs",
-        "fingerprint": "f1d0ab2c8b4d1e47d31ac64ea23ecfa824dfe44f9953dec37eb8d2a884cc9665"
-      },
-      {
-        "argText": "result.trace.frameCount",
-        "fingerprint": "f22cd70ae28a406e11d107feae3d67942138b1f3ceffa827a7b872bfe4e7be51"
-      }
-    ],
-    "log.error": [
-      {
-        "argText": "err",
-        "fingerprint": "08321f7db5cf7084f62fb988c36bb2f9b89a8e553d052ba844d668640dab1742"
-      },
-      {
-        "argText": "err.code",
-        "fingerprint": "33a42d9a706e8829426f3cbddcc727f5bc249e1a3f83ee297a1a816650daeee3"
-      },
-      {
-        "argText": "err",
-        "fingerprint": "e5767f28bf4657f982bd2a365a49f4696432bdeae0348b4a716b9199b9f5492f"
-      }
-    ],
-    "<unresolved-callee>": [
-      {
-        "argText": "async (req, reply) => {\n      const parsed = SimBodySchema.safeParse(req.body);\n      if (!parsed.success) {\n        return reply.status(400).send({\n          error: \"invalid_body\",\n          message: \"Invalid /api/capture/sim request body\",\n          details: parsed.error.flatten(),\n        });\n      }\n\n      const {\n        rolloutBytesBase64,\n        fps,\n        maxFrames,\n        downsamplePoints,\n        modelPath,\n        jobId,\n        deviceId,\n        taskId,\n        simulator,\n        expectedRolloutHash,\n      } = parsed.data;\n\n      let artefactBytes: Buffer;\n      try {\n        artefactBytes = Buffer.from(rolloutBytesBase64, \"base64\");\n      } catch (err) {\n        return reply.status(400).send({\n          error: \"invalid_rollout_bytes\",\n          message: `rolloutBytesBase64 failed to decode: ${(err as Error).message}`,\n        });\n      }\n\n      if (artefactBytes.length === 0) {\n        return reply.status(400).send({\n          error: \"empty_rollout\",\n          message: \"Decoded rollout artefact has zero bytes\",\n        });\n      }\n      if (artefactBytes.length > MAX_ARTEFACT_BYTES) {\n        return reply.status(413).send({\n          error: \"rollout_too_large\",\n          message: `Rollout exceeds ${MAX_ARTEFACT_BYTES} byte cap (got ${artefactBytes.length})`,\n        });\n      }\n\n      const actualHash =\n        \"sha256:\" + crypto.createHash(\"sha256\").update(artefactBytes).digest(\"hex\");\n      if (\n        expectedRolloutHash &&\n        expectedRolloutHash.toLowerCase() !== actualHash.toLowerCase()\n      ) {\n        return reply.status(400).send({\n          error: \"rollout_hash_mismatch\",\n          message: `expectedRolloutHash (${expectedRolloutHash}) does not match sha256(rolloutBytes)=${actualHash}`,\n        });\n      }\n\n      const tempPath = path.join(\n        os.tmpdir(),\n        `pcc-sim-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString(\"hex\")}.bin`,\n      );\n      try {\n        fs.writeFileSync(tempPath, artefactBytes);\n      } catch (err) {\n        return reply.status(500).send({\n          error: \"tempfile_write_failed\",\n          message: (err as Error).message,\n        });\n      }\n\n      try {\n        const result = await runGenesisInference({\n          artefactPath: tempPath,\n          fps,\n          maxFrames,\n          downsamplePoints,\n          modelPath,\n          deviceId,\n          taskId,\n          simulator,\n        });\n\n        // Defense-in-depth: re-validate the returned trace against the spec\n        // schema. The adapter already does this, but the gateway never trusts\n        // its result blindly.\n        const guard = SimulationTraceSchemaExport.safeParse(result.trace);\n        if (!guard.success) {\n          return reply.status(500).send({\n            error: \"trace_schema_invalid\",\n            message: \"Adapter returned a trace that failed schema validation\",\n            details: guard.error.flatten(),\n          });\n        }\n\n        // Cross-check the trace's rolloutHash against what we computed —\n        // catches an adapter bug where the trace was built from a different\n        // file (race, leftover tempfile, etc.).\n        if (result.trace.rolloutHash.toLowerCase() !== actualHash.toLowerCase()) {\n          return reply.status(500).send({\n            error: \"trace_rollout_hash_mismatch\",\n            message: `trace.rolloutHash (${result.trace.rolloutHash}) does not match request artefact hash (${actualHash})`,\n          });\n        }\n\n        pipelineTelemetry.emit(jobId ?? \"capture-sim\", \"evidence_capture\", \"completed\", {\n          metadata: {\n            subphase: \"capture_sim\",\n            jobId: jobId ?? null,\n            frameCount: result.trace.frameCount,\n            durationMs: result.durationMs,\n            stubbed: result.stubbed,\n            simulator: result.trace.scene.simulator,\n            taskId: result.trace.scene.taskId,\n            model: result.trace.model,\n            adapterVersion: ADAPTER_VERSION,\n          },\n        });\n\n        const response: SimResponse = {\n          trace: result.trace,\n          durationMs: result.durationMs,\n          stubbed: result.stubbed,\n          bytesReceived: artefactBytes.length,\n        };\n        return response;\n      } catch (err) {\n        if (err instanceof GenesisAdapterError) {\n          req.log.error({ err, code: err.code }, \"capture_sim adapter failed\");\n          pipelineTelemetry.emit(jobId ?? \"capture-sim\", \"evidence_capture\", \"failed\", {\n            metadata: {\n              subphase: \"capture_sim\",\n              jobId: jobId ?? null,\n              error: err.code,\n              message: err.message,\n            },\n            level: \"error\",\n          });\n          // Map adapter errors to user-actionable HTTP shapes.\n          const status = err.code === \"missing_artefact_path\" ? 400 : 502;\n          return reply.status(status).send({\n            error: err.code,\n            message: err.message,\n            detail: err.detail,\n          });\n        }\n        req.log.error({ err }, \"capture_sim threw\");\n        return reply.status(500).send({\n          error: \"internal_error\",\n          message: (err as Error).message,\n        });\n      } finally {\n        safeUnlink(tempPath);\n      }\n    }",
-        "fingerprint": "b9cc2d334d55451851dafe6775a6aa6749c40f986bd1fd1fea34230d3ecf1904"
-      }
-    ]
-  },
   "routes/capture.ts": {
     "pipelineTelemetry.emit": [
-      {
-        "argText": "verdictId",
-        "fingerprint": "04d1337f59b85329d6103f20c32a3ab47a9d7a5125b7effbaceadbce65041270"
-      },
-      {
-        "argText": "verdictId",
-        "fingerprint": "04eae6509ff390f76352f323eba25d8e53e9e45f6c9b01beeff45214c2dcebee"
-      },
-      {
-        "argText": "verdict.jobId",
-        "fingerprint": "053143634af6dfe407cbf2c94387f03d58a8ed57c382c2e9d9c3a9f32974d27b"
-      },
-      {
-        "argText": "ttl",
-        "fingerprint": "1acb66d45bdef3caf58a9d02dbad9b2dabc5998cb9ad3f2399a0446767ddaf49"
-      },
       {
         "argText": "result.anchorCandidate",
         "fingerprint": "291274a006fc68adbbf45164e6996eb817dd08af2031849230787103de1d0fb5"
       },
       {
-        "argText": "verdictId",
-        "fingerprint": "2bc7629221938d9a60798f6124ace39be548328add2ed9def181f3d88a3d9790"
-      },
-      {
-        "argText": "tx.txHash",
-        "fingerprint": "3003a383145ad3c8f7e6ec0a3adb944662486019b06c29531b8416e179b5ef32"
-      },
-      {
         "argText": "result.declaredClass",
         "fingerprint": "32d725359b58401a10fbf3140884ec5e6123ab8223d889ca06574ad0b0a14a12"
-      },
-      {
-        "argText": "jobId",
-        "fingerprint": "3fcd254b88ffc50e6b8a4239bb86837da333efca4dcca56fe452a48fe40dda64"
       },
       {
         "argText": "result.verdict",
@@ -712,16 +566,8 @@
         "fingerprint": "6052cbf193bdb7e53b8bdb5a50076a9a2eee3cc828c1f19653f64ab0c15064b6"
       },
       {
-        "argText": "declaredClass",
-        "fingerprint": "6dea06b6ac6b5eec71a56b73086952f04f3c68bb6d6ed24ae37a3b7a4f7051cc"
-      },
-      {
         "argText": "result.gatesPassed",
         "fingerprint": "6e3862db6e489fe2c71910afa2e3c2c421f74d91521e9837a059fc86b7686d41"
-      },
-      {
-        "argText": "tx.gasUsed",
-        "fingerprint": "717026b749be3f0c6eecddfcac5ace9775873b0ba4a2b1897c5d620df33f671a"
       },
       {
         "argText": "rows.length",
@@ -732,14 +578,6 @@
         "fingerprint": "96410963b9676c7e3344f88e3edcd94cca160c0ee5f7903dd6e514b6b53c95e6"
       },
       {
-        "argText": "verdictId",
-        "fingerprint": "99de2fed06b89d4c3526198454535f28d59f33f06bafef4a2daa958924eb82b2"
-      },
-      {
-        "argText": "verdict.jobId",
-        "fingerprint": "9df4aa78a1790be10b16868990c3f0de126e6c0bae5df613a40620122da83787"
-      },
-      {
         "argText": "result.gatesFailed",
         "fingerprint": "a43985a7b7d15a0f728f0a12e21bfb68ed479ad5c002b9eeb5438c98ff05ea8d"
       },
@@ -748,28 +586,8 @@
         "fingerprint": "af74a0f5f9015962c6d6fd0354a99040d073e0b0807271a1e914b2c4ca39bb41"
       },
       {
-        "argText": "(err as Error).message",
-        "fingerprint": "c62077699128fe26abd694a5f5c6e82b5fc7ec0c9445cfa17f89afc036efbba2"
-      },
-      {
-        "argText": "tx.blockNumber",
-        "fingerprint": "cf6daebe79561787169742593304ea20d3b2c8c5c88d6f545ef4a6c983db4983"
-      },
-      {
         "argText": "jobId",
         "fingerprint": "d1f3d1b71665e8f037fd90d3694537d278b8ca57ebfb817e819d75b9cfef5e77"
-      },
-      {
-        "argText": "verdict.jobId",
-        "fingerprint": "ddddbb5e10f6a49dc08e89565d50817ba34287f4e73ee51cbabb6cf1357d1a92"
-      },
-      {
-        "argText": "challenge.challengeId",
-        "fingerprint": "ddfda75da0758a6229117fcce7f0eddfde174ae4d54a087ee21070f1c00b2ad2"
-      },
-      {
-        "argText": "verdictId",
-        "fingerprint": "e4acd51657e343fd3a22c9efb0c0b3c1a2a92460dc34ebdad917fcd6c0decb84"
       },
       {
         "argText": "jobId",
@@ -778,10 +596,6 @@
       {
         "argText": "jobId",
         "fingerprint": "f6731ddc85f04dc240a1419884b9c97fff4888e6729509ed43708b035abba4b3"
-      },
-      {
-        "argText": "verdictId",
-        "fingerprint": "f71ba6e0abda96f12b3fb815d2f6bbb97b3cd922366d88b2d70b69d8f5574b7c"
       },
       {
         "argText": "verdictId",
@@ -799,14 +613,6 @@
       },
       {
         "argText": "err",
-        "fingerprint": "7df067667f551ecb0f5c8c39f8f15b4698fa15f14633f84cd9a37bb81e9e22ea"
-      },
-      {
-        "argText": "err",
-        "fingerprint": "bc609a2a2414ba0698f90a0a2c2d677b341824967aa855f16f5e4b4bf1308816"
-      },
-      {
-        "argText": "err",
         "fingerprint": "bf09eb2de5b6496f1d3db656d12edf73f8833c2244830e509be5d1976e93ddce"
       }
     ],
@@ -818,28 +624,6 @@
       {
         "argText": "async (req, reply) => {\n      const parsed = ListVerdictsQuerySchema.safeParse(req.query);\n      if (!parsed.success) {\n        return reply.status(400).send({\n          error: \"invalid_query\",\n          message: \"Invalid query params\",\n          details: parsed.error.flatten(),\n        });\n      }\n      const { jobId, limit } = parsed.data;\n      const effectiveLimit = Math.min(limit ?? 50, 200);\n\n      const { db } = getStore();\n      const rows = jobId\n        ? db\n            .select()\n            .from(captureVerdicts)\n            .where(eq(captureVerdicts.jobId, jobId))\n            .orderBy(desc(captureVerdicts.createdAt))\n            .limit(effectiveLimit)\n            .all()\n        : db\n            .select()\n            .from(captureVerdicts)\n            .orderBy(desc(captureVerdicts.createdAt))\n            .limit(effectiveLimit)\n            .all();\n\n      pipelineTelemetry.emit(jobId ?? \"capture-list\", \"evidence_capture\", \"completed\", {\n        metadata: {\n          subphase: \"list_verdicts\",\n          jobId: jobId ?? null,\n          count: rows.length,\n          limit: effectiveLimit,\n        },\n      });\n\n      return {\n        verdicts: rows.map((r) => ({\n          id: r.id,\n          jobId: r.jobId,\n          operatorId: r.operatorId,\n          captureHash: r.captureHash,\n          manifestHash: r.manifestHash,\n          declaredClass: r.declaredClassStr,\n          verifiedClass: r.verifiedClassStr,\n          verdict: r.verdict,\n          gatesPassed: r.gatesPassed ?? [],\n          gatesFailed: r.gatesFailed ?? [],\n          warnings: r.warnings ?? [],\n          anchorCandidate: r.anchorCandidate === 1,\n          createdAt: r.createdAt,\n        })),\n        count: rows.length,\n        limit: effectiveLimit,\n        jobId: jobId ?? null,\n      };\n    }",
         "fingerprint": "a8ea304ca7b766641162ac081caa539d960c17e0d9f2c11fcb1ca3d655f2b9c5"
-      },
-      {
-        "argText": "async (req, reply) => {\n      const parsed = ChallengeBodySchema.safeParse(req.body);\n      if (!parsed.success) {\n        return reply.status(400).send({\n          error: \"invalid_body\",\n          message: \"Invalid challenge request body\",\n          details: parsed.error.flatten(),\n        });\n      }\n\n      const { jobId, declaredClass, requestedTtlSeconds } = parsed.data;\n      const ttl = Math.min(\n        requestedTtlSeconds ?? CAPTURE_NONCE_MAX_AGE_SECONDS,\n        CAPTURE_NONCE_MAX_AGE_SECONDS,\n      );\n\n      try {\n        const chain = await getChainClient();\n        const block = await chain.getLatestBlock();\n        const svc = getChallengeService();\n        const challenge = svc.issueCaptureNonce({\n          issuedBy: String(req.userId ?? \"unknown\"),\n          scope: `${jobId}:${declaredClass}`,\n          visualNonceType: \"qr\",\n          blockNumber: block.number,\n          blockHash: block.hash,\n          blockTimestamp: block.timestamp,\n          chainId: chain.getChainId(),\n          maxAgeSeconds: ttl,\n        });\n\n        // Cache the challenge so /upload can resolve it back to the full\n        // server-side object. In-memory — challenges expire fast (≤120s).\n        pruneChallengeCache();\n        challengeCache.set(challenge.challengeId, challenge);\n\n        // Work output root = sha256(scope) — deterministic so the client\n        // can reconstruct it when assembling its capture manifest.\n        const workOutputRoot = crypto\n          .createHash(\"sha256\")\n          .update(challenge.scope)\n          .digest(\"hex\");\n\n        const nonce = buildNonceFromChallenge(challenge, workOutputRoot);\n\n        pipelineTelemetry.emit(jobId, \"evidence_capture\", \"completed\", {\n          metadata: {\n            subphase: \"capture_challenge\",\n            challengeId: challenge.challengeId,\n            declaredClass,\n            ttl,\n          },\n        });\n\n        const response: CaptureNonceChallengeResponse = {\n          challengeId: challenge.challengeId,\n          blockHash: challenge.blockHash,\n          workOutputRoot,\n          nonce,\n          issuedAt: challenge.issuedAt,\n          expiresAt: expiresAtIso(challenge),\n          maxAgeSeconds: challenge.maxAgeSeconds,\n          visualNonce: challenge.visualNonce,\n          blockNumber: challenge.blockNumber,\n          chainId: challenge.chainId,\n          scope: challenge.scope,\n        };\n        return response;\n      } catch (err) {\n        req.log.error({ err }, \"capture_challenge failed\");\n        return reply.status(500).send({\n          error: \"challenge_failed\",\n          message: (err as Error).message,\n        });\n      }\n    }",
-        "fingerprint": "cd9f05742ac172544a032f062822119e38595681b21605da7b8e2ca89e77f7bd"
-      },
-      {
-        "argText": "async (req, reply) => {\n      const parsed = AnchorBodySchema.safeParse(req.body);\n      if (!parsed.success) {\n        return reply.status(400).send({\n          error: \"invalid_body\",\n          message: \"verdictId required\",\n          details: parsed.error.flatten(),\n        });\n      }\n      const { verdictId } = parsed.data;\n\n      const verdict = selectVerdict(verdictId);\n      if (!verdict) {\n        return reply.status(404).send({\n          error: \"verdict_not_found\",\n          message: `No verdict with id=${verdictId}`,\n        });\n      }\n\n      // Gate A: only PASS verdicts with anchorCandidate:true are eligible.\n      if (verdict.verdict !== \"PASS\") {\n        return reply.status(400).send({\n          error: \"verdict_not_pass\",\n          message: `verdict ${verdict.verdict} not eligible for anchoring`,\n          verdictId,\n        });\n      }\n      if (!verdict.anchorCandidate) {\n        return reply.status(400).send({\n          error: \"not_anchor_candidate\",\n          message: \"verdict anchorCandidate=false — verifier declined anchoring\",\n          verdictId,\n        });\n      }\n\n      // Deduplicate — one anchor per verdict.\n      const existingAnchor = selectAnchor(verdictId);\n      if (existingAnchor) {\n        return {\n          txHash: existingAnchor.txHash,\n          blockNumber: existingAnchor.blockNumber,\n          gasUsed: existingAnchor.gasUsed,\n          anchoredAt: existingAnchor.anchoredAt,\n          status: \"already_anchored\" as const,\n        };\n      }\n\n      // Gate B: contract must be deployed. If not, return 202 deferred.\n      const registryAddress = process.env.CAPTURE_REGISTRY_ADDRESS as\n        | `0x${string}`\n        | undefined;\n      if (!registryAddress) {\n        pipelineTelemetry.emit(\n          verdict.jobId ?? verdictId,\n          \"evidence_capture\",\n          \"skipped\",\n          {\n            metadata: {\n              subphase: \"capture_anchor\",\n              verdictId,\n              reason: \"registry_not_deployed\",\n            },\n            level: \"warn\",\n          },\n        );\n        return reply.status(202).send({\n          status: \"deferred\" as const,\n          reason: \"CaptureClassRegistry contract not deployed\",\n          verdictId,\n        });\n      }\n\n      // Pull the original verifier result to reconstruct blockAnchor +\n      // attestationsRoot. The result is stored as JSON (drizzle JSON mode),\n      // so it comes back as an object already — no re-parse needed.\n      const parsedResult = verdict.resultJson as unknown as\n        | CaptureVerifierResult\n        | undefined;\n\n      const submittedBy = (req.userId ?? \"0x0000000000000000000000000000000000000000\") as\n        `0x${string}`;\n\n      // Extract the challenge's block anchor if present in the stored result.\n      // Fall back to 0 if absent (CC0 captures without a challenge).\n      const blockAnchor = 0; // challenge.blockNumber not surfaced in the result;\n      // wire later once verifier persists it on the result.\n      const capturedAt = BigInt(Math.floor(Date.now() / 1000));\n\n      const attestationsRoot = (\n        \"0x\" + \"0\".repeat(64)\n      ) as `0x${string}`;\n      const attesterCount = 0;\n\n      try {\n        const chain = await getChainClient();\n        const tx = await chain.anchorCapture({\n          registryAddress,\n          anchor: {\n            captureHash: toBytes32(verdict.captureHash),\n            manifestHash: toBytes32(verdict.manifestHash),\n            declaredClass: verdict.declaredClass,\n            verifiedClass: verdict.verifiedClass,\n            submittedBy,\n            jobId: toBytes32(verdict.jobId ?? verdictId),\n            challengeId: toBytes32(verdictId),\n            blockAnchor,\n            capturedAt,\n            attestationsRoot,\n            attesterCount,\n          },\n        });\n\n        const anchoredAt = new Date().toISOString();\n        insertAnchor({\n          verdictId,\n          txHash: tx.txHash,\n          blockNumber: tx.blockNumber,\n          gasUsed: tx.gasUsed,\n          anchoredAt,\n        });\n\n        pipelineTelemetry.emit(\n          verdict.jobId ?? verdictId,\n          \"evidence_capture\",\n          \"completed\",\n          {\n            metadata: {\n              subphase: \"capture_anchor\",\n              verdictId,\n              txHash: tx.txHash,\n              gasUsed: tx.gasUsed,\n              blockNumber: tx.blockNumber,\n            },\n          },\n        );\n\n        return {\n          txHash: tx.txHash,\n          blockNumber: tx.blockNumber,\n          gasUsed: tx.gasUsed,\n          anchoredAt,\n        };\n      } catch (err) {\n        req.log.error({ err }, \"capture_anchor failed\");\n        pipelineTelemetry.emit(\n          verdict.jobId ?? verdictId,\n          \"evidence_capture\",\n          \"failed\",\n          {\n            metadata: {\n              subphase: \"capture_anchor\",\n              verdictId,\n              error: (err as Error).message,\n            },\n            level: \"error\",\n          },\n        );\n        return reply.status(500).send({\n          error: \"anchor_failed\",\n          message: (err as Error).message,\n        });\n      }\n    }",
-        "fingerprint": "ce6837a443e44875e67aadbad4307377b38beb2b60673104d9c92ec4d360ee81"
-      }
-    ]
-  },
-  "routes/carrier.ts": {
-    "log.warn": [
-      {
-        "argText": "!!headerValue",
-        "fingerprint": "deb2495bd2b6d0950b3fa764b13a570da67bec7c81a4402fe62d4b56fd2835b9"
-      }
-    ],
-    "<unresolved-callee>": [
-      {
-        "argText": "async (req, reply) => {\n    const client = getEasyPostClient();\n    if (!client.hasWebhookSecret) {\n      return reply.code(503).send({\n        error: \"webhook_secret_not_configured\",\n        message: \"Set EASYPOST_WEBHOOK_SECRET before pointing an EasyPost webhook at this endpoint.\",\n      });\n    }\n\n    const header = req.headers[\"x-hmac-signature\"];\n    const headerValue = Array.isArray(header) ? header[0] : header;\n    const rawBody = req.rawBody ?? Buffer.alloc(0);\n    if (!client.verifyWebhookSignature(rawBody, headerValue)) {\n      req.log.warn({ hasHeader: !!headerValue, bytes: logSafeInt(rawBody.length) }, \"carrier webhook: signature verification failed\");\n      return reply.code(401).send({ error: \"invalid_signature\" });\n    }\n    const signatureHeader = headerValue as string;\n\n    const trackerEvent = client.parseTrackerEvent(req.body);\n    if (!trackerEvent) {\n      // Not a processable tracker event — 2xx so EasyPost does not retry forever.\n      return reply.code(200).send({ received: true, ignored: true });\n    }\n    if (client.requireProductionMode && trackerEvent.providerMode !== \"production\") {\n      // A sandbox tracker must never become evidence in production.\n      req.log.warn({ trackingCode: logSafeId(trackerEvent.trackingCode), providerMode: logSafeId(trackerEvent.providerMode) }, \"carrier webhook: non-production tracker refused\");\n      return reply.code(200).send({ received: true, ignored: true, reason: \"provider_mode_not_production\" });\n    }\n\n    const ledgered: LedgeredScan = { rawBodyB64: rawBody.toString(\"base64\"), signatureHeader, parsed: trackerEvent };\n\n    let result;\n    try {\n      result = await getCarrierShipmentStore().recordCarrierEvent(\n        trackerEvent,\n        (record, newStatus) => buildCarrierEvidenceEvent(record, newStatus, trackerEvent, rawBody, signatureHeader),\n        ledgered,\n        // Ledgering happens INSIDE the store's per-job/per-code lock (R4-2),\n        // so a concurrent finalize cannot slip between decision and insert.\n        { ledgerUnmatched: true },\n      );\n    } catch (err) {\n      // Evidence gate or persistence failed: NOT marked seen, so the\n      // provider's retry gets a clean attempt. Non-2xx makes EasyPost retry.\n      req.log.error({ code: \"carrier_webhook_apply_failed\", errorClass: knownErrorClassName(err), trackingCode: logSafeId(trackerEvent.trackingCode) }, \"carrier webhook: failed to apply event\");\n      return reply.code(500).send({ error: \"apply_failed\" });\n    }\n\n    if (!result.ok) {\n      switch (result.reason) {\n        case \"unknown_tracking_code\":\n        case \"not_finalized\":\n          // OURS-maybe but not yet matchable: already durably ledgered by the\n          // store (R3-5), under its lock (R4-2). 2xx — we hold it now.\n          req.log.info({ trackingCode: logSafeId(trackerEvent.trackingCode), reason: logSafeId(result.reason), ledgered: result.ledgered === true }, \"carrier webhook: ledgered for post-finalize replay\");\n          return reply.code(200).send({ received: true, pending: true, reason: result.reason });\n        case \"scan_predates_commitment\":\n          // Permanently non-qualifying (R3-4): the commitment did not predate\n          // this scan, so it can never support the pre-commitment claim.\n          req.log.warn({ trackingCode: logSafeId(trackerEvent.trackingCode) }, \"carrier webhook: scan predates commitment — permanently non-qualifying\");\n          return reply.code(200).send({ received: true, matched: false, reason: result.reason });\n        default:\n          // tracker_missing / tracker_mismatch / shipment_mismatch: same\n          // code, different purchase identity — refuse, warn.\n          req.log.warn({ trackingCode: logSafeId(trackerEvent.trackingCode), reason: logSafeId(result.reason) }, \"carrier webhook: identity refused\");\n          return reply.code(200).send({ received: true, matched: false, reason: result.reason });\n      }\n    }\n\n    return reply.code(200).send({\n      received: true,\n      matched: true,\n      jobId: result.record.jobId,\n      status: result.newStatus,\n      outcome: result.outcome,\n    });\n  }",
-        "fingerprint": "bdde1ca67b380c3591db9e9ac3c76f2d23941f6bc95cd6889ffaa3237ea46c4c"
       }
     ]
   },
@@ -1186,8 +970,8 @@
     ],
     "<unresolved-callee>": [
       {
-        "argText": "async (req, reply) => {\n    const body = (req.body ?? {}) as {\n      kernelId?: string;\n      operatorDid?: string;\n    };\n\n    if (!body.kernelId || !body.operatorDid) {\n      return reply.status(400).send({\n        error: \"missing_fields\",\n        message: \"Both kernelId and operatorDid are required\",\n      });\n    }\n\n    if (!LIT_ACCOUNT_KEY) {\n      console.log(\"[LIT] provision failed — no LIT_API_KEY configured\");\n      return reply.status(503).send({\n        error: \"lit_not_configured\",\n        message:\n          \"Lit Protocol account key is not configured. Set LIT_API_KEY env var.\",\n      });\n    }\n\n    try {\n      const provisionBody = JSON.stringify({\n        name: `pcc-operator-${body.kernelId}`,\n        description: `PCC evidence encryption for ${body.operatorDid}`,\n        can_create_groups: false,\n        can_delete_groups: false,\n        can_create_pkps: false,\n        manage_ipfs_ids_in_groups: [],\n        add_pkp_to_groups: [],\n        remove_pkp_from_groups: [],\n        execute_in_groups: [0],\n      });\n\n      console.log(\n        `[LIT] provisioning usage key for kernel=${body.kernelId} operator=${body.operatorDid}`,\n      );\n\n      const controller = new AbortController();\n      const timeout = setTimeout(() => controller.abort(), 10_000);\n\n      let usageKey: string;\n      try {\n        const res = await fetch(`${LIT_API_URL}/add_usage_api_key`, {\n          method: \"POST\",\n          headers: {\n            \"X-Api-Key\": LIT_ACCOUNT_KEY,\n            \"Content-Type\": \"application/json\",\n          },\n          body: provisionBody,\n          signal: controller.signal,\n        });\n        clearTimeout(timeout);\n\n        if (!res.ok) {\n          const text = await res.text();\n          console.log(\n            `[LIT] provision API error: ${res.status} ${text}`,\n          );\n          return reply.status(502).send({\n            error: \"lit_api_error\",\n            message: `Lit API returned ${res.status}: ${text.slice(0, 200)}`,\n          });\n        }\n\n        const data = (await res.json()) as { success?: boolean; usage_api_key?: string };\n        usageKey = data.usage_api_key ?? \"\";\n\n        if (!usageKey) {\n          console.log(\"[LIT] provision returned empty key — response:\", data);\n          return reply.status(502).send({\n            error: \"lit_empty_key\",\n            message: \"Lit API returned an empty usage key\",\n          });\n        }\n      } catch (fetchErr: any) {\n        clearTimeout(timeout);\n        if (fetchErr.name === \"AbortError\") {\n          console.log(\"[LIT] provision timed out after 10s\");\n          return reply.status(504).send({\n            error: \"lit_timeout\",\n            message: \"Lit API did not respond within 10 seconds\",\n          });\n        }\n        console.log(`[LIT] provision network error: ${fetchErr.message}`);\n        return reply.status(502).send({\n          error: \"lit_network_error\",\n          message: `Could not reach Lit API: ${fetchErr.message}`,\n        });\n      }\n\n      auditService.log({\n        eventType: \"lit.key_provisioned\",\n        actor: body.operatorDid,\n        resourceType: \"lit_usage_key\",\n        resourceId: body.kernelId,\n        action: \"create\",\n        metadata: { kernelId: body.kernelId, operatorDid: body.operatorDid },\n        ip: req.ip,\n        userAgent: req.headers[\"user-agent\"],\n      });\n      trackServerEvent(\"lit_key_provisioned\", {\n        kernelId: body.kernelId,\n        operatorDid: body.operatorDid,\n      });\n\n      console.log(\n        `[LIT] usage key provisioned for kernel=${body.kernelId}`,\n      );\n\n      return reply.status(201).send({\n        usageKey,\n        litApiUrl: LIT_API_URL,\n        litNetwork: \"chipotle\",\n      });\n    } catch (err: any) {\n      console.log(`[LIT] provision unexpected error: ${err.message}`);\n      return reply.status(500).send({\n        error: \"provision_failed\",\n        message: err.message ?? \"Unknown error during Lit key provisioning\",\n      });\n    }\n  }",
-        "fingerprint": "ed6ba6be8a01a974f9af8744d4790f50c1afadc4447a4ced60684b1358364210"
+        "argText": "async (req, reply) => {\n    const refusal = refuseCookieCredentialWrite(req);\n    if (refusal) return reply.status(401).send(refusal);\n    const body = (req.body ?? {}) as {\n      kernelId?: string;\n      operatorDid?: string;\n    };\n\n    if (!body.kernelId || !body.operatorDid) {\n      return reply.status(400).send({\n        error: \"missing_fields\",\n        message: \"Both kernelId and operatorDid are required\",\n      });\n    }\n\n    if (!LIT_ACCOUNT_KEY) {\n      console.log(\"[LIT] provision failed — no LIT_API_KEY configured\");\n      return reply.status(503).send({\n        error: \"lit_not_configured\",\n        message:\n          \"Lit Protocol account key is not configured. Set LIT_API_KEY env var.\",\n      });\n    }\n\n    try {\n      const provisionBody = JSON.stringify({\n        name: `pcc-operator-${body.kernelId}`,\n        description: `PCC evidence encryption for ${body.operatorDid}`,\n        can_create_groups: false,\n        can_delete_groups: false,\n        can_create_pkps: false,\n        manage_ipfs_ids_in_groups: [],\n        add_pkp_to_groups: [],\n        remove_pkp_from_groups: [],\n        execute_in_groups: [0],\n      });\n\n      console.log(\n        `[LIT] provisioning usage key for kernel=${body.kernelId} operator=${body.operatorDid}`,\n      );\n\n      const controller = new AbortController();\n      const timeout = setTimeout(() => controller.abort(), 10_000);\n\n      let usageKey: string;\n      try {\n        const res = await fetch(`${LIT_API_URL}/add_usage_api_key`, {\n          method: \"POST\",\n          headers: {\n            \"X-Api-Key\": LIT_ACCOUNT_KEY,\n            \"Content-Type\": \"application/json\",\n          },\n          body: provisionBody,\n          signal: controller.signal,\n        });\n        clearTimeout(timeout);\n\n        if (!res.ok) {\n          const text = await res.text();\n          console.log(\n            `[LIT] provision API error: ${res.status} ${text}`,\n          );\n          return reply.status(502).send({\n            error: \"lit_api_error\",\n            message: `Lit API returned ${res.status}: ${text.slice(0, 200)}`,\n          });\n        }\n\n        const data = (await res.json()) as { success?: boolean; usage_api_key?: string };\n        usageKey = data.usage_api_key ?? \"\";\n\n        if (!usageKey) {\n          console.log(\"[LIT] provision returned empty key — response:\", data);\n          return reply.status(502).send({\n            error: \"lit_empty_key\",\n            message: \"Lit API returned an empty usage key\",\n          });\n        }\n      } catch (fetchErr: any) {\n        clearTimeout(timeout);\n        if (fetchErr.name === \"AbortError\") {\n          console.log(\"[LIT] provision timed out after 10s\");\n          return reply.status(504).send({\n            error: \"lit_timeout\",\n            message: \"Lit API did not respond within 10 seconds\",\n          });\n        }\n        console.log(`[LIT] provision network error: ${fetchErr.message}`);\n        return reply.status(502).send({\n          error: \"lit_network_error\",\n          message: `Could not reach Lit API: ${fetchErr.message}`,\n        });\n      }\n\n      auditService.log({\n        eventType: \"lit.key_provisioned\",\n        actor: body.operatorDid,\n        resourceType: \"lit_usage_key\",\n        resourceId: body.kernelId,\n        action: \"create\",\n        metadata: { kernelId: body.kernelId, operatorDid: body.operatorDid },\n        ip: req.ip,\n        userAgent: req.headers[\"user-agent\"],\n      });\n      trackServerEvent(\"lit_key_provisioned\", {\n        kernelId: body.kernelId,\n        operatorDid: body.operatorDid,\n      });\n\n      console.log(\n        `[LIT] usage key provisioned for kernel=${body.kernelId}`,\n      );\n\n      return reply.status(201).send({\n        usageKey,\n        litApiUrl: LIT_API_URL,\n        litNetwork: \"chipotle\",\n      });\n    } catch (err: any) {\n      console.log(`[LIT] provision unexpected error: ${err.message}`);\n      return reply.status(500).send({\n        error: \"provision_failed\",\n        message: err.message ?? \"Unknown error during Lit key provisioning\",\n      });\n    }\n  }",
+        "fingerprint": "b48acf120494ebbc035ec3ea07737c67b3e88be677c0db36fb42191cc33ce5d2"
       }
     ]
   },

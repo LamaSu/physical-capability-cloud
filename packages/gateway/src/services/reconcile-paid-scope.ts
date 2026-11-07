@@ -15,7 +15,10 @@
  * Before anything is read, in this order (RECONCILE_REFUSALS' order): the record store
  * (funding_record_store_unavailable), then the expected chain (expected_chain_unavailable), then the
  * TTL (activation_ttl_unavailable), then the record's own checks (record_malformed,
- * record_chain_mismatch, record_scope_mismatch). Production has no store, so it answers the first.
+ * record_chain_mismatch, record_scope_mismatch), then, for testnet-only terms,
+ * testnet_buyer_not_allowed when the buyer list is unset, empty, malformed or does not name the
+ * verified payer.
+ * Production has no store, so it answers the first.
  *
  * One synchronous SQLite transaction (BEGIN IMMEDIATE; better-sqlite3 runs nothing else on the
  * connection until it ends, and holds the write lock against any other connection):
@@ -72,7 +75,7 @@ import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { schema, eq, and } from "@pcc/store";
 import { getStore } from "../db.js";
 import { emergencyStopState } from "../routes/device-relay.js";
-import { activationRefusal, isChainId, recordRefusal, recordScopeRefusal } from "./funding-binding.js";
+import { activationRefusal, isChainId, recordRefusal, recordScopeRefusal, testnetBuyerAllowance, testnetBuyerRefusal } from "./funding-binding.js";
 import { scopeExpiryMs } from "./scope-expiry.js";
 import { acceptanceFor, blockListUnreadable, escrowForJob, SCOPE_AWAITING_FUNDING } from "./scope-acceptance.js";
 import {
@@ -113,6 +116,8 @@ export const RECONCILE_REFUSALS = [
   "record_chain_mismatch",
   /** The record names another scope. */
   "record_scope_mismatch",
+  /** Testnet-only deployment terms require an explicitly allowed buyer. */
+  "testnet_buyer_not_allowed",
   "scope_not_found",
   /** The record's verified payer is not the scope's buyer. */
   "record_buyer_not_scope_buyer",
@@ -220,6 +225,10 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
   const own = recordRefusal(record, expectedChainId);
   if (own !== null) return refused(own);
   if (record.scopeId !== scopeId) return refused("record_scope_mismatch");
+  // Binding check 4a: after record validation and scope identity, before BEGIN IMMEDIATE or reads.
+  const allowance = testnetBuyerAllowance(terms);
+  const testnet = testnetBuyerRefusal(record, allowance);
+  if (testnet !== null) return refused(testnet);
   try {
     return getStore().db.transaction((tx): ReconcileResult => {
       const now = new Date();
@@ -227,7 +236,7 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
       if (!scope) return refused("scope_not_found");
 
       // Bound to this scope: the binding rule (funding-binding.ts), shared with the funding-status DTO.
-      const bound = recordScopeRefusal(record, scope, expectedChainId);
+      const bound = recordScopeRefusal(record, scope, expectedChainId, allowance);
       if (bound !== null) return refused(bound);
 
       // The record kept for this scope, if any: a conformant store shows finalized records only
@@ -237,7 +246,7 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
       // this record's escrow: the same (chain, escrow) funding.
       const kept = store.findByScope(tx, scopeId);
       const keptForThis =
-        kept !== null && recordScopeRefusal(kept, scope, expectedChainId) === null && sameAddress(kept.escrowAddress, record.escrowAddress)
+        kept !== null && recordScopeRefusal(kept, scope, expectedChainId, allowance) === null && sameAddress(kept.escrowAddress, record.escrowAddress)
           ? kept
           : null;
 
@@ -253,7 +262,7 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
       // transaction. activationRefusal is the ONE rule the funding-status DTO also reads
       // funded_verified by before activation (ruling 1): the binding, and the row's status (c).
       const escrow = escrowForJob(scope.jobId);
-      const notReady = activationRefusal(record, scope, escrow, expectedChainId);
+      const notReady = activationRefusal(record, scope, escrow, expectedChainId, allowance);
       if (notReady !== null || !escrow) return refused(notReady ?? "escrow_missing");
 
       // One funding, one scope. The funding is (chain, escrow) (ruling 4); the port folds the address

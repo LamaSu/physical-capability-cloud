@@ -27,7 +27,7 @@ import {
   populateDeviceRegistrationDTO,
   type DeviceRegistrationDTO,
 } from "./populators/device.populator.js";
-import { getKernelService } from "../services/kernel-service.js";
+import { getKernelService, type LocalRunQueueReason } from "../services/kernel-service.js";
 import { localJobDispatchDecision } from "../services/local-job-dispatch.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
@@ -91,7 +91,7 @@ export interface JobSubmitResult {
   jobId: string;
   deviceId: string | null;
   status: "queued" | "accepted";
-  reason?: Extract<ReturnType<typeof localJobDispatchDecision>, { ok: false }>["reason"];
+  reason?: LocalRunQueueReason;
 }
 
 export interface JobStatusResult {
@@ -277,6 +277,7 @@ export class JobFacade extends BaseFacade {
    */
   async submit(
     body: SubmitJobInput,
+    localRunAuthority: "decide" | "none",
     actorId?: string,
     ip?: string,
     userAgent?: string,
@@ -332,7 +333,7 @@ export class JobFacade extends BaseFacade {
         // KernelService not initialized — treat as external kernel path
       }
 
-      const queued = (reason: Extract<ReturnType<typeof localJobDispatchDecision>, { ok: false }>["reason"]) => {
+      const queued = (reason: LocalRunQueueReason) => {
         // The shared dispatch decision supplies a closed reason; caller-supplied
         // ids still pass through N71's formatters at the telemetry boundary.
         pipelineTelemetry.emit(logSafeId(jobId), "job_submit", "completed", {
@@ -357,7 +358,10 @@ export class JobFacade extends BaseFacade {
 
       // Local kernel: fire-and-forget via KernelService
       try {
-        const result = await svc!.submitJob({ jobId, kernelId, stepId, deviceId, gcodeHash, assuranceTier });
+        const result = await svc!.submitJob({ jobId, kernelId, stepId, deviceId, gcodeHash, assuranceTier, localRunAuthority });
+        if (result.status === "refused") {
+          throw new ConflictError("This gateway does not run the named device.", "device_not_runnable_here");
+        }
         // The stop or operator switch may have changed during safety preflight.
         if (result.status === "queued") return queued(result.reason);
         // result.deviceId may be auto-selected or caller-supplied; format it too.

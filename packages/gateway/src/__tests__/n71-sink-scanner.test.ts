@@ -297,6 +297,32 @@ describe("N71 round 8: sink provenance and immutable value proofs", () => {
 });
 
 describe("N71 round 9: sink escapes, derived sinks and conservative proofs", () => {
+  it.each(["probeSuppressedTracingInline", "probeSuppressedTracingReference", "probeSuppressedTracingImportedAlias"])("keeps the declaration-verified suppression callback as control flow in %s", (name) => {
+    const result = probeScan(name);
+    expect(result.violations, formatViolations(result.violations)).toHaveLength(0);
+    expect(result.unresolvedCallees, formatViolations(result.unresolvedCallees)).toHaveLength(0);
+  });
+
+  it("scans raw sinks inside a suppression callback", () => {
+    const result = probeScan("probeSuppressedTracingRawSink");
+    expect(result.violations.some((row) => row.sink === "console.warn" && row.argText === "raw"), formatViolations(result.violations)).toBe(true);
+  });
+
+  it("refuses a suppression-named impostor at a real sink", () => {
+    const result = probeScan("probeSuppressedTracingImpostor");
+    expect(result.violations.some((row) => row.sink === "console.warn" && row.argText === "() => raw"), formatViolations(result.violations)).toBe(true);
+  });
+
+  it("refuses suppression callbacks outside the sole verified argument", () => {
+    const result = probeScan("probeSuppressedTracingExtraArgument");
+    expect(result.violations.some((row) => row.argText === "() => raw"), formatViolations(result.violations)).toBe(true);
+  });
+
+  it("refuses suppression results used as sink data", () => {
+    const result = probeScan("probeSuppressedTracingReturnedData");
+    expect(result.violations.some((row) => row.sink === "console.warn" && row.argText === "Sentry.suppressTracing(() => raw)"), formatViolations(result.violations)).toBe(true);
+  });
+
   it.each([
     "probeStructuralLoggerArgument", "probeStructuralLoggerFields", "probeSinkObjectProperty",
     "probeSinkConstructorArgument", "probeDestructuredSinkAssignment", "probeSinkReturn",

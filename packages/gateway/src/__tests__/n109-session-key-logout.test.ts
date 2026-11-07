@@ -76,7 +76,7 @@ function sessionHeaders(app: FastifyInstance, token: string, path: "cookie" | "b
 
 async function mint(app: FastifyInstance, token: string, path: "cookie" | "bearer" = "bearer") {
   const response = await app.inject({
-    method: "POST", url: "/api/auth/session-key", headers: sessionHeaders(app, token, path),
+    method: "POST", url: "/api/auth/session-key", headers: { ...sessionHeaders(app, token, path), authorization: `Bearer ${token}` },
   });
   expect(response.statusCode).toBe(201);
   return response.json<{ api_key: string; key_id: string }>();

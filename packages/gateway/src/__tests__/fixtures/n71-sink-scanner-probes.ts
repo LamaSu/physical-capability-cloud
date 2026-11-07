@@ -23,6 +23,7 @@
 import type { FastifyRequest, FastifyBaseLogger } from "fastify";
 import type { ServerResponse } from "node:http";
 import { Console as NodeConsole } from "node:console";
+import { suppressTracing as suppressCallback } from "@sentry/node";
 import { trace, type Span } from "@opentelemetry/api";
 import {
   logSafeId,
@@ -623,4 +624,27 @@ export function probePersistedElementField(raw: string): void {
   const wrapper = new Wrapper();
   wrapper.set(raw);
   wrapper.send();
+}
+
+export function probeSuppressedTracingInline(raw: string): string {
+  return Sentry.suppressTracing(() => raw);
+}
+export function probeSuppressedTracingReference(callback: () => string): string {
+  return Sentry.suppressTracing(callback);
+}
+export function probeSuppressedTracingImportedAlias(callback: () => string): string {
+  return suppressCallback(callback);
+}
+export function probeSuppressedTracingRawSink(raw: string): void {
+  Sentry.suppressTracing(() => { console.warn(raw); });
+}
+export function probeSuppressedTracingImpostor(raw: string): void {
+  const Sentry = { suppressTracing: console.warn };
+  Sentry.suppressTracing(() => raw);
+}
+export function probeSuppressedTracingExtraArgument(raw: string): void {
+  Sentry.suppressTracing(() => "fixed", () => raw);
+}
+export function probeSuppressedTracingReturnedData(raw: string): void {
+  console.warn(Sentry.suppressTracing(() => raw));
 }

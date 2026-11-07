@@ -29,7 +29,7 @@
  *   - mapped and `Pick<>` types, through `checker.getPropertyOfType(type, method)?.declarations`;
  *   - pino/fastify `LogFn` and OTel's `Span` in the resolved-signature fallback.
  * (P5) Proofs:
- *   - A function expression counts as control flow only in positions the engine verifies, where its return value can't reach the sink argument (codex F5, :925).
+ *   - A function expression counts as control flow only in positions the engine verifies, where its return value can't reach the sink argument (codex F5, :925). A callable reference also counts as control flow only as the sole argument to the resolved Sentry suppressTracing declaration; its returned value is not a formatter result.
  *   - `JSON.stringify` is transparent only with no second argument, or a null/undefined or literal-array second argument, AND an argument whose value is proven. Any replacer function, or a value that may carry `toJSON`, is unproven (codex F5, :997).
  *   - A destructured or trace binding that is ever reassigned, or written through a property, is not trusted from its initializer (codex F5, :882).
  *   - A parameter proof is refused for a method that overrides a base member or implements an interface member (Opus F3 shape 5).
@@ -970,15 +970,22 @@ function isVirtualMethod(fn: ts.SignatureDeclaration, checker: ts.TypeChecker): 
   return Boolean(member.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.OverrideKeyword)) || inheritedMembers(fn, checker).length > 0;
 }
 
-function isVerifiedControlFlow(fn: ts.ArrowFunction | ts.FunctionExpression, ctx: ScanCtx): boolean {
-  let value: ts.Node = fn;
+function isVerifiedControlFlow(expr: ts.Expression, ctx: ScanCtx): boolean {
+  let value: ts.Node = expr;
   while (ts.isParenthesizedExpression(value.parent) || ts.isAsExpression(value.parent) || ts.isNonNullExpression(value.parent)) value = value.parent;
   const call = value.parent;
-  if (!ts.isCallExpression(call) || call !== ctx.sinkNode || call.arguments[call.arguments.length - 1] !== value) return false;
-  const method = memberAccess(call.expression)?.name;
+  if (!ts.isCallExpression(call) || call !== ctx.sinkNode) return false;
   const decl = ctx.checker.getResolvedSignature(call)?.declaration;
   if (!decl) return false;
   const file = decl.getSourceFile().fileName;
+  // This API invokes its sole callback under suppression and returns the result
+  // without exporting it. Callback bodies and uses of that result remain scanned.
+  if (ts.isFunctionDeclaration(decl) && decl.name?.text === "suppressTracing" &&
+      file.endsWith("/node_modules/@sentry/core/build/types/tracing/trace.d.ts") &&
+      call.arguments.length === 1 && call.arguments[0] === value &&
+      ctx.checker.getTypeAtLocation(expr).getCallSignatures().length > 0) return true;
+  if ((!ts.isArrowFunction(expr) && !ts.isFunctionExpression(expr)) || call.arguments[call.arguments.length - 1] !== value) return false;
+  const method = memberAccess(call.expression)?.name;
   // These APIs execute a callback under a span; they never serialize its return.
   return (file.includes(OTEL_PKG) && method === "startActiveSpan") ||
     ((file.includes(SENTRY_PKG) || file.endsWith(SENTRY_FILE_SUFFIX)) &&
@@ -1081,7 +1088,7 @@ export function checkArg(expr: ts.Expression, ctx: ScanCtx): boolean {
 
   // Only declaration-verified tracing callbacks are control flow. A closure in
   // data position (including a serializer callback) is an unproven value.
-  if ((ts.isArrowFunction(n) || ts.isFunctionExpression(n)) && isVerifiedControlFlow(n, ctx)) return true;
+  if (isVerifiedControlFlow(n, ctx)) return true;
 
   // template-literal holes
   if (ts.isTemplateExpression(n)) {

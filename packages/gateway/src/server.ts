@@ -8,6 +8,7 @@ import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
 import { writeAuditHook } from "./services/write-audit-hook.js";
 import { GATEWAY_LOGGER_OPTIONS, telemetryLookalikeHook, isWalletRequest } from "./services/telemetry-privacy.js";
 import { walletsRoutes } from "./routes/wallets.js";
+import { walletFaucetRoutes } from "./routes/wallet-faucet.js";
 initPostHog();
 import { randomBytes } from "node:crypto";
 
@@ -402,12 +403,21 @@ export async function createGateway(port = 3200) {
       } as Record<string, unknown>),
     },
   });
-  await app.register(fastifySwaggerUi, {
-    routePrefix: "/docs/api",
-    uiConfig: {
-      docExpansion: "list",
-      deepLinking: true,
-    },
+  await app.register(async (swaggerApp) => {
+    // Swagger's static wildcard serves oauth2-redirect.html, which has inline
+    // JavaScript. The plugin exposes no route config option for its static files.
+    swaggerApp.addHook("onRoute", (route) => {
+      if (route.url === "/docs/api/static/*") {
+        route.config = { ...route.config, cspInlineScripts: true };
+      }
+    });
+    await swaggerApp.register(fastifySwaggerUi, {
+      routePrefix: "/docs/api",
+      uiConfig: {
+        docExpansion: "list",
+        deepLinking: true,
+      },
+    });
   });
 
   // Expose the raw OpenAPI JSON document. PUBLIC — referenced by directory
@@ -629,7 +639,8 @@ export async function createGateway(port = 3200) {
     warn: (msg) => app.log.warn({ code: "background_service_warning", detail: logSafeId(msg) }),
   });
 
-  // Scope-based RBAC — enforces required scopes per endpoint (after apiGate sets key)
+  // Scope-based RBAC — onRequest after apiGate, before body parsing and route-level hooks.
+  // A limited API key can be refused here before DHT announce's route-level 501.
   await app.register(scopeChecker);
 
   // DLP redaction — role-aware field-level response filtering (onSend hook)
@@ -638,7 +649,6 @@ export async function createGateway(port = 3200) {
   // Analytics service — subscribes to event bus, persists events + updates views
   getAnalyticsService();
 
-  // x402 payment gate (before REST routes — gates protected endpoints)
   await app.register(x402Gate);
 
   // Service status + analytics — AFTER apiGate (they expose DB data, audit logs, security events)
@@ -696,6 +706,7 @@ export async function createGateway(port = 3200) {
   await app.register(spaceRoutes);
   await app.register(operatorRoutes);
   await app.register(walletsRoutes);
+  await app.register(walletFaucetRoutes);
   await app.register(operatorWorkRoutes);
   await app.register(productHomeRoutes);
   await app.register(operatorsPublicRoutes);
@@ -929,7 +940,9 @@ export async function createGateway(port = 3200) {
     } catch {
       landingHtml = null;
     }
-    app.get<{ Querystring: { mode?: string } }>("/", async (req, reply) => {
+    app.get<{ Querystring: { mode?: string } }>("/", {
+      config: { cspStaticHtmlPath: landingHtml !== null ? "/landing.html" : "/index.html" },
+    }, async (req, reply) => {
       if (req.query.mode === "agent") {
         reply.header("Cache-Control", "public, max-age=300");
         return reply.type("application/json").send({

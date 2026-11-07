@@ -12,6 +12,7 @@
  */
 
 import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from "vitest";
+import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import { setupRoutes } from "../routes/setup.js";
 import { initStore, closeStore, getRepos } from "../db.js";
@@ -97,6 +98,9 @@ const mockConfig: KernelConfig = {
 // ---------------------------------------------------------------------------
 
 async function buildApp(): Promise<FastifyInstance> {
+  const savedAdminKey = process.env.PCC_ADMIN_KEY;
+  const adminKey = randomUUID();
+  process.env.PCC_ADMIN_KEY = adminKey;
   process.env.PCC_DB_PATH = ":memory:";
   initStore({ seed: true });
 
@@ -113,7 +117,12 @@ async function buildApp(): Promise<FastifyInstance> {
     if (typeof key === "string") {
       (req as { userId?: string }).userId = key;
       (req as { operatorId?: string }).operatorId = key;
+      if (key === OWNER) req.headers["x-admin-key"] = adminKey;
     }
+  });
+  app.addHook("onClose", async () => {
+    if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = savedAdminKey;
   });
   await app.register(setupRoutes);
   await app.ready();

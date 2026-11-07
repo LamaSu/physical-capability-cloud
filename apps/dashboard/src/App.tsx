@@ -1,7 +1,7 @@
 import React, { Suspense, lazy } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { AppShell, Sidebar, TopBar, StatusBar, ParticleBackground } from "@pcc/ui";
+import { AppShell, Sidebar, TopBar, ParticleBackground } from "@pcc/ui";
 import { navGroups } from "./components/nav-config.js";
 import { useUIStore } from "./stores/ui-store.js";
 import { useAuthStore, onIdentityChange } from "./stores/auth-store.js";
@@ -159,7 +159,7 @@ function LogoutButton() {
   const logout = useAuthStore((s) => s.signOutWallet);
   return (
     <button
-      onClick={logout}
+      onClick={() => void logout()}
       className="w-full px-3 py-2 text-[10px] text-white/25 hover:text-red-400/70 hover:bg-white/[0.03] rounded-lg transition-all text-left tracking-wide uppercase"
     >
       Disconnect
@@ -200,7 +200,7 @@ function DashboardShell() {
             actions={<><ModeToggle /><ConnectWallet /><TourRestartButton /></>}
           />
         }
-        statusBar={<StatusBar kernelsOnline={2} activeJobs={3} networkStatus="connected" />}
+        statusBar={null}
       >
         <PageTransition>
           <Suspense fallback={<PageLoader />}>
@@ -294,6 +294,9 @@ function Shell() {
   const interfaceMode = useUIStore((s) => s.interfaceMode);
   const location = useLocation();
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const sessionToken = useAuthStore((s) => s.sessionToken);
+  // A restored wallet session can still make cookie-authorized reads and stops.
+  const hasAccess = isAuthenticated || sessionToken !== null;
 
   // Public pages that don't require auth
   const publicPaths = ["/", "/start", "/whitepaper", "/go", "/earn", "/onboard/chat"];
@@ -301,7 +304,7 @@ function Shell() {
 
   // Login page at /login
   if (location.pathname === "/login") {
-    return isAuthenticated ? (
+    return hasAccess ? (
       <Suspense fallback={<PageLoader />}><LandingPage /></Suspense>
     ) : (
       <LoginPage />
@@ -309,7 +312,7 @@ function Shell() {
   }
 
   // Auth gate — redirect to login for non-public pages
-  if (!isAuthenticated && !isPublicPage) {
+  if (!hasAccess && !isPublicPage) {
     return <LoginPage />;
   }
 
@@ -387,6 +390,11 @@ function Shell() {
         <OperatorMobilePage />
       </Suspense>
     );
+  }
+
+  if (location.pathname === "/operator" ||
+      (location.pathname.startsWith("/operator/") && location.pathname !== "/operator/revenue")) {
+    return <DashboardShell />;
   }
 
   // /app and /app/* — Spatial fallback web dashboard (with agent prompt banner)

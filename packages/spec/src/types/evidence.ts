@@ -66,6 +66,49 @@ export const EVIDENCE_EVENT_TYPES = [
   "device_death",
   "device_heartbeat",
   "calibration_record",
+  /**
+   * Payload: { jobId, deviceJobId, inputHash }, plus settlementUnitId and
+   * challengeNonce when the step has a settlement unit (LO-EV-9 binding);
+   * a verifier must not require an exact key set. inputHash has format
+   * `^sha256:[0-9a-f]{64}$`: SHA-256 of the exact input bytes, with no text,
+   * newline or BOM normalization. The SHA256 type is only a brand.
+   *
+   * PR-1a's contract: on JobRunner's prepare and legacy load_gcode paths
+   * only, a run in which an adapter or device emits method_loaded carrying
+   * inputHash fails. PR-1a does not cover runPrintJob. The kernel writes its
+   * method_loaded carrying inputHash after the device's prepare ack echoes
+   * jobId and inputHash. The prepare path ALWAYS carries inputData; the
+   * kernel computes inputHash itself from those bytes, and a hash-only
+   * prepare is refused. The every-path refusal, runPrintJob included, and
+   * the source.writer "kernel" marker (event hash v2) both arrive with ADK
+   * PR-1d. On the prepare path EVERY adapter method_loaded is refused, with
+   * or without inputHash. A legacy adapter's method_loaded without inputHash
+   * may appear, and makes input.hash_bound NOT met. Before PR-1a (#665) the
+   * kernel had no prepare command and wrote no method_loaded;
+   * adapter-pylabrobot still emits its own method_loaded, on the legacy
+   * path, until PR-1c.
+   *
+   * input.hash_bound requires at least one method_loaded. EVERY one must be
+   * kernel-written and carry payload.inputHash equal to the funded subject
+   * block's nonzero recipeRef, read only from the authenticated subjects
+   * object. It must be on the same deviceJobId as the completion: spec's
+   * LO-EV-9 step 8 and the oracle's input.hash_bound verifier mirror the
+   * binding (#8973), failing closed when absent. Every method_loaded must
+   * carry the same non-empty string payload.deviceJobId, and at least one
+   * execution_completed must exist; EVERY execution_completed must carry
+   * that exact deviceJobId. Until a producer stamps both event types
+   * (PR-1a's kernel, or PR-2a's runDeviceJob), this rule cannot be met.
+   * The oracle's process.batch_record verifier today reads payload.methodHash
+   * (or hash, gcodeHash, recipeHash, programHash) of the FIRST method_loaded;
+   * it must read inputHash before a template lists both primitives.
+   *
+   * Go-live precondition: input.hash_bound joins no verifiedPrimitives set
+   * and never flips to live until (i) ADK PR-1a and PR-1d are merged (PR-1d
+   * brings the every-path refusal, runPrintJob included, and the marker),
+   * (ii) this marker and v2 hash are merged, and (iii) the oracle's verifier
+   * SHIPs with the marker
+   * requirement. It remains a stub until all three hold.
+   */
   "method_loaded",
   "sequence_started",
   // Photo verification events (WS2)
@@ -128,6 +171,13 @@ export interface EvidenceSource {
   kernelId: Id;
   firmwareVersion?: string;
   /**
+   * Reserved for events the kernel itself writes. Absent means not
+   * kernel-attested. Adapters and devices never set it, and the kernel
+   * refuses an event that arrives carrying it. An event carrying this
+   * marker hashes under event hash v2 (util/canonical.ts).
+   */
+  writer?: "kernel";
+  /**
    * True when the emitting adapter is a mock/simulated device or is running
    * in mock mode — i.e. every event from this source is fabricated-by-design
    * simulation data, NOT a reading from physical hardware. Detector layers
@@ -146,7 +196,7 @@ export interface EvidenceEvent {
   source: EvidenceSource;
   /** The actual data — varies by event type */
   payload: Record<string, unknown>;
-  /** SHA-256 of canonical JSON of (type + timestamp + source + payload) */
+  /** SHA-256 of canonical event JSON; source.writer selects v2 (util/canonical.ts). */
   hash: SHA256;
 }
 

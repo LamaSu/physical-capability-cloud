@@ -31,6 +31,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import { setupRoutes } from "../routes/setup.js";
 import { initStore, closeStore, getRepos } from "../db.js";
@@ -233,6 +234,7 @@ class FakeBench {
 
 describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2 round 3)", () => {
   let app: FastifyInstance;
+  let savedAdminKey: string | undefined;
   let svc: ReturnType<typeof initKernelService>;
   let svcInternals: {
     machines: Map<string, MachineAdapter>;
@@ -241,6 +243,9 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
   };
 
   beforeAll(async () => {
+    savedAdminKey = process.env.PCC_ADMIN_KEY;
+    const adminKey = randomUUID();
+    process.env.PCC_ADMIN_KEY = adminKey;
     process.env.PCC_DB_PATH = process.env.PCC_DB_PATH ?? ":memory:";
     initStore({ seed: true });
 
@@ -325,6 +330,7 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
       if (typeof key === "string") {
         (req as { userId?: string }).userId = key;
         (req as { operatorId?: string }).operatorId = key;
+        if (key === OWNER) req.headers["x-admin-key"] = adminKey;
       }
     });
     await app.register(setupRoutes);
@@ -342,6 +348,8 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
       }
     }
     await app.close();
+    if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = savedAdminKey;
     closeStore();
     resetKernelService();
     unregisterMachineAdapter(UNMARKED_EXTENSION_TYPE);
