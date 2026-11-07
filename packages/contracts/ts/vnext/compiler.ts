@@ -39,6 +39,7 @@ import {
   type Address,
   type Hex,
 } from "viem";
+import { reclaimWindowFor } from "@pcc/spec/funding";
 
 const k = (preimage: string): Hex => keccak256(stringToHex(preimage));
 
@@ -795,6 +796,7 @@ export function compileVNextPolicy(input: VNextCompileInput): CompiledVNextPolic
   let totalLegs = 0;
   let totalGross = 0n;
   const seen = new Set<string>();
+  const w = reclaimWindowFor(chainId);
   configs.forEach((c, i) => {
     checkUnitConfig(c, i);
     totalLegs += c.payouts.length;
@@ -804,8 +806,8 @@ export function compileVNextPolicy(input: VNextCompileInput): CompiledVNextPolic
     if (seen.has(key)) fail("DUPLICATE_UNIT", `units[${i}] repeats (milestoneIndex, stepId)`);
     seen.add(key);
     const delay = c.reclaimAt - fundingTime;
-    if (c.reclaimAt <= fundingTime || delay < VNEXT.MIN_RECLAIM_DELAY || delay > VNEXT.MAX_RECLAIM_DELAY) {
-      fail("BAD_RECLAIM", `units[${i}]: reclaimAt must be fundingTime + [10 days, 365 days]`);
+    if (c.reclaimAt <= fundingTime || delay < w.min || delay > w.max) {
+      fail("BAD_RECLAIM", `units[${i}]: reclaimAt must be fundingTime + [${w.min}, ${w.max}] seconds`);
     }
     // fund() then narrows it: `u.reclaimAt = toUint64(c.reclaimAt)` (VNextSettlementEscrow.sol:825).
     if (c.reclaimAt > VNEXT.MAX_RECLAIM_AT) fail("VALUE_OVERFLOW", `units[${i}]: reclaimAt does not fit uint64`);
