@@ -705,7 +705,7 @@ All facade responses use the `Result<T>` pattern: `{success: true, data: T}` or 
 ```typescript
 {
   id: string;
-  jobId: string;
+  jobId?: string;
   status: "created"|"funded"|"active"|"completed"|"disputed"|"refunded";
   totalAmount: string;               // USDC amount
   currency: string;
