@@ -363,6 +363,14 @@ describe("Revenue reads", () => {
     fetchRoutes();
     expect(await refresh(client)).toContain("Couldn't refresh jobs and escrows");
   });
+  it("hides the empty state after a failed refresh of an empty successful read", async () => {
+    liveRoutes();
+    const client = newClient();
+    expect(await renderPage(<RevenueDashboardPage />, client)).toContain("No jobs or escrows yet");
+    fetchRoutes();
+    expect(await refresh(client)).toContain("Couldn't refresh jobs and escrows");
+    expect(text()).not.toContain("No jobs or escrows yet");
+  });
   it("uses the active escrow currency", async () => {
     liveRoutes(escrowRows([escrow({ currency: "ETH" })]));
     expect(await renderPage(<RevenueDashboardPage />)).toContain("ETH");
@@ -444,6 +452,12 @@ const moneyPages = [
   { name: "Revenue", page: () => <RevenueDashboardPage /> },
 ];
 describe.each(moneyPages)("$name escrow failures", ({ name, page }) => {
+  it("rejects the wrong escrows envelope", async () => {
+    liveRoutes({ "/api/escrow": ok({ items: [escrow()] }) });
+    expect(await renderPage(page())).toContain("Couldn't load escrows");
+    expect(text()).not.toMatch(/No escrows yet|No escrows|Nothing running yet|No jobs or escrows yet|No active escrows|Escrows\s*0/);
+    if (name === "Command Center") expect(text()).toMatch(/Escrows\s*—/);
+  });
   it.each([{ name: "HTTP failure", reply: errorReply }, { name: "network error", reply: "network-error" as Reply }])("shows an unavailable read for $name", async ({ reply }) => {
     liveRoutes({ "/api/escrow": reply });
     expect(await renderPage(page())).toContain("Couldn't load escrows");
@@ -510,6 +524,14 @@ describe("held escrow records", () => {
     expect(heldTile().textContent).toContain("None held");
     expect(heldTile().querySelector('[data-amount="value"]')).toBeNull();
   });
+  it("shows a dash instead of None held when only a decided release remains", async () => {
+    tileRoutes(held({ byCurrency: [], uncountedMilestones: 0, unclassifiedMilestones: 0,
+      releaseDecided: { bound: "at_most", byCurrency: [{ ...usdc, amountBaseUnits: "7000000" }] } }));
+    await renderPage(<DashboardPage />);
+    expect(heldTile().textContent).toContain("—");
+    expect(heldTile().textContent).not.toContain("None held");
+    expect(heldTile().textContent).toContain("at most $7.00USDC, release decided, payout not finished");
+  });
   it("does not call an uncounted funded currency empty", async () => {
     tileRoutes(held({ uncountedMilestones: 1 }));
     await renderPage(<DashboardPage />);
@@ -557,6 +579,20 @@ describe("held escrow records", () => {
     expect(heldTile().textContent).toContain("Couldn't load escrows");
     expect(heldTile().textContent).not.toMatch(/\d|None held/);
   });
+  it("rejects an escrow-held confirmation other than record_only", async () => {
+    liveRoutes({ "/api/product/home": ok({ ...home(),
+      escrowHeld: { ...held({ byCurrency: [usdc] }), confirmation: "chain_confirmed" } }) });
+    await renderPage(<DashboardPage />);
+    expect(heldTile().textContent).toContain("Couldn't load escrows");
+    expect(heldTile().textContent).not.toMatch(/\d|None held/);
+  });
+  it("rejects a release-decided bound other than at_most", async () => {
+    liveRoutes({ "/api/product/home": ok({ ...home(), escrowHeld: { ...held({ byCurrency: [usdc] }),
+      releaseDecided: { bound: "exact", byCurrency: [{ ...usdc, amountBaseUnits: "7000000" }] } } }) });
+    await renderPage(<DashboardPage />);
+    expect(heldTile().textContent).toContain("Couldn't load escrows");
+    expect(heldTile().textContent).not.toMatch(/\d|None held/);
+  });
   it("keeps decided releases on their own line apart from held amounts", async () => {
     tileRoutes(held({ byCurrency: [usdc], releaseDecided: { bound: "at_most", byCurrency: [{ ...usdc, amountBaseUnits: "7000000" }, eth] } }));
     await renderPage(<DashboardPage />);
@@ -595,6 +631,16 @@ function expectScope(label: string) {
   expect(line.classList.contains("text-white/30")).toBe(true);
   expect(line.parentElement?.firstElementChild).toBe(line);
 }
+it("Command Center shows the escrow account scope once when loaded and when the read fails", async () => {
+  const label = "Every account's escrows, as the gateway records them.";
+  liveRoutes(escrowRows([escrow()]));
+  const client = newClient();
+  expect(await renderPage(<DashboardPage />, client)).toContain("escrow-a");
+  expectScope(label);
+  liveRoutes({ "/api/escrow": errorReply });
+  expect(await refresh(client)).toContain("Couldn't load escrows");
+  expectScope(label);
+});
 const scopePages = [
   { id: "escrow", path: "/escrow", label: "Every account's escrows, as the gateway records them." },
   { id: "revenue", path: "/operator/revenue", label: "Your jobs, and escrows across the network (earnings need settled income, not yet served)" },

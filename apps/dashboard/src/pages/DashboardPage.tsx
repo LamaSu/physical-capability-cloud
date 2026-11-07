@@ -35,7 +35,7 @@ function HeldInEscrow() {
             <div className="space-y-1">
               {held.byCurrency.length ? held.byCurrency.map((entry) => (
                 <div key={entry.currency}><AmountDisplay amount={entry.amountBaseUnits} decimals={entry.decimals} currency={entry.currency} size="md" /></div>
-              )) : <span className="text-lg text-white/70">{held.uncountedMilestones === 0 && held.unclassifiedMilestones === 0 ? "None held" : "—"}</span>}
+              )) : <span className="text-lg text-white/70">{held.uncountedMilestones === 0 && held.unclassifiedMilestones === 0 && held.releaseDecided.byCurrency.length === 0 ? "None held" : "—"}</span>}
             </div>
             {held.releaseDecided.byCurrency.map((entry) => (
               <p key={entry.currency} className="text-xs text-white/40">
@@ -125,6 +125,7 @@ export function DashboardPage() {
             )}
           </GlassPanel>
           <GlassPanel padding="lg">
+            <p className="text-xs text-white/30">Every account's escrows, as the gateway records them.</p>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider">Escrows</h2>
               <button className="text-xs text-teal-400/60 hover:text-teal-400/90" onClick={() => navigate("/escrow")}>View all</button>
