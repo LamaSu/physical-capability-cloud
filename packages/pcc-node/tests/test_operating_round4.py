@@ -317,7 +317,9 @@ def test_a_deadline_while_the_log_body_arrives_leaves_the_log_out():
         started = time.monotonic()
         result = _run(runtime)
         assert time.monotonic() - started < 1.3, "the log body outlived the run's 1 s deadline"
-        assert result.ok is True, result
+        # Master reports success here; verdict 117d asks for timeout:run_finished (#512, and the
+        # 0.1.1 release line). Either way N214's rule holds: no partial log is signed.
+        assert result.ok is True or result.error == "timeout:run_finished", result
         assert _sources(result) == ["device:run"], _sources(result)
     finally:
         dev.close()
@@ -371,6 +373,39 @@ def test_a_start_answer_the_device_cuts_short_is_state_unknown():
         result = _run(AdapterRuntime.from_profile(_profile(dev.url), *_keys()))
         assert result.ok is False and result.error == "no_run_id:device_state_unknown", result
         assert dev.requests == [("POST", "/runs")], dev.requests
+    finally:
+        dev.close()
+
+
+def test_a_cancel_while_an_unframed_log_arrives_is_not_swallowed():
+    def unframed(handler):
+        handler.send_response(200)
+        handler.end_headers()  # no Content-Length: only the watch tells a stop from the device's close
+        handler.wfile.write(LOG[:10])
+        handler.wfile.flush()
+        time.sleep(3.0)
+
+    dev = Device(log=unframed)
+    try:
+        runtime = AdapterRuntime.from_profile(_profile(dev.url, log=True, timeout_s=30), *_keys())
+        timer = threading.Timer(0.5, runtime.cancel)
+        timer.start()
+        try:
+            result = _run(runtime)
+        finally:
+            timer.cancel()
+        assert result.ok is False and result.error == "cancelled:run_finished", result
+        assert _sources(result) == ["device:run"], _sources(result)
+    finally:
+        dev.close()
+
+
+def test_a_log_one_byte_short_is_left_out():
+    dev = Device(log=_cut_short(200, LOG, len(LOG) - 1))
+    try:
+        result = _run(AdapterRuntime.from_profile(_profile(dev.url, log=True), *_keys()))
+        assert result.ok is True, result
+        assert _sources(result) == ["device:run"], _sources(result)
     finally:
         dev.close()
 
