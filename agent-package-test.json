@@ -1804,33 +1804,6 @@
       "endpoint": { "method": "POST", "path": "/api/dht/query" }
     },
     {
-      "name": "pcc_dht_announce",
-      "description": "Announce capabilities to the DHT network. Signs the announcement with your node's Ed25519 key and broadcasts to connected peers.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "kernelId": { "type": "string", "description": "Kernel ID announcing capabilities" },
-          "capabilities": {
-            "type": "array",
-            "description": "Array of capability summaries to announce",
-            "items": {
-              "type": "object",
-              "properties": {
-                "type": { "type": "string", "description": "Capability type" },
-                "materials": { "type": "array", "items": { "type": "string" } },
-                "priceRange": { "type": "object", "properties": { "min": { "type": "number" }, "max": { "type": "number" }, "currency": { "type": "string" } } },
-                "queueDepth": { "type": "number" }
-              },
-              "required": ["type"]
-            }
-          },
-          "ttlSeconds": { "type": "number", "description": "How long the announcement is valid (default 300)" }
-        },
-        "required": ["kernelId", "capabilities"]
-      },
-      "endpoint": { "method": "POST", "path": "/api/dht/announce" }
-    },
-    {
       "name": "pcc_dht_peers",
       "description": "List known DHT peers and their connection status. Shows which nodes are currently connected to the gossip network.",
       "input_schema": { "type": "object", "properties": {}, "required": [] },
