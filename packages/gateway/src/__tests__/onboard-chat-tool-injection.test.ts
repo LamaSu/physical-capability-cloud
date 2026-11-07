@@ -24,7 +24,7 @@ vi.mock("../telemetry.js", () => ({
 const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
 const TIMEOUT = 60_000;
 type Headers = Record<string, string | string[] | undefined>;
-type Finding = { rule: string; file: string; enclosing: string; expression: string };
+type Finding = { rule: string; file: string; enclosing: string; expression: string; detail?: string };
 
 /** E4a-R1 is also exercised on planted header leakage without mutating the route. */
 function credentialHeaders(headers: Headers): string[] {
@@ -50,31 +50,53 @@ function scanLoopbackTrust(root: string, files: readonly string[]): Finding[] {
     const expr = unwrap(node);
     return ts.isStringLiteralLike(expr) && loopbacks.has(expr.text);
   };
-  const holdsLoopback = (node: ts.Expression, at: ts.Node = node, seen = new Set<ts.Node>()): boolean => {
-    node = unwrap(node);
-    if (seen.has(node)) return false;
-    seen.add(node);
-    try {
+  const holdsLoopback = (operand: ts.Expression): boolean => {
+    // A synthetic projection has a fresh node identity on an uncached lookup.
+    // Keep whole-query visits and identify bindings by name + declaration too.
+    const visited = new Set<ts.Node>();
+    const identifiers = new WeakMap<ts.Node, Set<string>>();
+    let visits = 0, incomplete = false;
+    const walk = (node: ts.Expression, at: ts.Node, depth: number): boolean => {
+      node = unwrap(node);
+      if (visited.has(node)) return false;
+      if (depth > 64 || ++visits > 4096) { incomplete = true; return false; }
+      visited.add(node);
       if (isLoopback(node)) return true;
-      if (ts.isIdentifier(node)) return resolveBinding(node.text, node.parent && node.pos >= 0 ? node : at).some(value => value.expression && holdsLoopback(value.expression, value.declaration ?? at, seen));
+      if (ts.isIdentifier(node)) {
+        const name = node.text;
+        const reference = node.parent && node.pos >= 0 ? node : at;
+        return resolveBinding(name, reference).some(value => {
+          const declaration = value.declaration ?? reference;
+          let names = identifiers.get(declaration);
+          if (!names) { names = new Set(); identifiers.set(declaration, names); }
+          if (names.has(name)) return false;
+          names.add(name);
+          return !!value.expression && walk(value.expression, declaration, depth + 1);
+        });
+      }
       let hit = false;
-      ts.forEachChild(node, child => { if (ts.isExpression(child) && holdsLoopback(child, at, seen)) hit = true; });
+      ts.forEachChild(node, child => { if (!incomplete && ts.isExpression(child) && walk(child, at, depth + 1)) hit = true; });
       return hit;
-    } finally { seen.delete(node); }
+    };
+    const hit = walk(operand, operand, 0);
+    if (incomplete) findings.push({ rule: "E4a-R2", file: operand.getSourceFile().fileName, enclosing: enclosingName(operand), expression: printNode(operand), detail: "loopback operand cannot be inspected: depth or visit bound exceeded" });
+    return hit;
   };
   for (const file of files) {
     if (!isRuntimeFile(file) || !file.startsWith("packages/gateway/src/")) continue;
     const source = readFileSync(join(root, file), "utf8");
-    if (!source.includes("\\") && !["127.", "::1", "localhost", "isLoopback", "isLocalRequest"].some((word) => source.includes(word))) continue;
+    if (!source.includes("\\") && !["127", "::1", "localhost", "isLoopback", "isLocalRequest"].some((word) => source.includes(word))) continue;
     const ast = parseSource(file, source);
     const visit = (node: ts.Node): void => {
       const callee = ts.isCallExpression(node) ? unwrap(node.expression) : undefined;
       const receiver = callee && (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) ? callee.expression : undefined;
       const member = callee && calleeName(callee);
-      const collectionTrust = ts.isCallExpression(node) && receiver && ["has", "includes"].includes(member ?? "") && node.arguments.some(isIp) && holdsLoopback(receiver, node);
-      const prefixTrust = ts.isCallExpression(node) && receiver && member === "startsWith" && isIp(receiver) && node.arguments.some(arg => ts.isStringLiteralLike(unwrap(arg)) && (unwrap(arg) as ts.StringLiteralLike).text === "127.");
-      if (collectionTrust || prefixTrust || (ts.isBinaryExpression(node) && comparisons.has(node.operatorToken.kind)
-        && ((isIp(node.left) && isLoopback(node.right)) || (isLoopback(node.left) && isIp(node.right))))
+      const collectionTrust = ts.isCallExpression(node) && receiver && ["has", "includes", "indexOf"].includes(member ?? "") && node.arguments.some(isIp) && holdsLoopback(receiver);
+      const prefixTrust = ts.isCallExpression(node) && receiver && member === "startsWith" && isIp(receiver) && node.arguments.some(arg => ts.isStringLiteralLike(unwrap(arg)) && /^(?:127\.|::ffff:127\.)/.test((unwrap(arg) as ts.StringLiteralLike).text));
+      const regexTrust = ts.isCallExpression(node) && receiver && member === "test" && ts.isRegularExpressionLiteral(unwrap(receiver)) && (unwrap(receiver) as ts.RegularExpressionLiteral).text.includes("127") && node.arguments.some(isIp);
+      const switchTrust = ts.isCaseClause(node) && ts.isCaseBlock(node.parent) && ts.isSwitchStatement(node.parent.parent) && isIp(node.parent.parent.expression) && holdsLoopback(node.expression);
+      if (collectionTrust || prefixTrust || regexTrust || switchTrust || (ts.isBinaryExpression(node) && comparisons.has(node.operatorToken.kind)
+        && ((isIp(node.left) && holdsLoopback(node.right)) || (isIp(node.right) && holdsLoopback(node.left))))
         || (ts.isCallExpression(node) && ["isLoopback", "isLocalRequest"].includes(calleeName(node.expression) ?? ""))) {
         findings.push({ rule: "E4a-R2", file, enclosing: enclosingName(node), expression: printNode(node, ast) });
       }
@@ -247,5 +269,85 @@ describe("verdict controls for E4a loopback trust", () => {
       writeFileSync(join(root, path), source);
       expect(scanLoopbackTrust(root, [path])).toHaveLength(1);
     } finally { rmSync(root, {recursive: true, force: true}); }
+  });
+});
+
+
+describe("delta verdict controls for E4a", () => {
+  for (const [name, source] of [
+    ["E4a-a named loopback", 'const LOCALHOST = "127.0.0.1"; export function trust(req) { return req.ip === LOCALHOST; }'],
+    ["E4a-b longer prefix", 'export function trust(req) { return req.ip.startsWith("127.0.0."); }'],
+    ["mapped loopback prefix", 'export function trust(req) { return req.ip.startsWith("::ffff:127."); }'],
+    ["E4a-c regex", 'export function trust(req) { return /^127\\./.test(req.ip); }'],
+    ["E4a-d indexOf", 'export function trust(req) { return ["127.0.0.1", "::1"].indexOf(req.ip) !== -1; }'],
+    ["E4a-e switch case", 'export function trust(req) { switch (req.ip) { case "127.0.0.1": return true; default: return false; } }'],
+  ]) it(`delta V5 ${name}: loopback trust is detected in routes`, () => {
+    const root = mkdtempSync(join(tmpdir(), "pcc-loopback-delta-"));
+    const file = "packages/gateway/src/routes/planted.ts";
+    try {
+      mkdirSync(dirname(join(root, file)), {recursive: true});
+      writeFileSync(join(root, file), source);
+      expect(scanLoopbackTrust(root, [file])).toHaveLength(1);
+    } finally { rmSync(root, {recursive: true, force: true}); }
+  });
+});
+
+// These cycles were found by an fs-based scan of the actual gateway runtime files.
+describe("f2b bounded loopback resolution", () => {
+  for (const [name, source] of [
+    ["signature verifier destructured address", `
+      const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+      const rpcLoopback = "127.0.0.1";
+      function verifyEvmMessageSignature({ address }, req) {
+        if (address.toLowerCase() === ZERO_ADDRESS) return false;
+        return req.ip === address;
+      }`],
+    ["settlement destructured callback signer", `
+      const rpcLoopback = "127.0.0.1";
+      function canonicalSignatures(sigs, req) {
+        copySignatureEntries(sigs).forEach(({ signer, scheme, sig }) => {
+          if (typeof signer !== "string") throw new Error("signer");
+          return req.ip === signer;
+        });
+      }`],
+    ["for-of synthetic iterable projection", `
+      const rpcLoopback = "127.0.0.1";
+      function trust({ items }, req) {
+        for (const item of items) if (req.ip === item) return true;
+        return false;
+      }`],
+  ]) it(`f2b cycle ${name}: a non-loopback alias terminates cleanly`, () => {
+    const root = mkdtempSync(join(tmpdir(), "pcc-loopback-cycle-"));
+    const file = "packages/gateway/src/auth/planted.ts";
+    try {
+      mkdirSync(dirname(join(root, file)), { recursive: true });
+      writeFileSync(join(root, file), source);
+      expect(scanLoopbackTrust(root, [file])).toEqual([]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("f2b cycle guard retains a loopback literal after a cyclic candidate", () => {
+    const root = mkdtempSync(join(tmpdir(), "pcc-loopback-cycle-"));
+    const file = "packages/gateway/src/auth/planted.ts";
+    try {
+      mkdirSync(dirname(join(root, file)), { recursive: true });
+      writeFileSync(join(root, file), 'function trust({ address }, req) { const candidates = [address, "127.0.0.1"]; return req.ip === candidates; }');
+      expect(scanLoopbackTrust(root, [file])).toHaveLength(1);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  for (const [name, operand] of [
+    ["depth", `${"[".repeat(160)}"ordinary"${"]".repeat(160)}`],
+    ["visits", `[${Array.from({ length: 5000 }, () => '"ordinary"').join(",")}]`],
+  ]) it(`f2b ${name} bound: an uninspectable operand is a finding`, () => {
+    const root = mkdtempSync(join(tmpdir(), "pcc-loopback-bound-"));
+    const file = "packages/gateway/src/auth/planted.ts";
+    try {
+      mkdirSync(dirname(join(root, file)), { recursive: true });
+      writeFileSync(join(root, file), `// audit 127.0.0.1\nfunction trust(req) { const operand = ${operand}; return req.ip === operand; }`);
+      const hits = scanLoopbackTrust(root, [file]);
+      expect(hits).toHaveLength(1);
+      expect(hits[0]).toMatchObject({ rule: "E4a-R2", detail: expect.stringContaining("cannot be inspected") });
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

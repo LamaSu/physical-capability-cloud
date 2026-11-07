@@ -124,7 +124,7 @@ export function scanToolReach(root: string, files: string[]): ToolScan {
     }
     return undefined;
   };
-  // Overload probing must not report findings on a description expression.
+  // Classify only supported shapes; ambiguous aliases are findings even during probing.
   // Once selected, a schema still goes through the full, fail-loudly walker.
   const schemaArgument = (expression: ts.Expression, seen = new Set<ts.Node>()): boolean => {
     expression = unwrap(expression);
@@ -133,7 +133,7 @@ export function scanToolReach(root: string, files: string[]): ToolScan {
     try {
       if (ts.isObjectLiteralExpression(expression)) return true;
       if (ts.isIdentifier(expression)) {
-        const initializer = resolve(expression, false);
+        const initializer = resolve(expression);
         return !!initializer && schemaArgument(initializer, seen);
       }
       if (ts.isPropertyAccessExpression(expression) && expression.name.text === "shape") return schemaArgument(expression.expression, seen);
@@ -141,6 +141,25 @@ export function scanToolReach(root: string, files: string[]): ToolScan {
         const callee = unwrap(expression.expression) as ts.PropertyAccessExpression;
         const owner = unwrap(callee.expression);
         return (ts.isIdentifier(owner) && owner.text === "z") || schemaArgument(owner, seen);
+      }
+      return false;
+    } finally { seen.delete(expression); }
+  };
+  const stringArgument = (expression: ts.Expression, seen = new Set<ts.Node>()): boolean => {
+    expression = unwrap(expression);
+    if (seen.has(expression)) return false;
+    seen.add(expression);
+    try {
+      if (ts.isStringLiteralLike(expression) || ts.isTemplateExpression(expression)) return true;
+      if (ts.isBinaryExpression(expression) && expression.operatorToken.kind === ts.SyntaxKind.PlusToken) return stringArgument(expression.left, seen) && stringArgument(expression.right, seen);
+      if (ts.isIdentifier(expression)) {
+        // schemaArgument has already reported any ambiguity in this position.
+        const initializer = resolve(expression, false);
+        return !!initializer && stringArgument(initializer, seen);
+      }
+      if (ts.isCallExpression(expression) && ts.isPropertyAccessExpression(unwrap(expression.expression))) {
+        const callee = unwrap(expression.expression) as ts.PropertyAccessExpression;
+        return callee.name.text === "join" && ts.isArrayLiteralExpression(unwrap(callee.expression));
       }
       return false;
     } finally { seen.delete(expression); }
@@ -164,18 +183,30 @@ export function scanToolReach(root: string, files: string[]): ToolScan {
           if (candidates.length === 1 && candidates[0].expression && ts.isStringLiteralLike(unwrap(candidates[0].expression))) tool = (unwrap(candidates[0].expression) as ts.StringLiteralLike).text;
           findings.push({ rule: "E4b-R1", file, enclosing: enclosingName(node), expression: printNode(node), detail: "non-literal tool name cannot be reviewed statically" });
         }
-        // Four arguments are description + shape + callback, except the SDK's
-        // schema + annotations + callback form (D2). Descriptions need not be literals.
-        // Three arguments may be a schema or a description for a zero-argument tool.
-        const second = node.arguments[1];
-        const secondIsSchema = second && registration === "tool" && schemaArgument(second);
-        let shape: ts.Expression | undefined = registration === "registerTool" ? second
-          : node.arguments.length >= 5 || (node.arguments.length === 4 && !secondIsSchema) ? node.arguments[2]
-          : secondIsSchema ? second : ts.factory.createObjectLiteralExpression();
+        const second = node.arguments[1], third = node.arguments[2];
+        let shape: ts.Expression | undefined;
+        let classified = true;
+        if (registration === "registerTool") shape = second;
+        else if (node.arguments.length >= 5) shape = third;
+        else if (node.arguments.length === 4) {
+          if (second && schemaArgument(second)) shape = second; // schema + annotations (D2)
+          else if (third && schemaArgument(third)) shape = third; // description + schema
+          else { classified = false; shape = third; }
+        } else if (node.arguments.length === 3) {
+          if (second && schemaArgument(second)) shape = second;
+          else if (second && stringArgument(second)) shape = ts.factory.createObjectLiteralExpression();
+          else { classified = false; shape = second; }
+        } else if (node.arguments.length === 2) shape = ts.factory.createObjectLiteralExpression();
+        else classified = false;
+        if (!classified) findings.push({ rule: "E4b-R1", file, enclosing: enclosingName(node), expression: printNode(shape ?? node), detail: `${tool}: overload argument cannot be classified` });
         if (registration === "registerTool" && shape) {
           let config = unwrap(shape);
           if (ts.isIdentifier(config)) config = resolve(config) ?? config;
-          shape = ts.isObjectLiteralExpression(config) ? config.properties.flatMap(item => ts.isPropertyAssignment(item) && propertyName(item.name) === "inputSchema" ? [item.initializer] : [])[0] : undefined;
+          if (ts.isObjectLiteralExpression(config) && !config.properties.some(ts.isSpreadAssignment)) {
+            const input = config.properties.find(item => (ts.isPropertyAssignment(item) || ts.isShorthandPropertyAssignment(item)) && propertyName(item.name) === "inputSchema");
+            shape = input && ts.isPropertyAssignment(input) ? input.initializer
+              : input && ts.isShorthandPropertyAssignment(input) ? input.name : ts.factory.createObjectLiteralExpression();
+          } else shape = undefined;
         }
         if (!shape) {
           findings.push({ rule: "E4b-R1", file, enclosing: enclosingName(node), expression: printNode(node), detail: `${tool}: missing or opaque input shape` });
@@ -602,5 +633,77 @@ server.tool(
 server.tool("opaque_shape", GET_EVIDENCE_DESCRIPTION, UnresolvedShape, h);`);
     const scan = scanToolReach(root, files);
     expect(scan.findings.some(hit => hit.rule === "E4b-R1" && hit.expression === "UnresolvedShape" && hit.detail?.includes("unresolved schema alias cannot be inspected")), formatFindings(scan.findings)).toBe(true);
+  });
+});
+
+
+describe("delta verdict controls for E4b", () => {
+  for (const [name, text] of [
+    ["E4b-a imported shape", 'import { relayShape } from "./schemas.js"; server.tool("pcc_planted", relayShape, cb);'],
+    ["E4b-b ambiguous shape", 'let shape = { calldata: z.string(), recipient: z.string() }; if (flag) shape = { safe: z.string() }; server.tool("pcc_planted", shape, cb);'],
+    ["E4b-c imported shape projection", 'import { RelayInput } from "./schemas.js"; server.tool("pcc_planted", RelayInput.shape, cb);'],
+    ["E4b-d conditional shape", 'const a = { calldata: z.string() }; const b = { safe: z.string() }; server.tool("pcc_planted", flag ? a : b, cb);'],
+    ["E4b-e shape factory", 'function relayShape() { return { calldata: z.string() }; } server.tool("pcc_planted", relayShape(), cb);'],
+    ["P5 ambiguous registration", 'let plantedShape = { calldata: z.string(), recipient: z.string() }; if (process.env.PLANTED_SAFE) plantedShape = { safe: z.string() } as any; server.tool("pcc_planted_relay", plantedShape, cb);'],
+    ["four-argument ambiguous first position", 'let shape = { calldata: z.string() }; if (flag) shape = { safe: z.string() }; server.tool("pcc_planted", shape, {title: "Relay"}, cb);'],
+    ["four-argument ambiguous second position", 'let shape = { calldata: z.string() }; if (flag) shape = { safe: z.string() }; server.tool("pcc_planted", DESC, shape, cb);'],
+  ]) it(`delta V3 ${name}: unclassified or ambiguous schema arguments fail loudly`, () => {
+    const t = synthetic([], text);
+    const scan = scanToolReach(t.root, t.files);
+    expect(scan.mcpToolCount).toBe(1); expect(scan.mcpPlainCallCount).toBe(1);
+    expect(scan.findings.some(hit => hit.rule === "E4b-R1"), formatFindings(scan.findings)).toBe(true);
+    if (name.includes("ambiguous")) expect(scan.findings.some(hit => hit.detail?.includes("ambiguous schema alias")), formatFindings(scan.findings)).toBe(true);
+  });
+
+  it("delta V3 P4: a sibling-module shape cannot disappear in a three-argument registration", () => {
+    const t = synthetic([], 'import { plantedShape } from "./planted-shape.js"; server.tool("pcc_planted_relay", plantedShape, cb);');
+    const file = "packages/mcp-server/src/planted-shape.ts";
+    writeFileSync(join(t.root, file), 'import { z } from "zod"; export const plantedShape = { calldata: z.string(), recipient: z.string() };');
+    t.files.push(file);
+    const scan = scanToolReach(t.root, t.files);
+    expect(scan.findings.some(hit => hit.rule === "E4b-R1"), formatFindings(scan.findings)).toBe(true);
+  });
+
+  it("delta V3 E4b-k: an imported description preserves all shape parameters", () => {
+    const t = synthetic([], 'import { DESC } from "./descriptions.js"; server.tool("pcc_planted", DESC, { calldata: z.string(), recipient: z.string() }, cb);');
+    const scan = scanToolReach(t.root, t.files);
+    expect(scan.parameters.map(parameter => parameter.path)).toEqual(["calldata", "recipient"]);
+    expect(scan.addresses).toEqual([{source: "mcp", tool: "pcc_planted", params: ["recipient"]}]);
+    expect(scan.findings.some(hit => hit.detail?.includes("calldata"))).toBe(true);
+  });
+
+  it("delta V3 E4b-l and M14b: a three-argument local shape is inspected", () => {
+    const t = synthetic([], 'const shape = { calldata: z.string() }; server.tool("pcc_planted", shape, cb);');
+    const scan = scanToolReach(t.root, t.files);
+    expect(scan.parameters.map(parameter => parameter.path)).toEqual(["calldata"]);
+    expect(scan.findings.some(hit => hit.rule === "E4b-R1" && hit.detail?.includes("calldata"))).toBe(true);
+  });
+
+  for (const [name, description] of [
+    ["literal", '"Ping"'], ["template", '`Ping ${label}`'], ["concatenation", '"Ping " + "tool"'],
+    ["array join", '["Ping", "tool"].join(" ")'], ["binding", 'DESC'],
+  ]) it(`delta V3 three-argument ${name} description: a provable string needs no schema`, () => {
+    const t = synthetic([], `const DESC = "Ping " + "tool"; server.tool("pcc_ping", ${description}, cb);`);
+    const scan = scanToolReach(t.root, t.files);
+    expect(scan.findings, formatFindings(scan.findings)).toEqual([]);
+    expect(scan.parameters).toEqual([]);
+  });
+
+  for (const [name, text, paths] of [
+    ["E4b-f zero-argument registerTool", 'server.registerTool("pcc_ping", { description: "Ping" }, cb);', []],
+    ["E4b-g shorthand inputSchema", 'const inputSchema = { safe: z.string() }; server.registerTool("pcc_ok", { description: "Ok", inputSchema }, cb);', ["safe"]],
+  ] as const) it(`delta V4 ${name}: legitimate configs pass`, () => {
+    const t = synthetic([], text);
+    const scan = scanToolReach(t.root, t.files);
+    expect(scan.findings, formatFindings(scan.findings)).toEqual([]);
+    expect(scan.parameters.map(parameter => parameter.path)).toEqual(paths);
+  });
+
+  for (const [name, text] of [
+    ["spread config", 'server.registerTool("pcc_planted", { ...config }, cb);'],
+    ["opaque config", 'server.registerTool("pcc_planted", unknownConfig, cb);'],
+  ]) it(`delta V4 ${name}: unknown input schemas still fail loudly`, () => {
+    const t = synthetic([], text);
+    expect(scanToolReach(t.root, t.files).findings.some(hit => hit.rule === "E4b-R1")).toBe(true);
   });
 });

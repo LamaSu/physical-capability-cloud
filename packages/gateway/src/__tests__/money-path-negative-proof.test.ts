@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
+import { Worker } from "node:worker_threads";
 import {
   WRITE_METHODS, WRITE_SCOPE, compareWrites, formatFindings, isTestPath, listRepoFiles,
-  readAllowlist, scanBytecode, scanForbiddenRuntime, scanPythonWrites,
+  readAllowlist, parseSource, resolveBinding, scanBytecode, scanForbiddenRuntime, scanPythonWrites,
   scanRuntimeSolcDependencies, scanWrites,
   type Finding, type WriteAllowlist, type WriteRecord,
 } from "./helpers/negative-proof-scan.js";
@@ -547,3 +548,149 @@ describe("verdict controls for E2 and E3", () => {
     clean(scanForbiddenRuntime(t.root, t.files), "E3-R2");
   });
 });
+
+
+describe("delta verdict controls for E2 and E3", () => {
+  for (const [name, source, method] of [
+    ["P1 parameter sender", 'export async function plantedRelay(sendTransaction: any, req: any) { return sendTransaction({ to: "0x0000000000000000000000000000000000000001", data: req.body.calldata }); }', "sendTransaction"],
+    ["P2 destructured writer", 'export async function plantedWrite({ writeContract }: any) { return writeContract({ address: "0x0000000000000000000000000000000000000001", abi: [], functionName: "planted" }); }', "writeContract"],
+    ["E2-c opaque local", 'function f(req) { const sendTransaction = getSender(); sendTransaction({ to, data: req.body.calldata }); }', "sendTransaction"],
+    ["E2-d callback sender", 'function f(senders, raw) { senders.forEach((sendRawTransaction) => sendRawTransaction(raw)); }', "sendRawTransaction"],
+  ]) it(`delta V1 ${name}: bare write names retain the review gate`, () => {
+    const t = tree({ "packages/sample/src/a.ts": source });
+    const scan = scanWrites(t.root, t.files);
+    expect(scan.records.map(record => record.method)).toEqual([method]);
+    expect(codes(compareWrites(scan.records, reviewed([])))).toContain("E2-R1");
+    if (["P1 parameter sender", "E2-c opaque local"].includes(name)) expect(codes(scan.findings)).toContain("E2-R4");
+  });
+
+  for (const [name, source] of [
+    ["E2-l encoder spread", 'function h(req) { const data = encodeFunctionData({ abi: ABI, functionName: "relay", ...req.body }); w.sendTransaction({ to, data }); }'],
+    ["E2-l2 aliased encoder spread", 'function h(req) { const body = req.body; const data = encodeFunctionData({ abi: ABI, functionName: "relay", ...body }); w.sendTransaction({ to, data }); }'],
+    ["E2-m shorthand encoder args", 'function h(req) { const args = [req.body.calldata]; const data = encodeFunctionData({ abi: ABI, functionName: "relay", args }); w.sendTransaction({ to, data }); }'],
+    ["E2-p shorthand contract args", 'function h(req) { const args = [req.body.calldata]; w.writeContract({ abi: ABI, functionName: "execute", args }); }'],
+    ["E2-p explicit identifier contract args", 'function h(req) { const list = [req.body.calldata]; w.writeContract({ abi: ABI, functionName: "execute", args: list }); }'],
+    ["E2-q contract config spread", 'function h(req) { w.writeContract({ address: ESCROW, abi: ABI, functionName: "release", ...req.body }); }'],
+  ]) it(`delta V2 ${name}: caller bytes cannot be allowlisted`, () => {
+    const t = tree({ "packages/sample/src/a.ts": source });
+    const scan = scanWrites(t.root, t.files);
+    expect(codes([...scan.findings, ...compareWrites(scan.records, reviewed(scan.records))]), formatFindings(scan.findings)).toContain("E2-R4");
+    if (name.startsWith("E2-q")) expect(scan.records[0].nonLiteralFunctionName).toBe(true);
+    if (name.startsWith("E2-p")) expect(scan.records[0].bindings).toBeUndefined();
+  });
+
+  it("delta V2 P3: the faucet encoder spread fails E2-R4 after re-seeding its allowlist", () => {
+    const file = "packages/gateway/src/routes/fiat-ramp.ts";
+    // Copy the faucet's encoder spelling so production mutants cannot change the control input.
+    const t = tree({ [file]: `async function faucet(req) {
+      const body = req.body as { walletAddress: string; amount?: number };
+      const amountRaw = BigInt(body.amount ?? 100) * BigInt(1e6);
+      const mintData = encodeFunctionData({
+        abi: [{ name: "mint", type: "function", inputs: [{ name: "to", type: "address" }, { name: "amount", type: "uint256" }], outputs: [] }],
+        functionName: "mint",
+        args: [body.walletAddress as \`0x\${string}\`, amountRaw],
+        ...(req.body as any),
+      });
+      return client.sendTransaction({ to: MOCK_USDC as \`0x\${string}\`, data: mintData });
+    }` });
+    const scan = scanWrites(t.root, t.files);
+    expect(scan.records).toHaveLength(1);
+    const list = readAllowlist(ALLOWLIST);
+    const original = list.entries.find(entry => entry.file === file)!;
+    list.entries = [{ ...scan.records[0], signer: original.signer, payload: original.payload, why: original.why }];
+    const fixture = join(tree({ "allowlist.json": JSON.stringify(list) }).root, "allowlist.json");
+    const hits = moneyPathFindings(t.root, t.files, fixture);
+    clean(hits, "E2-R1"); clean(hits, "E2-R2");
+    expect(codes(hits), formatFindings(hits)).toContain("E2-R4");
+  });
+
+  it("delta V6: a 24-span cn template scans under 100 ms and subprocess expansion stays bounded", async () => {
+    const spans = Array.from({ length: 24 }, (_, i) => `\${f${i} ? "a${i}" : "b${i}"}`).join(" ");
+    const ui = "apps/sample/src/a.tsx", command = "packages/sample/src/a.ts";
+    const t = tree({ [ui]: `export const c = cn(\`${spans}\`);`, [command]: `execSync(\`${spans}; forge build\`);` });
+    // Load the actual helper in an isolated worker: the unfixed exponential walk
+    // must fail this control without exhausting the gateway test process's heap.
+    const worker = new Worker(`
+      const { parentPort, workerData } = require("node:worker_threads");
+      const { createRequire } = require("node:module");
+      const { readFileSync } = require("node:fs");
+      const localRequire = createRequire(workerData.helper);
+      const ts = localRequire("typescript");
+      const js = ts.transpileModule(readFileSync(workerData.helper, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
+      const compiled = { exports: {} };
+      new Function("require", "module", "exports", js)(localRequire, compiled, compiled.exports);
+      parentPort.postMessage({ ready: true });
+      const start = performance.now();
+      const uiHits = compiled.exports.scanForbiddenRuntime(workerData.root, [workerData.ui]);
+      const uiMs = performance.now() - start;
+      const commandStart = performance.now();
+      const commandHits = compiled.exports.scanForbiddenRuntime(workerData.root, [workerData.command]);
+      parentPort.postMessage({ uiMs, commandMs: performance.now() - commandStart, uiHits, commandHits });
+    `, { eval: true, workerData: { helper: fileURLToPath(new URL("./helpers/negative-proof-scan.ts", import.meta.url)), root: t.root, ui, command }, resourceLimits: { maxOldGenerationSizeMb: 128 } });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await new Promise<{ uiMs: number; commandMs: number; uiHits: Finding[]; commandHits: Finding[] }>((resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("V6 worker did not initialize")), 10_000);
+        worker.on("error", reject);
+        worker.on("message", message => {
+          if (message.ready) {
+            clearTimeout(timer);
+            timer = setTimeout(() => reject(new Error("V6 24-span scan exceeded 100 ms")), 100);
+          } else { clearTimeout(timer); resolve(message); }
+        });
+      });
+      console.info(`V6 timing: 24-span cn=${result.uiMs.toFixed(2)} ms; capped subprocess=${result.commandMs.toFixed(2)} ms`);
+      expect(result.uiMs).toBeLessThan(100);
+      expect(result.commandMs).toBeLessThan(100);
+      expect(result.uiHits).toEqual([]);
+      expect(codes(result.commandHits)).toContain("E3-R2");
+    } finally { clearTimeout(timer); await worker.terminate(); }
+  }, 15_000);
+});
+
+
+it("f2b binding memo preserves position, source identity and candidate order", () => {
+  const first = parseSource("packages/sample/src/a.ts", 'let name = "fund"; sink(name); name = "release"; sink(name);');
+  const earlier = first.statements[1], later = first.statements[3];
+  for (let i = 0; i < 20; i++) {
+    expect(resolveBinding("name", earlier).map(value => value.printed)).toEqual(['"fund"']);
+    expect(resolveBinding("name", later).map(value => value.printed)).toEqual(['"fund"', '"release"']);
+  }
+  const edited = parseSource("packages/sample/src/a.ts", 'let name = "mint"; sink(name);');
+  expect(resolveBinding("name", edited.statements[1]).map(value => value.printed)).toEqual(['"mint"']);
+});
+
+it("f2b E3 repeated markdown replacements do not expand alias paths exponentially", async () => {
+  const file = "apps/sample/src/WhitepaperPage.tsx";
+  const replacements = Array.from({ length: 18 }, () => 'html = html.replace(/x/g, "y");').join("\n");
+  const t = tree({ [file]: `function markdownToHtml(md: string) { let html = md; ${replacements} return html; }` });
+  const worker = new Worker(`
+    const { parentPort, workerData } = require("node:worker_threads");
+    const { createRequire } = require("node:module");
+    const { readFileSync } = require("node:fs");
+    const localRequire = createRequire(workerData.helper);
+    const ts = localRequire("typescript");
+    const js = ts.transpileModule(readFileSync(workerData.helper, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
+    const compiled = { exports: {} };
+    new Function("require", "module", "exports", js)(localRequire, compiled, compiled.exports);
+    parentPort.postMessage({ ready: true });
+    const start = performance.now();
+    const hits = compiled.exports.scanForbiddenRuntime(workerData.root, [workerData.file]);
+    parentPort.postMessage({ ms: performance.now() - start, hits });
+  `, { eval: true, workerData: { helper: fileURLToPath(new URL("./helpers/negative-proof-scan.ts", import.meta.url)), root: t.root, file }, resourceLimits: { maxOldGenerationSizeMb: 128 } });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await new Promise<{ ms: number; hits: Finding[] }>((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("f2b profiling worker did not initialize")), 10_000);
+      worker.on("error", reject);
+      worker.on("message", message => {
+        clearTimeout(timer);
+        if (message.ready) timer = setTimeout(() => reject(new Error("f2b E3 alias scan exceeded 100 ms")), 100);
+        else resolve(message);
+      });
+    });
+    console.info(`f2b E3 markdown scan=${result.ms.toFixed(2)} ms`);
+    expect(result.ms).toBeLessThan(100);
+    expect(result.hits).toEqual([]);
+  } finally { clearTimeout(timer); await worker.terminate(); }
+}, 15_000);

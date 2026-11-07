@@ -153,7 +153,19 @@ function shadows(scope: ts.Node, name: string): boolean {
  * Closures can capture an outer binding; sibling blocks/functions cannot supply it.
  * Lookup returns initializers without evaluating them; consumers choose how to follow aliases.
  */
+// Cache by the actual AST location and name: earlier/later reads and reparsed
+// files stay independent, while repeated alias paths reuse even synthetic projections.
+const bindingMemo = new WeakMap<ts.Node, Map<string, Binding[]>>();
 function binding(name: string, at: ts.Node): Binding[] {
+  let names = bindingMemo.get(at);
+  if (!names) { names = new Map(); bindingMemo.set(at, names); }
+  const cached = names.get(name);
+  if (cached) return cached;
+  const result = findBinding(name, at);
+  names.set(name, result);
+  return result;
+}
+function findBinding(name: string, at: ts.Node): Binding[] {
   const source = at.getSourceFile();
   for (let scope: ts.Node | undefined = at.parent; scope; scope = scope.parent) {
     if (!isScope(scope)) continue;
@@ -257,10 +269,14 @@ function requestMember(node: ts.Node, at: ts.Node = node, typedArgument = false,
     if (ts.isCallExpression(node) && calleeName(node.expression) === "encodeFunctionData") {
       const config = node.arguments.map(unwrap).find(ts.isObjectLiteralExpression);
       const abi = config && property(config, "abi"), name = config && property(config, "functionName");
-      if (config && abi && literalName(name) !== undefined && !requestMember(abi, reference, false, seen)) {
+      if (config && !config.properties.some(ts.isSpreadAssignment) && abi && literalName(name) !== undefined && !requestMember(abi, reference, false, seen)) {
         // A fixed encoder's ordinary address/amount args are data. Raw-byte args
         // retain the same guard as writeContract args, regardless of alias spelling.
-        return config.properties.some(item => ts.isPropertyAssignment(item) && requestMember(item.initializer, reference, item.name.getText() === "args", seen));
+        return config.properties.some(item => {
+          if (ts.isPropertyAssignment(item)) return requestMember(item.initializer, reference, item.name.getText() === "args", seen);
+          if (ts.isShorthandPropertyAssignment(item)) return requestMember(item.name, reference, item.name.text === "args", seen);
+          return false;
+        });
       }
     }
     // Object keys, declaration names and callee names are not payload values.
@@ -325,7 +341,12 @@ export function scanWrites(root: string, files: string[]): { records: WriteRecor
     const source = parseSource(file, text);
     const walk = (node: ts.Node) => {
       if (ts.isCallExpression(node)) {
-        for (const method of writeCallees(node.expression, node)) {
+        const resolvedMethods = writeCallees(node.expression, node);
+        const bare = calleeName(node.expression);
+        // Callable provenance may be opaque (parameters, callbacks, injected locals).
+        // Keep the original bare-name floor without reclassifying .call wrappers.
+        const methods = resolvedMethods.length ? resolvedMethods : bare && writeMethods.has(bare) ? [bare] : [];
+        for (const method of methods) {
           const bindings: Record<string, string> = {};
           const importedBindings = new Set<string>();
           const payloads: ts.Expression[] = [];
@@ -355,13 +376,13 @@ export function scanWrites(root: string, files: string[]): { records: WriteRecor
             const literals = names.map(literalName);
             const literal = literals.length && literals.every(value => value !== undefined) ? literals.join("|") : undefined;
             record.functionName = literal ?? (name ? printNode(name) : "<missing>");
-            record.nonLiteralFunctionName = literal === undefined;
+            const spreads = object?.properties.filter(ts.isSpreadAssignment) ?? [];
+            record.nonLiteralFunctionName = literal === undefined || spreads.length > 0;
+            for (const spread of spreads) if (requestMember(spread.expression)) findings.push(location("E2-R4", file, node, "request-derived writeContract config spread"));
             record.abi = object && property(object, "abi") ? printNode(property(object, "abi")!) : "<missing>";
             const args = object && property(object, "args");
-            if (args) {
-              const list = unwrap(args);
-              if (ts.isArrayLiteralExpression(list) && list.elements.some(memberHasPayloadName)) findings.push(location("E2-R4", file, node, "request member used as writeContract payload argument"));
-            }
+            // Resolve args for intrinsic findings only; their aliases add no record bindings.
+            if (args && memberHasPayloadName(args)) findings.push(location("E2-R4", file, node, "request member used as writeContract payload argument"));
           } else {
             const collect = (n: ts.Node) => {
               if (ts.isPropertyAssignment(n) || ts.isShorthandPropertyAssignment(n)) {
@@ -451,6 +472,7 @@ function moduleImport(node: ts.Node): string | undefined {
 }
 const subprocessMethods = new Set(["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork", "execa"]);
 const execaMethods = new Set(["default", "execa", "execaSync", "execaCommand", "execaCommandSync", "$", "sync", "command", "commandSync"]);
+const subprocessMemberNames = new Set([...subprocessMethods, ...execaMethods, "promisify"]);
 type SubprocessModule = "child_process" | "execa" | "util" | "zx" | "bun";
 interface SubprocessBinding { module: SubprocessModule; member?: string }
 function subprocessModule(name: string | undefined): SubprocessModule | undefined {
@@ -513,8 +535,11 @@ function subprocessBinding(expression: ts.Expression, at: ts.Node, seen = new Se
         }
       }
     } else if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
-      const owners = subprocessBinding(expression.expression, reference, seen);
       const member = calleeName(expression);
+      // No supported subprocess module exports an arbitrary data method such as
+      // .replace/.then. Reject it before following a potentially branching alias DAG.
+      if (!member || !subprocessMemberNames.has(member)) return [];
+      const owners = subprocessBinding(expression.expression, reference, seen);
       return owners.flatMap(owner => {
         const target = member && (!owner.member || owner.member === "default" || (owner.module === "execa" && owner.member === "$" && member === "sync")) ? subprocessExport(owner.module, member) : undefined;
         return target ? [target] : [];
@@ -543,6 +568,7 @@ function isSubprocessCall(node: ts.CallExpression): boolean {
 // Known limits: commands imported from other modules, returned from functions,
 // held in object properties or joined from arrays; words split across + operands,
 // nested node -e programs, and shell redirects glued to a tool word (forge>out).
+// Template expansion keeps at most 256 candidates; overflowing spans become unknown.
 function commandLiteralParts(expression: ts.Expression, at: ts.Node, seen = new Set<ts.Node>(), argvOnly = false): string[] {
   expression = unwrap(expression);
   if (seen.has(expression)) return [];
@@ -571,7 +597,10 @@ function commandLiteralParts(expression: ts.Expression, at: ts.Node, seen = new 
         const values = commandLiteralParts(span.expression, reference, seen);
         // Unknown substitutions separate known words; known spans must be joined
         // before tokenization so `for${suffix}` is inspected as one command word.
-        candidates = candidates.flatMap(prefix => (values.length ? values : [" "]).map(value => prefix + value + span.literal.text));
+        const options = values.length ? [...new Set(values)] : [" "];
+        candidates = candidates.length * options.length > 256
+          ? candidates.map(prefix => prefix + " " + span.literal.text)
+          : candidates.flatMap(prefix => options.map(value => prefix + value + span.literal.text));
       }
       return candidates;
     }
@@ -601,15 +630,15 @@ export function scanForbiddenRuntime(root: string, files: string[]): Finding[] {
       if (ts.isCallExpression(node) && calleeName(node.expression) === "getContract") findings.push(location("E2-R5", file, node));
       if (ts.isStringLiteralLike(node) && deniedRPC.has(node.text)) findings.push(location("E2-R5", file, node));
       if (imported === "solc" || imported === "solc-js") findings.push(location("E3-R2", file, node));
-      if (ts.isCallExpression(node)) {
+      if (ts.isCallExpression(node) && isSubprocessCall(node)) {
         const parts = node.arguments[0] ? commandLiteralParts(node.arguments[0], node) : [];
         if (node.arguments[1]) parts.push(...commandLiteralParts(node.arguments[1], node, new Set(), true));
         const words = solidityCommandWords(parts);
-        if (words.length && isSubprocessCall(node)) findings.push(location("E3-R2", file, node, `Solidity command words: ${words.join(", ")}`));
+        if (words.length) findings.push(location("E3-R2", file, node, `Solidity command words: ${words.join(", ")}`));
       }
-      if (ts.isTaggedTemplateExpression(node)) {
+      if (ts.isTaggedTemplateExpression(node) && subprocessBinding(node.tag, node).some(target => ["execa", "zx", "bun"].includes(target.module))) {
         const words = solidityCommandWords(commandLiteralParts(node.template, node));
-        if (words.length && subprocessBinding(node.tag, node).some(target => ["execa", "zx", "bun"].includes(target.module))) findings.push(location("E3-R2", file, node, `Solidity command words: ${words.join(", ")}`));
+        if (words.length) findings.push(location("E3-R2", file, node, `Solidity command words: ${words.join(", ")}`));
       }
       ts.forEachChild(node, walk);
     }; walk(parseSource(file, text));
