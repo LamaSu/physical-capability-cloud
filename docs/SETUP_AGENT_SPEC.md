@@ -27,7 +27,7 @@
 
 ## 1. Project Overview
 
-PCC (Physical Capability Cloud) is "AWS for the physical world" — a cloud control plane for physical manufacturing capabilities. Shop Kernels are Availability Zones (physical sites with equipment). Capabilities are billable units (not machines — what machines can DO).
+PCC (Physical Capability Cloud) is a control plane for physical manufacturing capabilities: machines, instruments and skills registered as callable, composable capabilities, with evidence-verified execution and escrowed settlement. Shop Kernels are physical sites with equipment, the analogue of a cloud region. Capabilities are billable units (not machines — what machines can DO).
 
 **The problem**: Setting up a kernel (registering devices, configuring adapters, connecting to the network, deploying contracts, wiring evidence storage, etc.) requires manually setting 40+ environment variables across 6 config categories. Nobody should have to do this by hand.
 
