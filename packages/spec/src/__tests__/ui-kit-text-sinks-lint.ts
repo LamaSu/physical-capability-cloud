@@ -867,6 +867,7 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
       if (method === "location" && !isMemberReceiver(node)) report(node, "location reference must be a direct member receiver");
       if (method === "history" && !isMemberReceiver(node)) report(node, "history reference must be a direct member receiver");
     }
+    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && memberName(node) === "valueOf" && isBuiltinReference(unwrap(node.expression), "location")) report(node, "location reference must be a direct member receiver");
     if (ts.isIdentifier(node) && node.text === "open" && isValueIdentifier(node) && !resolveBinding(node, "open") && !isDirectCallTarget(node)) report(node, "navigation method read: open");
     if (ts.isIdentifier(node) && node.text === "location" && isValueIdentifier(node) && !isMemberReceiver(node)) report(node, "location reference must be a direct member receiver");
     if (ts.isIdentifier(node) && node.text === "history" && isValueIdentifier(node) && !isMemberReceiver(node)) report(node, "history reference must be a direct member receiver");

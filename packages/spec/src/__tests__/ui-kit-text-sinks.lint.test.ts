@@ -974,6 +974,8 @@ describe("location receivers and navigation window methods", () => {
     ["document location method destructuring", "var { assign: navigate } = document.location;", "navigation method destructuring: assign"],
     ["bare location alias", "var l = location; l.assign(raw);", "location reference must be a direct member receiver"],
     ["window location alias", "var l = window.location; l.replace(raw);", "location reference must be a direct member receiver"],
+    ["location valueOf member receiver", "location.valueOf().assign(raw);", "location reference must be a direct member receiver"],
+    ["window location valueOf member receiver", "var l = window.location.valueOf(); l.assign(raw);", "location reference must be a direct member receiver"],
     ["location binding destructuring", "var { location: l } = window;", "location alias destructuring"],
     ["location assignment destructuring", "({ location: l } = window);", "location alias destructuring"],
     ["window variable open", "var w = window; w.open(raw);", "navigation method call: open"],
@@ -995,6 +997,8 @@ describe("namespace location and Intl intrinsic policy", () => {
   it.each([
     ["window location assignment method", "window.location.assign(raw);", "navigation method call: assign"],
     ["Intl formatter prototype write", "Intl.NumberFormat.prototype.format = replacement;", "intrinsic target write"],
+    ["Intl constructor direct receiver", "var formatter = Intl.NumberFormat;", "intrinsic reference must be a direct receiver"],
+    ["Intl global direct receiver", "var intl = Intl;", "intrinsic reference must be a direct receiver"],
   ])("rejects %s at its own Program line", (_name, code, rule) => {
     const prefix = source + "\nfunction namespacePolicyProgram(raw, replacement) {\n";
     expect(lintTextSinks(prefix + code + "\n}", plainConfig)).toContainEqual(expect.objectContaining({ line: prefix.split("\n").length, rule }));
