@@ -377,7 +377,7 @@ is no fractional-wei accounting.
 
 ## Relationship to Story Protocol (now The DATA Foundation) — honest scoping
 
-**Status (2026-11-06):** Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. The `pcc_ip_*` tools and `/api/ip/*` routes return placeholder values by default and refuse in real mode, and Story's protocol contracts have been deprecated since 2026-09-19.
+**Status (2026-11-06):** Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. The `pcc_ip_*` tools and `/api/ip/*` routes reach Story only through PCC's Story service, which returns placeholder values by default and refuses every operation in real mode, and Story's protocol contracts have been deprecated since 2026-09-19.
 
 The original design ambition was that PCC's contributor economics would
 *extend* the existing Story Protocol IP graph integration (`pcc_ip_*` MCP
