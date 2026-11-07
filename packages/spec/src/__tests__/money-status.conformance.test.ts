@@ -2622,10 +2622,10 @@ describe("R12 r2d F1 (lane review, MEDIUM): a name that states money or verifica
     }
   });
 
-  it("NF-3 non-string names (live and snapshot): 42, an array and an object paint without throwing, as N3 reports on money data and nameText reports otherwise", async () => {
+  it("non-string names render without throwing, with claims withheld on non-money data and attributed on money data", async () => {
     const values = [42, ["Paid $5"], { claim: "Paid $5" }];
     const onMoney = values.map((v) => r2dRep(typeof v === "object" ? JSON.stringify(v) : String(v)));
-    const offMoney = ["reported: 42", "reported: Paid $5", "reported: [object Object]"];
+    const offMoney = ["reported: 42", R2D_NAME_WITHHELD, "reported: [object Object]"];
     const rows = values.map((v) => ({ displayName: v, ownerName: v }));
     for (const mode of ["live", "snapshot"] as const) {
       await r2dPaint(values.map((_, i) => r2dMetric("/api/escrow/e1", "names." + i + ".displayName")), { "/api/escrow/e1": { totalAmount: 250, names: rows } }, mode);

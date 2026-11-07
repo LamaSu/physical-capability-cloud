@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import vm from "node:vm";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ts from "typescript";
 import { assertKitTextViolations, flushKitText } from "./ui-kit-text-counter.js";
 
@@ -30,6 +30,7 @@ type Boundary = {
   hostOpErrorText(value: unknown): Text;
   errorLine(value: unknown): HTMLElement;
   nameText(value: unknown): Text;
+  idText(value: unknown): Text;
   fieldDefaultText(kind: string, value: unknown): Text;
   isMoneyClaim(value: string): boolean;
   isProseClaim(value: string): boolean;
@@ -54,7 +55,7 @@ function boundary(options: { forceClaimInitFailure?: boolean; before?: string; R
   };
   expect(source.match(bootTail)).toHaveLength(1);
   const instrumented = source.replace(bootTail,
-    "  window.boundary = { kitText, agentText, agentEl, WITHHELD_FIELD, WITHHELD_PROSE, HOST_WRITE_NOTE, joinText, el, setText, setAttrText, setValue, baseUnitsText, amountText, fmtTs, postErrorText, hostOpErrorText, errorLine, nameText, fieldDefaultText, isMoneyClaim, isProseClaim, renderNote, writeButton, inlineConfirm, intentChip, realRequestNode, requestReasonText, plainBody, collectForm, intentState, INTENT_STATE };");
+    "  window.boundary = { kitText, agentText, agentEl, WITHHELD_FIELD, WITHHELD_PROSE, HOST_WRITE_NOTE, joinText, el, setText, setAttrText, setValue, baseUnitsText, amountText, fmtTs, postErrorText, hostOpErrorText, errorLine, nameText, idText, fieldDefaultText, isMoneyClaim, isProseClaim, renderNote, writeButton, inlineConfirm, intentChip, realRequestNode, requestReasonText, plainBody, collectForm, intentState, INTENT_STATE };");
   if (options.before) {
     // Keep prototype-removal probes isolated from the shared test realm.
     vm.runInNewContext(options.before, sandbox);
@@ -85,6 +86,98 @@ function irNotice(name: string): string {
 
 type KitWindow = Window & { __PCC_UI_BOOTED__?: boolean; __PCC_UI_FORCE_CLAIM_INIT_FAILURE__?: boolean };
 afterEach(() => { delete (window as KitWindow).__PCC_UI_FORCE_CLAIM_INIT_FAILURE__; });
+
+describe("non-string names and identifiers", () => {
+  const claims = [
+    ["prose claim", "Paid in full - verified $250"],
+    ["identifier claim", "Payment team: we build parts, then delivery is completed"],
+  ] as const;
+  const withheldName = "name withheld: stated money or verification";
+
+  for (const helper of ["nameText", "idText"] as const) {
+    it.each(claims)(`${helper} withholds an array matching the %s rule`, (_rule, claim) => {
+      const { kit, count } = boundary();
+      const text = kit[helper]([claim]);
+      expect(text.t).toBe(helper === "nameText" ? withheldName : kit.WITHHELD_FIELD.t);
+      expect(Object.isFrozen(text)).toBe(true);
+      expect(count()).toBe(0);
+    });
+
+    it(`${helper} preserves an unflagged array and other non-string reports`, () => {
+      const { kit, count } = boundary();
+      for (const [raw, expected] of [
+        [["Printer"], "reported: Printer"], [42, "reported: 42"], [true, "reported: true"],
+        [{}, "reported: [object Object]"], [null, ""], [undefined, ""],
+      ] as const) expect(kit[helper](raw).t).toBe(expected);
+      expect(count()).toBe(0);
+    });
+
+    it(`${helper} withholds non-string values when the detector is unavailable`, () => {
+      const { kit, count } = boundary({ forceClaimInitFailure: true });
+      for (const raw of [["Printer"], 42, {}, null]) {
+        expect(kit[helper](raw).t).toBe(helper === "nameText" ? withheldName : kit.WITHHELD_FIELD.t);
+      }
+      expect(count()).toBe(0);
+    });
+  }
+
+  const sites = [
+    { site: "bound name", kind: "list", field: "name", selector: ".pcc-list-title", name: true },
+    { site: "bound id", kind: "list", field: "id", selector: ".pcc-list-title", name: false },
+    { site: "capability name", kind: "capability", field: "name", selector: ".pcc-cap-name", name: true },
+    { site: "capability id", kind: "capability", field: "id", selector: ".pcc-cap-name", name: false },
+    { site: "capability kernel name", kind: "capability", field: "kernelName", selector: ".pcc-cap-meta .pcc-mono", name: true },
+    { site: "capability kernel id", kind: "capability", field: "kernelId", selector: ".pcc-cap-meta .pcc-mono", name: false },
+    { site: "capability type", kind: "capability", field: "type", selector: ".pcc-cap-meta .pcc-tag", name: false },
+    { site: "planner capability type", kind: "chain", field: "capabilityType", selector: ".pcc-plan-type", name: false },
+    { site: "planner outcome type", kind: "chain", field: "outcomeType", selector: ".pcc-plan-type", name: false },
+  ] as const;
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  for (const site of sites) {
+    it.each([
+      ...claims.map(([rule, claim]) => [rule, [claim], site.name ? withheldName : irNotice("WITHHELD_FIELD")] as const),
+      ["unflagged control", ["Printer"], "reported: Printer"] as const,
+    ])(`${site.site} renders an array value: %s`, async (_rule, raw, expected) => {
+      document.head.innerHTML = "";
+      document.body.innerHTML = '<main id="pcc-root"></main>';
+      (window as KitWindow).__PCC_UI_BOOTED__ = false;
+      const manifest = document.createElement("script");
+      manifest.id = "pcc-manifest";
+      manifest.type = "application/json";
+      const snapshot = document.createElement("script");
+      snapshot.id = "pcc-snapshot";
+      snapshot.type = "application/json";
+      const route = site.kind === "list" ? "/api/kernels" : "/api/capabilities/c1";
+      const win = site.kind === "chain"
+        ? { kind: "chain", composeRef: { outcomeType: "Print parts" } }
+        : { kind: site.kind, binding: { path: route }, item: { title: site.field } };
+      manifest.textContent = JSON.stringify({ sections: [{ windows: [win] }] });
+      document.body.append(manifest);
+      if (site.kind === "chain") {
+        vi.stubGlobal("fetch", vi.fn(async () => ({
+          ok: true, status: 200, headers: new Headers(),
+          json: async () => ({ steps: [{ [site.field]: raw }] }),
+        })));
+      } else {
+        const row = { [site.field]: raw };
+        snapshot.textContent = JSON.stringify({ [route]: site.kind === "list" ? [row] : row });
+        document.body.append(snapshot);
+      }
+      (0, eval)(source);
+      assertKitTextViolations();
+      await flushKitText();
+      if (site.kind === "chain") {
+        (document.querySelector(".pcc-chain-head")!.closest(".pcc-win")!.querySelector(".pcc-btn") as HTMLButtonElement).click();
+        await flushKitText();
+        expect(fetch).toHaveBeenCalledTimes(1);
+      }
+      expect(document.querySelector(site.selector)?.textContent).toBe(expected);
+      assertKitTextViolations();
+    });
+  }
+});
 
 describe("the shipped plain kit's runtime boundary", () => {
   it("accepts frozen minted text, preserves copy, and leaves absent el text empty", () => {
