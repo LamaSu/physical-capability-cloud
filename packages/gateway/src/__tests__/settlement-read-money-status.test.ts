@@ -17,42 +17,48 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import vm from "node:vm";
-import { classifySettlementRecord, classifySettlementRead } from "@pcc/spec";
+import { classifySettlementRecord, classifySettlementRead, chainPin, assetRealityClass, ASSET_REALITY_ENVELOPE_KEYS } from "@pcc/spec";
 import { settlementReadRoutes, setSettlementUnitReader, type SettlementUnitReader } from "../routes/settlement-read.js";
 import { UnitState } from "../settlement/unit-state-mapper.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const kitSrc = readFileSync(path.resolve(here, "../../../../apps/dashboard/public/ui-kit/v1/pcc-ui.js"), "utf8");
 const SNAP_HASH = "0x" + "cd".repeat(32);
+// R12: a well-formed escrow address, so the real bodies carry a valid pin (a placeholder such as "0xEsCrOw" is pending).
+const ESCROW = "0x" + "e5".repeat(20);
 const UNIT = "0x" + "ab".repeat(32);
 
-function kitClassifier(): (r: unknown) => [string, string | null, string] {
+type KitClass = [string, string | null, string];
+function kitClassifiers(): { record: (r: unknown) => KitClass; read: (r: unknown, path: unknown, live: unknown) => KitClass; asset: (ar: unknown) => string } {
   const m = kitSrc.match(/\/\/ <status-map v2>[^\n]*\n([\s\S]*?)\/\/ <\/status-map v2>/);
   if (!m) throw new Error("<status-map v2> markers not found in pcc-ui.js");
   const ctx: Record<string, unknown> = {};
-  vm.runInNewContext(kitSrc.slice(kitSrc.indexOf("  function dataAt("), kitSrc.indexOf("  function dot(")) + m[1] + "\nthis.settlementRecordClass = settlementRecordClass;", ctx);
-  return ctx.settlementRecordClass as (r: unknown) => [string, string | null, string];
+  vm.runInNewContext(kitSrc.slice(kitSrc.indexOf("  function dataAt("), kitSrc.indexOf("  function dot(")) + m[1] + "\nthis.settlementRecordClass = settlementRecordClass; this.settlementReadClass = settlementReadClass; this.assetRealityClass = assetRealityClass;", ctx);
+  return { record: ctx.settlementRecordClass as (r: unknown) => KitClass, read: ctx.settlementReadClass as (r: unknown, path: unknown, live: unknown) => KitClass, asset: ctx.assetRealityClass as (ar: unknown) => string };
 }
-const kit = kitClassifier();
+const kitFns = kitClassifiers();
+const kit = kitFns.record;
 
-function reader(state: UnitState): SettlementUnitReader {
+type AssetIdentity = Awaited<ReturnType<SettlementUnitReader["readAssetIdentity"]>>;
+function reader(state: UnitState, binding: { chainId: number; escrow: string } = { chainId: 84532, escrow: ESCROW }, asset: AssetIdentity | null = { assetReality: "test", registryId: "reg-1", revision: 3 }): SettlementUnitReader {
   // A consistent same-block read: terminal -> no claims left; allocated -> one claim outstanding.
   const remainingClaimCount = state >= UnitState.SETTLED_RELEASED ? 0n : state >= UnitState.RELEASE_ALLOCATED ? 1n : undefined;
   return {
-    binding: () => ({ chainId: 84532, escrow: "0xEsCrOw" }),
+    binding: () => binding,
     windows: () => ({ challengeWindow: 3600n, appealWindow: 7200n }),
     pinSnapshot: async () => ({ asOfBlock: 100n, asOfBlockHash: SNAP_HASH, finality: "finalized" as const, logCompleteness: "complete" as const }),
     readAnchors: async () => ({ state, remainingClaimCount }),
     readRefundWitness: async () => ({}),
     readZeroingDischargeBlock: async () => 999n,
-    readEconomics: async () => ({ amount: "1000000", feeAmount: "23500", recipient: "0xRecipient", token: "0xUSDC", assuranceTier: 1 }),
-    readAssetIdentity: async () => ({ assetReality: "test" as const, registryId: "reg-1", revision: 3 }),
+    // asset === null: no economics, so the route emits assetReality: null.
+    readEconomics: async () => (asset === null ? undefined : { amount: "1000000", feeAmount: "23500", recipient: "0xRecipient", token: "0xUSDC", assuranceTier: 1 }),
+    readAssetIdentity: async () => asset ?? { assetReality: "unknown", registryId: "none" },
     readProvenance: async () => ({ availability: "AVAILABLE" as const, compositionRoot: "0xroot", revision: 1, leaves: [], nextCursor: null }),
     readOwnerTenant: async () => null,
   };
 }
-async function bodies(state: UnitState): Promise<{ lifecycle: Record<string, unknown>; receipt: Record<string, unknown> }> {
-  setSettlementUnitReader(reader(state));
+async function bodies(state: UnitState, binding?: { chainId: number; escrow: string }, asset?: AssetIdentity | null): Promise<{ lifecycle: Record<string, unknown>; receipt: Record<string, unknown> }> {
+  setSettlementUnitReader(reader(state, binding, asset));
   const app: FastifyInstance = Fastify();
   app.addHook("onRequest", async (req) => { (req as unknown as { tenantId: string | null }).tenantId = "tenant-a"; });
   await app.register(settlementReadRoutes);
@@ -114,13 +120,18 @@ describe("#313 classifies the settlement routes' REAL bodies (spec and shipped k
       const b = await bodies(s);
       for (const [leaf, body] of [["lifecycle", b.lifecycle], ["receipt", b.receipt]] as const) {
         const path = `/api/settlement/units/${UNIT}/${leaf}`;
+        const final = s === UnitState.SETTLED_RELEASED || s === UnitState.SETTLED_REFUNDED;
         const live = classifySettlementRead(body, { path, live: true });
         expect(live.tone, `${leaf} ${s} live`).toBe(classifySettlementRecord(body).tone);
+        // R12: the route's REAL DTO carries a valid pin (chainId, escrow, unitId, a decimal-string asOfBlock,
+        // asOfBlockHash, finality "finalized"), and the same body with a malformed escrow is only pending.
+        expect(chainPin(body, path), `${leaf} ${s} pin`).toMatchObject({ chainId: 84532, network: "Base Sepolia", escrow: ESCROW, unitId: UNIT, asOfBlock: "100", asOfBlockHash: SNAP_HASH, finality: "finalized" });
+        if (final) expect(classifySettlementRead({ ...(body as object), escrow: "0xEsCrOw" }, { path, live: true }).tone, `${leaf} ${s} bad pin`).toBe("waiting");
         const offline = classifySettlementRead(body, { path, live: false });
         const elsewhere = classifySettlementRead(body, { path: "/api/jobs/j1", live: true });
-        const final = s === UnitState.SETTLED_RELEASED || s === UnitState.SETTLED_REFUNDED;
-        expect(offline.tone, `${leaf} ${s} snapshot`).toBe(final ? "unknown" : live.tone);
-        expect(elsewhere.tone, `${leaf} ${s} other route`).toBe(final ? "unknown" : live.tone);
+        // R12 r2 D: not only a final state -- NO state is shown without a live read of the unit's own route.
+        expect(offline.tone, `${leaf} ${s} snapshot`).toBe("unknown");
+        expect(elsewhere.tone, `${leaf} ${s} other route`).toBe("unknown");
       }
     }
   });
@@ -147,5 +158,80 @@ describe("#313 classifies the settlement routes' REAL bodies (spec and shipped k
     const six = await bodies(UnitState.RELEASE_ALLOCATED);
     expect(both({ ...six.receipt, finalState: "SETTLED_RELEASED" }).tone).toBe("unknown");
     expect(both({ ...six.lifecycle, isAllocated: false }).tone).toBe("unknown");
+  });
+
+  // R12 r2 D (ChatGPT run 2 F1 HIGH on #599 @aa0b8df6): EVERY chain-derived state needs the live pin, not
+  // only 8 and 9. The bodies below come from the routes themselves; each broken pin is the real producer's
+  // own output where it can produce one (a placeholder escrow, a chain outside the network table, a read
+  // classified under another unit's route), and a hand edit of a real body where the route refuses to (it
+  // never answers 200 for a non-finalized head; a missing pin models a non-conforming producer).
+  it("R12 r2 D: every state 1..9 of the REAL bodies, from both routes, shows only from a live read of its own route with a valid pin (spec == kit)", async () => {
+    const OTHER_UNIT = "0x" + "ef".repeat(32);
+    const PIN_KEYS = ["chainId", "escrow", "unitId", "asOfBlock", "asOfBlockHash", "finality", "network"];
+    const strip = (o: Record<string, unknown>) => { const c = { ...o }; for (const k of PIN_KEYS) delete c[k]; return c; };
+    const agree = (body: unknown, path: string, live: unknown, want: { tone: string; label: string | null }, tag: string) => {
+      const spec = classifySettlementRead(body, { path, live });
+      expect({ tone: spec.tone, label: spec.label }, tag).toEqual(want);
+      const [cls, label] = kitFns.read(body, path, live);
+      expect([cls, label], tag).toEqual(["st-" + spec.tone, spec.label]);
+    };
+    const PENDING = { tone: "waiting", label: "pending - not confirmed at a finalized block" };
+    const NOT_SHOWN = { tone: "unknown", label: "state not shown - not a live read of a settlement route" };
+    for (const s of [1, 2, 3, 4, 5, 6, 7, 8, 9] as UnitState[]) {
+      const real = await bodies(s);
+      const placeholder = await bodies(s, { chainId: 84532, escrow: "0xEsCrOw" }); // the routes' own test fixture escrow
+      const otherChain = await bodies(s, { chainId: 1, escrow: ESCROW }); // Ethereum mainnet: not a settlement network
+      for (const leaf of ["lifecycle", "receipt"] as const) {
+        const path = `/api/settlement/units/${UNIT}/${leaf}`;
+        const own = classifySettlementRecord(real[leaf]);
+        expect(own.known, `${leaf} ${s}`).toBe(true);
+        agree(real[leaf], path, true, { tone: own.tone, label: own.label }, `${leaf} ${s} pinned live`);
+        for (const [name, body, p] of [
+          ["placeholder escrow", placeholder[leaf], path], ["chain 1", otherChain[leaf], path],
+          ["another unit's route", real[leaf], `/api/settlement/units/${OTHER_UNIT}/${leaf}`],
+          ["no pin", strip(real[leaf]), path], ["safe head", { ...real[leaf], finality: "safe" }, path],
+        ] as Array<[string, Record<string, unknown>, string]>) {
+          agree(body, p, true, PENDING, `${leaf} ${s} ${name}`);
+        }
+        for (const [name, p, live] of [["snapshot", path, false], ["a job route", "/api/jobs/j1", true], ["provenance", `/api/settlement/units/${UNIT}/provenance`, true]] as Array<[string, string, unknown]>) {
+          agree(real[leaf], p, live, NOT_SHOWN, `${leaf} ${s} ${name}`);
+        }
+      }
+    }
+  });
+});
+
+// R12 r2 C (ChatGPT run 2 F2 HIGH = run 3 F3 MEDIUM on #599 @aa0b8df6): the asset classification is CLOSED,
+// and the closed shape is the one the real /receipt route emits (its `assetIdentity` envelope).
+describe("R12 r2 C: assetRealityClass over the /receipt route's REAL assetReality envelopes (spec == kit)", () => {
+  async function envelopeFor(asset: AssetIdentity | null): Promise<unknown> {
+    return (await bodies(UnitState.SETTLED_RELEASED, undefined, asset)).receipt.assetReality;
+  }
+  it("the route's envelope has exactly the closed key set, and its real / test / unknown classify as such", async () => {
+    for (const [asset, want] of [
+      [{ assetReality: "real", registryId: "circle-usdc", revision: 7 }, "real"],
+      [{ assetReality: "test", registryId: "reg-1", revision: 3 }, "test"],
+      [{ assetReality: "unknown", registryId: "reg-1", revision: 3 }, "unknown"],
+      [{ assetReality: "real", registryId: "0x" + "ab".repeat(20), revision: 0 }, "real"], // a contract-address id
+    ] as Array<[AssetIdentity, string]>) {
+      const env = await envelopeFor(asset);
+      expect(Object.keys(env as object).sort(), JSON.stringify(asset)).toEqual([...ASSET_REALITY_ENVELOPE_KEYS].sort());
+      expect(assetRealityClass(env), JSON.stringify(asset)).toBe(want);
+      expect(kitFns.asset(env), JSON.stringify(asset)).toBe(want);
+    }
+  });
+  it("a registry id outside the readers' grammar, or no economics (assetReality null), is unknown", async () => {
+    for (const asset of [{ assetReality: "real", registryId: "Circle USDC", revision: 7 }, { assetReality: "real", registryId: "", revision: 7 }, null] as Array<AssetIdentity | null>) {
+      const env = await envelopeFor(asset);
+      expect(assetRealityClass(env), JSON.stringify(asset)).toBe("unknown");
+      expect(kitFns.asset(env), JSON.stringify(asset)).toBe("unknown");
+    }
+  });
+  it("KNOWN GAP (fails closed): the port types revision as optional; a reader that omits it makes the route drop the key, and a real asset then reads unknown", async () => {
+    // settlement-read-routes.test.ts registers exactly this reader ({assetReality:"real", registryId:"circle-usdc"}).
+    const env = await envelopeFor({ assetReality: "real", registryId: "circle-usdc" });
+    expect(Object.prototype.hasOwnProperty.call(env, "revision")).toBe(false);
+    expect(assetRealityClass(env)).toBe("unknown");
+    expect(kitFns.asset(env)).toBe("unknown");
   });
 });

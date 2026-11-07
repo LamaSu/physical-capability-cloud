@@ -623,10 +623,15 @@
     if (!isFinite(d.getTime())) return kitText('time not reported');
     try { return mintText(d.toLocaleString()); } catch (e) { return mintText(d.toISOString()); }
   }
-  function fmtVal(v, format, path) {
+  function fmtVal(v, format, path, money) {
     if (v == null) return kitText('—');
-    if (format === 'ts') return timeText(v);
-    if (typeof v !== 'number' || !isFinite(v)) return boundText(path, v, false);
+    // R12 r2c N3: on money data a time is a report like every other value (shown as sent); anything that is not
+    // a canonical UTC time still reads "time not reported", so this format never shows an amount.
+    if (format === 'ts') return money && canonicalPlainTime(v) ? reportedText(v, false, true) : timeText(v);
+    // R12 r2b B1: a value on money data is a report, never a fact: attributed to its source and shown as sent,
+    // never scaled or formatted (base units are not dollars; read-surface contract rule 14). Only a non-money
+    // number takes the window's format.
+    if (money || typeof v !== 'number' || !isFinite(v)) return boundText(path, v, !!money);
     switch (format) {
       case 'usd': return fmtUsd(v);
       case 'int': { var n = Number(v); return mintText(Math.round(n).toLocaleString('en-US')); }
@@ -726,12 +731,13 @@
     ERROR: 'st-failed', FAILED: 'st-failed', DENIED: 'st-failed', CANCELLED: 'st-failed', CANCELED: 'st-failed', REJECTED: 'st-failed',
     DONE: 'st-ack', COMPLETE: 'st-ack', COMPLETED: 'st-ack', OK: 'st-ack', SUCCESS: 'st-ack', SUCCEEDED: 'st-ack', RESOLVED: 'st-ack', READY: 'st-ack'
   });
-  // NON-money data only (a job, a kernel): generic run/action states first, then the flat money
-  // table (which has no green). Callers route money data away from here (dataStatusClass).
+  // NON-money data only (a job, a kernel): the generic run/action states, and nothing else. A money word
+  // on such a record ("refunded", "funded", "locked") is a report, not a money state, so it takes NO money
+  // tone (R12 r2 D): it is neutral, like every other unmapped word. Callers route money data away from
+  // here (dataStatusClass).
   function statusClass(s) {
     var k = normStatus(s);
     if (k !== '' && Object.prototype.hasOwnProperty.call(GENERIC_STATES, k)) return dataAt(GENERIC_STATES, k);
-    if (k !== '' && Object.prototype.hasOwnProperty.call(MONEY_STATUS, k)) return dataAt(MONEY_STATUS, k)[0];
     return 'st-unknown'; // fail closed -- an unmapped status is NEVER rendered as settled/green
   }
   // A BARE money word: the flat table only (never green). A generic success word ("done",
@@ -822,24 +828,101 @@
     }
     return false;
   }
-  // The only routes whose LIVE reads may present a FINAL settlement state (mirrors the spec's
+  // The only routes whose LIVE reads may present a settlement state, final or not (mirrors the spec's
   // SETTLEMENT_READ_ROUTE; the unit id is the route's own UNIT_ID_RE).
   var SETTLEMENT_READ_ROUTE = /^\/api\/settlement\/units\/0x[0-9a-fA-F]{64}\/(receipt|lifecycle)$/;
   // DISPLAY class of a settlement record given where it came from -> [pillClass, label, text]. Mirrors
-  // classifySettlementRead: a FINAL V-next state (settled 8, refunded 9) needs a LIVE read of an exact
-  // per-unit settlement route. Field shape is not provenance (astra r2 on #313, F1): a baked snapshot,
-  // a fallback, a stream event or a settled-shaped body from any other route is unknown.
+  // classifySettlementRead (the conformance test compares them over records x pins x sources). Field shape
+  // is not provenance (astra r2 on #313, F1).
+  //  - R12, and R12 r2 D: a V-next record shows ANY chain-derived state (1-7 as much as 8 and 9) only from
+  //    a LIVE read of the unit's own settlement route whose body carries a valid pin (chainPin). A live read
+  //    of that route without one is pending; a baked snapshot, a fallback, a stream event, a projection or
+  //    another route is unknown.
+  //  - R12 rule 4 (r2 D, the same class): a legacy escrow record's word, in ANY state, is the escrow
+  //    service's report: attributed, and no money tone (st-unknown).
+  var ESCROW_SERVICE_REPORTS = 'PCC escrow service reports: ';
+  var BOUND_RECORD_REPORTS = 'bound record reports: ';
+  var NOT_CONFIRMED_ON_CHAIN = ' (not confirmed on chain)';
+  function isLegacyEscrowRecord(o) {
+    return !!o && typeof o === 'object' && !Array.isArray(o) && typeof o.status === 'string' && (ownKey(o, 'contractAddress') || ownKey(o, 'escrowAddress') || Array.isArray(o.milestones) || ownKey(o, 'cwmId') || ownKey(o, 'totalAmount'));
+  }
+  var LEGACY_ESCROW_RECORD_ROUTE = /^\/api\/escrow\/(?!chain(?:[/?]|$))[^/?]+$/;
+  var LEGACY_ESCROW_LIST_ROUTE = /^\/api\/escrow(\?|$)/;
+  function isLegacyEscrowRead(o, bindingPath) {
+    return isLegacyEscrowRecord(o) && typeof bindingPath === 'string' && (LEGACY_ESCROW_RECORD_ROUTE.test(bindingPath) || LEGACY_ESCROW_LIST_ROUTE.test(bindingPath));
+  }
   function settlementReadClass(o, bindingPath, live) {
     var rc = settlementRecordClass(o);
-    if (!isVNextRecord(o) || (rc[0] !== 'st-settled' && rc[0] !== 'st-refunded')) return rc;
-    var p = typeof bindingPath === 'string' ? bindingPath.split('?')[0] : '';
-    if (live === true && SETTLEMENT_READ_ROUTE.test(p)) return rc;
-    return ['st-unknown', 'final state not shown - not a live read of a settlement route', rc[2]];
+    if (!isVNextRecord(o)) {
+      // A legacy shape speaks for the escrow service only on that service's own route.
+      if (isLegacyEscrowRecord(o) && !isLegacyEscrowRead(o, bindingPath)) return ['st-unknown', 'not a settlement record', rc[2]];
+      return rc[1] !== null && isLegacyEscrowRead(o, bindingPath) ? ['st-unknown', ESCROW_SERVICE_REPORTS + rc[1] + NOT_CONFIRMED_ON_CHAIN, rc[2]] : rc;
+    }
+    var p = typeof bindingPath === 'string' ? bindingPath : '';
+    if (!(live === true && SETTLEMENT_READ_ROUTE.test(p))) return ['st-unknown', 'state not shown - not a live read of a settlement route', rc[2]];
+    if (chainPin(o, p) === null) return ['st-waiting', 'pending - not confirmed at a finalized block', rc[2]];
+    return rc;
   }
-  function dataStatusClass(bindingPath, row, s, live) {
-    if (!isMoneyData(bindingPath, row)) return statusClass(s);
-    if (isVNextRecord(row)) return settlementReadClass(row, bindingPath, live)[0]; // a read model: schema AND source
-    return moneyStatusClass(s); // a bare money word: never green
+  // The pill class of a DATA surface (list rows, run status). A V-next read model goes through the display
+  // classifier above (schema AND source AND pin); any other money data is a flat word, which is a report and
+  // never a money tone (R12 r2 D); non-money data takes the generic states only. R12 r2d g2: `money` is the
+  // caller's structural judgment (a list row's pill: the response and every record on the way to its status);
+  // true forces the money table, and it only ever ADDS money: a row carrying money is money whatever it says.
+  function dataStatusClass(bindingPath, row, s, live, money) {
+    if (!money && !isMoneyData(bindingPath, row)) return statusClass(s);
+    if (isVNextRecord(row)) return settlementReadClass(row, bindingPath, live)[0];
+    return 'st-unknown';
+  }
+  // The pin of a settlement read (R12), or null; mirrors the spec's chainPin (the conformance test
+  // compares them). A pin is registered in PINS, so only chainPin can hand one to chainFactText.
+  var SETTLEMENT_ROUTE_UNIT_RE = /^\/api\/settlement\/units\/(0x[0-9a-fA-F]{64})\/(?:receipt|lifecycle)$/;
+  var SETTLEMENT_NETWORKS = Object.freeze({ 8453: 'Base', 84532: 'Base Sepolia' });
+  var PIN_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+  var PIN_WORD_RE = /^0x[0-9a-fA-F]{64}$/;
+  var PIN_BLOCK_RE = /^(?:0|[1-9][0-9]{0,15})$/;
+  var PINS = (function () {
+    var pins = new WeakSet();
+    return Object.freeze({ has: pins.has.bind(pins), add: pins.add.bind(pins) });
+  })();
+  var freezePin = Object.freeze.bind(null);
+  function chainPin(o, bindingPath) {
+    if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+    var p = typeof bindingPath === 'string' ? bindingPath : '';
+    var m = SETTLEMENT_ROUTE_UNIT_RE.exec(p);
+    if (!m) return null;
+    var chainId = o.chainId;
+    if (typeof chainId !== 'number' || !Number.isSafeInteger(chainId) || !ownKey(SETTLEMENT_NETWORKS, String(chainId))) return null;
+    if (ownKey(o, 'network')) {
+      var n = o.network;
+      if (!n || typeof n !== 'object' || Array.isArray(n) || n.chainId !== chainId) return null;
+    }
+    if (typeof o.escrow !== 'string' || !PIN_ADDRESS_RE.test(o.escrow)) return null;
+    if (typeof o.unitId !== 'string' || !PIN_WORD_RE.test(o.unitId) || o.unitId.toLowerCase() !== m[1].toLowerCase()) return null;
+    if (typeof o.asOfBlock !== 'string' || !PIN_BLOCK_RE.test(o.asOfBlock) || !Number.isSafeInteger(Number(o.asOfBlock))) return null;
+    if (typeof o.asOfBlockHash !== 'string' || !PIN_WORD_RE.test(o.asOfBlockHash)) return null;
+    if (o.finality !== 'finalized') return null;
+    var pin = freezePin({ chainId: chainId, network: dataAt(SETTLEMENT_NETWORKS, chainId), escrow: o.escrow, unitId: o.unitId,
+      asOfBlock: o.asOfBlock, asOfBlockHash: o.asOfBlockHash, finality: 'finalized' });
+    PINS.add(pin);
+    return pin;
+  }
+  // R12 r2 C: the asset classification, CLOSED, mirroring the spec's assetRealityClass (the conformance test
+  // compares them). 'real' or 'test' only for the route's own registry envelope -- exactly its five own keys,
+  // source "registry", a contract address or registry id, a non-negative safe-integer revision, attests
+  // "identity-not-liveness". Anything else, a bare or forged "real" included, is 'unknown'.
+  var ASSET_REALITY_ENVELOPE_KEYS = Object.freeze(['value', 'source', 'contractOrRegistryId', 'revision', 'attests']);
+  var ASSET_REGISTRY_ID_RE = /^(?:0x[0-9a-fA-F]{40}|[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)$/;
+  function assetRealityClass(ar) {
+    if (!ar || typeof ar !== 'object' || Array.isArray(ar)) return 'unknown';
+    if (Object.getOwnPropertyNames(ar).length !== ASSET_REALITY_ENVELOPE_KEYS.length) return 'unknown';
+    for (var i = 0; i < ASSET_REALITY_ENVELOPE_KEYS.length; i++) if (!ownKey(ar, dataAt(ASSET_REALITY_ENVELOPE_KEYS, i))) return 'unknown';
+    var v = ar.value;
+    if (v !== 'real' && v !== 'test') return 'unknown';
+    if (ar.source !== 'registry') return 'unknown';
+    if (typeof ar.contractOrRegistryId !== 'string' || !ASSET_REGISTRY_ID_RE.test(ar.contractOrRegistryId)) return 'unknown';
+    if (typeof ar.revision !== 'number' || !Number.isSafeInteger(ar.revision) || ar.revision < 0) return 'unknown';
+    if (ar.attests !== 'identity-not-liveness') return 'unknown';
+    return v;
   }
   // Pill TEXT (astra r4 on #313, F6; astra r5 on #313, F7-F9). The class decides the colour, and the text
   // may not claim more. Fails CLOSED over a CLOSED safe vocabulary (no blacklist to miss a spelling, and
@@ -857,9 +940,10 @@
     BIDDING: true, ASSIGNED: true, PROPOSED: true, OVER_BUDGET: true, NO_PATH_FOUND: true, APPROVED: true, EXPIRED: true,
     ACTIVE: true, INACTIVE: true, REVOKED: true, IDLE: true, BUSY: true, DRAFT: true, DEPRECATED: true, RESERVED: true, LIVE: true, STUB: true, PLANNED: true
   });
+  // R12 r2d g1: no money-table word is on the money list (PENDING and EXPIRED were): on money data they are attributed.
   var SAFE_MONEY_STATUS_WORDS = Object.freeze({
-    RUNNING: true, IN_PROGRESS: true, PROGRESS: true, PENDING: true, QUEUED: true, WAITING: true, PAUSED: true, REVIEW: true,
-    ERROR: true, FAILED: true, DENIED: true, CANCELLED: true, CANCELED: true, REJECTED: true, EXPIRED: true, UNKNOWN: true
+    RUNNING: true, IN_PROGRESS: true, PROGRESS: true, QUEUED: true, WAITING: true, PAUSED: true, REVIEW: true,
+    ERROR: true, FAILED: true, DENIED: true, CANCELLED: true, CANCELED: true, REJECTED: true, UNKNOWN: true
   });
   var UNCONFIRMED_SUFFIX = ' - settlement unconfirmed';
   var UNVERIFIED_SUFFIX = ' - status unverified';
@@ -875,21 +959,39 @@
   // A free-text server MESSAGE outside a pill (astra r6 F12): never PCC's own claim, so it is attributed
   // to its source, and on money data it says the settlement is unconfirmed. Callers pass `verified` only
   // for a VERIFIED PAYEE PAYMENT, never a verified refund (astra r6 F10). Mirrors the spec's reportedText.
-  function reportedText(raw, verified, money) {
+  function reportedText(raw, verified, money, sourceKind) {
     var t = raw == null ? '' : String(raw);
     if (hasBidiControl(t)) return WITHHELD_FIELD;
+    // A source label is supplied by the caller. Only a grammar-checked kind may bypass claim withholding.
+    if (sourceKind === 'id') {
+      if (typeof raw === 'string' && PLAIN_ID_RE.test(raw)) return mintText(t);
+      return isProseClaim(t) ? WITHHELD_FIELD : kitText('unrecognised value');
+    }
+    if (sourceKind === 'name') {
+      if (isProseClaim(t)) return nameText(t);
+      if (!CLAIM_DETECTOR || CLAIM_DETECTOR.identifier(t)) return WITHHELD_FIELD;
+      return mintText(t);
+    }
     if (verified || t === '') return mintText(t);
     return mintText('reported: ' + t + (money ? UNCONFIRMED_SUFFIX : ''));
   }
-  // The TEXT of a data status pill (list rows, run windows), paired with dataStatusClass. Money data shows
-  // the classifier's honest label, and a VERIFIED final (a live read of an exact settlement route) keeps
-  // its plain name. Anything else is the value itself, qualified when it claims money moved.
-  function dataStatusText(bindingPath, row, s, live) {
-    if (isMoneyData(bindingPath, row)) {
-      var vnext = isVNextRecord(row);
-      var rc = vnext ? settlementReadClass(row, bindingPath, live) : [moneyStatusClass(s), settlementLabel(s), s];
-      if (vnext && (rc[0] === 'st-settled' || rc[0] === 'st-refunded')) return mintText(String(rc[2]));
-      if (rc[1]) return mintText(rc[1]);
+  // The TEXT of a data status pill (list rows, run windows), paired with dataStatusClass.
+  //  - A V-next read model: a PINNED final state keeps its plain name and a pinned non-final state its honest
+  //    label; anything else is the classifier's refusal (pending, not shown, fields disagree), never a state.
+  //  - Any other money data: a flat-table word is a report (R12 rule 4; r2 D): attributed to its source --
+  //    the PCC escrow service for a legacy escrow record, else the bound record -- in ANY state. Any other
+  //    word takes the closed money vocabulary.
+  //  - Non-money data: the closed status vocabulary.
+  // `money` as in dataStatusClass (R12 r2d g2): true forces the money branch; it never removes money.
+  function dataStatusText(bindingPath, row, s, live, money) {
+    if (money || isMoneyData(bindingPath, row)) {
+      if (isVNextRecord(row)) {
+        var rc = settlementReadClass(row, bindingPath, live);
+        if (rc[0] === 'st-settled' || rc[0] === 'st-refunded') return mintText(String(rc[2]));
+        return rc[1] ? mintText(rc[1]) : statusPillText(s, false, true);
+      }
+      var label = settlementLabel(s);
+      if (label !== null) return mintText((isLegacyEscrowRead(row, bindingPath) ? ESCROW_SERVICE_REPORTS : BOUND_RECORD_REPORTS) + label + NOT_CONFIRMED_ON_CHAIN);
       return statusPillText(s, false, true);
     }
     return statusPillText(s, false, false);
@@ -1106,12 +1208,121 @@
   var PLAIN_TRACE_RE = /^[A-Za-z0-9_-]{8,64}$/;
   /** Identifiers can spell prose: withhold claims and attribute all remaining values, as in the IR. */
   function idText(raw) {
+      if (typeof raw !== "string") {
+          var t = String(raw);
+          if (isProseClaim(t) || !CLAIM_DETECTOR || CLAIM_DETECTOR.identifier(t)) return WITHHELD_FIELD;
+      }
       if (typeof raw === "string" && (!CLAIM_DETECTOR || CLAIM_DETECTOR.identifier(raw))) return WITHHELD_FIELD;
       return reportedText(raw, false, false);
   }
   /** Addresses and transaction hashes admit exactly their two wire lengths. */
   function hexText(raw) {
       return mintText(typeof raw === "string" && PLAIN_HEX_RE.test(raw) ? raw : "unrecognised value");
+  }
+  // A party a record names: an address or hash stays plain, an id stays plain inside its grammar, and
+  // anything else is reported. A valid kernel id is never "unrecognised value".
+  function partyText(raw, name) {
+    if (name) return reportedText(raw, false, false, 'name');
+    return typeof raw === 'string' && PLAIN_HEX_RE.test(raw) ? hexText(raw) : reportedText(raw, false, false, 'id');
+  }
+  function knownCurrency(raw) { return raw === 'USDC' || raw === 'ETH' || raw === 'DAI'; }
+  // R12 money facts: amounts, the payee and a final tone render only from a live, pinned, finalized read
+  // of the unit's own settlement route. chainFactText is the ONLY mint of this tier and needs a pin that
+  // chainPin registered; moneyFactEl is its only sink, and anything else there renders "pending".
+  var MONEY_FACT_BRANDS = (function () {
+    var facts = new WeakSet();
+    return Object.freeze({ has: facts.has.bind(facts), add: facts.add.bind(facts) });
+  })();
+  function chainFactText(text, pin) {
+    if (!isKitText(text) || !pin || typeof pin !== 'object' || !PINS.has(pin)) { window.__PCC_UI_TEXT_VIOLATIONS__++; return kitText('pending'); }
+    var fact = mintText(text.t);
+    MONEY_FACT_BRANDS.add(fact);
+    return fact;
+  }
+  function moneyFactEl(tag, cls, fact) {
+    if (fact && typeof fact === 'object' && MONEY_FACT_BRANDS.has(fact)) return el(tag, cls, fact);
+    window.__PCC_UI_TEXT_VIOLATIONS__++;
+    return el(tag, (cls ? cls + ' ' : '') + 'pcc-muted', kitText('pending'));
+  }
+  // The visible reference under a money fact: network, escrow, unit and the finalized block, every
+  // field one that chainPin validated (only hashes and addresses: R12 rule 6, privacy).
+  function pinShort(h) { return h.slice(0, 6) + '…' + h.slice(-4); }
+  function pinReferenceText(pin) {
+    if (!pin || !PINS.has(pin)) return kitText('—');
+    return joinText(mintText(pin.network + ' · escrow ' + pinShort(pin.escrow) + ' · unit ' + pinShort(pin.unitId) + ' · block '),
+      blockNumberText(pin.asOfBlock), mintText(' (' + pinShort(pin.asOfBlockHash) + ') · finalized'));
+  }
+  function pinValueText(pin, key) {
+    if (!pin || !PINS.has(pin)) return kitText('—');
+    if (key === 'chainId') return mintText(String(pin.chainId));
+    if (key === 'escrow') return mintText(pin.escrow);
+    if (key === 'unitId') return mintText(pin.unitId);
+    if (key === 'asOfBlock') return mintText(pin.asOfBlock);
+    if (key === 'asOfBlockHash') return mintText(pin.asOfBlockHash);
+    return kitText('finalized');
+  }
+  function pinRow(box, label, pin, key) {
+    var row = el('div', 'pcc-pin-row');
+    row.appendChild(el('span', 'pcc-muted pcc-pin-k', label));
+    row.appendChild(el('span', 'pcc-mono', pinValueText(pin, key)));
+    var raw = key === 'chainId' ? String(pin.chainId) : String(dataAt(pin, key));
+    var copy = el('button', 'pcc-chip pcc-copy', kitText('Copy'));
+    copy.type = 'button';
+    copy.onclick = function () { try { if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(raw); } catch (e) {} };
+    row.appendChild(copy);
+    box.appendChild(row);
+  }
+  // The exact read behind a money fact, so the reader's own agent or wallet can repeat it at the same
+  // block (the self-check calldata itself is A2, after the escrow's artifact D).
+  function pinDetails(pin) {
+    var d = el('details', 'pcc-pin-details');
+    d.appendChild(el('summary', 'pcc-muted', kitText('Reference: the chain read behind this money fact')));
+    pinRow(d, kitText('chain'), pin, 'chainId');
+    pinRow(d, kitText('escrow'), pin, 'escrow');
+    pinRow(d, kitText('unit'), pin, 'unitId');
+    pinRow(d, kitText('block'), pin, 'asOfBlock');
+    pinRow(d, kitText('block hash'), pin, 'asOfBlockHash');
+    pinRow(d, kitText('finality'), pin, 'finality');
+    return d;
+  }
+  // The visible reference line and its expandable details, for ONE pinned read, under the money fact it
+  // backs (the receipt and the run window share it).
+  function appendPinReference(parent, pin) {
+    parent.appendChild(el('div', 'pcc-mono pcc-muted pcc-pin-ref', pinReferenceText(pin)));
+    parent.appendChild(pinDetails(pin));
+  }
+  // Contract rules 11 and 15: only a registry-confirmed real asset goes unmarked, and only the closed
+  // classifier decides it (R12 r2 C). Rule 26: "real" is identity, never liveness, so its only effect is
+  // that this badge is absent; nothing else on the receipt changes.
+  function assetBadgeText(ar) {
+    var c = assetRealityClass(ar);
+    if (c === 'real') return null;
+    return c === 'test' ? kitText('TEST ASSET') : kitText('ASSET NOT VERIFIED');
+  }
+  // Contract rule 21: refundReason and finalizedBlock come from event logs (reorg-exposed), so they never
+  // render like a staticcall fact. "UNKNOWN" (or an empty marker) is "not reported".
+  function logValue(raw) {
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) raw = raw.value;
+    return raw === 'UNKNOWN' || raw === '' ? null : raw;
+  }
+  function blockNumberText(v) {
+    var str = typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? String(v)
+      : (typeof v === 'string' && PIN_BLOCK_RE.test(v) && Number.isSafeInteger(Number(v)) ? v : null);
+    return str === null ? kitText('not reported') : mintText(Number(str).toLocaleString('en-US', { maximumFractionDigits: 0 }));
+  }
+  function logFieldsNode(e) {
+    var box = null;
+    if (ownKey(e, 'refundReason') && e.refundReason != null) {
+      var rr = logValue(e.refundReason);
+      box = box || el('div', 'pcc-muted pcc-receipt-logs');
+      box.appendChild(el('div', 'pcc-receipt-log', joinText(kitText('refund reason: '), rr == null ? kitText('not reported') : reportedText(rr, false, false, 'id'), kitText(' (from event logs)'))));
+    }
+    if (ownKey(e, 'finalizedBlock') && e.finalizedBlock != null) {
+      var fb = logValue(e.finalizedBlock);
+      box = box || el('div', 'pcc-muted pcc-receipt-logs');
+      box.appendChild(el('div', 'pcc-receipt-log', joinText(kitText('finalized at block '), fb == null ? kitText('not reported') : blockNumberText(fb), kitText(' (from event logs)'))));
+    }
+    return box;
   }
   /** Canonical UTC, calendar-valid, and in the same 2000..2100 era as the IR kit. */
   function canonicalPlainTime(raw) {
@@ -1142,8 +1353,11 @@
   }
   /** Operator-chosen names are visibly framed; claims use PCC's withheld notice. */
   function nameText(raw) {
-      if (typeof raw !== "string")
-          return reportedText(raw, false, false);
+      if (typeof raw !== "string") {
+          var t = String(raw);
+          return isProseClaim(t) || !CLAIM_DETECTOR || CLAIM_DETECTOR.identifier(t)
+              ? mintText("name withheld: stated money or verification") : reportedText(raw, false, false);
+      }
       if (CLAIM_DETECTOR && hasBidiControl(raw)) return WITHHELD_FIELD;
       return mintText(isProseClaim(raw) ? "name withheld: stated money or verification" : "name: " + raw);
   }
@@ -1380,6 +1594,16 @@
     return ctx.mode === 'host' ? new HostTransport(ctx.apiBase) : new Transport(ctx.apiBase, false);
   }
 
+  // Any later asOf stitching must take it only from the kit's own unqueried read in this render,
+  // never from the manifest.
+  function hasBindingQuery(binding) {
+    var query = binding && binding.query;
+    if (query == null || typeof query !== 'object') return false;
+    var keys = Object.getOwnPropertyNames(query);
+    for (var i = 0; i < keys.length; i++) if (dataAt(query, dataAt(keys, i)) != null) return true;
+    return false;
+  }
+
   // Resolve a binding to data. In snapshot mode, look the path up in the baked
   // store (stale). In live modes, fetch. Returns {data, stale, error}.
   function resolveBinding(ctx, binding) {
@@ -1491,15 +1715,40 @@
     return typeof p === 'string' && /status|state|phase/i.test(p.split('.').pop() || '');
   }
   // A bound value shown as plain text (a list title or meta field, a metric): a status field takes the
-  // closed-vocabulary rule (astra r6, the F8/F11 class); anything else (a name, an id, an amount) is shown
-  // as sent. Never verified: these windows read collections, snapshots or single values, not a live
-  // settlement read model.
+  // closed-vocabulary rule (astra r6, the F8/F11 class). R12 r2c N3: on money data EVERY other value is a
+  // report, whatever its field is called -- a party's id (payeeId), the record's own id, a name, a type, an
+  // amount -- attributed and shown as sent, never bare and never only framed. No field is exempt: the closed
+  // allowlist of fields shown bare from money data is empty (the conformance test enumerates it), so money data
+  // never reaches the name/id/type lines after the money one. Only non-money data keeps a name, an id or a type
+  // typed. Never verified: these windows read collections, snapshots or single values, not a live settlement read.
+  // R12 r2d F1: nameText's withholding wins on every path. A name that states money or verification is withheld
+  // on money data exactly as on non-money data and in the IR kit; money attribution applies only to a value that
+  // passes it (a non-string name is never prose, so it is reported as sent).
   function boundText(path, v, money) {
     if (isStatusPath(path)) return statusPillText(v, false, money);
     var field = typeof path === 'string' ? path.split('.').pop() : '';
+    if (/name$/i.test(field) && typeof v === 'string' && isProseClaim(v)) return nameText(v);
+    if (money) return reportedText(typeof v === 'object' ? JSON.stringify(v) : v, false, true);
     if (/name$/i.test(field)) return nameText(v);
     if (/id$|type$/i.test(field)) return idText(v);
     return reportedText(typeof v === 'object' ? JSON.stringify(v) : v, false, money);
+  }
+  // R12 r2b B1 (lane review, known gap (a)): is the value a selector reaches money? Money data by isMoneyData (a
+  // money route, or a record carrying a money field), or ANY record on the way to the value is money-shaped: it
+  // carries a money field or names a currency (a listed price, a budget hint, an escrow total). Structure, never a
+  // guess from the selected field's name, and fail closed: a nested amount is as much money as a top-level one.
+  function moneyShaped(bindingPath, o) {
+    return isMoneyData(bindingPath, o) || (!!o && typeof o === 'object' && !Array.isArray(o) && ownKey(o, 'currency') && o.currency != null);
+  }
+  function selectsMoney(bindingPath, root, sel) {
+    var parts = sel == null || sel === '' ? [] : String(sel).split('.');
+    var cur = root;
+    if (moneyShaped(bindingPath, cur)) return true;
+    for (var i = 0; i < parts.length && cur != null && typeof cur === 'object'; i++) {
+      cur = Array.isArray(cur) && /^\d+$/.test(dataAt(parts, i)) ? dataAt(cur, parseInt(dataAt(parts, i), 10)) : dataAt(cur, dataAt(parts, i));
+      if (moneyShaped(bindingPath, cur)) return true;
+    }
+    return false;
   }
 
   // note — prose; split on double newline into <p>, textContent only.
@@ -1523,8 +1772,15 @@
     resolveBinding(ctx, w.binding).then(function (r) {
       var raw = sel != null ? dot(r.data, sel) : r.data;
       if (r.error) { clear(wrap._body); wrap._body.appendChild(errorLine(r.error)); }
-      else setText(val, isStatusPath(sel) && raw != null && typeof raw !== 'object'
-        ? boundText(sel, raw, isMoneyData(w.binding && w.binding.path, r.data)) : fmtVal(raw, w.format, sel));
+      else {
+        // R12 r2b B1: money is judged on the whole way to the value -- from the response itself (live: the
+        // unprojected body; otherwise the baked record) through binding.select, then from the bound data through
+        // the selector -- so neither a projection nor a nested record sheds its money shape.
+        var bpath = w.binding && w.binding.path;
+        var top = r.raw !== undefined ? r.raw : ctx.snapshot && typeof bpath === 'string' ? dataAt(ctx.snapshot, bpath) : undefined;
+        var money = selectsMoney(bpath, top, w.binding && w.binding.select) || selectsMoney(bpath, r.data, sel);
+        setText(val, isStatusPath(sel) && raw != null && typeof raw !== 'object' ? boundText(sel, raw, money) : fmtVal(raw, w.format, sel, money));
+      }
       wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale);
     });
     return wrap;
@@ -1542,8 +1798,8 @@
       var titleRow = el('div', 'pcc-cap-title');
       titleRow.appendChild(el('span', 'pcc-cap-name', c.name ? nameText(c.name) : c.id ? idText(c.id) : kitText('Capability')));
       var price = c.pricing && (c.pricing.baseCost != null ? c.pricing.baseCost : c.pricing.minimum);
-      var currency = (c.pricing && c.pricing.currency) || 'USDC';
-      if (price != null) titleRow.appendChild(el('span', 'pcc-price-chip pcc-tnum', fmtUsdWithUnit(price, currency)));
+      var currency = c.pricing && c.pricing.currency; // R12: a listed price is the operator's term, never a fact; no invented currency
+      if (price != null) titleRow.appendChild(el('span', 'pcc-price-chip pcc-tnum', joinText(kitText('listed price: '), knownCurrency(currency) ? fmtUsdWithUnit(price, currency) : joinText(fmtUsd(price), kitText(' (currency not listed)')), kitText(" (operator's listing)"))));
       wrap._body.appendChild(titleRow);
       var meta = el('div', 'pcc-cap-meta');
       if (c.kernelName || c.kernelId) meta.appendChild(el('span', 'pcc-mono', c.kernelName ? nameText(c.kernelName) : idText(c.kernelId)));
@@ -1570,28 +1826,40 @@
       if (r.error) { wrap._body.appendChild(errorLine(r.error)); wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale); return; }
       var rows = w.binding && w.binding.select != null ? (Array.isArray(r.data) ? r.data : firstArray(r.data)) : firstArray(r.raw != null ? r.raw : r.data);
       if (!rows.length) { wrap._body.appendChild(el('p', 'pcc-muted', kitText('Nothing here yet.'))); wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale); return; }
+      // R12 r2c N3: money is judged on the whole way to each painted value, as the metric judges it (r2b B1): the
+      // response itself (live: its unprojected body; otherwise the baked record) through binding.select, then the
+      // row and each record on the field's path. So a row inside a money record, or a party or an amount nested in
+      // a row's money-shaped record, is a report even on a non-money route.
+      var lpath = w.binding && w.binding.path;
+      var listBody = r.raw !== undefined ? r.raw : ctx.snapshot && typeof lpath === 'string' ? dataAt(ctx.snapshot, lpath) : undefined;
+      var listMoney = selectsMoney(lpath, listBody, w.binding && w.binding.select);
       var limit = w.limit || rows.length;
       var listNode = el('ul', 'pcc-list');
       for (var i = 0; i < rows.length && i < limit; i++) {
         var row = dataAt(rows, i);
         var li = el('li', 'pcc-list-row');
         var main = el('div', 'pcc-list-main');
-        var rowMoney = isMoneyData(w.binding && w.binding.path, row);
         var tv = dot(row, w.item.title);
-        main.appendChild(tv != null ? el('span', 'pcc-list-title', boundText(w.item.title, tv, rowMoney)) : agentEl('span', 'pcc-list-title', agentText(w.item.title || '', false)));
+        main.appendChild(tv != null ? el('span', 'pcc-list-title', boundText(w.item.title, tv, listMoney || selectsMoney(lpath, row, w.item.title))) : agentEl('span', 'pcc-list-title', agentText(w.item.title || '', false)));
         var metaVals = [];
         var metaKeys = (w.item.meta || []);
         for (var j = 0; j < metaKeys.length; j++) {
           var mv = dot(row, dataAt(metaKeys, j));
-          if (mv != null && mv !== '') metaVals.push(boundText(dataAt(metaKeys, j), mv, rowMoney));
+          if (mv != null && mv !== '') metaVals.push(boundText(dataAt(metaKeys, j), mv, listMoney || selectsMoney(lpath, row, dataAt(metaKeys, j))));
         }
         if (metaVals.length) main.appendChild(el('span', 'pcc-list-meta', joinWithText(kitText(' · '), metaVals)));
         li.appendChild(main);
         if (w.item.statusFrom) {
           var st = dot(row, w.item.statusFrom);
           // A row is an element of a collection, never the top-level record a settlement route returns, so
-          // it is never a verified read, however live the fetch (astra r7 F13).
-          if (st != null) li.appendChild(el('span', 'pcc-pill ' + dataStatusClass(w.binding && w.binding.path, row, st, false), dataStatusText(w.binding && w.binding.path, row, st, false)));
+          // it is never a verified read, however live the fetch (astra r7 F13). R12 r2d g2: the pill judges money
+          // as the title and meta do (r2c N3): the response through binding.select, then the row and each record
+          // on the statusFrom path, so a status nested in a row's money record, or a row inside a money record,
+          // takes the money table, never the row's own top-level keys alone.
+          if (st != null) {
+            var pillMoney = listMoney || selectsMoney(lpath, row, w.item.statusFrom);
+            li.appendChild(el('span', 'pcc-pill ' + dataStatusClass(lpath, row, st, false, pillMoney), dataStatusText(lpath, row, st, false, pillMoney)));
+          }
         }
         listNode.appendChild(li);
       }
@@ -1715,6 +1983,11 @@
   function renderRun(ctx, w) {
     var wrap = winShell(kitText('Run'), kitText('connecting'), 'st-running');
     var pill = wrap.querySelector('.pcc-pill');
+    // R12 r2 A: the chain reference of the read the pill shows (network, escrow, unit, block and hash, plus
+    // the expandable details the receipt uses), or nothing. It is painted in the SAME update as the pill,
+    // from that poll's own unprojected live body, so an earlier poll's pin is never kept.
+    var pinBox = el('div', 'pcc-run-pin');
+    wrap._body.appendChild(pinBox);
     var latest = el('div', 'pcc-run-latest', kitText('Waiting for the first update…'));
     wrap._body.appendChild(latest);
     var started = Date.now();
@@ -1737,7 +2010,7 @@
     var held = { latest: null, feed: null };
     function paintLatest(verified) {
       var h = held.latest;
-      if (h) setText(latest, h.isStatus ? statusPillText(h.raw, verified, h.money) : reportedText(h.raw, verified, h.money));
+      if (h) setText(latest, h.isStatus ? statusPillText(h.raw, verified, h.money) : reportedText(h.raw, false, h.money));
     }
     function paintFeed(verified) {
       var f = held.feed;
@@ -1746,30 +2019,44 @@
       for (var i = 0; i < f.lines.length; i++) feedLine(joinText(dataAt(f.lines, i).ts, statusPillText(dataAt(f.lines, i).label, verified, f.money)));
     }
 
-    // `live` is true only for a successful poll of the binding (never a snapshot or a stream event).
+    // One update of the header: the pill node is replaced, and the reference box is cleared and refilled
+    // from `p` (this read's pin, or null) at the same time, so the two can never disagree.
+    function setPill(node, p) {
+      if (pill.parentNode) pill.parentNode.replaceChild(node, pill);
+      pill = node;
+      clear(pinBox);
+      if (p) appendPinReference(pinBox, p);
+    }
+    // `live` is true only for a successful poll of the binding (never a snapshot or a stream event), and
+    // `data` is then that poll's whole response: a run never projects its read (binding.select is unused).
     function apply(statusVal, latestVal, data, full, live) {
       var bpath = w.binding && w.binding.path;
+      var runMoney = isMoneyData(bpath, data) || selectsMoney(bpath, data, w.statusFrom);
       var cls = null; // this read's pill class, when it sets one
       if (full && isVNextRecord(data) && isMoneyData(bpath, data)) {
-        cls = settlementReadClass(data, bpath, live)[0]; // a settlement read model: by its schema AND source
-        setText(pill, dataStatusText(bpath, data, statusVal, live)); pill.className = 'pcc-pill ' + cls;
+        cls = settlementReadClass(data, bpath, live)[0]; // a settlement read model: by its schema AND source AND pin
+        // R12 r2 A: a state (any of 1-9, D) shows only with this read's own pin, and then the pill is a money
+        // fact on that pin and its reference is painted with it.
+        var pin = live === true ? chainPin(data, bpath) : null;
+        var txt = dataStatusText(bpath, data, statusVal, live, runMoney);
+        setPill(pin && cls !== 'st-unknown' ? moneyFactEl('span', 'pcc-pill ' + cls, chainFactText(txt, pin)) : el('span', 'pcc-pill ' + cls, txt), pin);
       } else if (statusVal != null) {
-        cls = dataStatusClass(bpath, data, statusVal, live);
-        setText(pill, dataStatusText(bpath, data, statusVal, live)); pill.className = 'pcc-pill ' + cls;
+        cls = dataStatusClass(bpath, data, statusVal, live, runMoney);
+        setPill(el('span', 'pcc-pill ' + cls, dataStatusText(bpath, data, statusVal, live, runMoney)), null);
       } else if (full) {
         // A full snapshot WITHOUT a status: the earlier status is no longer known (never kept green).
-        setText(pill, kitText('unknown')); pill.className = 'pcc-pill st-unknown';
+        setPill(el('span', 'pcc-pill st-unknown', kitText('unknown')), null);
       }
       // Secondary text (the latest line, timeline and feed lines) is plain only on a VERIFIED PAYEE
       // PAYMENT: a V-next record whose live exact read is st-settled. A verified refund proves the payees
       // were NOT paid, so it vouches for no other claim (astra r6 F10).
       var payeeVerified = isVNextRecord(data) && cls === 'st-settled';
-      if (latestVal != null && latestVal !== '') {
+      if (w.latestFrom && latestVal != null && latestVal !== '') {
         // The latest line, on every surface (astra r5 F8, r6 F12). Status-sourced text (the status path
         // itself, or a status/state/phase field) is a label, so it takes the closed vocabulary; anything
         // else is a free-text message, attributed to its source.
         var latestIsStatus = typeof w.latestFrom === 'string' && (w.latestFrom === w.statusFrom || isStatusPath(w.latestFrom));
-        held.latest = { raw: latestVal, isStatus: latestIsStatus, money: isMoneyData(bpath, data) };
+        held.latest = { raw: latestVal, isStatus: latestIsStatus, money: isMoneyData(bpath, data) || selectsMoney(bpath, data, w.latestFrom) };
       }
       paintLatest(payeeVerified); // this read decides, even when it carries no new latest value
       return payeeVerified;
@@ -1790,10 +2077,11 @@
       var tl = dot(snap, 'job.timeline') || dot(snap, 'timeline');
       if (Array.isArray(tl) && tl.length) {
         // Timeline entries are labels (astra r6 F11): the closed vocabulary, never verified in a snapshot.
-        var snapMoney = isMoneyData(w.binding.path, snap);
+        var snapMoney = isMoneyData(w.binding.path, snap) || selectsMoney(w.binding.path, snap, w.statusFrom);
         for (var ti = 0; ti < tl.length; ti++) feedLine(joinText(dataAt(tl, ti).timestamp ? joinText(fmtTs(dataAt(tl, ti).timestamp), kitText(' \u00b7 ')) : kitText(''), statusPillText(dataAt(tl, ti).type || '', false, snapMoney)));
         var lastType = dataAt(tl, tl.length - 1).type; // last event = latest truth
-        if (lastType != null && lastType !== '') setText(latest, statusPillText(lastType, false, snapMoney));
+        var snapLatestMoney = isMoneyData(w.binding.path, snap) || selectsMoney(w.binding.path, snap, w.latestFrom);
+        if (lastType != null && lastType !== '') setText(latest, statusPillText(lastType, false, snapMoney || snapLatestMoney));
       }
       wrap._setFoot(null, true);
       clearInterval(tick); setText(elapsed, kitText(''));
@@ -1805,7 +2093,7 @@
     function poll(delay) {
       if (stopped) return;
       ctx.tx.getJSON(w.binding.path, w.binding.query).then(function (d) {
-        var payeeVerified = apply(dot(d, w.statusFrom), dot(d, w.latestFrom), d, true, true);
+        var payeeVerified = apply(dot(d, w.statusFrom), dot(d, w.latestFrom), d, true, !hasBindingQuery(w.binding));
         // Timeline feed, if the response carries one. Each entry (its type, or the raw entry) is a label:
         // the closed vocabulary, plain only on a verified payee payment (astra r6 F10, F11). It is held,
         // so a later unverified read requalifies it (astra r7 F10).
@@ -1813,15 +2101,16 @@
         if (Array.isArray(tl)) {
           var lines = [];
           for (var i = 0; i < tl.length; i++) lines.push({ ts: dataAt(tl, i).timestamp ? joinText(fmtTs(dataAt(tl, i).timestamp), kitText(' \u00b7 ')) : kitText(''), label: dataAt(tl, i).type || JSON.stringify(dataAt(tl, i)) });
-          held.feed = { lines: lines, money: isMoneyData(w.binding.path, d) };
+          held.feed = { lines: lines, money: isMoneyData(w.binding.path, d) || selectsMoney(w.binding.path, d, w.statusFrom) };
         }
         paintFeed(payeeVerified);
         wrap._setFoot(ctx.tx.lastTrace, false);
         setTimeout(function () { poll(w.binding.pollMs || POLL_DEFAULT_MS); }, w.binding.pollMs || POLL_DEFAULT_MS);
       }, function () {
         var next = Math.min((delay || POLL_DEFAULT_MS) * 2, 120000); // backoff
-        // A failed read never keeps an earlier state, least of all a final one (astra r2 on #313, F3).
-        setText(pill, kitText('unknown · read failed')); pill.className = 'pcc-pill st-unknown';
+        // A failed read never keeps an earlier state, least of all a final one (astra r2 on #313, F3), nor
+        // its reference (R12 r2 A).
+        setPill(el('span', 'pcc-pill st-unknown', kitText('unknown · read failed')), null);
         paintLatest(false); paintFeed(false); // nothing earlier stays vouched for (astra r7 F10)
         wrap._setFoot(ctx.tx.lastTrace, true);
         setTimeout(function () { poll(next); }, next);
@@ -1834,7 +2123,7 @@
               dot(ev, w.latestFrom) != null ? dot(ev, w.latestFrom) : (ev.message || ev.type), ev, false, false);
         // The feed line (astra r5 F8, r6 F12). Every label (the event's type, its status or the raw
         // event) takes the closed vocabulary on every surface. A stream event is never a verified read.
-        var feedMoney = isMoneyData(w.binding && w.binding.path, ev);
+        var feedMoney = isMoneyData(w.binding && w.binding.path, ev) || selectsMoney(w.binding && w.binding.path, ev, w.statusFrom);
         var label = ev.type || ev.status || JSON.stringify(ev);
         feedLine(joinText(ev.timestamp ? joinText(fmtTs(ev.timestamp), kitText(' \u00b7 ')) : kitText(''), statusPillText(label, false, feedMoney)));
         wrap._setFoot(ctx.tx.lastTrace, false);
@@ -1861,7 +2150,10 @@
       wrap._body.appendChild(realRequestNode(desc));
       var mismatch = recordAmountMismatch(r.data, desc);
       if (mismatch) wrap._body.appendChild(el('p', 'pcc-action-status st-failed pcc-mismatch', mismatch));
-      wrap._body.appendChild(recordNode(r, desc));
+      var bpath = w.binding && w.binding.path;
+      var top = r.raw !== undefined ? r.raw : ctx.snapshot && typeof bpath === 'string' ? dataAt(ctx.snapshot, bpath) : undefined;
+      var recMoney = selectsMoney(bpath, top, w.binding && w.binding.select);
+      wrap._body.appendChild(recordNode(r, desc, bpath, recMoney));
       var foot = el('div', 'pcc-win-foot pcc-actionbar');
       var status = el('span', 'pcc-action-status');
       var approve = el('button', 'pcc-btn pcc-btn-primary', kitText('Approve')); // kit text, never w.approve.label
@@ -1925,14 +2217,14 @@
   // What the BOUND RECORD says about an approval: attributed context, never the request. Its amount
   // line is dropped whenever the request carries an amount (the request's amount is what is sent),
   // and a failed or empty read says so instead of showing nothing (review charlie F1, N5).
-  function recordNode(r, desc) {
+  function recordNode(r, desc, bpath, recMoney) {
     var box = el('div', 'pcc-approval-record');
     box.appendChild(el('div', 'pcc-untrusted-k', kitText('The bound record says (context, not what will be sent):')));
     if (r.error || !r.data || typeof r.data !== 'object') {
       box.appendChild(el('p', 'pcc-muted', joinText(kitText('Details unavailable'), r.error ? joinText(kitText(': '), reportedText(r.error, false, false)) : kitText('.'))));
       return box;
     }
-    box.appendChild(approvalDetails(r.data, { noCost: !!(desc.amounts && desc.amounts.length) }));
+    box.appendChild(approvalDetails(r.data, { noCost: !!(desc.amounts && desc.amounts.length) }, bpath, recMoney));
     return box;
   }
   // A kit warning when the bound record states an amount that no amount in the request matches.
@@ -1949,18 +2241,19 @@
     }
     return joinText(kitText('The bound record says '), amountText(ra), kitText(', but the request sends '), joinWithText(kitText(' / '), sent), kitText('. Approve sends the request, not the record.'));
   }
-  function approvalDetails(info, opts) {
+  function approvalDetails(info, opts, bpath, recMoney) {
     var box = el('div', 'pcc-approval');
     // what
     var summary = info.summary || info.name || info.description;
     if (summary) { var what = untrustedLabel(summary); what.classList.add('pcc-approval-what'); box.appendChild(what); }
-    // who + cost
+    // who + cost. R12 r2b (b): each value the bound record states is attributed on its own line ("bound record
+    // reports <role>: <value>", as a receipt's parties are since r2 B), not only by the box heading.
     var line = el('div', 'pcc-approval-line');
     var payee = info.payee || (info.provider && (info.provider.id || info.provider.name)) || info.operatorAddress;
-    if (payee) line.appendChild(el('span', 'pcc-mono', joinText(kitText('to '), hexText(payee))));
+    if (payee) line.appendChild(el('span', 'pcc-mono', joinText(kitText('bound record reports payee: '), partyText(payee, !!(!info.payee && info.provider && !info.provider.id && info.provider.name)))));
     var amount = info.amount || info.totalAmount || (info.price && (info.price.base || info.price.amount));
     var currency = info.currency || (info.price && info.price.currency) || '';
-    if (amount != null && !(opts && opts.noCost)) line.appendChild(el('span', 'pcc-approval-cost pcc-tnum', joinText(amountText(amount), currency ? joinText(kitText(' '), currencyText(currency)) : kitText(''))));
+    if (amount != null && !(opts && opts.noCost)) line.appendChild(el('span', 'pcc-approval-cost pcc-tnum', joinText(kitText('bound record reports amount: '), amountText(amount), currency ? joinText(kitText(' '), currencyText(currency)) : kitText(''))));
     if (line.childNodes.length) box.appendChild(line);
     if (info.rationale) { var rationale = untrustedLabel(info.rationale); rationale.classList.add('pcc-approval-rationale'); box.appendChild(rationale); }
     // args table (ui.summaryKeys when present)
@@ -1973,7 +2266,8 @@
         if (v == null) continue;
         var kv = el('div', 'pcc-args-row');
         kv.appendChild(el('span', 'pcc-args-k', reportedText(JSON.stringify(dataAt(keys, i)), false, false)));
-        kv.appendChild(el('span', 'pcc-args-v pcc-mono', reportedText(typeof v === 'object' ? JSON.stringify(v) : String(v), false, false)));
+        var argMoney = recMoney || selectsMoney(bpath, info, (info.args ? 'args' : 'params') + '.' + dataAt(keys, i));
+        kv.appendChild(el('span', 'pcc-args-v pcc-mono', reportedText(typeof v === 'object' ? JSON.stringify(v) : String(v), false, argMoney)));
         tbl.appendChild(kv);
       }
       if (tbl.childNodes.length) box.appendChild(tbl);
@@ -1981,7 +2275,9 @@
     return box;
   }
 
-  // receipt — amount large + payer→payee + rail + event timeline + tx ids.
+  // receipt — amount large + payer→payee + rail + event timeline + tx ids. Only a live, pinned, readable
+  // V-next read shows facts (and the payer→payee layout); every other server value on it is a claim that
+  // names who reports it (R12 rule 4), and a record that is not a settlement record reads as a neutral record.
   function renderReceipt(ctx, w) {
     var wrap = winShell(kitText('Receipt'), null, null);
     wrap._body.appendChild(loadingLine());
@@ -1991,44 +2287,106 @@
       if (r.error || !e) { wrap._body.appendChild(errorLine(r.error || kitText('No settlement data.'))); wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale); return; }
       // Nothing is invented: an amount, currency, payer, payee or rail the record does not carry is
       // shown as not reported, never defaulted ("USDC", "payer", "escrow-milestone").
-      var econ = (e.economics && typeof e.economics === 'object') ? e.economics : {};
-      var amount = e.totalAmount != null ? e.totalAmount : e.amount;
-      var amtRow = el('div', 'pcc-receipt-amount pcc-tnum');
-      var econText = (amount == null || amount === '') && econ.amount != null ? baseUnitsText(econ.amount, econ.tokenDecimals) : null;
-      if (amount != null && amount !== '') {
-        amtRow.appendChild(el('span', 'pcc-receipt-num', fmtUsd(amount)));
-        if (fmtUsdRaw(amount) !== 'amount not reported' || (e.currency !== 'USDC' && e.currency !== 'ETH' && e.currency !== 'DAI')) {
-          amtRow.appendChild(el('span', 'pcc-receipt-cur', joinText(kitText(' '), currencyText(e.currency))));
-        }
-      } else if (econText !== null) {
-        // economics.amount is in the token's BASE units: never through fmtUsd, never with an invented currency.
-        amtRow.appendChild(el('span', 'pcc-receipt-num', econText));
-      } else {
-        amtRow.appendChild(el('span', 'pcc-receipt-num pcc-muted', kitText('amount not reported')));
-      }
-      wrap._body.appendChild(amtRow);
-      var payer = e.payer || e.funder, payee = e.payee || e.provider;
-      var pay = el('div', 'pcc-receipt-parties');
-      pay.appendChild(el('span', 'pcc-mono', payer ? hexText(payer) : kitText('payer not reported')));
-      pay.appendChild(el('span', 'pcc-arrow', kitText('→')));
-      pay.appendChild(el('span', 'pcc-mono', payee ? hexText(payee) : kitText('payee not reported')));
-      wrap._body.appendChild(pay);
-      // Settlement state by SOURCE SCHEMA (V-next /lifecycle or /receipt, a legacy escrow record,
-      // or "not a settlement record"), never by a bare status word. Never inferred from a count or
-      // from the receipt's existence (contract rule 12).
       // Authority needs the UNPROJECTED top-level response of the exact route: a binding.select projection
       // (or any nested object) never inherits the route's provenance (astra r7 F13).
+      var bpath = w.binding && w.binding.path;
       var recTopLevel = r.raw !== undefined && e === r.raw;
-      var rec = settlementReadClass(e, w.binding && w.binding.path, !r.stale && ctx.mode !== 'snapshot' && recTopLevel);
+      var liveRead = !r.stale && ctx.mode !== 'snapshot' && recTopLevel && !hasBindingQuery(w.binding);
+      var vnext = isVNextRecord(e);
+      var legacyBody = recTopLevel || (ctx.mode === 'snapshot' && e === dataAt(ctx.snapshot, bpath));
+      var legacy = !vnext && legacyBody && isLegacyEscrowRecord(e) && typeof bpath === 'string' && LEGACY_ESCROW_RECORD_ROUTE.test(bpath);
+      var readPath = vnext || legacy ? bpath : null;
+      // R12: a money FACT (the amount, the payee, a state) comes only from a live, pinned, finalized read of
+      // this unit's own settlement route; anything else money-shaped is attributed.
+      var pin = vnext && liveRead ? chainPin(e, bpath) : null;
+      // Settlement state by SOURCE SCHEMA (V-next /lifecycle or /receipt, a legacy escrow record, or "not a
+      // settlement record"), never by a bare status word. Never inferred from a count or from the receipt's
+      // existence (contract rule 12). R12 r2 D: a V-next state, final or not, shows only with THIS read's pin,
+      // and only a readable record's facts are facts: statePin is the pin of a pinned read whose fields agree.
+      var rec = settlementReadClass(e, readPath, liveRead);
+      var statePin = vnext && pin !== null && rec[0] !== 'st-unknown' ? pin : null;
+      if (legacy) wrap._body.appendChild(el('p', 'pcc-muted pcc-receipt-source', kitText('Reported by the PCC escrow service - not a chain read.')));
+      // R12 r2 B: a record that is not a settlement record (a job, an A2A task, any other shape) is presented
+      // as a neutral record: retitled, and its source stated first.
+      if (!vnext && !legacy) {
+        var title = wrap.querySelector('.pcc-win-title');
+        if (title) setText(title, kitText('Record'));
+        wrap._body.appendChild(el('p', 'pcc-muted pcc-receipt-source', kitText('Reported by the bound record - not a settlement record.')));
+      }
+      // Who reports every value below that is not a pinned money fact (R12 rule 4, r2 B).
+      var reporter = legacy ? kitText('PCC escrow service') : kitText('bound record');
+      var claimText = function (role, valueText) { return joinText(reporter, kitText(' reports '), role, kitText(': '), valueText); };
+      var econ = (e.economics && typeof e.economics === 'object') ? e.economics : {};
+      var refunded = statePin !== null && rec[0] === 'st-refunded';
+      var omitParties = statePin !== null && (rec[0] === 'st-refunded' || rec[2] === 'REFUND_ALLOCATED' || rec[2] === 'allocated');
+      var amtRow = el('div', 'pcc-receipt-amount pcc-tnum');
+      if (refunded) amtRow.appendChild(el('span', 'pcc-receipt-cur', kitText('refunded amount: ')));
+      if (vnext) {
+        // economics.amount is in the token's BASE units: never through fmtUsd, never with an invented currency.
+        if (econ.amount == null) amtRow.appendChild(el('span', 'pcc-receipt-num pcc-muted', kitText('amount not reported')));
+        else if (statePin) amtRow.appendChild(moneyFactEl('span', 'pcc-receipt-num', chainFactText(baseUnitsText(econ.amount, econ.tokenDecimals), statePin)));
+        else amtRow.appendChild(el('span', 'pcc-receipt-num pcc-muted', pin ? kitText('amount not shown - the settlement record is not readable') : kitText('amount pending - not confirmed at a finalized block')));
+      } else {
+        var amount = e.totalAmount != null ? e.totalAmount : e.amount;
+        if (amount != null && amount !== '') {
+          amtRow.appendChild(el('span', 'pcc-receipt-num', joinText(kitText('reported amount: '), fmtUsd(amount))));
+          if (fmtUsdRaw(amount) !== 'amount not reported' || !knownCurrency(e.currency)) {
+            amtRow.appendChild(el('span', 'pcc-receipt-cur', joinText(knownCurrency(e.currency) ? joinText(kitText(' '), currencyText(e.currency)) : kitText(' (currency not reported)'),
+              legacy ? kitText(' (PCC escrow service)') : kitText(' (the bound record)'))));
+          }
+        } else {
+          amtRow.appendChild(el('span', 'pcc-receipt-num pcc-muted', kitText('amount not reported')));
+        }
+      }
+      wrap._body.appendChild(amtRow);
+      // R12 r2 B: a party is a bare chain fact ONLY on a live, pinned, readable V-next read, where the payer->payee
+      // layout uses economics.recipient. A refund or unknown allocation direction paints no party line.
+      // The settlement read carries no payer, so a payer in its body is a claim even there. Every other
+      // receipt lists its parties as claims naming their source, never laid out as a payer->payee payment.
+      var payer = e.payer || e.funder;
+      if (statePin && !omitParties) {
+        var pay = el('div', 'pcc-receipt-parties');
+        pay.appendChild(payer ? el('span', 'pcc-mono pcc-receipt-claim', claimText(kitText('payer'), partyText(payer))) : el('span', 'pcc-mono', kitText('payer not reported')));
+        pay.appendChild(el('span', 'pcc-arrow', kitText('→')));
+        if (econ.recipient == null) pay.appendChild(el('span', 'pcc-mono pcc-muted', kitText('payee not reported')));
+        else if (typeof econ.recipient === 'string' && PLAIN_HEX_RE.test(econ.recipient)) pay.appendChild(moneyFactEl('span', 'pcc-mono', chainFactText(hexText(econ.recipient), statePin)));
+        else pay.appendChild(el('span', 'pcc-mono pcc-muted', hexText(econ.recipient)));
+        wrap._body.appendChild(pay);
+      } else if (!statePin) {
+        var claims = el('div', 'pcc-receipt-claims');
+        // A settlement record (V-next or legacy) says when a party is missing; a neutral record lists only what it has.
+        if (payer) claims.appendChild(el('div', 'pcc-mono pcc-receipt-claim', claimText(kitText('payer'), partyText(payer))));
+        else if (vnext || legacy) claims.appendChild(el('div', 'pcc-mono pcc-muted', kitText('payer not reported')));
+        if (vnext) {
+          // An unpinned (or unreadable) V-next payee is withheld, like its amount.
+          claims.appendChild(el('div', 'pcc-mono pcc-muted', econ.recipient == null ? kitText('payee not reported') : pin ? kitText('payee not shown') : kitText('payee pending')));
+        } else {
+          var payee = e.payee || e.provider;
+          if (payee) claims.appendChild(el('div', 'pcc-mono pcc-receipt-claim', claimText(kitText('payee'), partyText(payee))));
+          else if (legacy) claims.appendChild(el('div', 'pcc-mono pcc-muted', kitText('payee not reported')));
+        }
+        if (claims.childNodes.length) wrap._body.appendChild(claims);
+      }
       var railRow = el('div', 'pcc-receipt-rail');
-      // The pill text may not claim more than the class (F6): only a verified final keeps its plain name;
-      // "no settlement state" is PCC's own text.
-      var recVerified = isVNextRecord(e) && (rec[0] === 'st-settled' || rec[0] === 'st-refunded');
-      var payeePaid = isVNextRecord(e) && rec[0] === 'st-settled'; // secondary text: payee payment only
-      railRow.appendChild(el('span', 'pcc-pill ' + rec[0], statusPillText(rec[2], recVerified || (!isVNextRecord(e) && e.status == null), true)));
-      if (rec[1]) railRow.appendChild(el('span', 'pcc-muted pcc-settle-label', joinText(kitText(' '), settlementCaptionText(e, w.binding && w.binding.path, !r.stale && ctx.mode !== 'snapshot' && recTopLevel))));
-      if (e.rail) railRow.appendChild(el('span', 'pcc-muted', joinText(kitText(' · '), idText(e.rail))));
+      // With statePin the pill and its caption are money facts. Without it the pill is the classifier's
+      // refusal (pending, not shown, fields disagree) and names no state. A legacy word is attributed to the
+      // escrow service; anything else is neutral. The pill text may not claim more than the class (F6); "no
+      // settlement state" is PCC's own text.
+      var payeePaid = statePin !== null && rec[0] === 'st-settled'; // secondary text: payee payment only
+      if (statePin) railRow.appendChild(moneyFactEl('span', 'pcc-pill ' + rec[0], chainFactText(statusPillText(rec[2], true, true), statePin)));
+      else if (vnext) railRow.appendChild(el('span', 'pcc-pill ' + rec[0], settlementCaptionText(e, readPath, liveRead)));
+      else if (legacy) railRow.appendChild(el('span', 'pcc-pill ' + rec[0], joinText(kitText('PCC escrow service reports: '), reportedText(e.status, false, false, 'id'))));
+      else railRow.appendChild(el('span', 'pcc-pill ' + rec[0], statusPillText(rec[2], e.status == null, true)));
+      if (pin) { var badge = assetBadgeText(e.assetReality); if (badge) railRow.appendChild(el('span', 'pcc-pill st-unknown pcc-asset-badge', badge)); }
+      if (statePin) railRow.appendChild(moneyFactEl('span', 'pcc-muted pcc-settle-label', chainFactText(joinText(kitText(' '), settlementCaptionText(e, readPath, liveRead)), statePin)));
+      else if (!vnext && rec[1]) railRow.appendChild(el('span', 'pcc-muted pcc-settle-label', joinText(kitText(' '), settlementCaptionText(e, readPath, liveRead))));
+      if (e.rail) railRow.appendChild(el('span', 'pcc-muted', joinText(kitText(' · '), claimText(kitText('rail'), reportedText(e.rail, false, false, 'id'))))); // never in a settlement read
       wrap._body.appendChild(railRow);
+      if (pin) {
+        appendPinReference(wrap._body, pin);
+        var logs = logFieldsNode(e);
+        if (logs) wrap._body.appendChild(logs);
+      }
       // timeline of pcc.* / escrow events
       var events = e.events || e.timeline || (e.milestones);
       if (Array.isArray(events) && events.length) {
@@ -2047,8 +2405,9 @@
         }
         wrap._body.appendChild(tl);
       }
+      // Never in a settlement read either: a transaction hash or an address on a receipt is its source's claim.
       var tx = e.txHash || e.tx || e.escrowAddress || e.address;
-      if (tx) wrap._body.appendChild(el('div', 'pcc-mono pcc-receipt-tx', hexText(tx)));
+      if (tx) wrap._body.appendChild(el('div', 'pcc-mono pcc-receipt-tx pcc-receipt-claim', claimText(kitText(e.txHash || e.tx ? 'transaction' : e.escrowAddress ? 'escrow address' : 'address'), hexText(tx))));
       wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale);
     });
     return wrap;
@@ -2063,7 +2422,7 @@
     var cr = w.composeRef || {};
     var head = el('div', 'pcc-chain-head');
     head.appendChild(cr.outcomeType ? agentEl('span', 'pcc-chain-outcome', agentText(cr.outcomeType, false)) : el('span', 'pcc-chain-outcome', kitText('outcome')));
-    if (cr.budgetUSD != null) head.appendChild(el('span', 'pcc-chain-budget pcc-tnum', joinText(kitText('budget '), fmtUsdWithUnit(cr.budgetUSD, 'USDC'))));
+    if (cr.budgetUSD != null) head.appendChild(el('span', 'pcc-chain-budget pcc-tnum', joinText(kitText('requested budget: '), fmtUsdWithUnit(cr.budgetUSD, 'USDC'), kitText(' (this plan)'))));
     wrap._body.appendChild(head);
     var seq = (cr.outcomeChain && cr.outcomeChain.length) ? cr.outcomeChain : (cr.steps || [cr.outcomeType]);
     var stepsRow = el('div', 'pcc-chain-steps');
@@ -2091,11 +2450,11 @@
         var s = dataAt(steps, i);
         var li = el('li', 'pcc-plan-row');
         li.appendChild(el('span', 'pcc-plan-type', s.capabilityType || s.outcomeType ? idText(s.capabilityType || s.outcomeType) : joinText(kitText('step '), numberText(i + 1))));
-        if (s.estimatedPriceUSD != null) li.appendChild(el('span', 'pcc-mono pcc-tnum', fmtUsdWithUnit(s.estimatedPriceUSD, 'USDC')));
+        if (s.estimatedPriceUSD != null) li.appendChild(el('span', 'pcc-mono pcc-tnum', joinText(kitText('estimated price: '), fmtUsdWithUnit(s.estimatedPriceUSD, 'USDC'), kitText(" (planner's estimate)"))));
         box.appendChild(li);
       }
       result.appendChild(box);
-      if (body.totalPriceUSD != null) result.appendChild(el('div', 'pcc-plan-total pcc-tnum', joinText(kitText('total '), fmtUsdWithUnit(body.totalPriceUSD, 'USDC'))));
+      if (body.totalPriceUSD != null) result.appendChild(el('div', 'pcc-plan-total pcc-tnum', joinText(kitText('estimated total: '), fmtUsdWithUnit(body.totalPriceUSD, 'USDC'), kitText(" (planner's estimate)"))));
       if (w.execute) {
         var execBtn = writeButton(ctx, w.execute, requestDescriptor(w.execute, w.execute.body || {}, ctx.mode === 'host', ctx.apiBase), 'Execute');
         execBtn.onclick = function () { dispatchAction(ctx, w.execute, { status: status }); };
@@ -2401,7 +2760,7 @@
     for (var i = 0; i < amts.length; i++) {
       shown.add(dataAt(amts, i)[0]);
       var amountLine = el('div', 'pcc-realreq-amt pcc-tnum');
-      amountLine.appendChild(amts.length > 1 ? el('span', null, reportedText(JSON.stringify(dataAt(amts, i)[0]), false, false)) : el('span', null, kitText('Amount')));
+      amountLine.appendChild(amts.length > 1 ? el('span', null, joinText(reportedText(JSON.stringify(dataAt(amts, i)[0]), false, false), kitText(' in this request:'))) : el('span', null, kitText('This request would pay')));
       amountLine.appendChild(el('span', null, joinText(kitText(' '), amountText(dataAt(amts, i)[1]), asset)));
       box.appendChild(amountLine);
     }
@@ -2836,6 +3195,17 @@
       '.pcc-receipt-num{font:650 22px/28px var(--font);color:var(--ink);}',
       '.pcc-receipt-cur{font:450 14px/20px var(--font);color:var(--ink-2);}',
       '.pcc-receipt-parties{display:flex;gap:8px;align-items:center;}',
+      '.pcc-receipt-claims{display:flex;flex-direction:column;gap:2px;margin:2px 0;}',
+      '.pcc-receipt-claim{color:var(--ink-2);overflow-wrap:anywhere;}',
+      '.pcc-receipt-source{font:450 12px/17px var(--font);margin:0 0 4px;}',
+      '.pcc-pin-ref{font:450 12px/17px var(--mono);margin-top:6px;overflow-wrap:anywhere;}',
+      '.pcc-run-pin:empty{display:none;}',
+      '.pcc-run-pin .pcc-pin-ref{margin-top:0;}',
+      '.pcc-pin-details{margin-top:4px;font:450 12px/17px var(--font);}',
+      '.pcc-pin-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}',
+      '.pcc-pin-row .pcc-mono{overflow-wrap:anywhere;}',
+      '.pcc-asset-badge{margin-left:6px;}',
+      '.pcc-receipt-logs{margin-top:4px;font:450 12px/17px var(--font);}',
       '.pcc-arrow{color:var(--ink-3);}',
       '.pcc-receipt-rail{display:flex;gap:2px;align-items:center;}',
       '.pcc-timeline{list-style:none;margin:6px 0 0;padding:0 0 0 12px;border-left:1px solid var(--hairline);display:flex;flex-direction:column;gap:6px;}',

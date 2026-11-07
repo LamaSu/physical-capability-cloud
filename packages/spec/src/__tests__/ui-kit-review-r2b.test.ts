@@ -79,7 +79,7 @@ describe("review N2: approval field names identify the wire terms", () => {
       const row = rows.find((row) => row.querySelector(".pcc-args-k")?.textContent === expected);
       expect(row, expected).toBeDefined();
       const value = body[key as keyof typeof body];
-      expect(row!.querySelector(".pcc-args-v")!.textContent).toBe(`reported: ${surface === "request box" ? JSON.stringify(value) : value}`);
+      expect(row!.querySelector(".pcc-args-v")!.textContent).toBe(`reported: ${surface === "request box" ? JSON.stringify(value) : value}${surface === "approval args" ? " - settlement unconfirmed" : ""}`);
     }
     expect(node.textContent).not.toContain("withheld: stated money or verification");
     expect(count()).toBe(0);
@@ -89,7 +89,7 @@ describe("review N2: approval field names identify the wire terms", () => {
     const desc = k.requestDescriptor({ kind: "post", path: "/api/escrow", confirm: "approval" }, body, false, "https://capability.network");
     const node = k.realRequestNode(desc);
     expect(Array.from(node.querySelectorAll(".pcc-realreq-amt"), (el) => el.textContent)).toEqual([
-      'reported: "amount" 25.00 USDC', 'reported: "totalAmount" 30.00 USDC',
+      'reported: "amount" in this request: 25.00 USDC', 'reported: "totalAmount" in this request: 30.00 USDC',
     ]);
     expect(Array.from(node.querySelectorAll(".pcc-realreq-ref"), (el) => el.textContent)).toEqual([
       'reported: "jobId" job-1', 'reported: "escrowId" esc-1',

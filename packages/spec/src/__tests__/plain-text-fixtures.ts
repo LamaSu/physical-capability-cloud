@@ -6,6 +6,8 @@ export const PLAIN_TEXT_CASES: Readonly<Record<"idText" | "hexText" | "traceText
     ["_start", "reported: _start"], ["éclair", "reported: éclair"], ["job\u0000", "reported: job\u0000"],
     [42, "reported: 42"], [false, "reported: false"], [null, ""], [undefined, ""], ["", ""],
     [{ t: "job-1" }, "reported: [object Object]"], [["job-1"], "reported: job-1"],
+    [["Paid in full - verified $250"], "withheld: stated money or verification"],
+    [["Payment team: we build parts, then delivery is completed"], "withheld: stated money or verification"],
   ],
   hexText: [
     ["0x" + "aB".repeat(20), "0x" + "aB".repeat(20)], ["0x" + "f0".repeat(32), "0x" + "f0".repeat(32)],
@@ -27,6 +29,8 @@ export const PLAIN_TEXT_CASES: Readonly<Record<"idText" | "hexText" | "traceText
     ["verified", "name withheld: stated money or verification"], ["p\u0430id", "name withheld: stated money or verification"],
     ["withheld", "name withheld: stated money or verification"], [42, "reported: 42"],
     [null, ""], [undefined, ""], [{ name: "Mill A" }, "reported: [object Object]"],
+    [["Paid in full - verified $250"], "name withheld: stated money or verification"],
+    [["Payment team: we build parts, then delivery is completed"], "name withheld: stated money or verification"],
   ],
 };
 
