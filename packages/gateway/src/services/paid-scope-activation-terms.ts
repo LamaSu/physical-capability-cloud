@@ -27,10 +27,19 @@
  * PCC_VNEXT_RECORD_NETWORK=base-sepolia, PCC_VNEXT_ALLOW_TESTNET_RECORD=1 and no installed test
  * source resolves the chain but is refused activation_ttl_unavailable.
  *
+ * The whole validated record is exported too, for S1.1 and S1.2: configuredVNextDeploymentRecord
+ * (the configured directory) and vnextDeploymentRecord (a given one). It carries chainId; factory,
+ * implementation and usdc in lower case; the schedule tuple (scheduleId, scheduleTestnetOnly and
+ * its six windows, which must equal the schema's tuple for that id key for key, or the record is
+ * refused R-d); and recordSha256, the lowercase hex sha256 of the exact bytes read and parsed.
+ * Each call reads the file once and nothing is cached, so the chain and testnetOnly that
+ * paidScopeActivationTerms returns always come from one record (#10008 INFO-3, INFO-4).
+ *
  * A test process may install its own source (__setPaidScopeActivationTermsForTest); one installed is
  * never consulted outside a test process. The one logging exception is a fixed-code warning for a
  * refused V-next record (R-a through R-d); nothing it returns carries a request value.
  */
+import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -77,11 +86,11 @@ function realDirectory(path: string): boolean {
 }
 
 /**
- * The text of the regular file at `path`, never through a symlink, or null. Anything but a regular
+ * The bytes of the regular file at `path`, never through a symlink, or null. Anything but a regular
  * file is refused before it is opened: opening a FIFO to read blocks until a writer comes, and the
  * read is synchronous, so it would stall the gateway (r3 review NIT-1).
  */
-function readRegularFile(path: string): string | null {
+function readRegularFile(path: string): Buffer | null {
   try {
     const st = lstatSync(path);
     if (st.isSymbolicLink() || !st.isFile()) return null;
@@ -89,7 +98,7 @@ function readRegularFile(path: string): string | null {
     const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     try {
       if (!fstatSync(fd).isFile()) return null;
-      return readFileSync(fd, "utf8");
+      return readFileSync(fd);
     } finally {
       closeSync(fd);
     }
@@ -98,10 +107,62 @@ function readRegularFile(path: string): string | null {
   }
 }
 
-/** The fields this gateway reads from a schema-checked canonical deployment. */
-interface VNextRecordTerms {
-  chainId: number;
-  testnetOnly: boolean;
+/** The two schedule ids in CANONICAL.schema.json. */
+export type VNextScheduleId = "vnext-testnet-short-v1" | "vnext-mainnet-v1";
+
+/** One schedule tuple: a CANONICAL.schema.json oneOf branch, key for key (README.md:37). */
+export interface VNextScheduleTuple {
+  readonly scheduleId: VNextScheduleId;
+  readonly scheduleTestnetOnly: boolean;
+  readonly challengeWindowSec: number;
+  readonly appealWindowSec: number;
+  readonly backupWindowSec: number;
+  readonly emergencyReviewWindowSec: number;
+  readonly minReclaimDelaySec: number;
+  readonly maxReclaimDelaySec: number;
+}
+
+/**
+ * Addresses are lower case, the form funding_prepares stores (packages/db/src/schema/buyer-funding.ts:98-100).
+ * recordSha256 is 64 lowercase hex digits with no 0x (buyer-funding.ts:96), over the exact bytes read and parsed.
+ * The eight tuple keys equal the record's values, which equal its id's tuple.
+ */
+export interface VNextDeploymentRecord extends VNextScheduleTuple {
+  readonly chainId: number;
+  readonly factory: `0x${string}`;
+  readonly implementation: `0x${string}`;
+  readonly usdc: `0x${string}`;
+  readonly recordSha256: string;
+}
+
+/** GUARDS' agreement cell pins these tuples to the committed CANONICAL.schema.json. */
+export const VNEXT_SCHEDULE_TUPLES: readonly VNextScheduleTuple[] = Object.freeze([
+  Object.freeze({
+    scheduleId: "vnext-testnet-short-v1",
+    scheduleTestnetOnly: true,
+    challengeWindowSec: 600,
+    appealWindowSec: 1500,
+    backupWindowSec: 600,
+    emergencyReviewWindowSec: 1500,
+    minReclaimDelaySec: 4500,
+    maxReclaimDelaySec: 31536000,
+  }),
+  Object.freeze({
+    scheduleId: "vnext-mainnet-v1",
+    scheduleTestnetOnly: false,
+    challengeWindowSec: 172800,
+    appealWindowSec: 432000,
+    backupWindowSec: 172800,
+    emergencyReviewWindowSec: 432000,
+    minReclaimDelaySec: 864000,
+    maxReclaimDelaySec: 31536000,
+  }),
+]);
+
+function scheduleTupleOf(r: Record<string, unknown>): VNextScheduleTuple | null {
+  const entry = VNEXT_SCHEDULE_TUPLES.find((tuple) => tuple.scheduleId === r.scheduleId);
+  return entry && (Object.keys(entry) as Array<keyof VNextScheduleTuple>).every((key) => r[key] === entry[key])
+    ? entry : null;
 }
 
 type RecordRule = "R-a" | "R-b" | "R-c" | "R-d";
@@ -117,33 +178,33 @@ const RECORD_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 /**
  * CANONICAL.schema.json's required, const, enum, pattern and numeric bounds for the fields read
  * here. The structural agreement test pins these hand-written checks to the committed schema.
- * The schedule's oneOf also pairs its id with scheduleTestnetOnly; its windows are not read here.
+ * The schedule's oneOf tuple, its windows included, is checked by scheduleTupleOf (README.md:37).
  */
 function hasCanonicalReadFields(r: Record<string, unknown>): boolean {
   return r.canonical === true && r.doNotPin === false && r.mode === "CANONICAL"
     && r.label === "" && r.broadcast === true
     && [r.factory, r.implementation, r.usdc].every((v) => typeof v === "string" && RECORD_ADDRESS_RE.test(v))
     && typeof r.chainId === "number" && Number.isSafeInteger(r.chainId) && r.chainId >= 1
-    && typeof r.blockNumber === "number" && Number.isSafeInteger(r.blockNumber) && r.blockNumber >= 0
-    && r.scheduleId === (r.scheduleTestnetOnly ? "vnext-testnet-short-v1" : "vnext-mainnet-v1");
+    && typeof r.blockNumber === "number" && Number.isSafeInteger(r.blockNumber) && r.blockNumber >= 0;
 }
 
 /**
  * Read the canonical record from real directories and a regular file (never a link or FIFO),
  * retaining the existing path and explicit canonical-approval checks. R-a through R-d fail closed
  * before the chain can be used. Unavailable paths have no record to diagnose and remain silent.
+ * It returns the whole record; recordSha256 is the sha256 of the same bytes it parsed, from one read.
  */
-function vnextRecordTerms(packageRoot: string, network: string): VNextRecordTerms | null {
+export function vnextDeploymentRecord(packageRoot: string, network: string): VNextDeploymentRecord | null {
   if (!NETWORK_RE.test(network)) return null;
   const deployments = join(packageRoot, "deployments");
   const vnext = join(deployments, "vnext");
   const networkDir = join(vnext, network);
   if (![deployments, vnext, networkDir].every(realDirectory)) return null;
-  const text = readRegularFile(join(networkDir, "CANONICAL.json"));
-  if (text === null) return null;
+  const bytes = readRegularFile(join(networkDir, "CANONICAL.json"));
+  if (bytes === null) return null;
   let record: unknown;
   try {
-    record = JSON.parse(text);
+    record = JSON.parse(bytes.toString("utf8"));
   } catch {
     return recordRefused("R-d");
   }
@@ -154,14 +215,23 @@ function vnextRecordTerms(packageRoot: string, network: string): VNextRecordTerm
     || (r.scheduleTestnetOnly && r.chainId !== 84532 && r.chainId !== 31337)) return recordRefused("R-b");
   if (r.scheduleTestnetOnly && process.env.PCC_VNEXT_ALLOW_TESTNET_RECORD !== "1") return recordRefused("R-c");
   if (!hasCanonicalReadFields(r)) return recordRefused("R-d");
+  const schedule = scheduleTupleOf(r);
+  if (schedule === null) return recordRefused("R-d");
   const chainId = r.chainId as number;
   if (vnextNetworkSlug(chainId) !== network) return recordRefused("R-d");
-  return { chainId, testnetOnly: r.scheduleTestnetOnly };
+  return {
+    chainId,
+    factory: (r.factory as string).toLowerCase() as `0x${string}`,
+    implementation: (r.implementation as string).toLowerCase() as `0x${string}`,
+    usdc: (r.usdc as string).toLowerCase() as `0x${string}`,
+    ...schedule,
+    recordSha256: createHash("sha256").update(bytes).digest("hex"),
+  };
 }
 
 /** The chain of the one approved canonical record, or null on an unavailable or refused record. */
 export function vnextRecordChainId(packageRoot: string, network: string): number | null {
-  return vnextRecordTerms(packageRoot, network)?.chainId ?? null;
+  return vnextDeploymentRecord(packageRoot, network)?.chainId ?? null;
 }
 
 /** The @pcc/contracts package root (where deployments/ lives), found as Node resolves the package, or null. */
@@ -181,14 +251,15 @@ export function contractsPackageRoot(): string | null {
  * its own, so the no-default rule is checked against a record that exists.
  */
 export function configuredVNextChainId(packageRoot?: string | null): number | null {
-  return configuredVNextRecord(packageRoot)?.chainId ?? null;
+  return configuredVNextDeploymentRecord(packageRoot)?.chainId ?? null;
 }
 
-function configuredVNextRecord(packageRoot?: string | null): VNextRecordTerms | null {
+/** The validated record in the explicitly configured PCC_VNEXT_RECORD_NETWORK directory, or null, by configuredVNextChainId's rules: one read per call, and nothing cached. */
+export function configuredVNextDeploymentRecord(packageRoot?: string | null): VNextDeploymentRecord | null {
   const network = process.env.PCC_VNEXT_RECORD_NETWORK;
   if (typeof network !== "string" || process.env.PCC_VNEXT_RECORD_LABEL !== undefined) return null;
   const root = packageRoot === undefined ? contractsPackageRoot() : packageRoot;
-  return root === null ? null : vnextRecordTerms(root, network);
+  return root === null ? null : vnextDeploymentRecord(root, network);
 }
 
 /**
@@ -204,11 +275,11 @@ let testSource: PaidScopeActivationTermsSource | null = null;
 /** reconcilePaidScope's inputs for `scope`: a test process's installed source, else the configured ones. */
 export function paidScopeActivationTerms(scope: ActivationScope): PaidScopeActivationTerms {
   if (isTestProcess() && testSource) return testSource(scope);
-  const record = configuredVNextRecord();
+  const record = configuredVNextDeploymentRecord();
   return {
     expectedChainId: record?.chainId ?? null,
     postActivationTtlMs: preparedActivationTtlMs(scope),
-    testnetOnly: record?.testnetOnly ?? false,
+    testnetOnly: record?.scheduleTestnetOnly ?? false,
   };
 }
 
