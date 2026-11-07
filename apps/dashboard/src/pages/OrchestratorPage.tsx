@@ -6,6 +6,8 @@ import type { TransferGraph, TransferNode, Sample, InstrumentWorkflow, ResourceC
 import { useUIStore } from "../stores/ui-store.js";
 import { useOrchestratorStore } from "../stores/orchestrator-store.js";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { isNotAvailable, readGatewayJson } from "../lib/not-available.js";
+import { NotAvailablePanel } from "../components/NotAvailablePanel.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -61,22 +63,22 @@ export function OrchestratorPage() {
   // Fetch all data
   const { data: graphData } = useQuery({
     queryKey: ["orchestrator-graphs"],
-    queryFn: () => authorizedFetch("/api/orchestrator/graphs").then((r) => r.json()),
+    queryFn: () => authorizedFetch("/api/orchestrator/graphs").then(readGatewayJson),
   });
 
   const { data: sampleData } = useQuery({
     queryKey: ["orchestrator-samples"],
-    queryFn: () => authorizedFetch("/api/orchestrator/samples").then((r) => r.json()),
+    queryFn: () => authorizedFetch("/api/orchestrator/samples").then(readGatewayJson),
   });
 
   const { data: workflowData } = useQuery({
     queryKey: ["orchestrator-workflows"],
-    queryFn: () => authorizedFetch("/api/orchestrator/workflows").then((r) => r.json()),
+    queryFn: () => authorizedFetch("/api/orchestrator/workflows").then(readGatewayJson),
   });
 
   const { data: claimData } = useQuery({
     queryKey: ["orchestrator-claims"],
-    queryFn: () => authorizedFetch("/api/orchestrator/claims").then((r) => r.json()),
+    queryFn: () => authorizedFetch("/api/orchestrator/claims").then(readGatewayJson),
   });
 
   React.useEffect(() => {
@@ -109,6 +111,10 @@ export function OrchestratorPage() {
     () => graphs.flatMap((g) => g.nodes),
     [graphs],
   );
+
+  const notAvailable = [graphData, sampleData, workflowData, claimData].find(isNotAvailable);
+
+  if (notAvailable) return <NotAvailablePanel reply={notAvailable} />;
 
   return (
     <div className="space-y-6">

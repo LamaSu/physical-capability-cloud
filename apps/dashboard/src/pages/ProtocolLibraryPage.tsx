@@ -6,6 +6,8 @@ import type { ProtocolTemplate, ProtocolRun, AutomationStatus, AutomationLevel }
 import { useUIStore } from "../stores/ui-store.js";
 import { useProtocolLibraryStore } from "../stores/protocol-library-store.js";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { isNotAvailable, readGatewayJson } from "../lib/not-available.js";
+import { NotAvailablePanel } from "../components/NotAvailablePanel.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -83,17 +85,17 @@ export function ProtocolLibraryPage() {
   // Fetch data
   const { data: templateData } = useQuery({
     queryKey: ["protocol-templates"],
-    queryFn: () => authorizedFetch("/api/protocols").then((r) => r.json()),
+    queryFn: () => authorizedFetch("/api/protocols").then(readGatewayJson),
   });
 
   const { data: runData } = useQuery({
     queryKey: ["protocol-runs"],
-    queryFn: () => authorizedFetch("/api/protocol-runs").then((r) => r.json()),
+    queryFn: () => authorizedFetch("/api/protocol-runs").then(readGatewayJson),
   });
 
   const { data: automationData } = useQuery({
     queryKey: ["automation-statuses"],
-    queryFn: () => authorizedFetch("/api/automation-status").then((r) => r.json()),
+    queryFn: () => authorizedFetch("/api/automation-status").then(readGatewayJson),
   });
 
   React.useEffect(() => {
@@ -135,6 +137,8 @@ export function ProtocolLibraryPage() {
     return result;
   }, [templates, searchQuery, filterTags]);
 
+  const notAvailable = [templateData, runData, automationData].find(isNotAvailable);
+
   const toggleTag = (tag: string) => {
     if (filterTags.includes(tag)) {
       setFilterTags(filterTags.filter((t) => t !== tag));
@@ -142,6 +146,8 @@ export function ProtocolLibraryPage() {
       setFilterTags([...filterTags, tag]);
     }
   };
+
+  if (notAvailable) return <NotAvailablePanel reply={notAvailable} />;
 
   return (
     <div className="space-y-6">
