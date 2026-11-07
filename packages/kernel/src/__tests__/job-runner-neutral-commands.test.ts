@@ -296,7 +296,7 @@ describe("D neutral prepare", () => {
     expect((await f.run()).success).toBe(true);
     const spans = vi.mocked(Sentry.startSpan).mock.calls.map(([options]) => options);
     expect(spans.filter((options) => options.name === "job.prepare")).toStrictEqual([
-      { name: "job.prepare", op: "job.phase", attributes: { "job.id": f.config.jobId } },
+      { name: "job.prepare", op: "job.phase", attributes: { "job.id": `id:${createHash("sha256").update(f.config.jobId).digest("hex")}` } },
     ]);
     for (const options of spans) {
       expect(JSON.stringify(options.attributes)).not.toContain(H);

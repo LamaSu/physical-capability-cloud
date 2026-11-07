@@ -6,8 +6,16 @@
  * posthog-node is not installed.
  */
 
+import { isKnownNodeEnv, logSafeId } from "../redaction.js";
+import { consumeServerEventDistinctId, prepareServerEventDistinctId, safeServerEventProperties, safeServerEventDistinctId } from "./posthog-policy.js";
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let posthog: any = null;
+
+function analyticsEnvironment(): string {
+  const value = process.env.NODE_ENV;
+  return value && isKnownNodeEnv(value) ? value : "unknown";
+}
 
 export function initPostHog(): void {
   const apiKey =
@@ -28,17 +36,17 @@ export function initPostHog(): void {
 export function trackServerEvent(
   event: string,
   properties?: Record<string, unknown>,
-  distinctId?: string,
+  distinctId?: string | ReturnType<typeof prepareServerEventDistinctId>,
 ): void {
   if (!posthog) return;
   try {
     posthog.capture({
-      distinctId: distinctId || "pcc-gateway",
-      event,
+      distinctId: consumeServerEventDistinctId(distinctId),
+      event: logSafeId(event),
       properties: {
-        ...properties,
+        ...safeServerEventProperties(properties, event),
         source: "gateway",
-        environment: process.env.NODE_ENV,
+        environment: analyticsEnvironment(),
       },
     });
   } catch {
@@ -63,12 +71,12 @@ export function identifyAgent(
   if (!posthog) return;
   try {
     posthog.identify({
-      distinctId,
+      distinctId: safeServerEventDistinctId(distinctId),
       properties: {
-        ...properties,
+        ...safeServerEventProperties(properties),
         kind: "agent_journey",
         source: "gateway",
-        environment: process.env.NODE_ENV,
+        environment: analyticsEnvironment(),
       },
     });
   } catch {

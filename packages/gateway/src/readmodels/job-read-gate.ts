@@ -46,6 +46,7 @@
  */
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { getStore } from "../db.js";
+import { knownErrorClassName, logSafeId } from "../redaction.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 import { batchOwnership } from "./batch-ownership.js";
 import {
@@ -74,7 +75,7 @@ export function gateJobRead(req: FastifyRequest, jobId: string): JobReadGate {
     store = getStore();
     found = store.repos.jobs.findById(jobId) as JobRow | undefined;
   } catch (error) {
-    req.log.error({ jobId, err: error }, "job read gate: job row read failed");
+    req.log.error({ jobId: logSafeId(jobId), err: knownErrorClassName(error) }, "job read gate: job row read failed");
     return { ok: false, kind: "unavailable" };
   }
   const tenant = tenantOpts(req as any);
@@ -89,7 +90,7 @@ export function gateJobRead(req: FastifyRequest, jobId: string): JobReadGate {
     if (job && decision?.allow) return { ok: true, job, as: decision.as };
     return { ok: false, kind: "not_found" };
   } catch (error) {
-    req.log.error({ jobId, err: error }, "job read gate: authorization read failed");
+    req.log.error({ jobId: logSafeId(jobId), err: knownErrorClassName(error) }, "job read gate: authorization read failed");
     return { ok: false, kind: "unavailable" };
   }
 }
@@ -117,7 +118,7 @@ export function gateJobRecordRead(
     if (pre.as !== "admin") reader = jobReaderOf(pre.wallet, store.repos, store.db);
     record = recordOf();
   } catch (error) {
-    req.log.error({ err: error }, "job read gate: record read failed");
+    req.log.error({ err: knownErrorClassName(error) }, "job read gate: record read failed");
     return { ok: false, kind: "unavailable" };
   }
   const jobId = typeof record?.jobId === "string" && record.jobId !== "" ? record.jobId : undefined;
@@ -169,7 +170,7 @@ export function gateKernelRead(
       kernelId = undefined;
     }
   } catch (error) {
-    req.log.error({ err: error }, "kernel read gate: record read failed");
+    req.log.error({ err: knownErrorClassName(error) }, "kernel read gate: record read failed");
     return { ok: false, kind: "unavailable" };
   }
   if (kernelId === undefined) return { ok: false, kind: "not_found" };
@@ -190,7 +191,7 @@ export function kernelScopeOf(req: FastifyRequest): KernelReadScope {
   try {
     return { ok: true, kernels: operatedKernelsOf(pre.wallet, getStore().repos) };
   } catch (error) {
-    req.log.error({ err: error }, "kernel read scope: kernel read failed");
+    req.log.error({ err: knownErrorClassName(error) }, "kernel read scope: kernel read failed");
     return { ok: false, kind: "unavailable" };
   }
 }
@@ -217,7 +218,7 @@ export function jobReadScopeOf(req: FastifyRequest): JobReadScope {
     if (pre.as === "admin") return { ok: true, as: "admin", jobIds: new Set(jobs.map((job) => job.id)) };
     return { ok: true, as: "proven", jobIds: jobsReadableBy(jobs, pre.wallet, store.repos, store.db) };
   } catch (error) {
-    req.log.error({ err: error }, "job read scope: job or authorization read failed");
+    req.log.error({ err: knownErrorClassName(error) }, "job read scope: job or authorization read failed");
     return { ok: false, kind: "unavailable" };
   }
 }

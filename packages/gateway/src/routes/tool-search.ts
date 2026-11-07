@@ -32,6 +32,7 @@
  *     logged once at boot so operators notice.
  */
 
+import { knownErrorClassName, logSafeId, logSafeInt } from "../redaction.js";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { existsSync } from "node:fs";
 import { resolve as resolvePath, dirname } from "node:path";
@@ -180,11 +181,11 @@ function buildIndex(
     tools = loadAgentPackage(path);
     index.add(tools);
     logger?.info?.(
-      `[tool-search] indexed ${tools.length} tools from ${path} (provider=${provider.name}, ranker_mode=${mode})`,
+      `[tool-search] indexed ${logSafeInt(tools.length)} tools (provider=${logSafeId(provider.name)}, ranker_mode=${logSafeId(mode)})`,
     );
   } catch (err) {
     logger?.warn?.(
-      `[tool-search] failed to load ${path}: ${err instanceof Error ? err.message : String(err)}`,
+      `[tool-search] load failed: ${knownErrorClassName(err)}`,
     );
   }
   // Build the hybrid ranker side-by-side when PCC_RANKER_MODE is shadow|hybrid.
@@ -284,8 +285,8 @@ export async function toolSearchRoutes(app: FastifyInstance) {
 
     const mode = readRankerMode();
     const st = getIndex({
-      info: (m) => app.log.info(m),
-      warn: (m) => app.log.warn(m),
+      info: (m) => app.log.info({ code: "tool_index_event", detail: logSafeId(m) }),
+      warn: (m) => app.log.warn({ code: "tool_index_warning", detail: logSafeId(m) }),
     });
 
     // Legacy ranker (always evaluated for legacy + shadow modes).
@@ -324,9 +325,7 @@ export async function toolSearchRoutes(app: FastifyInstance) {
       void appendShadowEvent(event, {
         onError: (e) =>
           app.log.warn(
-            `[tool-search] shadow log append failed: ${
-              e instanceof Error ? e.message : String(e)
-            }`,
+            `[tool-search] shadow log append failed: ${knownErrorClassName(e)}`,
           ),
       });
     }
@@ -374,8 +373,8 @@ export async function toolSearchRoutes(app: FastifyInstance) {
   // ── GET /api/tools/status ──────────────────────────────────────────────
   app.get("/api/tools/status", async (_req, reply) => {
     const st = getIndex({
-      info: (m) => app.log.info(m),
-      warn: (m) => app.log.warn(m),
+      info: (m) => app.log.info({ code: "tool_index_event", detail: logSafeId(m) }),
+      warn: (m) => app.log.warn({ code: "tool_index_warning", detail: logSafeId(m) }),
     });
     const mode = readRankerMode();
     return reply.send({
@@ -399,8 +398,8 @@ export async function toolSearchRoutes(app: FastifyInstance) {
   app.post("/api/tools/reload", async (req, reply) => {
     if (!requireToolIndexAdmin(req, reply)) return;
     const built = buildIndex({
-      info: (m) => app.log.info(m),
-      warn: (m) => app.log.warn(m),
+      info: (m) => app.log.info({ code: "tool_index_event", detail: logSafeId(m) }),
+      warn: (m) => app.log.warn({ code: "tool_index_warning", detail: logSafeId(m) }),
     });
     state = {
       index: built.index,

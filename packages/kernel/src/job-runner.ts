@@ -12,6 +12,7 @@ import type { MachineAdapter, SensorAdapter, CameraAdapter } from "./adapters/ty
 import { EvidenceEmitter } from "./evidence-emitter.js";
 import { openEvidenceSession } from "./evidence-session.js";
 import { isStepLeased, leaseStep } from "./step-lease.js";
+import { knownErrorClassName, logSafeSmallInt, observationId } from "./observability.js";
 import * as Sentry from "@sentry/node";
 
 /** Callback fired at key pipeline phase transitions for external telemetry. */
@@ -191,7 +192,7 @@ export class JobRunner {
           await this.evidenceEmitter.addEvent(jobId, stepId, event);
         } catch (err) {
           unrecorded.first ??= { type: event.type, error: err instanceof Error ? err.message : String(err) };
-          console.error(err);
+          console.error("job_evidence_record_failed", knownErrorClassName(err));
         }
       });
     };
@@ -277,16 +278,16 @@ export class JobRunner {
           name: "job.run",
           op: "job.run",
           attributes: {
-            "job.id": jobId,
-            "job.step_id": stepId,
-            "job.assurance_tier": assuranceTier,
+            "job.id": observationId(jobId),
+            "job.step_id": observationId(stepId),
+            "job.assurance_tier": logSafeSmallInt(assuranceTier, 0, 3) ?? -1,
           },
         },
         async () => {
           // 1. Stage neutral input, or use the unchanged legacy G-code command.
           if (prepare) {
             const prepareResult = await Sentry.startSpan(
-              { name: "job.prepare", op: "job.phase", attributes: { "job.id": jobId } },
+              { name: "job.prepare", op: "job.phase", attributes: { "job.id": observationId(jobId) } },
               async () => this.machine.execute({
                 type: "prepare",
                 payload: {
@@ -321,7 +322,7 @@ export class JobRunner {
             });
           } else {
           const loadResult = await Sentry.startSpan(
-            { name: "job.load_gcode", op: "job.phase", attributes: { "job.id": jobId } },
+            { name: "job.load_gcode", op: "job.phase", attributes: { "job.id": observationId(jobId) } },
             async () =>
               this.machine.execute({
                 type: "load_gcode",
@@ -339,7 +340,7 @@ export class JobRunner {
           // 2. Start sensors (Tier 1+)
           if (assuranceTier >= 1) {
             await Sentry.startSpan(
-              { name: "job.start_sensors", op: "job.phase", attributes: { "job.id": jobId, "sensor.count": this.sensors.length } },
+              { name: "job.start_sensors", op: "job.phase", attributes: { "job.id": observationId(jobId), "sensor.count": logSafeSmallInt(this.sensors.length, 0, Number.MAX_SAFE_INTEGER) ?? 0 } },
               async () => {
                 for (const sensor of this.sensors) {
                   // Before the await: a start that throws may still have begun recording.
@@ -353,14 +354,14 @@ export class JobRunner {
           // 3. Take before-snapshot (Tier 2+)
           if (assuranceTier >= 2 && this.camera) {
             await Sentry.startSpan(
-              { name: "job.before_snapshot", op: "job.phase", attributes: { "job.id": jobId } },
+              { name: "job.before_snapshot", op: "job.phase", attributes: { "job.id": observationId(jobId) } },
               async () => this.camera!.captureSnapshot({ jobId }),
             );
           }
 
           // 4. Start execution
           const startResult = await Sentry.startSpan(
-            { name: "job.start_execution", op: "job.phase", attributes: { "job.id": jobId } },
+            { name: "job.start_execution", op: "job.phase", attributes: { "job.id": observationId(jobId) } },
             async () => this.machine.execute({ type: "start", payload: { jobId } }),
           );
           if (!startResult.success) {
@@ -369,14 +370,14 @@ export class JobRunner {
 
           // 5. Wait for completion
           await Sentry.startSpan(
-            { name: "job.wait_for_completion", op: "job.phase", attributes: { "job.id": jobId } },
+            { name: "job.wait_for_completion", op: "job.phase", attributes: { "job.id": observationId(jobId) } },
             async () => this.waitForCompletion(),
           );
 
           // 6. Stop sensors and collect summaries (Tier 1+)
           if (assuranceTier >= 1) {
             await Sentry.startSpan(
-              { name: "job.stop_sensors", op: "job.phase", attributes: { "job.id": jobId } },
+              { name: "job.stop_sensors", op: "job.phase", attributes: { "job.id": observationId(jobId) } },
               async () => {
                 for (const sensor of this.sensors) {
                   await sensor.stopRecording();
@@ -390,7 +391,7 @@ export class JobRunner {
           // 7. Run CV inspection (Tier 2+)
           if (assuranceTier >= 2 && this.camera) {
             await Sentry.startSpan(
-              { name: "job.cv_inspection", op: "job.phase", attributes: { "job.id": jobId } },
+              { name: "job.cv_inspection", op: "job.phase", attributes: { "job.id": observationId(jobId) } },
               async () => this.camera!.runInspection(undefined, { jobId }),
             );
           }
@@ -460,13 +461,13 @@ export class JobRunner {
               };
             }
             // For tier 0-1, warn but continue (self-attested/sensor-only)
-            console.warn(`[job-runner] Tier ${assuranceTier} partially met: ${check.missing.join(", ")}`);
+            console.warn("job_tier_requirements_partial", logSafeSmallInt(assuranceTier, 0, 3), logSafeSmallInt(check.missing.length, 0, Number.MAX_SAFE_INTEGER));
           }
 
           // 9. Finalize evidence bundle. The chain is closed and settled, so the step
           // cannot change while the bundle is hashed, signed and copied.
           const bundle = await Sentry.startSpan(
-            { name: "job.finalize_bundle", op: "job.phase", attributes: { "job.id": jobId } },
+            { name: "job.finalize_bundle", op: "job.phase", attributes: { "job.id": observationId(jobId) } },
             async () => this.evidenceEmitter.finalizeBundle(jobId, stepId),
           );
 
@@ -499,7 +500,7 @@ export class JobRunner {
         quiesceAsked = true;
         for (const sensor of recording) {
           // A stop that throws, or rejects, is logged: it cannot abort this cleanup.
-          const failed = (err: unknown) => console.error(`[job-runner] stopping sensor ${sensor.id} after a failed run:`, err);
+          const failed = (err: unknown) => console.error("job_sensor_stop_failed", knownErrorClassName(err), observationId(sensor.id));
           try {
             Promise.resolve(sensor.stopRecording()).catch(failed);
           } catch (err) {
@@ -509,7 +510,7 @@ export class JobRunner {
         try {
           await session.quiesce(this.evidenceQuiesceTimeoutMs);
         } catch (err) {
-          console.error(`[job-runner] job ${jobId}: an adapter could not confirm its evidence is complete:`, err);
+          console.error("job_evidence_quiesce_failed", knownErrorClassName(err), observationId(jobId));
         }
       }
       // Every exit closes the window. A failed run also seals the chain, so an event

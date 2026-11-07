@@ -174,11 +174,10 @@ function deleteSessionAndRevokeKeys(token: string) {
 }
 
 /**
- * Resolve a session from the request.
- * Checks both cookie (`pcc_session`) and Authorization Bearer header.
- * Returns the session address or null.
+ * Resolve only the cookie session, verifying its signature and expiry.
+ * Authorization does not participate in cookie-session origin checks.
  */
-export function resolveSession(
+export function resolveCookieSession(
   req: FastifyRequest,
 ): { address: `0x${string}`; token: string } | null {
   const repo = getRepos().sessions;
@@ -218,6 +217,21 @@ export function resolveSession(
       if (session) repo.deleteByToken(cookieToken);
     }
   }
+
+  return null;
+}
+
+/**
+ * Resolve a session from the request.
+ * Checks both cookie (`pcc_session`) and Authorization Bearer header.
+ * Returns the session address or null.
+ */
+export function resolveSession(
+  req: FastifyRequest,
+): { address: `0x${string}`; token: string } | null {
+  const cookieSession = resolveCookieSession(req);
+  if (cookieSession) return cookieSession;
+  const repo = getRepos().sessions;
 
   // 2. Try Bearer token
   const authHeader = req.headers.authorization;

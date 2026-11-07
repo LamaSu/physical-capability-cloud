@@ -39,6 +39,7 @@ import {
 } from "@pcc/spec";
 import { requireAuth } from "../auth/require-auth.js";
 import { pipelineTelemetry } from "../telemetry.js";
+import { logSafeId, logSafeInt } from "../redaction.js";
 
 // ---------------------------------------------------------------------------
 // Inline adapter — spawn the Python runner and validate its JSON output.
@@ -450,16 +451,16 @@ export async function captureSimRoutes(app: FastifyInstance): Promise<void> {
           });
         }
 
-        pipelineTelemetry.emit(jobId ?? "capture-sim", "evidence_capture", "completed", {
+        pipelineTelemetry.emit(logSafeId(jobId ?? "capture-sim"), "evidence_capture", "completed", {
           metadata: {
             subphase: "capture_sim",
-            jobId: jobId ?? null,
-            frameCount: result.trace.frameCount,
-            durationMs: result.durationMs,
-            stubbed: result.stubbed,
-            simulator: result.trace.scene.simulator,
-            taskId: result.trace.scene.taskId,
-            model: result.trace.model,
+            jobId: jobId == null ? null : logSafeId(jobId),
+            frameCount: logSafeInt(result.trace.frameCount),
+            durationMs: logSafeInt(result.durationMs),
+            stubbed: result.stubbed === true,
+            simulator: logSafeId(result.trace.scene.simulator),
+            taskId: result.trace.scene.taskId == null ? null : logSafeId(result.trace.scene.taskId),
+            model: result.trace.model == null ? null : logSafeId(result.trace.model),
             adapterVersion: ADAPTER_VERSION,
           },
         });
@@ -473,13 +474,15 @@ export async function captureSimRoutes(app: FastifyInstance): Promise<void> {
         return response;
       } catch (err) {
         if (err instanceof GenesisAdapterError) {
-          req.log.error({ err, code: err.code }, "capture_sim adapter failed");
-          pipelineTelemetry.emit(jobId ?? "capture-sim", "evidence_capture", "failed", {
+          // Only a formatted error code crosses the diagnostic boundary;
+          // dependency messages and structured error details remain local.
+          req.log.error({ code: logSafeId(err.code) }, "capture_sim adapter failed");
+          pipelineTelemetry.emit(logSafeId(jobId ?? "capture-sim"), "evidence_capture", "failed", {
             metadata: {
               subphase: "capture_sim",
-              jobId: jobId ?? null,
-              error: err.code,
-              message: err.message,
+              jobId: jobId == null ? null : logSafeId(jobId),
+              error: logSafeId(err.code),
+              message: "adapter_failed",
             },
             level: "error",
           });
@@ -491,7 +494,7 @@ export async function captureSimRoutes(app: FastifyInstance): Promise<void> {
             detail: err.detail,
           });
         }
-        req.log.error({ err }, "capture_sim threw");
+        req.log.error({ code: "capture_sim_failed" }, "capture_sim threw");
         return reply.status(500).send({
           error: "internal_error",
           message: (err as Error).message,

@@ -18,6 +18,7 @@ import { getStore } from "../db.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 import { getJobOffersStore } from "../services/job-offers-store.js";
 import { jobReadCallerOf } from "../readmodels/job-execution.js";
+import { knownErrorClassName, logSafeId } from "../redaction.js";
 import {
   buildOperatorIncomeDTO,
   buildOperatorWorkDTO,
@@ -119,7 +120,7 @@ function load(req: FastifyRequest): Load {
     store = getStore();
     kernels = findOperatorKernels(wallet, store.db);
   } catch (error) {
-    req.log.error({ err: error }, "operator read model: kernel read failed");
+    req.log.error({ code: "operator_kernel_read_failed", errorClass: knownErrorClassName(error) }, "operator kernel read failed");
     return {
       ok: false,
       status: 503,
@@ -128,7 +129,7 @@ function load(req: FastifyRequest): Load {
   }
   const sources = loadOperatorWorkSources(kernels, store.repos as any, store.db, offersReader(), {
     tenant: tenantOpts(req as any),
-    onReadError: (source, error) => req.log.warn({ source, err: error }, "operator read model: source read failed"),
+    onReadError: (source, error) => req.log.warn({ code: "operator_source_read_failed", source: logSafeId(source), errorClass: knownErrorClassName(error) }, "operator source read failed"),
   });
   return { ok: true, sources };
 }

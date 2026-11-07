@@ -14,6 +14,7 @@ import type { MachineAdapter } from "../adapters/types.js";
 import { EvidenceEmitter } from "../evidence-emitter.js";
 import { JobRunner } from "../job-runner.js";
 import type { LogCaptureService } from "../log-capture-service.js";
+import { observationId } from "../observability.js";
 
 // JobRunner's spans, as in its own tests: plain functions, so vi.restoreAllMocks() cannot strip them.
 vi.mock("@sentry/node", () => ({
@@ -963,6 +964,12 @@ describe("PrinterLogAdapter under JobRunner (astra pack 196): its start at step 
       return next;
     };
     const log = new PrinterLogAdapter("log-jobrunner", KERNEL_ID, memoryLogCapture(), { pollIntervalMs: 60_000, logProvider });
+    const stopRejections: unknown[] = [];
+    const stopRecording = log.stopRecording.bind(log);
+    vi.spyOn(log, "stopRecording").mockImplementation(() => stopRecording().catch((err: unknown) => {
+      stopRejections.push(err);
+      throw err;
+    }));
     const seen: unknown[][] = [];
     log.onEvidence((e) => seen.push([e.type, e.payload.jobId, e.payload.rawContent ?? e.payload.chainLength]));
     const machine = {
@@ -1000,9 +1007,17 @@ describe("PrinterLogAdapter under JobRunner (astra pack 196): its start at step 
       ["printer_job_verified", "job-4", 1],
     ]);
     expect.soft(seenWhenRun2Returned, "events emitted by the time run 2 returned").toBe(4);
+    const failedStopLogs = errors.mock.calls.filter((call) => call[0] === "job_sensor_stop_failed");
+    expect.soft(failedStopLogs, "the failure path's stop failure count").toHaveLength(2);
+    expect.soft(failedStopLogs, "the failure path's safe stop failure logs").toEqual([
+      ["job_sensor_stop_failed", "Error", observationId("log-jobrunner")],
+      ["job_sensor_stop_failed", "Error", observationId("log-jobrunner")],
+    ]);
+    expect.soft(stopRejections, "every settled stop rejection").toHaveLength(3);
+    expect.soft(stopRejections[0], "the final poll's stop rejection").toMatchObject({ message: "final poll failed once" });
     expect
       .soft(
-        errors.mock.calls.filter((call) => String(call[0]).includes("stopping sensor log-jobrunner after a failed run")).map((call) => String(call[1])),
+        stopRejections.slice(1).map((reason) => String(reason)),
         "the failure path's stops that failed",
       )
       .toEqual([

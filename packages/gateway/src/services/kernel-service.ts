@@ -19,6 +19,7 @@ import { getSettlementService } from "./settlement-service.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
 import { pipelineTelemetry } from "../telemetry.js";
+import { knownErrorClassName, logSafeId, logSafeSmallInt } from "../redaction.js";
 import { localJobDispatchDecision, type LocalJobDispatchReason } from "./local-job-dispatch.js";
 
 // ---------------------------------------------------------------------------
@@ -408,16 +409,38 @@ export class KernelService {
       this.jobAdapters.delete(this.jobAdapters.keys().next().value as string);
     }
 
-    // Telemetry: job accepted by a device
-    pipelineTelemetry.emit(jobId, "job_accepted", "completed", {
-      metadata: { deviceId, kernelId: this.config.kernelId ?? "default" },
+    // Telemetry: job accepted by a device. N71 round 6 (astra pack 83e): jobId and
+    // deviceId are both caller-influenceable (a submitted jobId, or a deviceId that
+    // matched an existing registration with no shape check at registration time) —
+    // validated echo, never the raw value. this.config.kernelId is this service's own
+    // fixed KernelConfig, never per-request input.
+    // N71 round 7 (astra pack 83f, CRITICAL #3): this.config.kernelId is raw
+    // operator config/env (KERNEL_ID, kernel-config.ts's buildDefaultConfig) — not a
+    // closed value just because it is "this service's own", so it goes through
+    // logSafeId at this sink like every other id, same as jobId/deviceId above.
+    pipelineTelemetry.emit(logSafeId(jobId), "job_accepted", "completed", {
+      metadata: { deviceId: logSafeId(deviceId), kernelId: logSafeId(this.config.kernelId ?? "default") },
     });
 
-    // Start a local trace (alongside Sentry) so the dashboard waterfall sees it
+    // Start a local trace (alongside Sentry) so the dashboard waterfall sees it.
+    // N71 round 7 (astra pack 83f, CRITICAL #2): startTrace wasn't in the round-6
+    // scanner's sink list at all, and received raw jobId/stepId. jobId now goes
+    // through logSafeId and the tier through logSafeSmallInt, same treatment as
+    // every other sink. The "job.type" attribute (which actually held stepId, not a
+    // type — a pre-existing mislabel) is DROPPED rather than echoed: logSafeId's
+    // identifier grammar validates SHAPE (rejects credential/URL/free-text), not
+    // uniqueness of content, so a caller-chosen stepId that happens to be
+    // identifier-shaped is admitted as-is by design (the same treatment
+    // job.facade.ts's round-6 code already gives stepId, unchallenged). That is not
+    // provable-safe enough for an UNLABELED free-form value with no fixed vocabulary
+    // to validate against (unlike jobId, which this job's own DB row anchors) — same
+    // "drop, don't guess" boundary this round already applies to body.reason and
+    // evidenceBundleHash (settlement.facade.ts). jobId (in "job.id") still
+    // correlates this span to the job.
     const { traceId, spanId: lifecycleLocalSpanId } = startTrace(
       "job.lifecycle",
       "kernel",
-      { "job.id": jobId, "job.type": stepId, "job.assurance_tier": assuranceTier },
+      { "job.id": logSafeId(jobId), "job.assurance_tier": logSafeSmallInt(assuranceTier, 0, 3) ?? -1 },
     );
     // Store traceId on the running job so we can reference it in callbacks
     (this.runningJobs.get(jobId) as unknown as { traceId: string }).traceId = traceId;
@@ -451,10 +474,12 @@ export class KernelService {
         {
           name: "job.lifecycle",
           op: "job.lifecycle",
+          // N71 round 7 (astra pack 83f, CRITICAL #2): same treatment as startTrace
+          // above — jobId through logSafeId, tier through logSafeSmallInt,
+          // "job.type" (stepId) dropped rather than echoed (see startTrace's comment).
           attributes: {
-            "job.id": jobId,
-            "job.type": stepId,
-            "job.assurance_tier": assuranceTier,
+            "job.id": logSafeId(jobId),
+            "job.assurance_tier": logSafeSmallInt(assuranceTier, 0, 3) ?? undefined,
           },
         },
         (lifecycleSpan) => {
@@ -463,8 +488,8 @@ export class KernelService {
             lifecycleSpan.end();
             return;
           }
-          // Telemetry: job execution starting only after the final dispatch guard.
-          pipelineTelemetry.emit(jobId, "job_started", "completed", { metadata: { deviceId } });
+          // Emit only after the final dispatch guard, with N71's validated ids.
+          pipelineTelemetry.emit(logSafeId(jobId), "job_started", "completed", { metadata: { deviceId: logSafeId(deviceId) } });
           dispatched = true;
           runner
             .run({
@@ -472,9 +497,21 @@ export class KernelService {
               stepId,
               gcodeHash: (gcodeHash ?? `sha256:${jobId}`) as `sha256:${string}`,
               assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
-              // Bridge job-runner phase events to gateway telemetry
-              onPhase: (jid, phase, status, meta) => {
-                pipelineTelemetry.emit(jid, phase, status, { metadata: meta });
+              // Bridge job-runner phase events to gateway telemetry. N71 round 6
+              // (astra pack 83e): jid is validated the same as jobId above; phase and
+              // status are OnPhaseCallback's own closed-enum parameters
+              // (@pcc/kernel/job-runner.ts), never free text. meta is
+              // Record<string, unknown> — @pcc/kernel's own call sites (job-runner.ts,
+              // outside this PR's 12-file scope) look safe today, but that is not this
+              // file's boundary to audit; THE SINK IS THE BOUNDARY means it is dropped
+              // here rather than forwarded unexamined.
+              onPhase: (jid, phase, status) => {
+                if (!["job_accepted", "job_started", "evidence_capture"].includes(phase) || !["completed", "failed"].includes(status)) return;
+                pipelineTelemetry.emit(
+                  logSafeId(jid),
+                  phase === "job_accepted" ? "job_accepted" : phase === "job_started" ? "job_started" : "evidence_capture",
+                  status === "completed" ? "completed" : "failed",
+                );
               },
             })
             .then(async (result) => {
@@ -520,8 +557,17 @@ export class KernelService {
                       contractAddress,
                     });
                   } catch (err) {
-                    // Settlement pipeline is non-fatal — the job itself succeeded
-                    console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
+                    // Settlement pipeline is non-fatal — the job itself succeeded.
+                    // N71 round 5 followup: never err.message/String(err) here —
+                    // a fixed code plus, at most, knownErrorClassName(err)
+                    // (closed set, instanceof-checked). THE SINK IS THE
+                    // BOUNDARY, same as checkDeviceHealth's console.warn below
+                    // and base.facade.ts's span — see redaction.ts.
+                    console.warn(
+                      "[kernel-service] Settlement pipeline failed:",
+                      "settlement_pipeline_failed",
+                      knownErrorClassName(err),
+                    );
                   } finally {
                     // Clean up in-memory evidence data
                     this.emitter.cleanup(jobId, stepId);
@@ -530,7 +576,16 @@ export class KernelService {
                 }
               }
 
-              lifecycleSpan.setStatus({ code: result.success ? 1 : 2, message: result.error ?? "ok" });
+              // N71 round 5 followup: result.error is JobRunner's OWN
+              // JobResult.error (job-runner.ts:38), not a facade Result — it
+              // can carry an adapter's raw MachineCommandResult.message
+              // ("Failed to load G-code: ...") or JobRunner's own caught
+              // err.message/String(err). The span gets a fixed code only;
+              // result.error is never read here.
+              lifecycleSpan.setStatus({
+                code: result.success ? 1 : 2,
+                message: result.success ? "ok" : "job_run_failed",
+              });
               lifecycleSpan.end();
               // End local trace span
               endTrace(traceId, lifecycleLocalSpanId, result.success ? "ok" : "error");
@@ -545,7 +600,12 @@ export class KernelService {
               } catch {
                 // DB update failure is non-fatal
               }
-              lifecycleSpan.setStatus({ code: 2, message: String(err) });
+              // N71 round 5 followup: never String(err)/err.message on the
+              // span — fixed code plus, at most, the closed-set class name.
+              lifecycleSpan.setStatus({
+                code: 2,
+                message: `job_run_failed:${knownErrorClassName(err)}`,
+              });
               lifecycleSpan.end();
               // End local trace span
               endTrace(traceId, lifecycleLocalSpanId, "error");
@@ -562,17 +622,25 @@ export class KernelService {
         blockDispatch();
         return queued();
       }
-      // Telemetry: job execution starting (fallback path)
-      pipelineTelemetry.emit(jobId, "job_started", "completed", { metadata: { deviceId } });
+      // Emit only after the final dispatch guard, with N71's validated ids.
+      pipelineTelemetry.emit(logSafeId(jobId), "job_started", "completed", { metadata: { deviceId: logSafeId(deviceId) } });
       runner
         .run({
           jobId,
           stepId,
           gcodeHash: (gcodeHash ?? `sha256:${jobId}`) as `sha256:${string}`,
           assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
-          // Bridge job-runner phase events to gateway telemetry (fallback path)
-          onPhase: (jid, phase, status, meta) => {
-            pipelineTelemetry.emit(jid, phase, status, { metadata: meta });
+          // Bridge job-runner phase events to gateway telemetry (fallback path).
+          // N71 round 6: same treatment as the primary (Sentry) path above — jid
+          // validated, phase/status are closed enums, meta dropped (not this file's
+          // boundary to audit @pcc/kernel's own call sites).
+          onPhase: (jid, phase, status) => {
+            if (!["job_accepted", "job_started", "evidence_capture"].includes(phase) || !["completed", "failed"].includes(status)) return;
+            pipelineTelemetry.emit(
+              logSafeId(jid),
+              phase === "job_accepted" ? "job_accepted" : phase === "job_started" ? "job_started" : "evidence_capture",
+              status === "completed" ? "completed" : "failed",
+            );
           },
         })
         .then(async (result) => {
@@ -613,7 +681,14 @@ export class KernelService {
                   contractAddress,
                 });
               } catch (err) {
-                console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
+                // N71 round 5 followup: same boundary as the primary
+                // (Sentry) path's settlement catch above — fixed code plus,
+                // at most, knownErrorClassName(err). Never err.message/err.
+                console.warn(
+                  "[kernel-service] Settlement pipeline failed:",
+                  "settlement_pipeline_failed",
+                  knownErrorClassName(err),
+                );
               } finally {
                 // Clean up in-memory evidence data
                 this.emitter.cleanup(jobId, stepId);
@@ -707,6 +782,21 @@ export class KernelService {
     );
   }
 
+  /** A stalled adapter must not hold either inventory or direct health reads. */
+  private async readMachineStatus(machine: MachineAdapter): Promise<Awaited<ReturnType<MachineAdapter["getStatus"]>> | undefined> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        machine.getStatus(),
+        new Promise<undefined>((resolve) => {
+          timeout = setTimeout(() => resolve(undefined), DEVICE_HEALTH_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+  }
+
   /**
    * Derive a device's health from its live adapter status + circuit-breaker
    * state. Returns one of the DeviceStatusDTO healthStatus values:
@@ -731,18 +821,7 @@ export class KernelService {
     const machine = this.machines.get(device.id);
     if (machine) {
       try {
-        let timeout: ReturnType<typeof setTimeout> | undefined;
-        let status: Awaited<ReturnType<MachineAdapter["getStatus"]>> | undefined;
-        try {
-          status = await Promise.race([
-            machine.getStatus(),
-            new Promise<undefined>((resolve) => {
-              timeout = setTimeout(() => resolve(undefined), DEVICE_HEALTH_TIMEOUT_MS);
-            }),
-          ]);
-        } finally {
-          if (timeout !== undefined) clearTimeout(timeout);
-        }
+        const status = await this.readMachineStatus(machine);
         adapterHealth =
           status === undefined
             ? "unknown"
@@ -777,7 +856,25 @@ export class KernelService {
   }
 
   /**
-   * Ping a device adapter for health.
+   * Ping a device adapter for health. `details` is the adapter's own status, or, when
+   * the adapter throws, a fixed code — never the exception text.
+   *
+   * N71 round 3 (astra pack 83b): round 2 scrubbed the exception message with a
+   * URL-boundary regex and returned the rest ("still a usable diagnostic"). Astra
+   * showed that is not a confidentiality boundary: a URL with an apostrophe in its
+   * userinfo defeated the regex, and free text with no URL at all
+   * (`authentication failed: password=...`) was never caught by it either.
+   *
+   * N71 round 5 (astra pack 83d, CRITICAL #1): rounds 3-4 kept trying to SCRUB the
+   * message instead of dropping it — and astra found yet another regex-boundary
+   * bypass (a WHATWG-valid "scheme:userinfo@host" with no "//" at all, which a
+   * fetch-alike would still read the userinfo of). There is no fourth scrubber that
+   * closes this for good: THE SINK IS THE BOUNDARY. This log line never sees
+   * `err.message` in any form, scrubbed or not — only a fixed code plus, at most, a
+   * CLOSED-SET class name (knownErrorClassName — checked via `instanceof`, never
+   * `.name`, which any thrown value can forge). The real message is NOT logged
+   * anywhere by this method any more; if it is ever needed again, that is a new,
+   * explicit decision, not a side effect of a diagnostic string.
    */
   async checkDeviceHealth(deviceId: string): Promise<{ healthy: boolean; details?: string }> {
     const machine = this.machines.get(deviceId);
@@ -785,14 +882,23 @@ export class KernelService {
       return { healthy: false, details: "device_not_found" };
     }
     try {
-      const status = await machine.getStatus();
+      const status = await this.readMachineStatus(machine);
+      if (status === undefined) return { healthy: false, details: "adapter_error" };
       const healthy = status !== "error" && status !== "offline";
       return { healthy, details: status };
     } catch (err) {
-      return {
-        healthy: false,
-        details: err instanceof Error ? err.message : "unknown_error",
-      };
+      // N71 round 6 (astra pack 83e, C2): the error side of this log was already
+      // fixed (round 5) to a closed-set class name — but deviceId was still
+      // interpolated raw into the template, and a caller picks deviceId (register-
+      // device has no shape check on it). THE SINK IS THE BOUNDARY applies to every
+      // argument, not just the exception: validated echo, never the raw value.
+      console.warn(
+        "[kernel-service] health check failed:",
+        "adapter_health_failed",
+        knownErrorClassName(err),
+        logSafeId(deviceId),
+      );
+      return { healthy: false, details: "adapter_error" };
     }
   }
 }

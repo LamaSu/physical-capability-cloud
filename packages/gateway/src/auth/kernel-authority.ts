@@ -27,6 +27,7 @@ import crypto from "node:crypto";
 import type { FastifyRequest } from "fastify";
 import { schema, eq } from "@pcc/store";
 import { getStore } from "../db.js";
+import { knownErrorClassName, logSafeId } from "../redaction.js";
 
 export type KernelAction = "decide" | "read" | "stop_or_submit" | "operate";
 
@@ -165,7 +166,7 @@ export function refuseKernelAction(req: FastifyRequest, a: KernelAuthority, kern
       .where(eq(schema.shopKernels.id, kernelId))
       .get();
   } catch (err) {
-    req.log.warn({ kernelId, err }, "kernel read for an operator action failed");
+    req.log.warn({ kernelId: logSafeId(kernelId), err: knownErrorClassName(err) }, "kernel read for an operator action failed");
     return { status: 503, body: { error: "read_failed", message: "The kernel could not be read to check who operates it. Try again shortly." } };
   }
   if (!kernel) return { status: 404, body: { error: "kernel_not_found", message: "No kernel with this id is registered." } };

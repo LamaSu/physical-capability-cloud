@@ -26,6 +26,7 @@
  * See docs/kernel-lifecycle.md for the contract.
  */
 
+import { knownErrorClassName, logSafeInt } from "../redaction.js";
 import type { IRepositories } from "@pcc/store";
 import { emitKernelLifecycleEvent } from "../facades/kernel.facade.js";
 
@@ -43,7 +44,7 @@ export function resolveSweepIntervalSec(): number {
     parsed > SWEEP_INTERVAL_UPPER_BOUND_SEC
   ) {
     console.warn(
-      `[kernel-ttl-sweeper] KERNEL_SWEEP_INTERVAL_SEC="${raw}" out of band [${SWEEP_INTERVAL_LOWER_BOUND_SEC},${SWEEP_INTERVAL_UPPER_BOUND_SEC}]; using ${SWEEP_INTERVAL_DEFAULT_SEC}`,
+      "[kernel-ttl-sweeper] interval_out_of_band; using default",
     );
     return SWEEP_INTERVAL_DEFAULT_SEC;
   }
@@ -171,11 +172,11 @@ export function startKernelTtlSweeper(
       const result = runOneSweep(repos);
       if (result.kernelsExpired > 0 || result.capabilitiesExpired > 0) {
         console.log(
-          `[kernel-ttl-sweeper] swept k:${result.kernelsExpired}/${result.scannedKernels} c:${result.capabilitiesExpired}/${result.scannedCapabilities}`,
+          `[kernel-ttl-sweeper] swept k:${logSafeInt(result.kernelsExpired)}/${logSafeInt(result.scannedKernels)} c:${logSafeInt(result.capabilitiesExpired)}/${logSafeInt(result.scannedCapabilities)}`,
         );
       }
     } catch (err) {
-      console.error(`[kernel-ttl-sweeper] sweep failed:`, err);
+      console.error("[kernel-ttl-sweeper] sweep failed:", knownErrorClassName(err));
     }
   }, intervalMs);
   // Don't keep the event loop alive just for the sweeper — vitest needs

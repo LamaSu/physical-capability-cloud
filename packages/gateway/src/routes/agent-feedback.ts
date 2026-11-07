@@ -31,6 +31,7 @@ import { randomBytes } from "node:crypto";
 import { trace } from "@opentelemetry/api";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { logSafeId, logSafeSmallInt } from "../redaction.js";
 
 // ── Rate limiting (per-IP, in-memory) ─────────────────────────────────────
 //
@@ -186,11 +187,11 @@ export async function agentFeedbackRoutes(app: FastifyInstance) {
       async (span) => {
         try {
           span.setAttribute("pcc.report_id", report_id);
-          if (trace_id) span.setAttribute("pcc.trace_id", trace_id);
-          if (body.agent_kind) span.setAttribute("pcc.agent_kind", body.agent_kind);
-          if (body.last_endpoint) span.setAttribute("pcc.last_endpoint", body.last_endpoint);
-          if (body.last_error_code) span.setAttribute("pcc.last_error_code", body.last_error_code);
-          if (body.confused_about) span.setAttribute("pcc.confused_about", body.confused_about);
+          if (trace_id) span.setAttribute("pcc.trace_id", logSafeId(trace_id));
+          if (body.agent_kind) span.setAttribute("pcc.agent_kind", logSafeId(body.agent_kind));
+          if (body.last_endpoint) span.setAttribute("pcc.last_endpoint", logSafeId(body.last_endpoint));
+          if (body.last_error_code) span.setAttribute("pcc.last_error_code", logSafeId(body.last_error_code));
+          if (body.confused_about) span.setAttribute("pcc.confused_about", logSafeId(body.confused_about));
 
           // Persist to the audit log (temporary sink until piece 5 lands).
           auditService.log({
@@ -217,10 +218,10 @@ export async function agentFeedbackRoutes(app: FastifyInstance) {
           // PostHog event for the live dashboard.
           trackServerEvent("agent_report_filed", {
             report_id,
-            trace_id,
-            agent_kind: body.agent_kind,
-            last_error_code: body.last_error_code,
-            confused_about: body.confused_about,
+            trace_id: logSafeId(trace_id),
+            agent_kind: body.agent_kind === undefined ? undefined : logSafeId(body.agent_kind),
+            last_error_code: body.last_error_code === undefined ? undefined : logSafeId(body.last_error_code),
+            confused_about: body.confused_about === undefined ? undefined : logSafeId(body.confused_about),
           });
 
           // Add a span event so any OTel collector subscribed to the
@@ -228,8 +229,8 @@ export async function agentFeedbackRoutes(app: FastifyInstance) {
           // sink (piece 5).
           span.addEvent("agent_report_received", {
             "pcc.report_id": report_id,
-            "pcc.trace_id": trace_id ?? "",
-            "pcc.summary_length": body.summary.length,
+            "pcc.trace_id": logSafeId(trace_id ?? ""),
+            "pcc.summary_length": logSafeSmallInt(body.summary.length, SUMMARY_MIN, SUMMARY_MAX) ?? 0,
           });
 
           return reply.status(201).send({

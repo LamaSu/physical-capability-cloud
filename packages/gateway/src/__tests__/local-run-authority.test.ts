@@ -472,7 +472,7 @@ describe("hosted and generated configuration replies stay unchanged", () => {
     const response = await testJob(claimed(owner.address));
     expect(response.statusCode).toBe(409);
     expect(response.json()).toEqual({ error: "gateway_does_not_run_this_kernel",
-      message: `This gateway runs kernel "kernel_dev_001", not "${KERNEL}". Run the test job on the node that operates this kernel (for example \`pcc-node\`), which submits real evidence back to the gateway.`,
+      message: "This gateway does not run the requested kernel. Run the test job on the node that operates this kernel (for example `pcc-node`), which submits real evidence back to the gateway.",
       kernelId: KERNEL, ran: false, passed: false });
     expect(commands()).toEqual([]);
   });
@@ -484,7 +484,7 @@ describe("hosted and generated configuration replies stay unchanged", () => {
     const response = await testJob(claimed(owner.address), { kernelId: other, deviceId: "device-local-run-authority-other" });
     expect(response.statusCode).toBe(409);
     expect(response.json()).toEqual({ error: "gateway_does_not_run_this_kernel",
-      message: `This gateway runs kernel "${KERNEL}", not "${other}". Run the test job on the node that operates this kernel (for example \`pcc-node\`), which submits real evidence back to the gateway.`,
+      message: "This gateway does not run the requested kernel. Run the test job on the node that operates this kernel (for example `pcc-node`), which submits real evidence back to the gateway.",
       kernelId: other, ran: false, passed: false });
     expect(check).not.toHaveBeenCalled();
     expect(rowCount()).toBe(0);

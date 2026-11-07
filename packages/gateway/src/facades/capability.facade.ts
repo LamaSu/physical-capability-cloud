@@ -9,6 +9,7 @@
 import { type Result, ok, Errors } from "@pcc/spec";
 import type { ShopKernel } from "@pcc/spec";
 import { BaseFacade } from "./base.facade.js";
+import { NotFoundError, BadRequestError } from "./facade-errors.js";
 import type {
   CapabilityDTO,
   CapabilitySearchCriteria,
@@ -309,7 +310,7 @@ export class CapabilityFacade extends BaseFacade {
     return this.execute("create", async () => {
       const { kernelId, type } = body;
       if (!kernelId || !type) {
-        throw Object.assign(new Error("kernelId and type required"), { name: "BadRequestError" });
+        throw new BadRequestError("kernelId and type required");
       }
       const id = body.id || `cap-${kernelId}-${type}`;
       const context = this.defaultContext();
@@ -364,10 +365,3 @@ export class CapabilityFacade extends BaseFacade {
   }
 }
 
-/** Internal error for flow control — caught by BaseFacade.execute() */
-class NotFoundError extends Error {
-  constructor(entity: string, id: string) {
-    super(`${entity} '${id}' not found`);
-    this.name = "NotFoundError";
-  }
-}

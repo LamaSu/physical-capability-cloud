@@ -1,0 +1,1781 @@
+/**
+ * N71 (operator item 86): stored device configuration, and configuration the
+ * gateway holds for itself, were readable through the API.
+ *
+ * Round 1 (reproduced at #326's head f76e93d5 before any code changed):
+ * `GET /api/devices/:kernelId` returned the raw device rows, adapterConfig
+ * included. That is the connection config a device registered with: hosts,
+ * tokens and API keys. Any key could read any kernel's config, and
+ * `POST /api/devices/register` echoed the stored adapterConfig back. The kernel
+ * route `GET /api/kernels/:kernelId/devices` already returned a public view.
+ * Now `GET /api/devices/:kernelId` answers with that public view (id, type,
+ * model, status, healthStatus, adapterType, capabilities: seven fields).
+ *
+ * `POST /api/devices/register` is NOT the same shape. It answers with an explicit
+ * registration view that carries more fields (id, kernelId, type, model, firmware,
+ * status, healthStatus, adapterType, capabilities, contributesToCapabilities,
+ * lastUpdated, lastHealthCheck, emits) and never adapterConfig.
+ *
+ * Round 2 (astra's verdict on pack 83): the same material was still readable
+ * through other doors, reproduced below before they were closed:
+ *   - GET /api/setup/detect echoed KERNEL_CONFIG (the server's own device
+ *     config, API keys and URL credentials included) in `envVars`;
+ *   - POST /api/setup/validate defaults to KERNEL_CONFIG and put URLs, hosts,
+ *     endpoints and URIs (and JSON parse errors, which quote the source) into
+ *     its messages;
+ *   - POST /api/setup/register-device returned the whole stored row, including
+ *     the PRESERVED adapterConfig on an update that omits it;
+ *   - POST /api/devices/register spread the stored row, so any column added
+ *     later would have become public;
+ *   - POST /api/devices/:deviceId/health forwarded adapter exception text.
+ *
+ * Scope: this branch carries REDACTION only. WHO may register or update a device
+ * (kernel/device ownership) is WP-C's (PR #445). Where a test below drives that
+ * path it asserts only what the response contains, not whether the caller was
+ * allowed.
+ *
+ * Not changed: POST /api/setup/generate-config echoes the caller's OWN input
+ * (an apiKey the caller just sent). That is not a stored or server-held
+ * credential, so it is not covered by "never leaves the API" below; the control
+ * test at the end pins that behaviour.
+ */
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import type { FastifyInstance, LightMyRequestResponse } from "fastify";
+import { createRequire } from "node:module";
+import { randomUUID } from "node:crypto";
+import { safeServerEventDistinctId } from "../services/posthog-policy.js";
+
+const analyticsCapture = vi.hoisted(() => vi.fn());
+const analyticsConstruct = vi.hoisted(() => vi.fn());
+vi.mock("posthog-node", () => ({
+  PostHog: class {
+    capture = analyticsCapture;
+    identify = vi.fn();
+    shutdown = vi.fn().mockResolvedValue(undefined);
+    constructor() { analyticsConstruct(); }
+  },
+}));
+
+process.env.PCC_DB_PATH = ":memory:";
+process.env.NODE_ENV = "test";
+process.env.PCC_SEED_DATA = "false";
+
+const A = "device-owner-a@x.test";
+const B = "other-b@x.test";
+const SECRET = "DEVICE-CRED-7f3a9c";
+/** Synthetic sentinel. Every value below that must never leave the API starts with it. */
+const SENTINEL = "N71-SENTINEL";
+/** A column the device row does not have today. */
+const FUTURE = `${SENTINEL}-future-column`;
+
+/** Every column of the device row except adapterConfig, spelled out (sorted). */
+const REGISTRATION_VIEW_KEYS = [
+  "adapterType",
+  "capabilities",
+  "contributesToCapabilities",
+  "emits",
+  "firmware",
+  "healthStatus",
+  "id",
+  "kernelId",
+  "lastHealthCheck",
+  "lastUpdated",
+  "model",
+  "status",
+  "type",
+];
+
+let app: FastifyInstance;
+let getRepos: typeof import("../db.js").getRepos;
+let generateApiKey: typeof import("../auth/api-key-auth.js").generateApiKey;
+let getKernelService: typeof import("../services/kernel-service.js").getKernelService;
+let getJobFacade: typeof import("../facades/index.js").getJobFacade;
+let MockFDMAdapter: typeof import("@pcc/kernel").MockFDMAdapter;
+let seq = 0;
+let ipSeq = 10;
+
+function seedKey(operatorId: string): string {
+  const { rawKey, keyHash, keyPrefix } = generateApiKey();
+  getRepos().apiKeys.insert({
+    id: `n71-key-${++seq}`,
+    keyHash,
+    keyPrefix,
+    operatorId,
+    scopes: JSON.stringify(["operator"]),
+    rateLimit: "1000/hour",
+    usageCount: "0",
+    createdAt: new Date().toISOString(),
+  } as never);
+  return rawKey;
+}
+
+const inj = (method: string, url: string, raw: string, payload?: unknown, headers: Record<string, string> = {}) =>
+  app.inject({
+    method: method as never,
+    url,
+    remoteAddress: `10.97.${Math.floor(++ipSeq / 250)}.${ipSeq % 250}`,
+    payload: payload as never,
+    headers: { authorization: `Bearer ${raw}`, ...headers },
+  });
+
+/**
+ * N71 round 6: capturing the REQUEST logger (req.log), not just the response.
+ *
+ * createGateway() hardcodes `logger: true` with no way to inject a custom stream from
+ * here, so `vi.spyOn(app.log, "warn"/"error")` looks like the obvious move — but it does
+ * NOT work: Fastify's per-request `req.log` is a pino CHILD (`Object.create(app.log)`),
+ * and pino's `setLevel` (lib/levels.js, run again on every child at creation) assigns
+ * EACH instance its OWN fresh `.warn`/`.error` function objects as OWN properties —
+ * never inherited, never shared, so patching the parent's never touches a child's
+ * (confirmed empirically: the raw secret still hit real stdout while a parent-level spy
+ * saw zero calls). What a child never gets its own copy of is the destination STREAM —
+ * `child()` never reassigns pino's internal `streamSym`, so every child inherits the
+ * SAME stream object the root logger writes to. Spying on that one shared stream's
+ * `.write` therefore sees every request's log output, however deep the child chain.
+ * pino is a transitive dependency (via fastify), not a direct one, so it is resolved the
+ * same way fastify itself resolves it — rooting `require` at fastify's own location —
+ * rather than adding a new direct dependency for one test file.
+ */
+const pinoSymbols: { streamSym: symbol } = createRequire(createRequire(import.meta.url).resolve("fastify"))("pino").symbols;
+
+/** Runs `fn`, capturing every raw line pino's shared stream would have written during
+ *  it (as an array of strings), with real output suppressed for that duration. */
+async function captureAppLog<T>(fn: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
+  const stream = (app.log as unknown as Record<symbol, { write: (chunk: string) => boolean }>)[pinoSymbols.streamSym];
+  const lines: string[] = [];
+  const spy = vi.spyOn(stream, "write").mockImplementation((chunk: string) => {
+    lines.push(chunk);
+    return true;
+  });
+  try {
+    const result = await fn();
+    return { result, lines };
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+/** Run `fn` with the given env vars set (undefined = unset); every one is restored afterwards. */
+async function withEnv<T>(vars: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
+  const saved: Record<string, string | undefined> = {};
+  for (const name of Object.keys(vars)) saved[name] = process.env[name];
+  try {
+    for (const [name, value] of Object.entries(vars)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    return await fn();
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+/** None of the named values may appear anywhere in the body; the name labels the failure. */
+function expectNoLeak(body: string, values: Record<string, string>): void {
+  for (const [name, value] of Object.entries(values)) expect(body, name).not.toContain(value);
+}
+
+const bodyOf = (res: LightMyRequestResponse) => res.json() as Record<string, any>;
+const deviceIdsOf = (res: LightMyRequestResponse) =>
+  (res.json() as { devices: Array<{ id: string }> }).devices.map((d) => d.id);
+
+let keyA: string;
+let keyB: string;
+let kernelId: string;
+let deviceId: string;
+let registerBody = "";
+
+beforeAll(async () => {
+  const server = await import("../server.js");
+  ({ getRepos } = await import("../db.js"));
+  ({ generateApiKey } = await import("../auth/api-key-auth.js"));
+  ({ getKernelService } = await import("../services/kernel-service.js"));
+  ({ getJobFacade } = await import("../facades/index.js"));
+  ({ MockFDMAdapter } = await import("@pcc/kernel"));
+  // N104 requires an explicit local identity before DB devices can be installed.
+  // Keep the mock machine these redaction probes exercise, under a configured kernel.
+  app = await withEnv({ KERNEL_CONFIG: JSON.stringify({
+    kernelId: "kernel-n71-runtime",
+    mockMode: true,
+    devices: [{ id: "dev_fdm_001", type: "machine", adapterType: "mock", config: {} }],
+  }) }, async () => (await server.createGateway(0)).app as unknown as FastifyInstance);
+  await app.ready();
+  keyA = seedKey(A);
+  keyB = seedKey(B);
+  kernelId = `kernel-n71-${Date.now().toString(36)}`;
+  deviceId = `dev-${kernelId}`;
+  const k = await inj("POST", "/api/kernels", keyA, { id: kernelId, name: "A's workshop" });
+  expect(k.statusCode, k.body).toBeLessThan(300);
+  const reg = await inj("POST", "/api/devices/register", keyA, {
+    kernelId,
+    id: deviceId,
+    type: "printer",
+    model: "Model X",
+    adapterType: "http",
+    adapterConfig: { host: "10.0.0.5", apiKey: SECRET },
+    capabilities: ["print"],
+  });
+  expect(reg.statusCode, reg.body).toBeLessThan(300);
+  registerBody = reg.body;
+}, 120_000);
+
+afterAll(async () => {
+  await app?.close();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// /api/devices: the stored adapterConfig never leaves
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("N71: stored device configuration never leaves the /api/devices routes", () => {
+  it("[neg] GET /api/devices/:kernelId shows another key no adapterConfig and no credential", async () => {
+    const res = await inj("GET", `/api/devices/${kernelId}`, keyB);
+    expect(res.statusCode).toBe(200);
+    expect(deviceIdsOf(res)).toEqual([deviceId]);
+    expect(res.body).not.toContain(SECRET);
+    expect(res.body).not.toContain("adapterConfig");
+  });
+
+  it("[neg] the kernel's own owner gets the public view too (the config stays on the device)", async () => {
+    // An error body is credential-free too, so the status and the device's identity
+    // come first: without them this test would also pass on a 403/500 (astra, MEDIUM 4).
+    const res = await inj("GET", `/api/devices/${kernelId}`, keyA);
+    expect(res.statusCode).toBe(200);
+    expect(deviceIdsOf(res)).toEqual([deviceId]);
+    expect(res.body).not.toContain(SECRET);
+    expect(res.body).not.toContain("adapterConfig");
+  });
+
+  it("[neg] POST /api/devices/register does not echo the stored adapterConfig", () => {
+    const reg = JSON.parse(registerBody) as { device?: { id?: string } };
+    expect(reg.device?.id).toBe(deviceId);
+    expect(registerBody).not.toContain(SECRET);
+    expect(registerBody).not.toContain("adapterConfig");
+  });
+
+  it("POST /api/devices/register answers with an explicit registration view (exact key set)", () => {
+    const { device } = JSON.parse(registerBody) as { device: Record<string, unknown> };
+    expect(Object.keys(device).sort()).toEqual(REGISTRATION_VIEW_KEYS);
+    expect(device).toMatchObject({
+      id: deviceId,
+      kernelId,
+      type: "printer",
+      model: "Model X",
+      adapterType: "http",
+      status: "idle",
+      capabilities: ["print"],
+    });
+  });
+
+  it("[neg] a column added to the device row later is not published by POST /api/devices/register", async () => {
+    // The repository is made to return a row with a column that does not exist today.
+    // A rest-spread response would publish it; an explicit view cannot.
+    // (A kernel of its own, so the other tests on `kernelId` keep seeing exactly one device.)
+    const ownKernel = `${kernelId}-future`;
+    const made = await inj("POST", "/api/kernels", keyA, { id: ownKernel, name: "A's second workshop" });
+    expect(made.statusCode, made.body).toBeLessThan(300);
+    const kernels = getRepos().kernels;
+    const realInsert = kernels.insertDevice.bind(kernels);
+    const spy = vi
+      .spyOn(kernels, "insertDevice")
+      .mockImplementation((d) => ({ ...realInsert(d), futureColumn: FUTURE }) as never);
+    try {
+      const res = await inj("POST", "/api/devices/register", keyA, {
+        kernelId: ownKernel,
+        id: `dev-future-${ownKernel}`,
+        type: "printer",
+        model: "Model Y",
+        adapterType: "http",
+        adapterConfig: { apiKey: SECRET },
+      });
+      expect(res.statusCode, res.body).toBe(200);
+      const { device } = bodyOf(res);
+      expect(device.id).toBe(`dev-future-${ownKernel}`);
+      expect(Object.keys(device).sort()).toEqual(REGISTRATION_VIEW_KEYS);
+      expect(res.body).not.toContain(FUTURE);
+      expect(res.body).not.toContain(SECRET);
+      expect(res.body).not.toContain("adapterConfig");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("control: the public view keeps what callers use (the same shape as GET /api/kernels/:kernelId/devices)", async () => {
+    const mine = (await inj("GET", `/api/devices/${kernelId}`, keyB)).json() as { devices: Array<Record<string, unknown>> };
+    const pub = (await inj("GET", `/api/kernels/${kernelId}/devices`, keyB)).json() as { devices: Array<Record<string, unknown>> };
+    expect(mine.devices.length).toBe(1);
+    expect(mine.devices).toEqual(pub.devices);
+    expect(mine.devices[0]).toMatchObject({ id: deviceId, type: "printer", model: "Model X", adapterType: "http" });
+  });
+
+  it("control: the stored row still holds the config, for dispatch", () => {
+    const rows = getRepos().kernels.findDevicesByKernel(kernelId) as Array<{ adapterConfig?: string | null }>;
+    expect(String(rows[0]?.adapterConfig ?? "")).toContain(SECRET);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// /api/devices/:deviceId/health: the error channel
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("N71: the device health error channel does not forward credentials", () => {
+  // A machine adapter whose status call fails with a message that quotes the URL it
+  // was configured with, userinfo included (fetch itself does this for URLs that
+  // carry credentials). The in-tree adapters swallow their own errors, but
+  // MachineAdapter.getStatus is allowed to throw and the service forwards the message.
+  const ADAPTER_ERROR = `connect failed for http://u:${SENTINEL}@printer.invalid:5000/api/printer?apikey=${SENTINEL}-q`;
+  const DEVICE = "dev_fdm_001"; // the default mock machine of the gateway's KernelService
+
+  it("[neg] POST /api/devices/:deviceId/health returns a fixed code for an adapter exception, never its text", async () => {
+    // Round 3 (astra pack 83b) supersedes round 2's "still a usable diagnostic" scrub:
+    // astra showed scrubbing can never be complete (free text like "password=..." has
+    // no URL to catch), so the fix is a fixed code, not a better scrub. See the N71
+    // round 3 describe block below for the full astra-pack-83b coverage of this path.
+    const spy = vi.spyOn(MockFDMAdapter.prototype, "getStatus").mockRejectedValue(new Error(ADAPTER_ERROR));
+    try {
+      const res = await inj("POST", `/api/devices/${DEVICE}/health`, keyB);
+      expect(res.statusCode).toBe(200);
+      expect(bodyOf(res)).toEqual({ healthy: false, details: "adapter_error" });
+      expect(res.body).not.toContain(SENTINEL);
+      expect(res.body).not.toContain("printer.invalid"); // not even the location, anymore
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("[neg] KernelService.checkDeviceHealth returns a fixed code for an adapter exception, never its text", async () => {
+    const spy = vi.spyOn(MockFDMAdapter.prototype, "getStatus").mockRejectedValue(new Error(ADAPTER_ERROR));
+    try {
+      const result = await getKernelService().checkDeviceHealth(DEVICE);
+      expect(result).toEqual({ healthy: false, details: "adapter_error" });
+      expect(JSON.stringify(result)).not.toContain(SENTINEL);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("[neg] the facade scrubs details whatever the service returned", async () => {
+    const spy = vi
+      .spyOn(getKernelService(), "checkDeviceHealth")
+      .mockResolvedValue({ healthy: false, details: ADAPTER_ERROR });
+    try {
+      const res = await inj("POST", `/api/devices/${DEVICE}/health`, keyB);
+      expect(res.statusCode).toBe(200);
+      expect(bodyOf(res).healthy).toBe(false);
+      expect(res.body).not.toContain(SENTINEL);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("control: a healthy device still reports its status, and an unknown one is device_not_found", async () => {
+    const ok = bodyOf(await inj("POST", `/api/devices/${DEVICE}/health`, keyB));
+    expect(ok.healthy).toBe(true);
+    expect(ok.details).toBe("idle");
+    const missing = bodyOf(await inj("POST", "/api/devices/dev-n71-missing/health", keyB));
+    expect(missing).toEqual({ healthy: false, details: "device_not_found" });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// /api/setup/detect and /api/setup/validate: server-held configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Values that live in the SERVER's KERNEL_CONFIG; none may appear in any response. */
+const HELD = {
+  octoUserinfo: `${SENTINEL}-octo-userinfo`,
+  octoHost: `${SENTINEL}-octo-host`,
+  octoQuery: `${SENTINEL}-octo-query`,
+  octoApiKey: `${SENTINEL}-octo-apikey`,
+  modbusHost: `${SENTINEL}-modbus-host`,
+  opcuaEndpoint: `${SENTINEL}-opcua-endpoint`,
+  silaUrl: `${SENTINEL}-sila-url`,
+  ippUri: `${SENTINEL}-ipp-uri`,
+  ippBadUserinfo: `${SENTINEL}-ipp-bad-userinfo`,
+  adapterTypeTypo: `${SENTINEL}-adapter-type`,
+  deviceTypeTypo: `${SENTINEL}-device-type`,
+};
+
+/** One device per adapter kind, plus three misconfigured ones (a wrong adapterType, type and ipp uri). */
+const HELD_CONFIG = JSON.stringify({
+  kernelId: "kernel-n71-env",
+  devices: [
+    {
+      id: "dev_octo",
+      type: "machine",
+      adapterType: "octoprint",
+      config: { url: `http://user:${HELD.octoUserinfo}@${HELD.octoHost}.invalid:5000/api?token=${HELD.octoQuery}`, apiKey: HELD.octoApiKey },
+    },
+    { id: "dev_modbus", type: "sensor", adapterType: "modbus", config: { host: `${HELD.modbusHost}.invalid`, port: 502 } },
+    { id: "dev_opcua", type: "machine", adapterType: "opcua", config: { endpoint: `opc.tcp://${HELD.opcuaEndpoint}.invalid:4840` } },
+    { id: "dev_sila", type: "machine", adapterType: "sila", config: { url: `https://${HELD.silaUrl}.invalid` } },
+    { id: "dev_ipp", type: "machine", adapterType: "ipp", config: { uri: `ipp://${HELD.ippUri}.invalid:631/ipp/print` } },
+    { id: "dev_ipp_bad", type: "machine", adapterType: "ipp", config: { uri: `http://user:${HELD.ippBadUserinfo}@printer.invalid/ipp` } },
+    { id: "dev_bad_adapter", type: "machine", adapterType: `http://user:${HELD.adapterTypeTypo}@printer.invalid`, config: {} },
+    { id: "dev_bad_type", type: `http://user:${HELD.deviceTypeTypo}@printer.invalid`, adapterType: "mock", config: {} },
+  ],
+});
+
+type Check = { name: string; status: string; message: string };
+
+describe("N71: GET /api/setup/detect does not return server-held configuration", () => {
+  it("[neg] KERNEL_CONFIG is reported as present, never as its value", async () => {
+    await withEnv({ KERNEL_CONFIG: HELD_CONFIG }, async () => {
+      const res = await inj("GET", "/api/setup/detect", keyB);
+      expect(res.statusCode).toBe(200);
+      const entry = (bodyOf(res).envVars as Array<{ name: string; set: boolean; value?: string }>).find(
+        (v) => v.name === "KERNEL_CONFIG",
+      );
+      expect(entry).toMatchObject({ name: "KERNEL_CONFIG", set: true });
+      expect(entry?.value).toBeUndefined();
+      expectNoLeak(res.body, HELD);
+    });
+  });
+
+  it("[neg] a URL-valued variable does not carry its credentials out", async () => {
+    // Round 3 (astra pack 83b) supersedes round 2's "the location itself is still
+    // useful" scrub-and-keep: astra's remediation for this field is presence-only
+    // (see the dedicated N71 round 3 describe block below for the full X402_FACILITATOR_URL
+    // coverage, apostrophe cases included). No "value" key survives JSON serialization
+    // of an undefined property, so envEntryOf's result carries only name/category/set.
+    const userinfo = `${SENTINEL}-facilitator-userinfo`;
+    const query = `${SENTINEL}-facilitator-query`;
+    await withEnv({ X402_FACILITATOR_URL: `https://svc:${userinfo}@facilitator.invalid/v1?apikey=${query}` }, async () => {
+      const res = await inj("GET", "/api/setup/detect", keyB);
+      expect(res.statusCode).toBe(200);
+      const entry = (bodyOf(res).envVars as Array<{ name: string; set: boolean; value?: string }>).find(
+        (v) => v.name === "X402_FACILITATOR_URL",
+      );
+      expect(entry?.set).toBe(true);
+      expect(entry?.value).toBeUndefined();
+      expectNoLeak(res.body, { userinfo, query });
+    });
+  });
+
+  it("control: a variable that is not a secret still shows its value", async () => {
+    const res = await inj("GET", "/api/setup/detect", keyB);
+    expect(res.statusCode).toBe(200);
+    const nodeEnv = (bodyOf(res).envVars as Array<{ name: string; value?: string }>).find((v) => v.name === "NODE_ENV");
+    expect(nodeEnv?.value).toBe("test");
+  });
+});
+
+describe("N71: POST /api/setup/validate does not echo connection values", () => {
+  it("[neg] validating the server's own KERNEL_CONFIG (no body) names devices and fields, never their values", async () => {
+    await withEnv({ KERNEL_CONFIG: HELD_CONFIG }, async () => {
+      const res = await inj("POST", "/api/setup/validate", keyB, {});
+      expect(res.statusCode).toBe(200);
+      const body = bodyOf(res);
+      // The checks really ran against that config, one branch each ...
+      const byName = new Map((body.checks as Check[]).map((c) => [c.name, c]));
+      expect(byName.get("device:dev_octo:url")?.status).toBe("pass");
+      expect(byName.get("device:dev_modbus:host")?.status).toBe("pass");
+      expect(byName.get("device:dev_opcua:endpoint")?.status).toBe("pass");
+      expect(byName.get("device:dev_sila:url")?.status).toBe("pass");
+      expect(byName.get("device:dev_ipp:uri")?.status).toBe("pass");
+      expect(byName.get("device:dev_ipp_bad:uri")?.status).toBe("fail");
+      expect(byName.get("device:dev_bad_adapter:adapterType")?.status).toBe("fail");
+      expect(byName.get("device:dev_bad_type:type")?.status).toBe("fail");
+      expect(body.valid).toBe(false);
+      // ... and none of the connection values (or misplaced ones) came back.
+      expectNoLeak(res.body, HELD);
+    });
+  });
+
+  it("[neg] a config the caller sends is not echoed back either (one policy, whatever the source)", async () => {
+    const res = await inj("POST", "/api/setup/validate", keyB, { config: HELD_CONFIG });
+    expect(res.statusCode).toBe(200);
+    const body = bodyOf(res);
+    expect((body.checks as Check[]).some((c) => c.name === "device:dev_octo:url" && c.status === "pass")).toBe(true);
+    expectNoLeak(res.body, HELD);
+  });
+
+  // V8's JSON.parse error QUOTES the text it choked on: all of it when the source is
+  // short (under 21 characters), else ten characters either side of the error. So a
+  // value that is not JSON (a key pasted into the wrong variable) comes back whole, and
+  // a stray token next to a secret brings the secret's neighbours with it.
+  const SHORT_SOURCE = `u:${SENTINEL}@h`;
+  const WINDOWED = "N71-KEY";
+  const WINDOWED_SOURCE = `{"kernelId":"k","apiKey": ${WINDOWED}}`;
+
+  const expectUnparseable = (res: LightMyRequestResponse) => {
+    expect(res.statusCode).toBe(200);
+    const body = bodyOf(res);
+    expect(body.valid).toBe(false);
+    expect((body.checks as Check[]).find((c) => c.name === "config_parseable")?.status).toBe("fail");
+    expect(body.errors.length).toBeGreaterThan(0);
+  };
+
+  it("[neg] a JSON parse error does not quote the server's KERNEL_CONFIG (a value that is not JSON)", async () => {
+    await withEnv({ KERNEL_CONFIG: SHORT_SOURCE }, async () => {
+      const res = await inj("POST", "/api/setup/validate", keyB, {});
+      expectUnparseable(res);
+      expect(res.body).not.toContain(SENTINEL);
+    });
+  });
+
+  it("[neg] a JSON parse error does not quote the server's KERNEL_CONFIG (a stray token next to a secret)", async () => {
+    await withEnv({ KERNEL_CONFIG: WINDOWED_SOURCE }, async () => {
+      const res = await inj("POST", "/api/setup/validate", keyB, {});
+      expectUnparseable(res);
+      expect(res.body).not.toContain(WINDOWED);
+    });
+  });
+
+  it("[neg] a JSON parse error does not quote a config the caller sent", async () => {
+    const res = await inj("POST", "/api/setup/validate", keyB, { config: SHORT_SOURCE });
+    expectUnparseable(res);
+    expect(res.body).not.toContain(SENTINEL);
+  });
+
+  it("control: the diagnostics that name a device and a field are kept", async () => {
+    const res = await inj("POST", "/api/setup/validate", keyB, {
+      config: JSON.stringify({
+        kernelId: "kernel-n71-ctl",
+        devices: [
+          { id: "dev_ctl_octo", type: "machine", adapterType: "octoprint", config: { url: "http://printer.invalid:5000" } },
+          { id: "dev_ctl_ipp", type: "machine", adapterType: "ipp", config: {} },
+        ],
+      }),
+    });
+    const body = bodyOf(res);
+    const byName = new Map((body.checks as Check[]).map((c) => [c.name, c]));
+    expect(byName.get("kernel_id")?.message).toContain("kernel-n71-ctl");
+    expect(byName.get("device:dev_ctl_octo:apiKey")).toMatchObject({ status: "warn" });
+    expect(byName.get("device:dev_ctl_octo:apiKey")?.message).toContain("dev_ctl_octo");
+    expect(byName.get("device:dev_ctl_ipp:uri")).toMatchObject({ status: "fail" });
+    expect(byName.get("device:dev_ctl_ipp:uri")?.message).toContain("dev_ctl_ipp");
+    expect(body.valid).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// /api/setup/register-device: the upsert answers with a credential-free view
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("N71: POST /api/setup/register-device returns a credential-free device view", () => {
+  const SETUP_SECRET = `${SENTINEL}-setup-adapter-config`;
+  const REPLACED_SECRET = `${SENTINEL}-setup-adapter-config-replaced`;
+  let setupKernel: string; // A's kernel for these tests
+  let setupDeviceId: string;
+  let createBody: Record<string, any>;
+
+  const setupBody = (extra: Record<string, unknown> = {}) => ({
+    kernelId: setupKernel,
+    deviceId: setupDeviceId,
+    type: "sensor",
+    adapterType: "mock",
+    ...extra,
+  });
+  const storedConfig = () =>
+    String(getRepos().kernels.findDeviceById(setupDeviceId)?.adapterConfig ?? "");
+
+  beforeAll(async () => {
+    setupKernel = `${kernelId}-setup`;
+    setupDeviceId = `dev-setup-${setupKernel}`;
+    const made = await inj("POST", "/api/kernels", keyA, { id: setupKernel, name: "A's setup workshop" });
+    expect(made.statusCode, made.body).toBeLessThan(300);
+    // A registers device D on it with a credential.
+    const res = await inj("POST", "/api/setup/register-device", keyA, {
+      ...setupBody({ model: "Setup Sensor", adapterConfig: { apiKey: SETUP_SECRET } }),
+    });
+    expect(res.statusCode, res.body).toBe(201);
+    createBody = bodyOf(res);
+  });
+
+  it("[neg] the create response (201) names the device and carries no adapterConfig", () => {
+    expect(createBody).toMatchObject({ registered: true, action: "created" });
+    expect(createBody.device).toMatchObject({ id: setupDeviceId, kernelId: setupKernel, type: "sensor", model: "Setup Sensor", adapterType: "mock" });
+    expect(Object.keys(createBody.device).sort()).toEqual(REGISTRATION_VIEW_KEYS);
+    expect(JSON.stringify(createBody)).not.toContain(SETUP_SECRET);
+    expect(JSON.stringify(createBody)).not.toContain("adapterConfig");
+  });
+
+  it("[neg] another key that omits adapterConfig does not get A's stored credential back", async () => {
+    // Ownership of the kernel and device is WP-C's (PR #445). On this branch B's update
+    // is accepted (200); with WP-C's guard it is refused (403). Only the REDACTION is
+    // asserted here: whichever it is, the stored credential must not be in the body.
+    const res = await inj("POST", "/api/setup/register-device", keyB, setupBody());
+    expect([200, 403], res.body).toContain(res.statusCode);
+    expect(res.body).not.toContain(SETUP_SECRET);
+    expect(res.body).not.toContain("adapterConfig");
+    if (res.statusCode === 200) {
+      const body = bodyOf(res);
+      expect(body).toMatchObject({ registered: true, action: "updated" });
+      expect(body.device).toMatchObject({ id: setupDeviceId, kernelId: setupKernel, adapterType: "mock", model: "Setup Sensor" });
+      expect(Object.keys(body.device).sort()).toEqual(REGISTRATION_VIEW_KEYS);
+      // The update really took the "preserve the stored config" path; it is only the response that is redacted.
+      expect(storedConfig()).toContain(SETUP_SECRET);
+    }
+  });
+
+  it("[neg] the owner's own successful update (200) returns the device, not its configuration", async () => {
+    const res = await inj("POST", "/api/setup/register-device", keyA, setupBody({ model: "Setup Sensor v2", adapterConfig: { apiKey: REPLACED_SECRET } }));
+    expect(res.statusCode, res.body).toBe(200);
+    const body = bodyOf(res);
+    expect(body).toMatchObject({ registered: true, action: "updated" });
+    expect(body.device).toMatchObject({ id: setupDeviceId, kernelId: setupKernel, model: "Setup Sensor v2" });
+    expect(Object.keys(body.device).sort()).toEqual(REGISTRATION_VIEW_KEYS);
+    expect(res.body).not.toContain(SETUP_SECRET);
+    expect(res.body).not.toContain(REPLACED_SECRET);
+    expect(res.body).not.toContain("adapterConfig");
+    // ... while the new config is what dispatch will read.
+    expect(storedConfig()).toContain(REPLACED_SECRET);
+  });
+
+  it("[neg] a column added to the device row later is not published, on create or on update", async () => {
+    const kernels = getRepos().kernels;
+    const realInsert = kernels.insertDevice.bind(kernels);
+    const realUpdate = kernels.updateDevice.bind(kernels);
+    const insertSpy = vi.spyOn(kernels, "insertDevice").mockImplementation((d) => ({ ...realInsert(d), futureColumn: FUTURE }) as never);
+    const updateSpy = vi.spyOn(kernels, "updateDevice").mockImplementation((id, d) => ({ ...realUpdate(id, d), futureColumn: FUTURE }) as never);
+    try {
+      const futureId = `dev-setup-future-${setupKernel}`;
+      const created = await inj("POST", "/api/setup/register-device", keyA, setupBody({ deviceId: futureId, adapterConfig: { apiKey: SETUP_SECRET } }));
+      expect(created.statusCode, created.body).toBe(201);
+      expect(bodyOf(created).device.id).toBe(futureId);
+      expect(Object.keys(bodyOf(created).device).sort()).toEqual(REGISTRATION_VIEW_KEYS);
+      expect(created.body).not.toContain(FUTURE);
+
+      const updated = await inj("POST", "/api/setup/register-device", keyA, setupBody({ deviceId: futureId }));
+      expect(updated.statusCode, updated.body).toBe(200);
+      expect(bodyOf(updated).device.id).toBe(futureId);
+      expect(Object.keys(bodyOf(updated).device).sort()).toEqual(REGISTRATION_VIEW_KEYS);
+      expect(updated.body).not.toContain(FUTURE);
+      expect(updated.body).not.toContain(SETUP_SECRET);
+    } finally {
+      insertSpy.mockRestore();
+      updateSpy.mockRestore();
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// /api/setup/generate-config: unchanged on purpose
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("N71: POST /api/setup/generate-config is unchanged (it returns the caller's own input)", () => {
+  it("[neg] an omitted kernelId is generated independently of the server environment", async () => {
+    const serverOnly = SENTINEL.toLowerCase().replace(/[^a-z0-9]/g, "");
+    await withEnv({ KERNEL_ID: serverOnly }, async () => {
+      const res = await inj("POST", "/api/setup/generate-config", keyB, {
+        devices: [{ name: "Printer", type: "machine", adapterType: "mock" }],
+      });
+      expect(res.statusCode).toBe(200);
+      const body = bodyOf(res);
+      expect(body.config.kernelId).toMatch(/^kernel_[0-9a-f-]{36}$/);
+      expect(res.body).not.toContain(serverOnly);
+      expect(body.configJson).not.toContain(serverOnly);
+      expect(body.envLine).not.toContain(serverOnly);
+    });
+  });
+
+  it("control: a credential the caller sends comes back in what it generated, and nothing stored does", async () => {
+    const mine = `${SENTINEL}-caller-supplied`;
+    const res = await inj("POST", "/api/setup/generate-config", keyB, {
+      kernelId: "kernel-n71-gen",
+      devices: [{ name: "My Printer", type: "machine", adapterType: "octoprint", url: "http://printer.invalid:5000", apiKey: mine }],
+    });
+    expect(res.statusCode).toBe(200);
+    const body = bodyOf(res);
+    expect(body.config.devices[0].config.apiKey).toBe(mine);
+    expect(body.configJson).toContain(mine);
+    expect(body.envLine).toContain(mine);
+    // It is not a window onto anything the gateway stores.
+    expect(res.body).not.toContain(SECRET);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Round 3: astra's verdict on pack 83b (DO-NOT-SHIP at b7106adc)
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Round 2 put a REGEX (redactUrlCredentials) in front of the values that leave the gateway. The
+// regex treated an apostrophe as a delimiter, and an apostrophe is legal in URI userinfo, query and
+// fragment, so `http://u:pa'ss@host.invalid/x` came back unchanged. It guarded /detect's
+// non-sensitive variables and the text of a failed health check. Beyond it, the same verdict listed
+// the other places a configuration value or an exception message still reached a response.
+//
+// The rule these tests pin: a response carries a FIXED code, an enumerated value, or "present"
+// (set: true); never a configuration value and never exception text, however well scrubbed.
+//   - /detect and /setup/status: presence only, or a value from a fixed set (a network, a storage
+//     type, a port that parses as an integer).
+//   - /validate: an identifier is echoed only when it is a plain identifier ([invalid id] otherwise).
+//   - health, the setup catch blocks, BaseFacade: a fixed code. The detail is logged, scrubbed.
+//   - a device's emitter manifest (emits[].params, via) is a public matching artifact: a manifest
+//     that carries credentials is refused at registration (400 invalid_emitter_manifest).
+//
+// Every disclosure test embeds the synthetic sentinel; none of them uses a real credential.
+
+const REDACTED_MARK = "[redacted]";
+const INVALID_ID = "[invalid id]";
+
+type EnvEntry = { name: string; category: string; set: boolean; value?: string };
+const envEntryOf = (res: LightMyRequestResponse, name: string) =>
+  (bodyOf(res).envVars as EnvEntry[]).find((v) => v.name === name);
+const categoryOf = (res: LightMyRequestResponse, name: string) =>
+  (bodyOf(res).categories as Array<{ name: string; status: string; details: string }>).find((c) => c.name === name);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Health: a fixed code, never exception text
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("N71 round 3 (astra pack 83b): the health response carries a fixed code, never exception text", () => {
+  const DEVICE = "dev_fdm_001"; // the default mock machine of the gateway's KernelService
+  const ADAPTER_ERROR_BODY = { healthy: false, details: "adapter_error" };
+
+  /** What an adapter's exception can say. The first three are valid URL characters (astra's V8 table); the rest have no URL at all. */
+  const ADAPTER_ERRORS: Array<[string, string]> = [
+    ["an apostrophe in a URL's password", `connect failed for http://u:pa'${SENTINEL}@printer.invalid:5000/api/printer`],
+    ["an apostrophe in a URL's query value", `GET https://printer.invalid/v1/status?token=abc'${SENTINEL} failed`],
+    ["an apostrophe in a URL's fragment", `GET https://printer.invalid/v1/status#abc'${SENTINEL} failed`],
+    ["a credential outside any URL (astra: survives both helpers)", `authentication failed: password=${SENTINEL}`],
+    ["a credential in a header line", `401 from upstream, x-api-key: ${SENTINEL}-key`],
+  ];
+
+  async function whileAdapterFails<T>(failure: unknown, fn: () => Promise<T>): Promise<T> {
+    const spy = vi.spyOn(MockFDMAdapter.prototype, "getStatus").mockRejectedValue(failure);
+    try {
+      return await fn();
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  it.each(ADAPTER_ERRORS)("[neg] POST /api/devices/:deviceId/health, adapter throws with %s", async (_what, text) => {
+    await whileAdapterFails(new Error(text), async () => {
+      const res = await inj("POST", `/api/devices/${DEVICE}/health`, keyB);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).not.toContain(SENTINEL);
+      expect(bodyOf(res)).toEqual(ADAPTER_ERROR_BODY);
+    });
+  });
+
+  it("[neg] KernelService.checkDeviceHealth returns the fixed code for an Error and for a thrown string", async () => {
+    for (const failure of [new Error(ADAPTER_ERRORS[0][1]), `thrown string with password=${SENTINEL}`]) {
+      await whileAdapterFails(failure, async () => {
+        const result = await getKernelService().checkDeviceHealth(DEVICE);
+        expect(JSON.stringify(result)).not.toContain(SENTINEL);
+        expect(result).toEqual(ADAPTER_ERROR_BODY);
+      });
+    }
+  });
+
+  it.each<[string, unknown]>([
+    ["an object", { nested: `${SENTINEL}-object` }],
+    ["an array", [`${SENTINEL}-array`]],
+    ["free text", `${SENTINEL}-free text, not a status`],
+    ["a number", 42],
+  ])("[neg] the facade drops a service `details` that is not a fixed code: %s", async (_what, details) => {
+    const spy = vi.spyOn(getKernelService(), "checkDeviceHealth").mockResolvedValue({ healthy: true, details } as never);
+    try {
+      const res = await inj("POST", `/api/devices/${DEVICE}/health`, keyB);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).not.toContain(SENTINEL);
+      expect(bodyOf(res)).toEqual({ healthy: true, details: null });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it.each(["idle", "busy", "maintenance", "error", "offline"])("control: the adapter's own status %s still reaches the response", async (status) => {
+    const spy = vi.spyOn(MockFDMAdapter.prototype, "getStatus").mockResolvedValue(status as never);
+    try {
+      const body = bodyOf(await inj("POST", `/api/devices/${DEVICE}/health`, keyB));
+      expect(body).toEqual({ healthy: status !== "error" && status !== "offline", details: status });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C2: the health log's deviceId is never raw, even when it is credential-shaped
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("N71 round 6 (astra pack 83e, C2): console.warn's deviceId is validated, not interpolated raw", () => {
+  // Astra: "construct the existing throwing adapter with device ID
+  // pcc_live_N71-SENTINEL, call checkDeviceHealth(), and inspect console.warn; the
+  // sentinel is emitted by the first argument. The current test varies only the
+  // exception message and uses a fixed clean device ID." — this device id is
+  // deliberately pcc_live_-shaped (credential-shaped), unlike the existing health-log
+  // tests above, which all use the fixed DEVICE = "dev_fdm_001".
+  let healthKernel: string;
+  const sentinelDeviceId = `pcc_live_${SENTINEL}-health-check`;
+
+  beforeAll(async () => {
+    healthKernel = getKernelService().kernelId;
+    const made = await inj("POST", "/api/kernels", keyA, { id: healthKernel, name: "A's r6 health workshop" });
+    expect(made.statusCode, made.body).toBeLessThan(300);
+    const reg = await inj("POST", "/api/setup/register-device", keyA, {
+      kernelId: healthKernel,
+      deviceId: sentinelDeviceId,
+      type: "machine",
+      adapterType: "mock",
+    });
+    expect(reg.statusCode, reg.body).toBe(201);
+  });
+
+  it("[neg] console.warn never carries the credential-shaped deviceId, nor the adapter's thrown message", async () => {
+    const spy = vi.spyOn(MockFDMAdapter.prototype, "getStatus").mockRejectedValue(new Error(`password=${SENTINEL}`));
+    const warnSpy = vi.spyOn(console, "warn");
+    try {
+      const result = await getKernelService().checkDeviceHealth(sentinelDeviceId);
+      expect(JSON.stringify(result)).not.toContain(SENTINEL);
+      expect(warnSpy).toHaveBeenCalled();
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain(SENTINEL);
+    } finally {
+      spy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// /api/setup/detect: URL-valued variables are present or not, never a value
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("N71 round 3 (astra pack 83b): GET /api/setup/detect reports URL-valued variables as present, never as a value", () => {
+  /** [what, the variable's value, a fragment that must not come back]. */
+  const URL_VALUES: Array<[string, string, string]> = [
+    ["astra's reproduction, verbatim", "http://u:pa'ss@host.invalid/x", "pa'ss"],
+    ["an apostrophe in the password", `http://u:pa'${SENTINEL}@host.invalid/x`, SENTINEL],
+    ["an apostrophe in the query", `https://host.invalid/?token=abc'${SENTINEL}`, SENTINEL],
+    ["an apostrophe in the fragment", `https://host.invalid/#abc'${SENTINEL}`, SENTINEL],
+    ["a double quote in the password", `http://u:pa"${SENTINEL}@host.invalid/x`, SENTINEL],
+    ["ordinary credentials", `https://svc:${SENTINEL}@facilitator.invalid/v1?apikey=${SENTINEL}-q`, SENTINEL],
+    ["no credentials at all", "https://facilitator.invalid/v1", "facilitator.invalid"],
+  ];
+
+  it.each(URL_VALUES)("[neg] X402_FACILITATOR_URL with %s is {set: true} and nothing more", async (_what, value, leak) => {
+    await withEnv({ X402_FACILITATOR_URL: value }, async () => {
+      const res = await inj("GET", "/api/setup/detect", keyB);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).not.toContain(leak);
+      expect(envEntryOf(res, "X402_FACILITATOR_URL")).toEqual({ name: "X402_FACILITATOR_URL", category: "payments", set: true });
+    });
+  });
+
+  it("control: a variable that is not set is reported as not set", async () => {
+    await withEnv({ X402_FACILITATOR_URL: undefined }, async () => {
+      const entry = envEntryOf(await inj("GET", "/api/setup/detect", keyB), "X402_FACILITATOR_URL");
+      expect(entry).toEqual({ name: "X402_FACILITATOR_URL", category: "payments", set: false });
+    });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// /api/setup/detect and /api/setup/status: network, storage, port and account
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("N71 round 3 (astra pack 83b): /api/setup/detect and /api/setup/status do not echo environment values", () => {
+  // A credential-bearing URL (or a bare token) in a variable that should hold a name, a type, a port or
+  // an address: what an operator pastes into the wrong variable. None of it may come back.
+  const MISPLACED = {
+    PCC_NETWORK: `https://u:${SENTINEL}-net@rpc.invalid/?apikey=${SENTINEL}-netq`,
+    EVIDENCE_STORAGE: `http://u:pa'${SENTINEL}-store@storage.invalid`,
+    PORT: `http://u:${SENTINEL}-port@host.invalid:8080`,
+    STARKNET_ACCOUNT_ADDRESS: `${SENTINEL}-account`,
+    ESCROW_CONTRACT_ADDRESS: `${SENTINEL}-escrow`,
+    NODE_ENV: `${SENTINEL}-node-env`,
+    PCC_GATEWAY_PRIVATE_KEY: `${SENTINEL}-gateway-key`,
+  };
+
+  it("[neg] /detect: network, storage type and account address are withheld, and the booleans keep their meaning", async () => {
+    await withEnv(MISPLACED, async () => {
+      const res = await inj("GET", "/api/setup/detect", keyB);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).not.toContain(SENTINEL);
+      const body = bodyOf(res);
+      expect(body.chain).toEqual({ connected: true, network: REDACTED_MARK });
+      expect(body.storage).toEqual({ type: REDACTED_MARK, configured: false });
+      expect(body.identity).toEqual({ configured: true, accountAddress: REDACTED_MARK });
+      // Every variable is still listed as set, and none carries a value.
+      for (const name of ["PCC_NETWORK", "EVIDENCE_STORAGE", "PORT", "STARKNET_ACCOUNT_ADDRESS", "ESCROW_CONTRACT_ADDRESS", "NODE_ENV"]) {
+        const entry = envEntryOf(res, name);
+        expect(entry?.set, name).toBe(true);
+        expect(entry?.value, name).toBeUndefined();
+      }
+    });
+  });
+
+  it("control: /detect still names a network and a storage type from the fixed sets, and a port that is a number", async () => {
+    await withEnv({ PCC_NETWORK: "base-sepolia", EVIDENCE_STORAGE: "helia", PORT: "4321", NODE_ENV: "test", STARKNET_ACCOUNT_ADDRESS: undefined }, async () => {
+      const res = await inj("GET", "/api/setup/detect", keyB);
+      const body = bodyOf(res);
+      expect(body.chain.network).toBe("base-sepolia");
+      expect(body.storage).toEqual({ type: "helia", configured: true });
+      expect(body.identity).toEqual({ configured: false, accountAddress: null });
+      expect(envEntryOf(res, "PCC_NETWORK")?.value).toBe("base-sepolia");
+      expect(envEntryOf(res, "PORT")?.value).toBe("4321");
+      expect(envEntryOf(res, "NODE_ENV")?.value).toBe("test");
+    });
+  });
+
+  it("control: /detect with nothing set reports the defaults", async () => {
+    await withEnv({ PCC_NETWORK: undefined, EVIDENCE_STORAGE: undefined, STARKNET_ACCOUNT_ADDRESS: undefined }, async () => {
+      const body = bodyOf(await inj("GET", "/api/setup/detect", keyB));
+      expect(body.chain).toEqual({ connected: false, network: null });
+      expect(body.storage).toEqual({ type: "local", configured: true });
+    });
+  });
+
+  it("[neg] /status: port, network, storage type and account are withheld, and the categories keep their meaning", async () => {
+    await withEnv(MISPLACED, async () => {
+      const res = await inj("GET", "/api/setup/status", keyB);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).not.toContain(SENTINEL);
+      expect(categoryOf(res, "gateway")).toMatchObject({ status: "ready", details: `Gateway running on port ${REDACTED_MARK}` });
+      expect(categoryOf(res, "chain")).toMatchObject({ status: "ready", details: `Chain: ${REDACTED_MARK}, escrow configured` });
+      expect(categoryOf(res, "storage")).toMatchObject({ status: "partial", details: `Unknown storage type: ${REDACTED_MARK}` });
+      expect(categoryOf(res, "identity")?.status).toBe("ready");
+    });
+  });
+
+  it("control: /status still names a port that is a number, a network and a storage type from the fixed sets", async () => {
+    await withEnv(
+      {
+        PORT: "4321",
+        PCC_NETWORK: "base-sepolia",
+        PCC_GATEWAY_PRIVATE_KEY: `${SENTINEL}-gateway-key`,
+        ESCROW_CONTRACT_ADDRESS: `0x${"ab".repeat(20)}`,
+        EVIDENCE_STORAGE: "helia",
+        STARKNET_ACCOUNT_ADDRESS: undefined,
+      },
+      async () => {
+        const res = await inj("GET", "/api/setup/status", keyB);
+        expect(categoryOf(res, "gateway")?.details).toBe("Gateway running on port 4321");
+        expect(categoryOf(res, "chain")).toMatchObject({ status: "ready", details: "Chain: base-sepolia, escrow configured" });
+        expect(categoryOf(res, "storage")).toMatchObject({ status: "ready", details: "Evidence storage: helia" });
+        expect(categoryOf(res, "identity")?.status).toBe("unconfigured");
+      },
+    );
+  });
+
+  it("control: /status with no PORT set says 3200", async () => {
+    await withEnv({ PORT: undefined }, async () => {
+      expect(categoryOf(await inj("GET", "/api/setup/status", keyB), "gateway")?.details).toBe("Gateway running on port 3200");
+    });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// /api/setup/validate: identifiers
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("N71 round 3 (astra pack 83b): POST /api/setup/validate echoes an identifier only when it is a plain identifier", () => {
+  /** Identifiers a misconfigured KERNEL_CONFIG can hold; one per branch of the validator. */
+  const IDS = {
+    kernel: `http://u:${SENTINEL}-kernel@h.invalid/x`,
+    octoprint: `https://u:${SENTINEL}-octo@h.invalid/'q`,
+    modbus: `ftp://u:${SENTINEL}-modbus@h.invalid`,
+    opcua: `opc.tcp://u:pa'${SENTINEL}-opcua@h.invalid:4840`,
+    sila: `x'${SENTINEL}-sila`,
+    ipp: `ipp://u:${SENTINEL}-ipp@h.invalid`,
+    mock: `sk-${SENTINEL}-0123456789`, // an identifier-shaped string that is also a vendor key shape
+    badType: `http://u:${SENTINEL}-bad-type@h.invalid`,
+    badAdapter: `http://u:${SENTINEL}-bad-adapter@h.invalid`,
+  };
+
+  const CONFIG = JSON.stringify({
+    kernelId: IDS.kernel,
+    devices: [
+      { id: IDS.octoprint, type: "machine", adapterType: "octoprint", config: { url: "http://printer.invalid" } },
+      { id: IDS.modbus, type: "sensor", adapterType: "modbus", config: {} },
+      { id: IDS.opcua, type: "machine", adapterType: "opcua", config: {} },
+      { id: IDS.sila, type: "machine", adapterType: "sila", config: {} },
+      { id: IDS.ipp, type: "machine", adapterType: "ipp", config: {} },
+      { id: IDS.mock, type: "machine", adapterType: "mock", config: {} },
+      { id: IDS.badType, type: "bogus", adapterType: "mock", config: {} },
+      { id: IDS.badAdapter, type: "machine", adapterType: "bogus", config: {} },
+    ],
+  });
+
+  it("[neg] no identifier from the config comes back (names, messages, errors, warnings), and every device was still checked", async () => {
+    const res = await inj("POST", "/api/setup/validate", keyB, { config: CONFIG });
+    expect(res.statusCode).toBe(200);
+    expectNoLeak(res.body, IDS);
+    expect(res.body).not.toContain(SENTINEL);
+    const body = bodyOf(res);
+    // The validator really walked every branch (a leak-free body must not be an empty one) ...
+    const checkNames = (body.checks as Check[]).map((c) => c.name);
+    expect(checkNames.filter((n) => n.endsWith(":url")).length).toBeGreaterThanOrEqual(2); // octoprint + sila
+    expect(checkNames.some((n) => n.endsWith(":uri"))).toBe(true); // ipp
+    expect(checkNames.some((n) => n.endsWith(":host"))).toBe(true); // modbus
+    expect(checkNames.some((n) => n.endsWith(":endpoint"))).toBe(true); // opcua
+    expect(checkNames.some((n) => n.endsWith(":type"))).toBe(true);
+    expect(checkNames.some((n) => n.endsWith(":adapterType"))).toBe(true);
+    expect(body.valid).toBe(false);
+    // ... and says that an identifier was withheld.
+    expect(res.body).toContain(INVALID_ID);
+  });
+
+  it("[neg] the same, when the server validates its own KERNEL_CONFIG", async () => {
+    await withEnv({ KERNEL_CONFIG: CONFIG }, async () => {
+      const res = await inj("POST", "/api/setup/validate", keyB, {});
+      expect(res.statusCode).toBe(200);
+      expectNoLeak(res.body, IDS);
+    });
+  });
+
+  it("[neg] an identifier that is not a string is not echoed either (an array stringifies to its contents)", async () => {
+    const res = await inj("POST", "/api/setup/validate", keyB, {
+      config: JSON.stringify({
+        kernelId: [SENTINEL],
+        devices: [{ id: [`${SENTINEL}-device`], type: "machine", adapterType: "ipp", config: {} }],
+      }),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain(SENTINEL);
+    expect(res.body).toContain(INVALID_ID);
+  });
+
+  it("control: plain identifiers are echoed, so a device can still be told from another", async () => {
+    const res = await inj("POST", "/api/setup/validate", keyB, {
+      config: JSON.stringify({
+        kernelId: "kernel_ctl-3",
+        devices: [
+          { id: "dev_a-1", type: "machine", adapterType: "ipp", config: {} },
+          { id: "dev_b-2", type: "machine", adapterType: "bogus", config: {} },
+        ],
+      }),
+    });
+    const body = bodyOf(res);
+    const byName = new Map((body.checks as Check[]).map((c) => [c.name, c]));
+    expect(byName.get("kernel_id")?.message).toBe("kernelId: kernel_ctl-3");
+    expect(byName.get("device:dev_a-1:uri")?.message).toContain('"dev_a-1"');
+    expect(byName.get("device:dev_b-2:adapterType")?.message).toContain('"dev_b-2"');
+    expect(body.errors).toContain("Device dev_b-2: invalid adapterType");
+    expect(res.body).not.toContain(INVALID_ID);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The setup catch blocks
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("N71 round 3 (astra pack 83b): the setup catch blocks answer with fixed codes", () => {
+  const THROWN = `failed near http://u:pa'${SENTINEL}@db.invalid/x password=${SENTINEL}-pw`;
+  let catchKernel: string;
+
+  beforeAll(async () => {
+    catchKernel = `${kernelId}-catch`;
+    const made = await inj("POST", "/api/kernels", keyA, { id: catchKernel, name: "A's catch workshop" });
+    expect(made.statusCode, made.body).toBeLessThan(300);
+  });
+
+  it("[neg] POST /api/setup/register-device: an exception from the repository is not returned, NOR logged", async () => {
+    const kernels = getRepos().kernels;
+    const spy = vi.spyOn(kernels, "insertDevice").mockImplementation(() => {
+      throw new Error(THROWN);
+    });
+    try {
+      // N71 round 6 (astra pack 83e, C1, 2nd sink): the request logger is itself a
+      // sink — req.log.error used to carry err.message verbatim ("insertDevice()
+      // throwing Error('password=...') places the sentinel in the log even though the
+      // HTTP response is fixed"). Captured via captureAppLog (see its doc comment).
+      const { result: res, lines } = await captureAppLog(() =>
+        inj("POST", "/api/setup/register-device", keyA, {
+          kernelId: catchKernel,
+          deviceId: `dev-catch-${catchKernel}`,
+          type: "sensor",
+          adapterType: "mock",
+        }),
+      );
+      expect(res.statusCode).toBe(500);
+      expect(res.body).not.toContain(SENTINEL);
+      // toMatchObject, not toEqual: the gateway's onSend hook decorates every 5xx
+      // JSON body with a report_hint block (traceId, how-to-report), same as the
+      // sibling test-job assertion below pins it.
+      expect(bodyOf(res)).toMatchObject({ error: "upsert_failed", message: "Device registration failed" });
+      // ...and NOTHING else but that decoration: no exception text or other field rides along.
+      expect(Object.keys(bodyOf(res) as Record<string, unknown>).sort()).toEqual(["error", "message", "report_hint"]);
+      expect(lines.some((l) => l.includes("upsert failed"))).toBe(true);
+      expect(lines.join("\n")).not.toContain(SENTINEL);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("[neg] POST /api/setup/register-device: the kernel-service refresh-catch logger never carries the thrown message or a credential-shaped deviceId", async () => {
+    // astra's C1 (the 1st sink, setup.ts's refresh catch) logs {err: msg, deviceId} —
+    // BOTH can be attacker/operator text: the thrown message, and the deviceId the
+    // caller just registered with. The sentinel id is ALSO pcc_live_-shaped on purpose,
+    // so this one test covers both the dependency-text and the caller-id angle at once.
+    const sentinelDeviceId = `pcc_live_${SENTINEL}-refresh-catch`;
+    const refreshSpy = vi.spyOn(getKernelService(), "refreshDeviceFromDb").mockImplementation(() => {
+      throw new Error(`password=${SENTINEL}`);
+    });
+    try {
+      const { result: res, lines } = await captureAppLog(() =>
+        inj("POST", "/api/setup/register-device", keyA, {
+          kernelId: catchKernel,
+          deviceId: sentinelDeviceId,
+          type: "sensor",
+          adapterType: "mock",
+        }),
+      );
+      // The refresh failure is explicitly non-fatal — registration itself still succeeds.
+      // The response legitimately echoes the caller's OWN deviceId back (same
+      // caller's-own-input philosophy as generate-config, below) — that is not a leak,
+      // so only the LOGGED output is asserted sentinel-free here, not the response.
+      expect(res.statusCode, res.body).toBe(201);
+      expect(lines.some((l) => l.includes("kernel-service refresh failed"))).toBe(true);
+      expect(lines.join("\n")).not.toContain(SENTINEL);
+    } finally {
+      refreshSpy.mockRestore();
+    }
+  });
+
+  it("[neg] POST /api/setup/test-job: an exception from the job submission is not returned, NOR logged", async () => {
+    // Reach the submission catch through the owner, device, explicit-local-identity
+    // and clear-stop gates, so every original response/log assertion exercises it.
+    const localKernelId = getKernelService().kernelId;
+    getRepos().kernels.insertDevice({
+      id: "dev_fdm_001", kernelId: localKernelId, type: "machine", model: "Mock printer",
+      firmware: "1", status: "idle", contributesToCapabilities: [],
+      lastUpdated: new Date().toISOString(), adapterType: "mock",
+    });
+    const spy = vi.spyOn(getKernelService(), "submitJob").mockRejectedValue(new Error(THROWN));
+    const admin = randomUUID();
+    try {
+      const { result: res, lines } = await withEnv({ PCC_ADMIN_KEY: admin }, () => captureAppLog(() =>
+        inj("POST", "/api/setup/test-job", keyA, { kernelId: localKernelId, deviceId: "dev_fdm_001" }, { "x-admin-key": admin }),
+      ));
+      expect(res.statusCode).toBe(500);
+      expect(res.body).not.toContain(SENTINEL);
+      const body = bodyOf(res);
+      expect(body).toMatchObject({ error: "job_submission_failed", message: "Test job submission failed" });
+      expect(typeof body.jobId).toBe("string"); // the rest of the shape is unchanged
+      expect(typeof body.duration).toBe("number");
+      // N71 round 6: the scanner's "every other site, the same way" extends this fixed-
+      // code-never-text treatment to this catch too, not just astra's two named sites.
+      expect(lines.some((l) => l.includes("test-job submission failed"))).toBe(true);
+      expect(lines.join("\n")).not.toContain(SENTINEL);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("[neg] the outer test-job catch contains a repository read failure", async () => {
+    const spy = vi.spyOn(getRepos().kernels, "findById").mockImplementation(() => { throw new TypeError(THROWN); });
+    try {
+      const { result: res, lines } = await captureAppLog(() =>
+        inj("POST", "/api/setup/test-job", keyA, { kernelId, deviceId }),
+      );
+      expect(spy).toHaveBeenCalled();
+      expect(res.statusCode).toBe(500);
+      expect(bodyOf(res)).toEqual({ error: "test_job_error", message: "Test job failed", ran: false, passed: false, report_hint: expect.any(Object) });
+      expect(res.body).not.toContain(THROWN);
+      expect(res.body).not.toContain(SENTINEL);
+      const logs = lines.map((line) => JSON.parse(line)).filter((line) => line.code === "setup_test_job_failed");
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toMatchObject({ errorClass: "TypeError", msg: "setup/test-job failed" });
+      expect(lines.join("\n")).not.toContain(THROWN);
+      expect(lines.join("\n")).not.toContain(SENTINEL);
+    } finally { spy.mockRestore(); }
+  });
+
+  it("[neg] the outer test-job catch contains a completion-processing failure", async () => {
+    const svc = getKernelService();
+    const localKernelId = svc.kernelId;
+    const submit = vi.spyOn(svc, "submitJob").mockResolvedValue({ jobId: "completion-job", deviceId: "dev_fdm_001", status: "running" });
+    const status = vi.spyOn(svc, "getJobStatus").mockResolvedValue({ jobId: "completion-job", status: "completed" });
+    const completion = vi.spyOn(svc, "jobRanSimulated").mockImplementation(() => { throw new RangeError(THROWN); });
+    const findDevice = vi.spyOn(getRepos().kernels, "findDeviceById");
+    findDevice.mockReturnValue({ id: "dev_fdm_001", kernelId: localKernelId, type: "machine", adapterType: "generic-http" } as never);
+    const admin = randomUUID();
+    try {
+      const { result: res, lines } = await withEnv({ PCC_ADMIN_KEY: admin }, () => captureAppLog(() =>
+        inj("POST", "/api/setup/test-job", keyA, { kernelId: localKernelId, deviceId: "dev_fdm_001" }, { "x-admin-key": admin }),
+      ));
+      expect(submit).toHaveBeenCalledOnce();
+      expect(status).toHaveBeenCalled();
+      expect(completion).toHaveBeenCalledOnce();
+      expect(res.statusCode).toBe(500);
+      expect(bodyOf(res)).toEqual({ error: "test_job_error", message: "Test job failed", ran: false, passed: false, report_hint: expect.any(Object) });
+      expect(res.body).not.toContain(THROWN);
+      expect(res.body).not.toContain(SENTINEL);
+      expect(lines.map((line) => JSON.parse(line))).toContainEqual(expect.objectContaining({ code: "setup_test_job_failed", errorClass: "RangeError" }));
+      expect(lines.join("\n")).not.toContain(THROWN);
+      expect(lines.join("\n")).not.toContain(SENTINEL);
+    } finally {
+      submit.mockRestore(); status.mockRestore(); completion.mockRestore(); findDevice.mockRestore();
+    }
+  });
+});
+
+describe("N71 round 8: analytics capture policy", () => {
+  async function enableAnalytics() {
+    const service = await import("../services/posthog-service.js");
+    analyticsConstruct.mockClear();
+    await withEnv({ POSTHOG_API_KEY: SENTINEL }, async () => {
+      service.initPostHog();
+      await vi.waitFor(() => expect(analyticsConstruct).toHaveBeenCalledOnce());
+    });
+    analyticsCapture.mockClear();
+    return service;
+  }
+
+  it("[neg] the remote boundary formats declared fields and omits undeclared properties", async () => {
+    const service = await enableAnalytics();
+    service.trackServerEvent("job_submitted", {
+      kernelId: `pcc_live_${SENTINEL}`, model: SENTINEL, unexpected: SENTINEL,
+      operatorAddress: `pcc_live_${SENTINEL}`,
+      external: true, reason: "not_local", capabilitiesRegistered: 2, assuranceTier: SENTINEL,
+    }, `pcc_live_${SENTINEL}`);
+    expect(analyticsCapture).toHaveBeenCalledOnce();
+    expect(analyticsCapture).toHaveBeenCalledWith({
+      event: "job_submitted", distinctId: safeServerEventDistinctId(`pcc_live_${SENTINEL}`),
+      properties: { kernelId: "[invalid id]", operatorAddress: "[invalid id]", external: true, reason: "not_local", capabilitiesRegistered: 2, assuranceTier: null, source: "gateway", environment: "test" },
+    });
+    expect(analyticsCapture.mock.calls[0][0].distinctId).toMatch(/^h:[0-9a-f]{16}$/);
+    expect(JSON.stringify(analyticsCapture.mock.calls)).not.toContain(SENTINEL);
+  });
+
+  it("[neg] job.facade submission reaches capture with formatted properties", async () => {
+    await enableAnalytics();
+    const result = await getJobFacade().submit({
+      jobId: `analytics-job-${++seq}`, stepId: "analytics-step", kernelId,
+      capabilityId: `pcc_live_${SENTINEL}`, queueOnly: true,
+    }, "none", `pcc_live_${SENTINEL}`);
+    expect(result.success).toBe(true);
+    const captured = analyticsCapture.mock.calls.map(([event]) => event).filter((event) => event.event === "job_submitted");
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toEqual({
+      event: "job_submitted", distinctId: safeServerEventDistinctId(`pcc_live_${SENTINEL}`),
+      properties: { kernelId, capabilityType: "[invalid id]", external: true, reason: "queue_only", source: "gateway", environment: "test" },
+    });
+    expect(captured[0].distinctId).toMatch(/^h:[0-9a-f]{16}$/);
+    expect(JSON.stringify(captured)).not.toContain(SENTINEL);
+  });
+
+  it("[neg] device registration reaches capture without model text or raw identifiers", async () => {
+    await enableAnalytics();
+    const res = await inj("POST", "/api/setup/register-device", keyA, {
+      kernelId, deviceId: `pcc_live_${SENTINEL}`, type: "sensor", adapterType: "mock", model: SENTINEL,
+    });
+    expect(res.statusCode).toBe(201);
+    const captured = analyticsCapture.mock.calls.map(([event]) => event).filter((event) => event.event === "device_registered");
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toEqual({
+      event: "device_registered", distinctId: safeServerEventDistinctId(A),
+      properties: { kernelId, deviceId: "[invalid id]", type: "sensor", adapterType: "mock", action: "created", capabilitiesRegistered: 0, source: "gateway", environment: "test" },
+    });
+    expect(captured[0].distinctId).toMatch(/^h:[0-9a-f]{16}$/);
+    expect(JSON.stringify(captured)).not.toContain(SENTINEL);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BaseFacade: unexpected exceptions
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("N71 round 3 (astra pack 83b): an unexpected exception inside a facade does not reach the response", () => {
+  const THROWN = `database trouble near http://u:pa'${SENTINEL}@db.invalid/x`;
+
+  it("[neg] an unexpected exception answers with the generic internal error", async () => {
+    const kernels = getRepos().kernels;
+    const spy = vi.spyOn(kernels, "findDevicesByKernel").mockImplementation(() => {
+      throw new Error(THROWN);
+    });
+    try {
+      const res = await inj("GET", `/api/devices/${kernelId}`, keyB);
+      expect(res.statusCode).toBe(500);
+      expect(res.body).not.toContain(SENTINEL);
+      expect(bodyOf(res)).toMatchObject({ error: "INTERNAL_ERROR", message: "internal_error" });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("[neg] a transient failure (an RPC URL with a key in it) answers with the transient code and no text", async () => {
+    const kernels = getRepos().kernels;
+    const spy = vi.spyOn(kernels, "findDevicesByKernel").mockImplementation(() => {
+      throw new Error(`fetch failed: https://rpc.invalid/v2/${SENTINEL}-rpc-key`);
+    });
+    try {
+      const res = await inj("GET", `/api/devices/${kernelId}`, keyB);
+      expect(res.statusCode).toBe(503);
+      expect(res.body).not.toContain(SENTINEL);
+      expect(bodyOf(res)).toMatchObject({ error: "TRANSIENT_ERROR", message: "transient_error" });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("[neg] the telemetry feed (GET /api/telemetry/pipeline/:jobId) does not carry the exception text either", async () => {
+    const { pipelineTelemetry } = await import("../telemetry.js");
+    const kernels = getRepos().kernels;
+    const spy = vi.spyOn(kernels, "findDevicesByKernel").mockImplementation(() => {
+      throw new Error(THROWN);
+    });
+    try {
+      await inj("GET", `/api/devices/${kernelId}`, keyB);
+    } finally {
+      spy.mockRestore();
+    }
+    const timelines = pipelineTelemetry.getAllJobIds().map((id) => ({ id, events: pipelineTelemetry.getTimeline(id) }));
+    // The failure WAS recorded ...
+    const failed = timelines.flatMap((t) => t.events).filter((e) => e.status === "failed" && e.metadata.operation === "getDevicesForKernel");
+    expect(failed.length).toBeGreaterThan(0);
+    // ... and no timeline holds the text.
+    expect(JSON.stringify(timelines)).not.toContain(SENTINEL);
+    const feed = await inj("GET", `/api/telemetry/pipeline/${failed[0].jobId}`, keyB);
+    expect(feed.body).not.toContain(SENTINEL);
+  });
+
+  it("control: a typed, expected error keeps its message (400 and 404)", async () => {
+    const bad = await inj("POST", "/api/devices/register", keyA, { kernelId });
+    expect(bad.statusCode).toBe(400);
+    expect(bodyOf(bad)).toMatchObject({ error: "missing_required_fields", message: "kernelId, id, type, model, adapterType are all required" });
+    // Master's job-read gate requires a proven identity or valid admin credential
+    // before disclosing a missing job. Supply that fixture to retain the 404 probe.
+    const missing = await withEnv({ PCC_ADMIN_KEY: "n71-missing-job-control-admin" }, () => app.inject({
+      method: "GET", url: "/api/jobs/job-n71-missing/status",
+      headers: { authorization: `Bearer ${keyB}`, "x-admin-key": "n71-missing-job-control-admin" },
+    }));
+    expect(missing.statusCode).toBe(404);
+    expect(String(bodyOf(missing).message)).toContain("job-n71-missing");
+  });
+
+  it("control: registering the same device twice is still a 409 device_already_exists", async () => {
+    const payload = { kernelId, id: `dev-dup-${kernelId}`, type: "machine", model: "Dup", adapterType: "mock" };
+    expect((await inj("POST", "/api/devices/register", keyA, payload)).statusCode).toBeLessThan(300);
+    const again = await inj("POST", "/api/devices/register", keyA, payload);
+    expect(again.statusCode).toBe(409);
+    expect(bodyOf(again)).toEqual({ error: "device_already_exists" });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Q3: the emitter manifest is a public matching artifact, so it may not carry credentials
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("N71 round 3 (astra pack 83b, Q3): a device's emitter manifest that carries credentials is refused at registration", () => {
+  let emitsKernel: string;
+  let seq3 = 0;
+
+  beforeAll(async () => {
+    emitsKernel = `${kernelId}-emits`;
+    const made = await inj("POST", "/api/kernels", keyA, { id: emitsKernel, name: "A's emitter workshop" });
+    expect(made.statusCode, made.body).toBeLessThan(300);
+  });
+
+  const register = (emits: unknown, deviceId = `dev-emits-${++seq3}-${emitsKernel}`) =>
+    inj("POST", "/api/setup/register-device", keyA, { kernelId: emitsKernel, deviceId, type: "sensor", adapterType: "mock", emits });
+  const stored = (deviceId: string) => getRepos().kernels.findDeviceById(deviceId);
+
+  /** [what the manifest carries, the emits array]. Each embeds the sentinel. */
+  const CREDENTIAL_MANIFESTS: Array<[string, unknown]> = [
+    ["a secret-named param", [{ id: "decl.self_attested", params: { apiKey: SENTINEL } }]],
+    ["a secret-named param, other spellings", [{ id: "decl.self_attested", params: { client_secret: SENTINEL } }]],
+    ["a secret-named param, nested in an object", [{ id: "decl.self_attested", params: { upstream: { auth: { token: SENTINEL } } } }]],
+    ["a secret-named param, nested in an array", [{ id: "decl.self_attested", params: { hops: [{ ok: 1 }, { password: SENTINEL }] } }]],
+    ["a URL with userinfo in a param", [{ id: "decl.self_attested", params: { endpoint: `http://u:${SENTINEL}@h.invalid/x` } }]],
+    ["a URL with an apostrophe in its userinfo", [{ id: "decl.self_attested", params: { endpoint: `http://u:pa'${SENTINEL}@h.invalid/x` } }]],
+    ["a URL with userinfo in via", [{ id: "decl.self_attested", via: `https://svc:${SENTINEL}@h.invalid/hook` }]],
+    ["a URL with userinfo in bind", [{ id: "decl.self_attested", bind: `https://svc:${SENTINEL}@h.invalid/hook` }]],
+    ["a URL whose query names a secret", [{ id: "decl.self_attested", params: { callback: `https://h.invalid/cb?api_key=${SENTINEL}` } }]],
+    ["a URL with userinfo in the second declaration", [{ id: "decl.self_attested" }, { id: "capture.photo_nonced", params: { media: "photo", src: `ftp://u:${SENTINEL}@h.invalid` } }]],
+    // N71 round 4 (astra pack 83c, HIGH #5): a vendor-key-shaped value is a credential even
+    // when it is not itself a URL (via/bind are bare strings, not URLs), and a URL's fragment
+    // (not just its query) can carry a credential-named key too.
+    ["a vendor-key-shaped value in 'via', not a URL at all (astra pack 83c)", [{ id: "decl.self_attested", via: `sk-proj-${SENTINEL}-ABCDEFGHIJ` }]],
+    ["a URL fragment (not the query) names a secret (astra pack 83c)", [{ id: "decl.self_attested", params: { endpoint: `https://h.invalid/#token=${SENTINEL}` } }]],
+    // N71 round 5 (astra pack 83d, CRITICAL #1): astra's own example — the query
+    // key is "session", not any of SECRET_KEY_NAME's fixed list, and the VALUE
+    // isn't vendor-key/JWT/hex/bearer-shaped either. Nothing about this value's
+    // SHAPE looks like a credential; round 3/4's valueCarriesCredential (shape
+    // signals) cannot catch it by construction. The round-5 fix refuses ANY
+    // query on a manifest URL, key name irrelevant — see findEmitterManifestFormIssue.
+    ["a URL QUERY with a non-credential-named key (astra pack 83d CRITICAL #1's own example)", [{ id: "decl.self_attested", params: { endpoint: `https://h.invalid/?session=${SENTINEL}` } }]],
+    ["a URL FRAGMENT with a non-credential-named key (round 5 — not 'token=', which round 4 already caught by key name)", [{ id: "decl.self_attested", params: { endpoint: `https://h.invalid/#session=${SENTINEL}` } }]],
+    // N71 round 5 follow-up (lane review): the declaration's own `id` is a caller string that is
+    // stored and returned too, so the URL-form rule covers every string in a declaration.
+    ["a URL QUERY in the declaration's own id", [{ id: `https://h.invalid/?session=${SENTINEL}` }]],
+  ];
+
+  it.each(CREDENTIAL_MANIFESTS)("[neg] %s: 400 invalid_emitter_manifest, nothing written, nothing echoed", async (_what, emits) => {
+    const deviceId = `dev-emits-refused-${++seq3}-${emitsKernel}`;
+    const res = await register(emits, deviceId);
+    expect(res.body).not.toContain(SENTINEL);
+    expect(res.statusCode, res.body).toBe(400);
+    expect(bodyOf(res).error).toBe("invalid_emitter_manifest");
+    expect(stored(deviceId)).toBeUndefined(); // refused before any write
+  });
+
+  it("[neg] an update that PRESERVES a stored manifest which carries credentials is refused too", async () => {
+    // A manifest stored before the check existed. The caller sends no emits; the update would keep it,
+    // and the registration view would hand it back.
+    const deviceId = `dev-emits-legacy-${emitsKernel}`;
+    getRepos().kernels.insertDevice({
+      id: deviceId,
+      kernelId: emitsKernel,
+      type: "sensor",
+      model: "Legacy",
+      firmware: "unknown",
+      status: "idle",
+      contributesToCapabilities: [],
+      lastUpdated: new Date().toISOString(),
+      adapterType: "mock",
+      capabilities: [],
+      healthStatus: "healthy",
+      emits: [{ id: "decl.self_attested", params: { apiKey: SENTINEL } }],
+    } as never);
+    const res = await inj("POST", "/api/setup/register-device", keyA, { kernelId: emitsKernel, deviceId, type: "sensor", adapterType: "mock" });
+    expect(res.body).not.toContain(SENTINEL);
+    expect(res.statusCode, res.body).toBe(400);
+    expect(bodyOf(res).error).toBe("invalid_emitter_manifest");
+    // Re-registering with a clean manifest is the way out, and it replaces the stored one.
+    const fixed = await inj("POST", "/api/setup/register-device", keyA, { kernelId: emitsKernel, deviceId, type: "sensor", adapterType: "mock", emits: [{ id: "decl.self_attested" }] });
+    expect(fixed.statusCode, fixed.body).toBe(200);
+    expect(fixed.body).not.toContain(SENTINEL);
+  });
+
+  it("control: a manifest without credentials is accepted and comes back as sent (the public contract is unchanged)", async () => {
+    // N71 round 5 (astra pack 83d, HIGH #5 residual): this used to carry
+    // `callback: "https://h.invalid/cb?id=7"` — an ORDINARY (non-credential) query,
+    // illustrating round 4's position that a query is fine unless its key looks
+    // credential-shaped. Round 5 supersedes that position: astra's own example
+    // (?session=<secret>) is a query with an unrecognizable key, proving "unless the
+    // key looks suspicious" can never be complete. findEmitterManifestFormIssue now
+    // refuses ANY query on a manifest URL, so this fixture drops the query — the
+    // point of the test (a non-credential, non-URL-query value is accepted) is
+    // unchanged; only the illustration moved to a query-free URL.
+    const emits = [
+      { id: "decl.self_attested" },
+      { id: "capture.photo_nonced", params: { media: "photo", minClass: "CC1", callback: "https://h.invalid/cb" }, bind: "capturePhotoCid", via: "captureSnapshot" },
+    ];
+    const res = await register(emits);
+    expect(res.statusCode, res.body).toBe(201);
+    expect(bodyOf(res).device.emits).toEqual(emits);
+  });
+
+  it("control: an email-looking string and a path with an @ are not credentials", async () => {
+    const emits = [{ id: "decl.self_attested", params: { contact: "ops@example.com", profile: "https://medium.invalid/@user" } }];
+    const res = await register(emits);
+    expect(res.statusCode, res.body).toBe(201);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// N71 round 5 (astra pack 83d, HIGH #5 residual): the determinate part of F5.
+//
+// Round 3/4's valueCarriesCredential (above) is a SHAPE-based signal — it
+// catches a secret-NAMED key or a vendor-key/URL-userinfo-SHAPED value, but
+// astra's round-5 example has neither: {endpoint: "https://h.invalid/?session=
+// <secret>"} names no recognized key and isn't itself vendor-key-shaped. Round
+// 5 adds two INDEPENDENT, closed-form admission gates (findEmitterManifestFormIssue,
+// redaction.ts) alongside valueCarriesCredential, never replacing it:
+//   (a) any string anywhere in params (recursively)/bind/via that PARSES AS A
+//       URL may not carry userinfo, a query, or a fragment — a manifest string
+//       is for matching; scheme+host+path is enough, full stop;
+//   (b) bind and via must match a closed identifier grammar, derived from
+//       EVERY bind/via value that exists in this repo today (adapter-
+//       manifests.ts production defaults, the CSD fixture, every test) — see
+//       83e-n71-report.md for the inventory.
+//
+// Explicitly OUT of scope (escalated to the steward as a cross-lane row, per
+// the round-5 brief): per-primitive semantic param schemas. `params` stays
+// z.record(z.unknown()) at the spec-schema level; this gate is the GATEWAY's
+// own boundary check, independent of packages/spec (untouched this round).
+// ─────────────────────────────────────────────────────────────────────────
+
+describe("N71 round 5 (astra pack 83d, HIGH #5 residual): bind/via identifier grammar", () => {
+  let grammarKernel: string;
+  let seq5 = 0;
+
+  beforeAll(async () => {
+    grammarKernel = `${kernelId}-grammar`;
+    const made = await inj("POST", "/api/kernels", keyA, { id: grammarKernel, name: "A's grammar workshop" });
+    expect(made.statusCode, made.body).toBeLessThan(300);
+  });
+
+  const registerG = (emits: unknown, deviceId = `dev-grammar-${++seq5}-${grammarKernel}`) =>
+    inj("POST", "/api/setup/register-device", keyA, { kernelId: grammarKernel, deviceId, type: "sensor", adapterType: "mock", emits });
+  const storedG = (deviceId: string) => getRepos().kernels.findDeviceById(deviceId);
+
+  it.each([
+    ["via with an embedded space — not an identifier, and not vendor-key-shaped either", [{ id: "decl.self_attested", via: "capture snapshot" }]],
+    ["bind with an embedded slash — not an identifier", [{ id: "decl.self_attested", bind: "cid/with/slash" }]],
+    ["via that is the empty string", [{ id: "decl.self_attested", via: "" }]],
+  ] as Array<[string, unknown]>)("[neg] %s: 400 invalid_emitter_manifest, nothing written", async (_what, emits) => {
+    const deviceId = `dev-grammar-refused-${++seq5}-${grammarKernel}`;
+    const res = await registerG(emits, deviceId);
+    expect(res.statusCode, res.body).toBe(400);
+    expect(bodyOf(res).error).toBe("invalid_emitter_manifest");
+    expect(storedG(deviceId)).toBeUndefined();
+  });
+
+  // Every bind/via value that exists anywhere in this repo as of round 5 (git
+  // grep across packages/*, kits, tests, docs — the 83e report's inventory),
+  // sent together through the SAME endpoint this gate guards. If the chosen
+  // grammar were too narrow, ANY one of these would 400 — none may.
+  const REAL_BIND_VIA_MANIFEST = [
+    { id: "decl.self_attested" },
+    { id: "ident.registered_key", via: "toKernelOutput" },
+    { id: "receipt.kernel_signed", via: "toKernelOutput" },
+    { id: "artifact.hash", bind: "outputArtifactCid", via: "gcode" },
+    { id: "artifact.hash", bind: "outputDocumentCid", via: "print" },
+    { id: "telemetry.envelope_conformance", via: "telemetry" },
+    { id: "telemetry.envelope_conformance", via: "opcua-node" },
+    { id: "telemetry.envelope_conformance", via: "sila-feature" },
+    { id: "confirm.target_system", params: { channel: "api" }, via: "http-response" },
+    { id: "capture.photo_nonced", bind: "capturePhotoCid", via: "captureSnapshot" },
+    { id: "artifact.hash", bind: "sensorLogCid", via: "stopRecording" },
+    { id: "artifact.hash", bind: "cid", via: "x" },
+    { id: "decl.self_attested", bind: "declaration" },
+    { id: "machine.execution_log", bind: "machineLogChainCid" },
+    { id: "telemetry.envelope_conformance", bind: "sensorSummaryCid" },
+    // From the document-print-and-mail CSD fixture (packages/spec/src/csds):
+    { id: "decl.self_attested", bind: "printer_log_captured" },
+    { id: "decl.self_attested", bind: "printer_job_verified" },
+    { id: "decl.self_attested", bind: "execution_completed" },
+    { id: "decl.self_attested", bind: "commitment.labelHash" },
+    { id: "decl.self_attested", bind: "photo_captured" },
+    { id: "decl.self_attested", bind: "photo_anti_spoof_check" },
+    { id: "decl.self_attested", bind: "courier_pickup_confirmed" },
+    { id: "decl.self_attested", bind: "courier_delivery_confirmed" },
+    { id: "decl.self_attested", bind: "recipientSignatureCid" },
+  ];
+
+  it("control: every bind/via value found anywhere in the repo today is still accepted", async () => {
+    const res = await registerG(REAL_BIND_VIA_MANIFEST);
+    expect(res.statusCode, res.body).toBe(201);
+    expect(bodyOf(res).device.emits).toEqual(REAL_BIND_VIA_MANIFEST);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Round 4: astra's verdict on pack 83c (DO-NOT-SHIP at 9b30fd73)
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Round 3 closed the apostrophe bypass and moved most fields to a fixed set / presence
+// only. Four things still carried an arbitrary string from a dependency, a URL, an
+// exception or an env value:
+//   - redactUrlCredentials's "retained" host+path group (see redaction.test.ts for the
+//     direct, function-level reproduction — there is no HTTP response path left that
+//     surfaces it after this round's setup.ts fix, below);
+//   - /setup/detect's displayEnvValue default branch, which ran the SAME url-only scrub
+//     on an env var that might not be a URL at all (KERNEL_ID, KERNEL_CONFIG_FILE, ...);
+//   - /setup/detect's kernelService.devices block, which projected a live device's
+//     id/type/adapterType with no shape check;
+//   - BaseFacade.execute()'s typed-error detection (`error.name === "NotFoundError"`),
+//     forgeable by any thrown value; and its UNIQUE-constraint carve-out, which kept the
+//     driver's own message whenever a mutable `code` or a message prefix matched.
+
+describe("N71 round 4 (astra pack 83c, CRITICAL #2): GET /api/setup/detect's fallback env values and runtime device fields", () => {
+  it("[neg] KERNEL_ID holding a misplaced credential (no URL in it) is reported present, never as its value", async () => {
+    await withEnv({ KERNEL_ID: `password=${SENTINEL}` }, async () => {
+      const res = await inj("GET", "/api/setup/detect", keyB);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).not.toContain(SENTINEL);
+      const entry = envEntryOf(res, "KERNEL_ID");
+      expect(entry?.set).toBe(true);
+      expect(entry?.value).toBeUndefined();
+    });
+  });
+
+  it("[neg] KERNEL_CONFIG_FILE holding a bare secret (nothing for a URL scrub to catch) is reported present, never as its value", async () => {
+    await withEnv({ KERNEL_CONFIG_FILE: SENTINEL }, async () => {
+      const res = await inj("GET", "/api/setup/detect", keyB);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).not.toContain(SENTINEL);
+      const entry = envEntryOf(res, "KERNEL_CONFIG_FILE");
+      expect(entry?.set).toBe(true);
+      expect(entry?.value).toBeUndefined();
+    });
+  });
+
+  it("[neg] a runtime device id that is a credential-bearing URL is withheld, never projected verbatim", async () => {
+    const spy = vi.spyOn(getKernelService(), "listDevices").mockResolvedValue([
+      { id: `http://u:${SENTINEL}@host.invalid`, type: "machine", adapterType: "mock", healthStatus: "healthy" },
+    ] as never);
+    try {
+      const res = await inj("GET", "/api/setup/detect", keyB);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).not.toContain(SENTINEL);
+      expect(bodyOf(res).kernelService.devices).toEqual([
+        { id: INVALID_ID, type: "machine", adapterType: "mock", healthy: true },
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("[neg] a runtime device type/adapterType outside the known fixed sets is withheld too", async () => {
+    const spy = vi.spyOn(getKernelService(), "listDevices").mockResolvedValue([
+      {
+        id: "dev_ok",
+        type: `http://u:${SENTINEL}-type@host.invalid` as never,
+        adapterType: `http://u:${SENTINEL}-adapter@host.invalid` as never,
+        healthStatus: "healthy",
+      },
+    ] as never);
+    try {
+      const res = await inj("GET", "/api/setup/detect", keyB);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).not.toContain(SENTINEL);
+      expect(bodyOf(res).kernelService.devices).toEqual([
+        { id: "dev_ok", type: INVALID_ID, adapterType: INVALID_ID, healthy: true },
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("control: KERNEL_ID and KERNEL_CONFIG_FILE with ordinary values are STILL presence-only (round 4 tightens the default for everyone, not just misuse)", async () => {
+    await withEnv({ KERNEL_ID: "kernel_dev_001", KERNEL_CONFIG_FILE: "/etc/pcc/kernel.json" }, async () => {
+      const res = await inj("GET", "/api/setup/detect", keyB);
+      expect(envEntryOf(res, "KERNEL_ID")).toEqual({ name: "KERNEL_ID", category: "kernel", set: true });
+      expect(envEntryOf(res, "KERNEL_CONFIG_FILE")).toEqual({ name: "KERNEL_CONFIG_FILE", category: "kernel", set: true });
+    });
+  });
+
+  it("control: a runtime device with a plain id and a known type/adapterType passes through unchanged", async () => {
+    const spy = vi.spyOn(getKernelService(), "listDevices").mockResolvedValue([
+      { id: "dev_ok_001", type: "sensor", adapterType: "modbus", healthStatus: "healthy" },
+    ] as never);
+    try {
+      const res = await inj("GET", "/api/setup/detect", keyB);
+      expect(bodyOf(res).kernelService.devices).toEqual([
+        { id: "dev_ok_001", type: "sensor", adapterType: "modbus", healthy: true },
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("N71 round 4 (astra pack 83c, HIGH #3): a forged error name is not proof — BaseFacade must check the error's CLASS, not .name", () => {
+  it("[neg] a dependency's plain Error with .name forged to 'NotFoundError' does not get its message disclosed, and is not treated as a proven 404", async () => {
+    const kernels = getRepos().kernels;
+    const spy = vi.spyOn(kernels, "findDevicesByKernel").mockImplementation(() => {
+      throw Object.assign(new Error(`password=${SENTINEL}`), { name: "NotFoundError" });
+    });
+    try {
+      const res = await inj("GET", `/api/devices/${kernelId}`, keyB);
+      expect(res.body).not.toContain(SENTINEL);
+      // Falls through to the same generic internal error as any other untyped
+      // exception — a forged .name buys the dependency nothing.
+      expect(res.statusCode).toBe(500);
+      expect(bodyOf(res)).toMatchObject({ error: "INTERNAL_ERROR", message: "internal_error" });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("[neg] the same forgery does not reach the pipeline telemetry feed either", async () => {
+    const { pipelineTelemetry } = await import("../telemetry.js");
+    const kernels = getRepos().kernels;
+    const spy = vi.spyOn(kernels, "findDevicesByKernel").mockImplementation(() => {
+      throw Object.assign(new Error(`password=${SENTINEL}`), { name: "NotFoundError" });
+    });
+    try {
+      await inj("GET", `/api/devices/${kernelId}`, keyB);
+    } finally {
+      spy.mockRestore();
+    }
+    const timelines = pipelineTelemetry.getAllJobIds().map((id) => ({ id, events: pipelineTelemetry.getTimeline(id) }));
+    expect(JSON.stringify(timelines)).not.toContain(SENTINEL);
+  });
+});
+
+describe("N71 round 4 (astra pack 83c, HIGH #4): a UNIQUE-constraint violation becomes a structured conflict, never the driver's message", () => {
+  it("[neg] the facade Result itself never carries the driver's message for a UNIQUE-prefixed violation (not just this route's 409 mapping)", async () => {
+    const kernels = getRepos().kernels;
+    const spy = vi.spyOn(kernels, "insertDevice").mockImplementation(() => {
+      throw new Error(`UNIQUE constraint failed: devices.id value=http://u:${SENTINEL}@host.invalid`);
+    });
+    try {
+      const result = await getJobFacade().registerDevice({
+        kernelId,
+        id: `dev-uniq-r4-${kernelId}`,
+        type: "machine",
+        model: "Uniq",
+        adapterType: "mock",
+      } as never);
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(JSON.stringify(result.error)).not.toContain(SENTINEL);
+      }
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("[neg] the pipeline telemetry feed does not carry the driver's message for a secret-bearing message with the mutable SQLITE_CONSTRAINT_UNIQUE code either", async () => {
+    const { pipelineTelemetry } = await import("../telemetry.js");
+    const kernels = getRepos().kernels;
+    const spy = vi.spyOn(kernels, "insertDevice").mockImplementation(() => {
+      throw Object.assign(new Error(`insert failed: apiKey=${SENTINEL}`), { code: "SQLITE_CONSTRAINT_UNIQUE" });
+    });
+    try {
+      await getJobFacade().registerDevice({
+        kernelId,
+        id: `dev-uniq-r4b-${kernelId}`,
+        type: "machine",
+        model: "Uniq2",
+        adapterType: "mock",
+      } as never);
+    } finally {
+      spy.mockRestore();
+    }
+    const timelines = pipelineTelemetry.getAllJobIds().map((id) => ({ id, events: pipelineTelemetry.getTimeline(id) }));
+    expect(JSON.stringify(timelines)).not.toContain(SENTINEL);
+  });
+
+  it("control: routes/job-submit.ts's /api/devices/register still maps a UNIQUE-prefixed violation to 409 device_already_exists, even when the driver message carries a credential", async () => {
+    const kernels = getRepos().kernels;
+    const spy = vi.spyOn(kernels, "insertDevice").mockImplementation(() => {
+      throw new Error(`UNIQUE constraint failed: devices.id value=http://u:${SENTINEL}@host.invalid`);
+    });
+    try {
+      const res = await inj("POST", "/api/devices/register", keyA, {
+        kernelId,
+        id: `dev-uniq-r4c-${kernelId}`,
+        type: "machine",
+        model: "Uniq3",
+        adapterType: "mock",
+      });
+      expect(res.body).not.toContain(SENTINEL);
+      expect(res.statusCode).toBe(409);
+      expect(bodyOf(res)).toEqual({ error: "device_already_exists" });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("control: the same 409 mapping holds for the SQLITE_CONSTRAINT_UNIQUE code form", async () => {
+    const kernels = getRepos().kernels;
+    const spy = vi.spyOn(kernels, "insertDevice").mockImplementation(() => {
+      throw Object.assign(new Error(`insert failed: apiKey=${SENTINEL}`), { code: "SQLITE_CONSTRAINT_UNIQUE" });
+    });
+    try {
+      const res = await inj("POST", "/api/devices/register", keyA, {
+        kernelId,
+        id: `dev-uniq-r4d-${kernelId}`,
+        type: "machine",
+        model: "Uniq4",
+        adapterType: "mock",
+      });
+      expect(res.body).not.toContain(SENTINEL);
+      expect(res.statusCode).toBe(409);
+      expect(bodyOf(res)).toEqual({ error: "device_already_exists" });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("control: registering the same device twice (real, unmocked constraint) is still a 409 device_already_exists", async () => {
+    const payload = { kernelId, id: `dev-dup-r4-${kernelId}`, type: "machine", model: "Dup", adapterType: "mock" };
+    expect((await inj("POST", "/api/devices/register", keyA, payload)).statusCode).toBeLessThan(300);
+    const again = await inj("POST", "/api/devices/register", keyA, payload);
+    expect(again.statusCode).toBe(409);
+    expect(bodyOf(again)).toEqual({ error: "device_already_exists" });
+  });
+});

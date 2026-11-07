@@ -9,6 +9,7 @@
  * initialized (e.g., missing env config).
  */
 
+import { knownErrorClassName, logSafeId, logSafeInt } from "./redaction.js";
 import { MessageBus, PersistentMessageBus } from "@pcc/a2a";
 import type { A2AMessage, Conversation, AgentCard } from "@pcc/a2a";
 import { UserAgent } from "@pcc/agent-user";
@@ -98,12 +99,12 @@ export async function initAgentBridge(): Promise<void> {
       const result = getAgentFacade().revokeAllForDid(agentId);
       if (result.success) {
         console.log(
-          `[agent-bridge] Revoked ${result.data.revoked} facade sessions for rogue agent ${agentId}`,
+          `[agent-bridge] Revoked ${logSafeInt(result.data.revoked)} facade sessions for rogue agent ${logSafeId(agentId)}`,
         );
       } else {
         console.error(
-          `[agent-bridge] Failed to revoke facade sessions for ${agentId}:`,
-          result.error,
+          `[agent-bridge] Failed to revoke facade sessions for ${logSafeId(agentId)}:`,
+          { code: "session_revocation_failed" },
         );
       }
     };
@@ -113,7 +114,7 @@ export async function initAgentBridge(): Promise<void> {
     _initialized = true;
     console.log("[agent-bridge] Agent swarm initialized: user, broker, kernel");
   } catch (err) {
-    console.warn("[agent-bridge] Failed to initialize agents, using mock fallbacks:", err);
+    console.warn("[agent-bridge] Failed to initialize agents, using mock fallbacks:", knownErrorClassName(err));
   }
 }
 

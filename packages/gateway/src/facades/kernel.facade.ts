@@ -14,6 +14,7 @@ import { type Result, type RegisteredSigner, ok, err, Errors } from "@pcc/spec";
 import { verifyEd25519Signature, normalizePublicKeyHex } from "../auth/ed25519.js";
 import { EXPLICIT_CREDENTIAL_REQUIRED, provenByCookieOnly } from "../auth/kernel-authority.js";
 import { BaseFacade } from "./base.facade.js";
+import { NotFoundError, BadRequestError, ForbiddenError, ConflictError } from "./facade-errors.js";
 import type {
   KernelDTO,
   KernelHealthSnapshot,
@@ -32,6 +33,8 @@ import {
 import { locationVisibilityOf, storedLocation } from "./populators/public-location.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { safeServerEventProperties, prepareServerEventDistinctId } from "../services/posthog-policy.js";
+import { logSafeId, logSafeInt, logSafeIsoTimestamp } from "../redaction.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -137,19 +140,16 @@ export function mayPublishExactLocation(authority: LocationOptInAuthority, opera
   return owner !== ZERO_WALLET && proven.toLowerCase() === owner;
 }
 
-function exactLocationRefusal(kernelId: string): Error {
-  return Object.assign(
-    new Error(
-      `Publishing the exact location of kernel '${kernelId}' needs the X-Admin-Key header, ` +
-        `or a wallet you proved (SIWE) that is the kernel's operator`,
-    ),
-    { name: "ForbiddenError" },
+function exactLocationRefusal(kernelId: string): ForbiddenError {
+  return new ForbiddenError(
+    `Publishing the exact location of kernel '${kernelId}' needs the X-Admin-Key header, ` +
+      `or a wallet you proved (SIWE) that is the kernel's operator`,
   );
 }
 
 function explicitCredentialRefusal(): Error {
-  return Object.assign(new Error(EXPLICIT_CREDENTIAL_REQUIRED.message), {
-    name: "ForbiddenError", code: EXPLICIT_CREDENTIAL_REQUIRED.error,
+  return Object.assign(new ForbiddenError(EXPLICIT_CREDENTIAL_REQUIRED.message), {
+    code: EXPLICIT_CREDENTIAL_REQUIRED.error,
   });
 }
 
@@ -204,8 +204,14 @@ export function resolveKernelTtlHours(): number {
     parsed < KERNEL_TTL_LOWER_BOUND_HOURS ||
     parsed > KERNEL_TTL_UPPER_BOUND_HOURS
   ) {
+    // N71 round 6 (astra pack 83e): raw is an operator env var, not caller input, but
+    // the SAME class of mistake applies — redaction.ts's own doc comment names "a
+    // credential pasted into the wrong env var" as a real leak class this lane
+    // already treats seriously (setup.ts's displayEnvValue). logSafeId's grammar
+    // (echo only if plain-identifier-shaped) fits a TTL-hours value exactly: a
+    // legitimate "abc"/"10000" typo still shows, a credential-shaped paste does not.
     console.warn(
-      `[kernel-ttl] KERNEL_TTL_HOURS="${raw}" out of band [${KERNEL_TTL_LOWER_BOUND_HOURS},${KERNEL_TTL_UPPER_BOUND_HOURS}]; using ${KERNEL_TTL_DEFAULT_HOURS}`,
+      `[kernel-ttl] KERNEL_TTL_HOURS="${logSafeId(raw)}" out of band [${KERNEL_TTL_LOWER_BOUND_HOURS},${KERNEL_TTL_UPPER_BOUND_HOURS}]; using ${KERNEL_TTL_DEFAULT_HOURS}`,
     );
     return KERNEL_TTL_DEFAULT_HOURS;
   }
@@ -368,10 +374,7 @@ export class KernelFacade extends BaseFacade {
         requestedVisibility !== "exact" &&
         requestedVisibility !== "approximate"
       ) {
-        throw Object.assign(new Error('locationVisibility must be "exact" or "approximate"'), {
-          name: "BadRequestError",
-          code: "invalid_location_visibility",
-        });
+        throw new BadRequestError('locationVisibility must be "exact" or "approximate"', "invalid_location_visibility");
       }
       const id = body.id || `kernel_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
       const context = this.defaultContext();
@@ -393,10 +396,7 @@ export class KernelFacade extends BaseFacade {
           (hasRecordedOwner && existing.operatorAddress !== actorId) ||
           (!hasRecordedOwner && !authority.admin)
         )) {
-          throw Object.assign(
-            new Error(`Authenticated actor does not own kernel '${id}'`),
-            { name: "ForbiddenError" },
-          );
+          throw new ForbiddenError(`Authenticated actor does not own kernel '${id}'`);
         }
         // Upsert: update heartbeat + optional fields
         const updates: Record<string, unknown> = {
@@ -454,10 +454,7 @@ export class KernelFacade extends BaseFacade {
             const current = repos.kernels.findById(id) ?? kernel;
             const currentSigner = this.signerFromRow(current);
             if (!currentSigner || !this.sameSigner(currentSigner, provenSigner)) {
-              throw Object.assign(
-                new Error(`Kernel '${id}' already has a different registered signer`),
-                { name: "ConflictError" },
-              );
+              throw new ConflictError(`Kernel '${id}' already has a different registered signer`);
             }
             kernel = current;
           }
@@ -555,8 +552,8 @@ export class KernelFacade extends BaseFacade {
 
       trackServerEvent(
         "kernel_registered",
-        { kernelId: id, name: kernelData.name, operatorAddress: kernelData.operatorAddress },
-        actorId,
+        safeServerEventProperties({ kernelId: id, operatorAddress: kernelData.operatorAddress }),
+        prepareServerEventDistinctId(actorId),
       );
       auditService.log({
         eventType: "kernel.created",
@@ -702,13 +699,13 @@ export class KernelFacade extends BaseFacade {
       try {
         emitKernelLifecycleEvent({
           event: "kernel.heartbeat.received",
-          kernelId,
+          kernelId: logSafeId(kernelId),
           sinceLastHeartbeatSec,
         });
         if (resurrected) {
           emitKernelLifecycleEvent({
             event: "kernel.resurrected",
-            kernelId,
+            kernelId: logSafeId(kernelId),
             wasExpiredForMinutes: wasExpiredForMinutes ?? 0,
           });
         }
@@ -898,14 +895,6 @@ export class KernelFacade extends BaseFacade {
   }
 }
 
-/** Internal error for flow control — caught by BaseFacade.execute() */
-class NotFoundError extends Error {
-  constructor(entity: string, id: string) {
-    super(`${entity} '${id}' not found`);
-    this.name = "NotFoundError";
-  }
-}
-
 // ── Lifecycle telemetry ───────────────────────────────────────────────────
 //
 // One JSON line per event to stdout. The dashboard tails this in the
@@ -927,12 +916,58 @@ export interface KernelLifecycleEvent {
   ageMinutes?: number;
 }
 
+/**
+ * N71 round 7 (astra pack 83f, CRITICAL #4): the closed set emitKernelLifecycleEvent's
+ * own `event` field is checked against at RUNTIME. The interface above's union type is
+ * erased at runtime — a caller that bypasses TypeScript (an `as unknown as never`
+ * cast, or any JS caller) can pass anything at all, so the type alone proves nothing
+ * about what this function actually writes.
+ */
+const KNOWN_LIFECYCLE_EVENTS: ReadonlySet<string> = new Set<KernelLifecycleEvent["event"]>([
+  "kernel.heartbeat.received",
+  "kernel.expired",
+  "kernel.resurrected",
+  "capability.expired",
+]);
+/** Substituted for any event name outside the closed set above. */
+const UNKNOWN_LIFECYCLE_EVENT = "unknown_event";
+
+/**
+ * N71 round 7 (astra pack 83f, CRITICAL #4): this emitter now sanitizes EVERY field
+ * at its OWN boundary, so every caller — in the scanner's scope or not
+ * (routes/kernels.ts and services/kernel-ttl-sweeper.ts both call this from outside
+ * the sink-scanner's scanned-file list, and the round-6 scanner only trusted the
+ * call SITES, not this function) — is protected without touching them. THE SINK IS
+ * THE BOUNDARY: the write below is scanned like any other call, so every field must
+ * be a literal or a formatter output — none may be a bare, unformatted read of `evt`.
+ * `event` goes through the closed set above; kernelId goes through logSafeId; every
+ * number goes through logSafeInt; the one timestamp goes through
+ * logSafeIsoTimestamp. Each formatter call is written directly (never through an
+ * intermediate local), inline in the object JSON.stringify serializes, so the
+ * declaration-based scanner can recurse straight through JSON.stringify's own
+ * (non-laundering) argument to each one.
+ *
+ * capabilityId is DROPPED rather than echoed through logSafeId. logSafeId's
+ * identifier grammar validates SHAPE (rejects credential/URL/free-text), not
+ * uniqueness of content, so a caller-chosen capabilityId that happens to be
+ * identifier-shaped is admitted as-is by design — capability ids are NOT drawn from
+ * a fixed vocabulary this emitter can anchor against (capability.facade.ts's create()
+ * accepts an arbitrary caller-supplied `body.id`). Same "drop, don't guess" boundary
+ * this round already applies to body.reason/evidenceBundleHash (settlement.facade.ts)
+ * and kernel-service.ts's "job.type". kernelId still identifies which kernel's
+ * capability expired; only the specific capability id is not echoed here (it remains
+ * available in the DB row the caller ultimately found it from).
+ */
 export function emitKernelLifecycleEvent(evt: KernelLifecycleEvent): void {
-  const line = JSON.stringify({
-    ts: new Date().toISOString(),
-    ...evt,
-  });
-  // Use stderr so it doesn't collide with Fastify request logs on stdout.
-  // Dashboard collector reads both.
-  process.stderr.write(`[kernel-lifecycle] ${line}\n`);
+  process.stderr.write(
+    `[kernel-lifecycle] ${JSON.stringify({
+      ts: new Date().toISOString(),
+      event: KNOWN_LIFECYCLE_EVENTS.has(evt.event) ? logSafeId(evt.event) : UNKNOWN_LIFECYCLE_EVENT,
+      kernelId: logSafeId(evt.kernelId),
+      sinceLastHeartbeatSec: logSafeInt(evt.sinceLastHeartbeatSec),
+      wasExpiredForMinutes: evt.wasExpiredForMinutes === undefined ? undefined : logSafeInt(evt.wasExpiredForMinutes),
+      lastHeartbeatAt: logSafeIsoTimestamp(evt.lastHeartbeatAt),
+      ageMinutes: evt.ageMinutes === undefined ? undefined : logSafeInt(evt.ageMinutes),
+    })}\n`,
+  );
 }

@@ -11,6 +11,7 @@ import { randomBytes } from "node:crypto";
 import { streamHub } from "./sse/stream-hub.js";
 import { Sentry } from "./sentry.js";
 import { trace } from "@opentelemetry/api";
+import { logSafeId, logSafeInt } from "./redaction.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -41,6 +42,8 @@ export type PipelinePhase =
   | "dht_query";
 
 export type TelemetryStatus = "started" | "completed" | "failed" | "skipped";
+
+export const TELEMETRY_STATUSES: readonly TelemetryStatus[] = ["started", "completed", "failed", "skipped"];
 
 export interface TelemetryEvent {
   id: string;
@@ -179,14 +182,14 @@ export class PipelineTelemetryService {
     // in Sentry shows the pipeline phase progression alongside spans.
     Sentry.addBreadcrumb({
       category: "pcc.pipeline",
-      message: `[${jobId}] ${phase} → ${status}`,
+      message: `[${logSafeId(jobId)}] ${logSafeId(phase)} → ${logSafeId(status)}`,
       level: event.level === "error" ? "error" : event.level === "warn" ? "warning" : "info",
       data: {
-        jobId,
-        phase,
-        status,
-        duration_ms: event.duration_ms,
-        source: event.source,
+        jobId: logSafeId(jobId),
+        phase: logSafeId(phase),
+        status: logSafeId(status),
+        duration_ms: logSafeInt(event.duration_ms),
+        source: logSafeId(event.source),
       },
       timestamp: new Date(event.timestamp).getTime() / 1000,
     });
@@ -195,11 +198,11 @@ export class PipelineTelemetryService {
     // Zero new spans — this just adds a named event to the enclosing facade or A2A span.
     const activeSpan = trace.getActiveSpan();
     if (activeSpan) {
-      activeSpan.addEvent(`pipeline.${phase}`, {
-        "pipeline.status": status,
-        "pipeline.job_id": jobId,
-        "pipeline.duration_ms": event.duration_ms ?? 0,
-        "pipeline.source": event.source,
+      activeSpan.addEvent(`pipeline.${logSafeId(phase)}`, {
+        "pipeline.status": logSafeId(status),
+        "pipeline.job_id": logSafeId(jobId),
+        "pipeline.duration_ms": logSafeInt(event.duration_ms) ?? 0,
+        "pipeline.source": logSafeId(event.source),
       });
     }
 

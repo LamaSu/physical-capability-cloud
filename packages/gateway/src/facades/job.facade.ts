@@ -9,6 +9,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { type Result, ok, err, Errors } from "@pcc/spec";
 import { BaseFacade } from "./base.facade.js";
+import { NotFoundError, BadRequestError, ConflictError } from "./facade-errors.js";
 import type {
   JobDTO,
   JobDetailDTO,
@@ -22,11 +23,17 @@ import {
   populateJobDetailDTO,
   populateJobList,
 } from "./populators/job.populator.js";
+import {
+  populateDeviceRegistrationDTO,
+  type DeviceRegistrationDTO,
+} from "./populators/device.populator.js";
 import { getKernelService, type LocalRunQueueReason } from "../services/kernel-service.js";
 import { localJobDispatchDecision } from "../services/local-job-dispatch.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { safeServerEventProperties, prepareServerEventDistinctId } from "../services/posthog-policy.js";
+import { logSafeId } from "../redaction.js";
 import { writeJobStatusGuarded, SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
 import { recordOperatorStage } from "../services/funnel-tracker.js";
 
@@ -327,10 +334,12 @@ export class JobFacade extends BaseFacade {
       }
 
       const queued = (reason: LocalRunQueueReason) => {
-        pipelineTelemetry.emit(jobId, "job_submit", "completed", {
-          metadata: { kernelId, stepId, external: true, reason },
+        // The shared dispatch decision supplies a closed reason; caller-supplied
+        // ids still pass through N71's formatters at the telemetry boundary.
+        pipelineTelemetry.emit(logSafeId(jobId), "job_submit", "completed", {
+          metadata: { kernelId: logSafeId(kernelId), stepId: logSafeId(stepId), external: true, reason: logSafeId(reason) },
         });
-        trackServerEvent("job_submitted", { kernelId, capabilityType: body.capabilityId, external: true, reason }, actorId);
+        trackServerEvent("job_submitted", safeServerEventProperties({ kernelId, capabilityType: body.capabilityId, external: true, reason }), prepareServerEventDistinctId(actorId));
         auditService.log({
           eventType: "job.submitted",
           actor: actorId,
@@ -355,10 +364,11 @@ export class JobFacade extends BaseFacade {
         }
         // The stop or operator switch may have changed during safety preflight.
         if (result.status === "queued") return queued(result.reason);
-        pipelineTelemetry.emit(result.jobId, "job_submit", "completed", {
-          metadata: { kernelId, stepId, deviceId: result.deviceId },
+        // result.deviceId may be auto-selected or caller-supplied; format it too.
+        pipelineTelemetry.emit(logSafeId(result.jobId), "job_submit", "completed", {
+          metadata: { kernelId: logSafeId(kernelId), stepId: logSafeId(stepId), deviceId: logSafeId(result.deviceId) },
         });
-        trackServerEvent("job_submitted", { kernelId, capabilityType: body.capabilityId }, actorId);
+        trackServerEvent("job_submitted", safeServerEventProperties({ kernelId, capabilityType: body.capabilityId }), prepareServerEventDistinctId(actorId));
         auditService.log({
           eventType: "job.submitted",
           actor: actorId,
@@ -429,12 +439,13 @@ export class JobFacade extends BaseFacade {
   }
 
   /**
-   * Register a device for a kernel.
+   * Register a device for a kernel. The response is the explicit registration view
+   * (populateDeviceRegistrationDTO), never the stored row.
    * Replaces: POST /api/devices/register
    */
   async registerDevice(
     body: RegisterDeviceInput,
-  ): Promise<Result<{ device: unknown }>> {
+  ): Promise<Result<{ device: DeviceRegistrationDTO | undefined }>> {
     return this.execute("registerDevice", async () => {
       const { kernelId, id, type, model, adapterType, adapterConfig, capabilities } = body;
 
@@ -462,19 +473,53 @@ export class JobFacade extends BaseFacade {
         healthStatus: "healthy",
       });
 
-      return { device };
+      // An explicit view, not the row (N71): the row holds adapterConfig, and with a
+      // rest-spread every column added later would be public.
+      return { device: populateDeviceRegistrationDTO(device) };
     });
   }
 
   /**
-   * Get devices for a kernel.
+   * The public view of a device row (N71, operator item 86). It is the same view
+   * GET /api/kernels/:kernelId/devices returns (kernel.facade.ts getDevices). A
+   * row's adapterConfig is the device's connection config (hosts, tokens, API
+   * keys): no response carries it, and dispatch reads it from the row. This
+   * endpoint used to return the raw rows to any key, for any kernel. (What a
+   * caller sends in is its own: POST /api/setup/generate-config hands it back.)
+   */
+  private publicDevice(d: any) {
+    return {
+      id: d.id,
+      type: d.type,
+      model: d.model,
+      status: d.status ?? "offline",
+      healthStatus: d.healthStatus ?? "unknown",
+      adapterType: d.adapterType ?? undefined,
+      capabilities: d.capabilities ?? d.contributesToCapabilities ?? [],
+    };
+  }
+
+  /**
+   * Get devices for a kernel (the public view; see publicDevice).
    * Replaces: GET /api/devices/:kernelId
    */
   async getDevicesForKernel(kernelId: string): Promise<Result<unknown[]>> {
     return this.execute("getDevicesForKernel", async () => {
-      return this.repos.kernels.findDevicesByKernel(kernelId);
+      return this.repos.kernels.findDevicesByKernel(kernelId).map((d: any) => this.publicDevice(d));
     });
   }
+
+  /**
+   * The fixed set of `details` values KernelService.checkDeviceHealth can legitimately
+   * return: an adapter's own status, "device_not_found", or the "adapter_error" fallback
+   * for a thrown exception (kernel-service.ts). Anything else — an object, an array, a
+   * number, or a string outside this set — is not a shape checkDeviceHealth promises,
+   * so it is dropped rather than trusted (N71 round 3, astra pack 83b: "the service
+   * contract specifies strings", but a mocked/future caller could return anything).
+   */
+  private static readonly SAFE_HEALTH_DETAILS = new Set([
+    "idle", "busy", "maintenance", "error", "offline", "device_not_found", "adapter_error",
+  ]);
 
   /**
    * Trigger a health check on a device.
@@ -531,7 +576,17 @@ export class JobFacade extends BaseFacade {
         /* funnel tracking must never break a health-check response */
       }
 
-      return { healthy: result.healthy, details: result.details ?? null };
+      // Allow-listed here as well as fixed-coded in the service: this is what leaves
+      // the API (N71 round 3, astra pack 83b) — a free-form string from a dependency
+      // (e.g. "password=...") is never safe to show regardless of any scrub (N71
+      // round 5, astra pack 83d: the service-side scrubber this comment used to name
+      // was deleted outright — kernel-service.ts's checkDeviceHealth never logs the
+      // message at all any more, scrubbed or not).
+      const details =
+        typeof result.details === "string" && JobFacade.SAFE_HEALTH_DETAILS.has(result.details)
+          ? result.details
+          : null;
+      return { healthy: result.healthy, details };
     });
   }
 
@@ -539,7 +594,7 @@ export class JobFacade extends BaseFacade {
 
   /** Return a bad-request result (shorthand used inside execute()) */
   private badRequest<T>(code: string, message: string): T {
-    throw Object.assign(new Error(message), { name: "BadRequestError", code });
+    throw new BadRequestError(message, code);
   }
 
   private loadKernelMap(kernelIds: string[]): Map<string, any> {
@@ -618,23 +673,13 @@ export class JobFacade extends BaseFacade {
     return scored[0].score > 0 ? scored[0].cap.id : caps[0].id;
   }
 }
-
-/** Internal error for flow control — caught by BaseFacade.execute(), which answers 409 with `code`. */
-class ConflictError extends Error {
-  readonly code: string;
-  constructor(message: string, code: string) {
-    super(message);
-    this.name = "ConflictError";
-    this.code = code;
-  }
-}
-
-/** Internal error for flow control — caught by BaseFacade.execute() */
-class NotFoundError extends Error {
-  readonly code?: string;
-  constructor(entity: string, id: string, code?: string) {
-    super(`${entity} '${id}' not found`);
-    this.name = "NotFoundError";
-    if (code) this.code = code;
-  }
-}
+// merge-up (master): the local ConflictError/NotFoundError duplicates master
+// defined here are dropped — NotFoundError is already imported from
+// facade-errors.ts above (a local redeclaration would be a duplicate
+// identifier), and ConflictError now also comes from facade-errors.ts (its
+// class there gained the optional `code` param master's duplicate existed to
+// provide). Using the SHARED classes, not file-local duplicates, is required
+// for base.facade.ts's `error instanceof ConflictError` / `instanceof
+// NotFoundError` checks to recognize errors thrown here — a local duplicate
+// class has a different identity and would silently fall through to the
+// generic 500 branch instead of the intended 409/404.

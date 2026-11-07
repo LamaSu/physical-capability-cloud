@@ -15,6 +15,7 @@ import { tenantOpts } from "../config/tenant-enforce.js";
 import { getActiveNetwork } from "../chain-client.js";
 import { buildProductHomeDTO, type ProductHomeSources } from "../readmodels/product-home.js";
 import type { SourceRead } from "../readmodels/job-execution.js";
+import { knownErrorClassName } from "../redaction.js";
 
 export async function productHomeRoutes(app: FastifyInstance) {
   app.get("/api/product/home", async (req, reply) => {
@@ -23,7 +24,7 @@ export async function productHomeRoutes(app: FastifyInstance) {
       try {
         return { ok: true, value: fn() };
       } catch (error) {
-        req.log.warn({ source, err: error }, "product home read model: source read failed");
+        req.log.warn({ source, err: knownErrorClassName(error) }, "product home read model: source read failed");
         return { ok: false };
       }
     };
@@ -32,7 +33,7 @@ export async function productHomeRoutes(app: FastifyInstance) {
     try {
       store = getStore();
     } catch (error) {
-      req.log.error({ err: error }, "product home read model: store unavailable");
+      req.log.error({ err: knownErrorClassName(error) }, "product home read model: store unavailable");
     }
     const db = store?.db;
     const fail = (): never => {

@@ -15,6 +15,7 @@ import { gateJobRead, refuseJobRead } from "../readmodels/job-read-gate.js";
 import type { SubmitJobInput, RegisterDeviceInput } from "../facades/index.js";
 import { getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
+import { knownErrorClassName, logSafeId } from "../redaction.js";
 import { authorityOf, refuseKernelAction } from "../auth/kernel-authority.js";
 
 const { operatorPolicies, captureVerdicts, captureAnchors } = schema;
@@ -224,8 +225,12 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
           // Fail-open — a policy read failure should not block jobs that
           // don't actually require CVP. The facade and subsequent gates
           // will still run. Log for observability.
+          // N71 round 6 (astra pack 83e): err was the raw caught exception (a DB read
+          // failure can quote whatever it was reading) and kernelId is caller-supplied
+          // request-body text — a fixed code, closed-set class, and validated echo,
+          // same shape as every other sink this round.
           req.log.warn(
-            { err, kernelId },
+            { code: "capture_policy_gate_read_failed", errorClass: knownErrorClassName(err), kernelId: logSafeId(kernelId) },
             "capture policy gate read failed; proceeding without CVP check",
           );
         }
@@ -267,8 +272,12 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
   app.post<{ Body: RegisterDeviceInput }>("/api/devices/register", async (req, reply) => {
     const result = await facade.registerDevice(req.body);
     if (!result.success) {
-      // Map duplicate error to 409
-      if (result.error.message?.includes("UNIQUE") || result.error.message?.includes("unique")) {
+      // N71 round 4 (astra pack 83c, HIGH #4): detect the structured CONFLICT code
+      // BaseFacade.execute() now emits for a UNIQUE-constraint violation (never the
+      // driver's own message — that message no longer reaches this Result at all, so
+      // there is nothing left here to sniff). The 409 device_already_exists response
+      // is unchanged; what changed is that it is driven by a code, not message text.
+      if (result.error.code === "CONFLICT") {
         return reply.code(409).send({ error: "device_already_exists" });
       }
       return sendResult(reply, result);

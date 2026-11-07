@@ -18,6 +18,7 @@ import type { AnomalyDetectedIntent, SystemAlertIntent } from "@pcc/a2a";
 import { auditService } from "./audit-service.js";
 import { getStore } from "../db.js";
 import { sql } from "@pcc/store";
+import { knownErrorClassName, logSafeId, logSafeInt } from "../redaction.js";
 
 // ── Exported constants ────────────────────────────────────────────────────────
 
@@ -106,12 +107,12 @@ export class AgentHeartbeatMonitor {
         this._check();
       } catch (err) {
         // Monitor failure must never crash the gateway
-        console.error("[heartbeat-monitor] Tick error:", err);
+        console.error({ code: "heartbeat_monitor_tick_failed", errorClass: knownErrorClassName(err) });
       }
     }, this.checkIntervalMs);
     console.log(
-      `[heartbeat-monitor] Started (interval=${this.checkIntervalMs}ms, ` +
-      `suspicious>=${this.suspiciousThreshold}, rogue>=${this.rogueThreshold})`,
+      `[heartbeat-monitor] Started (interval=${logSafeInt(this.checkIntervalMs)}ms, ` +
+      `suspicious>=${logSafeInt(this.suspiciousThreshold)}, rogue>=${logSafeInt(this.rogueThreshold)})`,
     );
   }
 
@@ -142,7 +143,7 @@ export class AgentHeartbeatMonitor {
       status: "healthy",
       registeredAt: now,
     });
-    console.log(`[heartbeat-monitor] Registered agent: ${card.id} (${card.name})`);
+    console.log(`[heartbeat-monitor] Registered agent: ${logSafeId(card.id)} (${logSafeId(card.name)})`);
   }
 
   /**
@@ -162,7 +163,7 @@ export class AgentHeartbeatMonitor {
     // Allow recovery from suspicious → healthy
     if (record.status === "suspicious") {
       record.status = "healthy";
-      console.log(`[heartbeat-monitor] Agent ${agentId} recovered (suspicious → healthy)`);
+      console.log(`[heartbeat-monitor] Agent ${logSafeId(agentId)} recovered (suspicious → healthy)`);
     }
 
     return true;
@@ -173,7 +174,7 @@ export class AgentHeartbeatMonitor {
    */
   unregisterAgent(agentId: string): void {
     this.records.delete(agentId);
-    console.log(`[heartbeat-monitor] Unregistered agent: ${agentId}`);
+    console.log(`[heartbeat-monitor] Unregistered agent: ${logSafeId(agentId)}`);
   }
 
   /**
@@ -204,7 +205,7 @@ export class AgentHeartbeatMonitor {
       if (missed >= this.rogueThreshold && record.status !== "rogue") {
         // --- ROGUE ---
         record.status = "rogue";
-        console.warn(`[heartbeat-monitor] Agent ${agentId} is ROGUE (missed=${missed})`);
+        console.warn(`[heartbeat-monitor] Agent ${logSafeId(agentId)} is ROGUE (missed=${logSafeInt(missed)})`);
 
         // Broadcast critical anomaly (fire-and-forget)
         this._broadcastAnomaly(record, "critical", "trust_violation");
@@ -228,14 +229,14 @@ export class AgentHeartbeatMonitor {
         try {
           if (this.onRogue) this.onRogue(agentId);
         } catch (cbErr) {
-          console.error(`[heartbeat-monitor] onRogue callback failed for ${agentId}:`, cbErr);
+          console.error({ code: "heartbeat_monitor_rogue_callback_failed", agentId: logSafeId(agentId), errorClass: knownErrorClassName(cbErr) });
         }
 
         // Suspend active scopes (async, fire-and-forget — failure is non-fatal)
         this._suspendScopes(agentId).then((count) => {
           record.status = "suspended";
           record.scopesSuspended = count;
-          console.log(`[heartbeat-monitor] Agent ${agentId} → suspended, ${count} scopes revoked`);
+          console.log(`[heartbeat-monitor] Agent ${logSafeId(agentId)} → suspended, ${logSafeInt(count)} scopes revoked`);
 
           auditService.log({
             eventType: "agent_scope_suspended",
@@ -246,7 +247,7 @@ export class AgentHeartbeatMonitor {
             metadata: { scopesSuspended: count, agentId },
           });
         }).catch((err) => {
-          console.error(`[heartbeat-monitor] Scope suspension failed for ${agentId}:`, err);
+          console.error({ code: "heartbeat_monitor_scope_suspension_failed", agentId: logSafeId(agentId), errorClass: knownErrorClassName(err) });
           // Even if scope suspension fails, keep agent as rogue (not suspended)
           // The anomaly is already broadcast — downstream handlers can act
         });
@@ -255,13 +256,13 @@ export class AgentHeartbeatMonitor {
         try {
           this.bus.unregister(agentId);
         } catch (err) {
-          console.error(`[heartbeat-monitor] Bus unregister failed for ${agentId}:`, err);
+          console.error({ code: "heartbeat_monitor_bus_unregister_failed", agentId: logSafeId(agentId), errorClass: knownErrorClassName(err) });
         }
 
       } else if (missed >= this.suspiciousThreshold && record.status === "healthy") {
         // --- SUSPICIOUS ---
         record.status = "suspicious";
-        console.warn(`[heartbeat-monitor] Agent ${agentId} is SUSPICIOUS (missed=${missed})`);
+        console.warn(`[heartbeat-monitor] Agent ${logSafeId(agentId)} is SUSPICIOUS (missed=${logSafeInt(missed)})`);
 
         // Broadcast warning-level system alert
         this._broadcastSystemAlert(record, missed);
@@ -283,7 +284,7 @@ export class AgentHeartbeatMonitor {
       } else if (missed < this.suspiciousThreshold && record.status === "suspicious") {
         // --- RECOVERED ---
         record.status = "healthy";
-        console.log(`[heartbeat-monitor] Agent ${agentId} recovered (suspicious → healthy via tick)`);
+        console.log(`[heartbeat-monitor] Agent ${logSafeId(agentId)} recovered (suspicious → healthy via tick)`);
       }
     }
   }
@@ -322,7 +323,7 @@ export class AgentHeartbeatMonitor {
         timestamp: nowIso(),
       },
     ).catch((err) => {
-      console.error("[heartbeat-monitor] Anomaly broadcast failed:", err);
+      console.error({ code: "heartbeat_monitor_anomaly_broadcast_failed", errorClass: knownErrorClassName(err) });
     });
   }
 
@@ -357,7 +358,7 @@ export class AgentHeartbeatMonitor {
         timestamp: nowIso(),
       },
     ).catch((err) => {
-      console.error("[heartbeat-monitor] System alert broadcast failed:", err);
+      console.error({ code: "heartbeat_monitor_alert_broadcast_failed", errorClass: knownErrorClassName(err) });
     });
   }
 
@@ -380,7 +381,7 @@ export class AgentHeartbeatMonitor {
       // Drizzle's run() returns a RunResult with changes count
       return (result as unknown as { changes: number }).changes ?? 0;
     } catch (err) {
-      console.error(`[heartbeat-monitor] DB scope suspension failed for ${agentId}:`, err);
+      console.error({ code: "heartbeat_monitor_scope_database_failed", agentId: logSafeId(agentId), errorClass: knownErrorClassName(err) });
       return 0;
     }
   }

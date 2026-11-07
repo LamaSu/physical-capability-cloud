@@ -22,6 +22,7 @@ import type { EvidenceBundle, EvidenceEvent, EvidenceSource, SHA256 } from "@pcc
 import type { CameraAdapter, MachineAdapter, MachineCommand, MachineCommandResult } from "../adapters/types.js";
 import { EvidenceEmitter } from "../evidence-emitter.js";
 import { JobRunner } from "../job-runner.js";
+import { observationId } from "../observability.js";
 import type { JobResult } from "../job-runner.js";
 import { lose1Capture } from "./lose1-capture-fixture.js";
 
@@ -569,7 +570,7 @@ describe("Quiescence: a job's window stays open until its adapters are done", ()
     const a = await drive(new JobRunner(machine, [], null, emitter).run({ jobId: "job-late-A", stepId: STEP, gcodeHash: gcode(212), assuranceTier: 1 }));
     expect(a.success).toBe(true);
     machine.emit(evidence("execution_completed", machine.id, "controller", { late: "after close" }));
-    expect(console.warn).toHaveBeenCalledWith(`[evidence-session] dropped a execution_completed event from adapter ${machine.id}: no job is recording it`);
+    expect(console.warn).toHaveBeenCalledWith("evidence_event_without_job", observationId(machine.id), observationId("execution_completed"));
 
     const b = await drive(new JobRunner(machine, [], null, emitter).run({ jobId: "job-late-B", stepId: STEP, gcodeHash: gcode(213), assuranceTier: 1 }));
     expect(b, "round 3 refused B for a quiet period after that event").toMatchObject({ success: true });

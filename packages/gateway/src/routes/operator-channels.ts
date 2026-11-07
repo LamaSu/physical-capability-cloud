@@ -32,6 +32,7 @@
  * Toast operator gets a head-start by reusing that recipe.
  */
 
+import { logSafeId } from "../redaction.js";
 import type { FastifyInstance } from "fastify";
 import { randomBytes, createHmac } from "node:crypto";
 import { getEmailTransport } from "../services/email-transport.js";
@@ -477,9 +478,10 @@ async function dispatchOne(
         // provider is a per-transport follow-on with the same shape as the
         // email path below.
         console.log(
-          `[op-channel] ${ch.transport} transport not implemented; would dispatch to ` +
-            `operator=${ch.operatorSlug} endpoint=${JSON.stringify(ch.endpoint)} ` +
-            `describe="${ch.describe.slice(0, 80)}" payload=${JSON.stringify(p)}`,
+          "[op-channel] transport_not_implemented", {
+            transport: logSafeId(ch.transport), operator: logSafeId(ch.operatorSlug),
+            channel: logSafeId(ch.id), jobId: logSafeId(p.jobId),
+          },
         );
         return {
           channelId: ch.id,
@@ -564,17 +566,15 @@ function emailBody(ch: ChannelRecord, p: ChannelDispatchPayload): string {
  * coarse: a blocked destination, a name that does not resolve and a connection
  * failure all read the same, so the test-send route cannot be used to probe
  * which internal names exist or which internal ports answer, and no address,
- * resolver message or socket error text ever reaches the caller. The precise
- * reason goes to the server log only (JSON-encoded: the slug is caller-chosen).
+ * resolver message or socket error text ever reaches the caller. Only the closed error code and formatted identifiers go to the server log.
  */
 function webhookFailure(ch: ChannelRecord, e: unknown): ChannelDispatchResult {
   if (!(e instanceof OutboundError)) throw e; // unexpected: dispatchOne reports send_failed
   console.warn(
     `[op-channel] webhook not sent ${JSON.stringify({
-      operator: ch.operatorSlug,
-      channel: ch.id,
-      code: e.code,
-      reason: e.reason,
+      operator: logSafeId(ch.operatorSlug),
+      channel: logSafeId(ch.id),
+      code: logSafeId(e.code),
     })}`,
   );
   const base = { channelId: ch.id, transport: "webhook" as const, delivered: false };
@@ -651,8 +651,8 @@ async function sendWebhook(
 function credentialRefRefused(ch: ChannelRecord): ChannelDispatchResult {
   console.warn(
     `[op-channel] webhook not sent ${JSON.stringify({
-      operator: ch.operatorSlug,
-      channel: ch.id,
+      operator: logSafeId(ch.operatorSlug),
+      channel: logSafeId(ch.id),
       code: "credential_ref_not_allowed",
     })}`,
   );

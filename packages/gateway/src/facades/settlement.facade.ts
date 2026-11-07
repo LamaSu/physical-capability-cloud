@@ -19,6 +19,12 @@ import { type Result, ok, err, Errors } from "@pcc/spec";
 import { isAddress, type Address, type Hex } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
 import { BaseFacade } from "./base.facade.js";
+import {
+  NotFoundError,
+  BadRequestError,
+  WriteDisabledError,
+  BatchDisabledError,
+} from "./facade-errors.js";
 import type {
   EscrowSummaryDTO,
   SettlementResultDTO,
@@ -33,6 +39,7 @@ import { getSettlementService } from "../services/settlement-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { safeServerEventProperties, prepareServerEventDistinctId } from "../services/posthog-policy.js";
 import {
   readEscrow,
   getEscrowEvents,
@@ -71,6 +78,7 @@ import {
   getQueueStatus,
   getEpochHistory,
 } from "../contracts/batch-settlement.js";
+import { logSafeSmallInt, logSafeAddress, logSafeInt } from "../redaction.js";
 
 /**
  * Whether on-chain escrow operations route through the EAS-gated
@@ -318,8 +326,12 @@ export class SettlementFacade extends BaseFacade {
       const result = useEasV2()
         ? await chainFundEscrowV2(address)
         : await chainFundEscrow(address);
-      pipelineTelemetry.emit(address, "escrow_fund", "completed", { metadata: { escrow: address } });
-      trackServerEvent("escrow_funded", { amount: result?.toString?.() ?? address }, actorId);
+      // N71 round 7 (astra pack 83f, scanner ruling (2)): address is validated via
+      // validateAddress() above, but the scanner proves safety by DECLARATION, not
+      // by a prose "checked earlier in this function" claim — logSafeAddress
+      // re-asserts the same 0x+40hex shape at the sink itself.
+      pipelineTelemetry.emit(logSafeAddress(address), "escrow_fund", "completed", { metadata: { escrow: logSafeAddress(address) } });
+      trackServerEvent("escrow_funded", safeServerEventProperties({}), prepareServerEventDistinctId(actorId));
       auditService.log({
         eventType: "escrow.funded",
         actor: actorId,
@@ -346,7 +358,7 @@ export class SettlementFacade extends BaseFacade {
       this.validateAddress(address);
       this.requireWriteEnabled();
       if (!amount) {
-        throw Object.assign(new Error("amount is required"), { name: "BadRequestError" });
+        throw new BadRequestError("amount is required");
       }
       const result = await chainApproveToken(address, amount, tokenAddress);
       return { ...result, action: "approve", spender: address, amount };
@@ -375,8 +387,10 @@ export class SettlementFacade extends BaseFacade {
       this.validateMilestoneIndex(milestoneIndex);
       this.requireWriteEnabled();
       const result = await chainReleaseMilestone(milestoneIndex, attestation, address);
-      pipelineTelemetry.emit(address, "settlement_complete", "completed", {
-        metadata: { escrow: address, milestoneIndex, released: true },
+      // N71 round 7: address/milestoneIndex through logSafeAddress/logSafeInt at
+      // the sink itself (see fundEscrow's comment above).
+      pipelineTelemetry.emit(logSafeAddress(address), "settlement_complete", "completed", {
+        metadata: { escrow: logSafeAddress(address), milestoneIndex: logSafeInt(milestoneIndex), released: true },
       });
       auditService.log({
         eventType: "escrow.released",
@@ -409,10 +423,7 @@ export class SettlementFacade extends BaseFacade {
       this.validateMilestoneIndex(milestoneIndex);
       this.requireWriteEnabled();
       if (!body.challengerBond || !body.challengerEvidenceHash || !body.reason) {
-        throw Object.assign(
-          new Error("Missing required fields: challengerBond, challengerEvidenceHash, reason"),
-          { name: "BadRequestError" },
-        );
+        throw new BadRequestError("Missing required fields: challengerBond, challengerEvidenceHash, reason");
       }
       const result = useEasV2()
         ? await chainFileDisputeV2(
@@ -429,8 +440,13 @@ export class SettlementFacade extends BaseFacade {
             body.reason,
             address,
           );
-      pipelineTelemetry.emit(address, "verification_result", "completed", {
-        metadata: { escrow: address, milestoneIndex, dispute: true, reason: body.reason },
+      // N71 round 6 (astra pack 83e): body.reason is free-form caller text (checked
+      // only for truthiness) — THE SINK IS THE BOUNDARY means it is dropped from
+      // telemetry rather than forwarded unexamined; it remains fully available via
+      // auditService.log below (a permissioned audit trail, not a scanned sink).
+      // N71 round 7: address/milestoneIndex through logSafeAddress/logSafeInt.
+      pipelineTelemetry.emit(logSafeAddress(address), "verification_result", "completed", {
+        metadata: { escrow: logSafeAddress(address), milestoneIndex: logSafeInt(milestoneIndex), dispute: true },
       });
       auditService.log({
         eventType: "escrow.disputed",
@@ -464,8 +480,9 @@ export class SettlementFacade extends BaseFacade {
       const result = useEasV2()
         ? await chainDepositBondV2(milestoneIndex, address)
         : await chainDepositBond(milestoneIndex, address);
-      pipelineTelemetry.emit(address, "escrow_fund", "completed", {
-        metadata: { escrow: address, milestoneIndex, action: "depositBond" },
+      // N71 round 7: address/milestoneIndex through logSafeAddress/logSafeInt.
+      pipelineTelemetry.emit(logSafeAddress(address), "escrow_fund", "completed", {
+        metadata: { escrow: logSafeAddress(address), milestoneIndex: logSafeInt(milestoneIndex), action: "depositBond" },
       });
       auditService.log({
         eventType: "escrow.bond_deposited",
@@ -498,15 +515,20 @@ export class SettlementFacade extends BaseFacade {
       this.validateMilestoneIndex(milestoneIndex);
       this.requireWriteEnabled();
       if (!evidenceBundleHash) {
-        throw Object.assign(new Error("evidenceBundleHash is required"), { name: "BadRequestError" });
+        throw new BadRequestError("evidenceBundleHash is required");
       }
       const result = await chainSubmitEvidence(
         milestoneIndex,
         evidenceBundleHash as `0x${string}`,
         address,
       );
-      pipelineTelemetry.emit(address, "verification_request", "completed", {
-        metadata: { escrow: address, milestoneIndex, evidenceBundleHash },
+      // N71 round 6 (astra pack 83e): evidenceBundleHash is caller-supplied free-form
+      // text (checked only for truthiness, not hash-shaped) — dropped from telemetry
+      // for the same reason as fileDispute's `reason` above; it stays in
+      // auditService.log below and in the caller's own request.
+      // N71 round 7: address/milestoneIndex through logSafeAddress/logSafeInt.
+      pipelineTelemetry.emit(logSafeAddress(address), "verification_request", "completed", {
+        metadata: { escrow: logSafeAddress(address), milestoneIndex: logSafeInt(milestoneIndex) },
       });
       auditService.log({
         eventType: "escrow.evidence_submitted",
@@ -544,19 +566,25 @@ export class SettlementFacade extends BaseFacade {
       this.validateMilestoneIndex(milestoneIndex);
       this.requireWriteEnabled();
       if (!attestation || !attestation.escrowAddress) {
-        throw Object.assign(new Error("attestation struct is required"), { name: "BadRequestError" });
+        throw new BadRequestError("attestation struct is required");
       }
       const result = await chainSubmitAttestation(
         milestoneIndex,
         attestation,
         address,
       );
-      pipelineTelemetry.emit(address, "verification_result", "completed", {
+      // N71 round 6 (astra pack 83e): attestation.evidenceHash is caller-supplied
+      // (the OracleAttestation struct is accepted from the request body with no
+      // shape check beyond !attestation.escrowAddress) — dropped from telemetry for
+      // the same reason as the two sinks above. attestation.tier is kept only
+      // through logSafeSmallInt: it is typed `number` but arrives from the request
+      // body unchecked, so anything but an integer 0-3 is logged as null.
+      // N71 round 7: address/milestoneIndex through logSafeAddress/logSafeInt.
+      pipelineTelemetry.emit(logSafeAddress(address), "verification_result", "completed", {
         metadata: {
-          escrow: address,
-          milestoneIndex,
-          evidenceHash: attestation.evidenceHash,
-          tier: attestation.tier,
+          escrow: logSafeAddress(address),
+          milestoneIndex: logSafeInt(milestoneIndex),
+          tier: logSafeSmallInt(attestation.tier, 0, 3),
         },
       });
       auditService.log({
@@ -617,23 +645,17 @@ export class SettlementFacade extends BaseFacade {
   async submitBatchIntent(intent: BatchIntentInput): Promise<Result<unknown>> {
     return this.execute("submitBatchIntent", async () => {
       if (!isBatchEnabled()) {
-        throw Object.assign(
-          new Error("Batch settlement is not configured. Set PCC_BUNDLER_URL to enable."),
-          { name: "BatchDisabledError" },
-        );
+        throw new BatchDisabledError("Batch settlement is not configured. Set PCC_BUNDLER_URL to enable.");
       }
 
       const { intentId, agentId, escrowAddress, operation, usdcValue } = intent;
 
       if (!intentId || !agentId || !escrowAddress || !operation?.type) {
-        throw Object.assign(
-          new Error("Missing required fields: intentId, agentId, escrowAddress, operation.type"),
-          { name: "BadRequestError" },
-        );
+        throw new BadRequestError("Missing required fields: intentId, agentId, escrowAddress, operation.type");
       }
 
       if (!isAddress(escrowAddress)) {
-        throw Object.assign(new Error("Invalid escrowAddress"), { name: "BadRequestError" });
+        throw new BadRequestError("Invalid escrowAddress");
       }
 
       const parsedOp = parseOperation(operation);
@@ -673,10 +695,10 @@ export class SettlementFacade extends BaseFacade {
   ): Promise<Result<SettlementResultDTO>> {
     return this.execute("releaseMilestoneForJob", async () => {
       if (!jobId) {
-        throw Object.assign(new Error("jobId is required"), { name: "BadRequestError" });
+        throw new BadRequestError("jobId is required");
       }
       if (!attestation || !attestation.escrowAddress) {
-        throw Object.assign(new Error("attestation struct is required"), { name: "BadRequestError" });
+        throw new BadRequestError("attestation struct is required");
       }
 
       const idx = milestoneIndex ?? 0;
@@ -740,18 +762,21 @@ export class SettlementFacade extends BaseFacade {
   async flushBatch(): Promise<Result<unknown>> {
     return this.execute("flushBatch", async () => {
       if (!isBatchEnabled()) {
-        throw Object.assign(
-          new Error("Batch settlement is not configured. Set PCC_BUNDLER_URL to enable."),
-          { name: "BatchDisabledError" },
-        );
+        throw new BatchDisabledError("Batch settlement is not configured. Set PCC_BUNDLER_URL to enable.");
       }
 
       const summary = await flushSettlements();
+      // N71 round 7 (scanner ruling (2)): summary.epochId/totalIntents are
+      // server-computed (EpochSummary from the batch settlement system — an
+      // internally-incremented counter and count, never caller input), but the
+      // scanner proves safety by declaration, not by a prose "it's server-
+      // computed" claim — logSafeInt re-asserts "non-negative safe integer" at
+      // the sink itself, the same shape these values already have.
       pipelineTelemetry.emit(
-        `epoch-${summary.epochId}`,
+        `epoch-${logSafeInt(summary.epochId)}`,
         "settlement_claim",
         "completed",
-        { metadata: { epochId: summary.epochId, totalIntents: summary.totalIntents } },
+        { metadata: { epochId: logSafeInt(summary.epochId), totalIntents: logSafeInt(summary.totalIntents) } },
       );
 
       return {
@@ -774,31 +799,27 @@ export class SettlementFacade extends BaseFacade {
 
   private validateAddress(address: string): void {
     if (!isAddress(address)) {
-      throw Object.assign(new Error("Invalid Ethereum address"), { name: "BadRequestError" });
+      throw new BadRequestError("Invalid Ethereum address");
     }
   }
 
   private validateMilestoneIndex(index: number): void {
-    if (isNaN(index) || index < 0) {
-      throw Object.assign(new Error("Invalid milestone index"), { name: "BadRequestError" });
+    // N71 round 7 (astra pack 83f, MEDIUM #5): isNaN() coerces its argument, so
+    // isNaN("2") is false and the string "2" was admitted as if it were the number
+    // 2. Number.isSafeInteger performs NO coercion — it is false for any non-number
+    // (string, object, array), for Infinity, and for a non-integer fraction — so
+    // only an actual safe integer can pass, same contract the fix's own tests pin.
+    if (!Number.isSafeInteger(index) || index < 0) {
+      throw new BadRequestError("Invalid milestone index");
     }
   }
 
   private requireWriteEnabled(): void {
     if (!isWriteEnabled()) {
-      throw Object.assign(
-        new Error("Write operations are not available — PCC_GATEWAY_PRIVATE_KEY is not configured."),
-        { name: "WriteDisabledError" },
+      throw new WriteDisabledError(
+        "Write operations are not available — PCC_GATEWAY_PRIVATE_KEY is not configured.",
       );
     }
-  }
-}
-
-/** Internal error for flow control — caught by BaseFacade.execute() */
-class NotFoundError extends Error {
-  constructor(entity: string, id: string) {
-    super(`${entity} '${id}' not found`);
-    this.name = "NotFoundError";
   }
 }
 

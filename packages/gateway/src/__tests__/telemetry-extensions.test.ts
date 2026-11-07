@@ -36,6 +36,7 @@ import {
   pipelineTelemetry,
   type PipelinePhase,
 } from "../telemetry.js";
+import { Sentry } from "../sentry.js";
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -44,6 +45,42 @@ describe("Pipeline Telemetry Extensions", () => {
 
   beforeEach(() => {
     service = new PipelineTelemetryService();
+  });
+
+  it("[neg] remote breadcrumbs format runtime values independently of their TypeScript types", () => {
+    const raw = "operator supplied diagnostic / private value";
+    vi.mocked(Sentry.addBreadcrumb).mockClear();
+    const event = service.emit(raw, raw as PipelinePhase, raw as never, {
+      source: raw, duration_ms: raw as never,
+    });
+    expect(event).toMatchObject({ jobId: raw, phase: raw, status: raw });
+    expect(Sentry.addBreadcrumb).toHaveBeenCalledOnce();
+    expect(Sentry.addBreadcrumb).toHaveBeenCalledWith(expect.objectContaining({
+      data: { jobId: "[invalid id]", phase: "[invalid id]", status: "[invalid id]", duration_ms: null, source: "[invalid id]" },
+    }));
+    expect(JSON.stringify(vi.mocked(Sentry.addBreadcrumb).mock.calls)).not.toContain(raw);
+  });
+
+  it("[neg] the telemetry route rejects runtime phase and status values outside its vocabularies", async () => {
+    const { default: Fastify } = await import("fastify");
+    const { telemetryRoutes } = await import("../routes/telemetry.js");
+    const app = Fastify({ logger: false });
+    app.addHook("onRequest", async (request) => {
+      Object.assign(request, { apiKeyId: "telemetry-test", operatorId: "telemetry-operator" });
+    });
+    await app.register(telemetryRoutes);
+    const emit = vi.spyOn(pipelineTelemetry, "emit");
+    try {
+      for (const payload of [
+        { jobId: "telemetry-job", phase: "operator supplied diagnostic / private value", status: "completed" },
+        { jobId: "telemetry-job", phase: "job_submit", status: "operator supplied diagnostic / private value" },
+      ]) {
+        const response = await app.inject({ method: "POST", url: "/api/telemetry/emit", payload });
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toEqual({ error: "invalid_telemetry_phase_or_status" });
+      }
+      expect(emit).not.toHaveBeenCalled();
+    } finally { emit.mockRestore(); await app.close(); }
   });
 
   // ── PIPELINE_PHASES array ──────────────────────────────────────────────────

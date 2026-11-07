@@ -18,6 +18,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { PIPELINE_PHASES, TELEMETRY_STATUSES } from "../telemetry.js";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const PKG_PATH = join(REPO, "apps/dashboard/public/agent-package.json");
@@ -48,6 +49,26 @@ function repoPackages(): Set<string> {
 }
 
 describe("the agent pack tells agents only true things", () => {
+  it("advertises only the gateway's telemetry phases and statuses (N71)", () => {
+    for (const file of ["apps/dashboard/public/agent-package.json", "agent-package-test.json"]) {
+      const pack = JSON.parse(readFileSync(join(REPO, file), "utf8")) as {
+        tools: Array<{
+          name: string;
+          input_schema: { properties: { phase: { enum: string[]; description: string }; status: { enum: string[] } } };
+        }>;
+      };
+      const emit = pack.tools.find((t) => t.name === "emit_telemetry");
+      expect(emit, file).toBeDefined();
+      const { phase, status } = emit!.input_schema.properties;
+      expect(phase.enum, file).toEqual(PIPELINE_PHASES);
+      expect(status.enum, file).toEqual(TELEMETRY_STATUSES);
+      expect(phase.description, file).not.toMatch(/\b(?:intake|binding|execution|evidence|settlement)\b/);
+      const examples = phase.description.match(/\be\.g\.\s*([^)]+)/)?.[1].split(/,\s*/);
+      expect(examples, file).toBeDefined();
+      for (const example of examples!) expect(PIPELINE_PHASES, file).toContain(example);
+    }
+  });
+
   it("names the onboarding route that exists (N76)", () => {
     for (const [file, text] of PACK) {
       expect(text.includes("/api/onboard/session/start"), file).toBe(false);

@@ -13,6 +13,7 @@
  *   - explicit stop for test cleanup
  */
 
+import { knownErrorClassName, logSafeInt } from "../redaction.js";
 import { getJobOffersStore } from "./job-offers-store.js";
 
 interface SweeperState {
@@ -31,12 +32,12 @@ async function runSweep(
     const result = await store.sweep();
     if (result.expired || result.reverified || result.autoCancelled) {
       logger?.info?.(
-        `[courier-jobs/shim] sweep via generic store: expired=${result.expired} reverified=${result.reverified} autoCancelled=${result.autoCancelled}`,
+        `[courier-jobs/shim] sweep via generic store: expired=${logSafeInt(result.expired)} reverified=${logSafeInt(result.reverified)} autoCancelled=${logSafeInt(result.autoCancelled)}`,
       );
     }
   } catch (err) {
     logger?.warn?.(
-      `[courier-jobs/shim] sweep failed: ${err instanceof Error ? err.message : String(err)}`,
+      `[courier-jobs/shim] sweep failed: ${knownErrorClassName(err)}`,
     );
   }
 }

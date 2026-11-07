@@ -41,6 +41,7 @@ import { IppAdapter, type IppAdapterConfig } from "../adapters/ipp-adapter.js";
 import { OutstandingWork } from "../adapters/outstanding-work.js";
 import type { MachineAdapter, MachineCommand, MachineCommandResult } from "../adapters/types.js";
 import { EvidenceEmitter } from "../evidence-emitter.js";
+import { observationId } from "../observability.js";
 import { createIppPrintKernel, runPrintJob } from "../printer-job.js";
 import type { PrintJobOptions, PrintJobResult } from "../printer-job.js";
 
@@ -1347,7 +1348,7 @@ describe("the print's setup, its latch's event label and the recovery log, whate
     expect.soft(first.success, "the first print").toBe(false);
     expect.soft(second.busy?.reason, "the second print, refused").toBe("quiescing");
     expect.soft(unhandled.length, "unhandled rejections").toBe(0);
-    expect.soft(console.error, "the hook's failure, logged").toHaveBeenCalledWith(expect.stringMatching(/could not confirm its evidence is complete: /));
+    expect.soft(console.error, "the hook's failure, logged").toHaveBeenCalledWith("evidence_quiesce_failed", "Error", observationId(printer.id));
   });
 });
 

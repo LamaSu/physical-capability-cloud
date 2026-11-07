@@ -43,6 +43,7 @@ import {
 import { csdSlugFromUrl, revalidatePlanSnapshots, type RevalidationDeps, type SnapshotClaim } from "../services/plan-snapshot-revalidation.js";
 import { bindDeal, type DealEncoder } from "../services/agent-plan-deal.js";
 import { presentPlan } from "../services/plan-presentation.js";
+import { knownErrorClassName } from "../redaction.js";
 
 /** R13's consume: ONE atomic step that re-checks the reservation, recomputes the digest, consumes once and seals. */
 export type ConsumeReservation = (
@@ -166,7 +167,7 @@ export async function agentPlanRoutes(app: FastifyInstance, opts: AgentPlanRoute
       const result = revalidatePlanSnapshots(nodes as SnapshotClaim[], revalidation, { tenantId: req.tenantId ?? null });
       return reply.status(200).send(jsonSafe({ ok: result.ok, verdicts: result.verdicts, asOf: new Date().toISOString() }));
     } catch (err) {
-      req.log.error({ err }, "agent-plans validate: server fault");
+      req.log.error({ err: knownErrorClassName(err) }, "agent-plans validate: server fault");
       return reply.status(500).send({ error: "internal-error" });
     }
   });
@@ -263,14 +264,14 @@ export async function agentPlanRoutes(app: FastifyInstance, opts: AgentPlanRoute
         // Only a documented conflict code reaches the client. Anything else is a store diagnostic: it is
         // logged and answered with a generic error, never forwarded (astra, round 1 of #391).
         if (!PUBLIC_CONSUME_REASONS.has(reason)) {
-          req.log.error({ consumeReason: reason }, "agent-plans accept: unexpected consume refusal");
+          req.log.error({ consumeReason: "unexpected_refusal" }, "agent-plans accept: unexpected consume refusal");
           return reply.status(500).send({ error: "internal-error" });
         }
         return reply.status(409).send({ error: "reservation-conflict", reason });
       }
       return reply.status(200).send(body);
     } catch (err) {
-      req.log.error({ err }, "agent-plans accept: server fault");
+      req.log.error({ err: knownErrorClassName(err) }, "agent-plans accept: server fault");
       return reply.status(500).send({ error: "internal-error" });
     }
   });

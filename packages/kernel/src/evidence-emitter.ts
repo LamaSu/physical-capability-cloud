@@ -22,6 +22,7 @@ import { ids } from "@pcc/spec";
 import { types } from "node:util";
 import type { EvidenceStorageService, ArchiveResult } from "./evidence-storage.js";
 import * as Sentry from "@sentry/node";
+import { observationId } from "./observability.js";
 
 /** The camera event types; each counts toward a tier only as a closed LO-SE-1 capture for the job. */
 const CAMERA_TYPES: readonly string[] = KERNEL_PULL_CAPTURE_TYPES;
@@ -297,9 +298,9 @@ export class EvidenceEmitter {
             name: "evidence.ipfs_archive",
             op: "storage",
             attributes: {
-              "bundle.id": bundle.id,
-              "job.id": bundle.jobId,
-              "kernel.id": this.kernelId,
+              "bundle.id": observationId(bundle.id),
+              "job.id": observationId(bundle.jobId),
+              "kernel.id": observationId(this.kernelId),
             },
           },
           async () => this.storageService!.archiveBundle(bundle),

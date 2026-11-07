@@ -48,6 +48,7 @@ import type { CaptureNonceChallenge } from "@pcc/verifier";
 import { schema, eq, desc } from "@pcc/store";
 import { getStore } from "../db.js";
 import { requireAuth } from "../auth/require-auth.js";
+import { logSafeId, logSafeInt, logSafeSmallInt } from "../redaction.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import {
   getCaptureVerifier,
@@ -482,12 +483,12 @@ export async function captureRoutes(app: FastifyInstance): Promise<void> {
 
         const nonce = buildNonceFromChallenge(challenge, workOutputRoot);
 
-        pipelineTelemetry.emit(jobId, "evidence_capture", "completed", {
+        pipelineTelemetry.emit(logSafeId(jobId), "evidence_capture", "completed", {
           metadata: {
             subphase: "capture_challenge",
-            challengeId: challenge.challengeId,
-            declaredClass,
-            ttl,
+            challengeId: logSafeId(challenge.challengeId),
+            declaredClass: logSafeId(declaredClass),
+            ttl: logSafeSmallInt(ttl, 1, CAPTURE_NONCE_MAX_AGE_SECONDS),
           },
         });
 
@@ -506,7 +507,7 @@ export async function captureRoutes(app: FastifyInstance): Promise<void> {
         };
         return response;
       } catch (err) {
-        req.log.error({ err }, "capture_challenge failed");
+        req.log.error({ code: "capture_challenge_failed" }, "capture_challenge failed");
         return reply.status(500).send({
           error: "challenge_failed",
           message: (err as Error).message,
@@ -721,13 +722,13 @@ export async function captureRoutes(app: FastifyInstance): Promise<void> {
         | undefined;
       if (!registryAddress) {
         pipelineTelemetry.emit(
-          verdict.jobId ?? verdictId,
+          logSafeId(verdict.jobId ?? verdictId),
           "evidence_capture",
           "skipped",
           {
             metadata: {
               subphase: "capture_anchor",
-              verdictId,
+              verdictId: logSafeId(verdictId),
               reason: "registry_not_deployed",
             },
             level: "warn",
@@ -790,16 +791,15 @@ export async function captureRoutes(app: FastifyInstance): Promise<void> {
         });
 
         pipelineTelemetry.emit(
-          verdict.jobId ?? verdictId,
+          logSafeId(verdict.jobId ?? verdictId),
           "evidence_capture",
           "completed",
           {
             metadata: {
               subphase: "capture_anchor",
-              verdictId,
-              txHash: tx.txHash,
-              gasUsed: tx.gasUsed,
-              blockNumber: tx.blockNumber,
+              verdictId: logSafeId(verdictId),
+              gasUsed: logSafeId(tx.gasUsed),
+              blockNumber: logSafeInt(tx.blockNumber),
             },
           },
         );
@@ -811,16 +811,16 @@ export async function captureRoutes(app: FastifyInstance): Promise<void> {
           anchoredAt,
         };
       } catch (err) {
-        req.log.error({ err }, "capture_anchor failed");
+        req.log.error({ code: "capture_anchor_failed" }, "capture_anchor failed");
         pipelineTelemetry.emit(
-          verdict.jobId ?? verdictId,
+          logSafeId(verdict.jobId ?? verdictId),
           "evidence_capture",
           "failed",
           {
             metadata: {
               subphase: "capture_anchor",
-              verdictId,
-              error: (err as Error).message,
+              verdictId: logSafeId(verdictId),
+              error: "anchor_failed",
             },
             level: "error",
           },

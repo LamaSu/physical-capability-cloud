@@ -14,6 +14,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
+import { knownErrorClassName, logSafeSmallInt } from "../redaction.js";
 import { v4 as uuidv4 } from "uuid";
 
 // Discord webhook for #bug-reports notifications
@@ -50,11 +51,11 @@ async function notifyDiscord(thread: SupportThread, msg: Message): Promise<void>
       body: JSON.stringify({ content, username: "PCC Support" }),
     });
     if (!res.ok) {
-      console.error(`Discord webhook failed: ${res.status}`);
+      console.error(`Discord webhook failed: ${logSafeSmallInt(res.status, 100, 599)}`);
     }
   } catch (err) {
     // Non-fatal — don't break support flow if Discord is down
-    console.error(`Discord webhook error: ${err}`);
+    console.error("Discord webhook error:", knownErrorClassName(err));
   }
 }
 
