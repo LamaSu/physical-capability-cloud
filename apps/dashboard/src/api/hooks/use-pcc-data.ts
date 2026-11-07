@@ -19,6 +19,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { JobExecutionDTO } from "@pcc/spec";
 import { api, ApiError } from "../gateway.js";
 import { JOB_EXECUTION_REFRESH_MS, JOB_EXECUTION_TERMINAL_REFRESH_MS } from "../../lib/job-execution-view.js";
+import { parseProductHome } from "../../lib/product-home.js";
 import type {
   CapabilityDTO,
   JobDTO,
@@ -30,8 +31,9 @@ import type {
   ComplianceReportDTO,
   DriftAlertDTO,
   PaginatedResult,
+  AgentMeDTO,
 } from "../../types/dto.js";
-import { KNOWN_KERNEL_STATUSES, isCount, isInRange } from "../wire-vocabulary.js";
+import { ESCROW_CURRENCIES, KNOWN_ESCROW_STATUSES, KNOWN_JOB_STATUSES, KNOWN_KERNEL_STATUSES, isCanonicalAmount, isCount, isInRange } from "../wire-vocabulary.js";
 
 // ---------------------------------------------------------------------------
 // Wire guards
@@ -52,6 +54,20 @@ function rowsOrThrow<T>(list: unknown, route: string, rowOk: (row: Record<string
 
 /** Absent, or present and valid: for fields a page marks unknown when absent. */
 const optional = (v: unknown, ok: (v: unknown) => boolean) => v === undefined || v === null || ok(v);
+
+/** A status must be recognised before a job can contribute to a count. */
+const jobRowOk = (row: Record<string, unknown>) =>
+  isText(row.id) && isText(row.status) && KNOWN_JOB_STATUSES.has(row.status);
+
+/** Read the whole escrow list only when every displayed amount and status is readable. */
+const escrowRowOk = (row: Record<string, unknown>) => {
+  if (!isText(row.id) || !isText(row.status) || !KNOWN_ESCROW_STATUSES.has(row.status) ||
+    !isCanonicalAmount(row.totalAmount) || typeof row.currency !== "string" || !ESCROW_CURRENCIES.has(row.currency)) return false;
+  if (!optional(row.jobId, (value) => typeof value === "string") ||
+    !optional(row.milestoneCount, isCount) || !optional(row.releasedCount, isCount) || !optional(row.disputedCount, isCount)) return false;
+  return !isCount(row.milestoneCount) || !isCount(row.releasedCount) || !isCount(row.disputedCount) ||
+    row.releasedCount + row.disputedCount <= row.milestoneCount;
+};
 
 /** "Online" needs a known status and the staleness flag the gateway always sets. */
 const kernelRowOk = (r: Record<string, unknown>) =>
@@ -244,10 +260,7 @@ export function useJobs(params?: { kernelId?: string; status?: string }) {
     queryKey: ["jobs", params],
     queryFn: async () => {
       const res = await api.getJobs(params);
-      // Route wraps result in { jobs: [...] } for backward compat. A response without that
-      // array is an error, never an empty list (absence is not evidence).
-      if (!Array.isArray(res?.jobs)) throw new Error("unexpected response shape from /api/jobs");
-      return res.jobs;
+      return rowsOrThrow<JobDTO>(res?.jobs, "/api/jobs", jobRowOk);
     },
     retry: 1,
     staleTime: 10_000,
@@ -348,8 +361,7 @@ export function useEscrows(params?: { status?: string }) {
     queryKey: ["escrows", params],
     queryFn: async () => {
       const res = await api.getEscrows(params);
-      // Route wraps result in { escrows: [...] } for backward compat.
-      return res.escrows ?? [];
+      return rowsOrThrow<EscrowSummaryDTO>(res?.escrows, "/api/escrow", escrowRowOk);
     },
     retry: 1,
     staleTime: 10_000,
@@ -406,6 +418,41 @@ export function useGatewayHealth() {
     queryKey: ["health"],
     queryFn: () => api.health(),
     retry: 0,
+    staleTime: 30_000,
+  });
+}
+
+/** Account identity is required; unreadable sections retain their individual failure state. */
+export function useAgentMe() {
+  return useQuery<AgentMeDTO>({
+    queryKey: ["agentMe"],
+    queryFn: async () => {
+      const response = await api.getAgentMe();
+      const identity = isRecord(response) ? response.identity : undefined;
+      if (!isRecord(identity) || !isText(identity.operator) ||
+        !isText(identity.key_id) ||
+        !optional(identity.key_name, (value) => typeof value === "string") ||
+        !Array.isArray(identity.scopes) || !identity.scopes.every((scope) => typeof scope === "string")) {
+        throw new Error("unexpected response shape from /api/agent/me");
+      }
+      return response;
+    },
+    retry: 1,
+    staleTime: 30_000,
+  });
+}
+
+/** An unavailable or inconsistent key section supplies no counts. */
+export function keyCounts(keys: unknown): { active: number; wildcardKeys: number } | null {
+  if (!isRecord(keys) || keys.unavailable || !isCount(keys.active) || !isCount(keys.wildcard_keys) || keys.wildcard_keys > keys.active) return null;
+  return { active: keys.active, wildcardKeys: keys.wildcard_keys };
+}
+
+export function useProductHome() {
+  return useQuery({
+    queryKey: ["productHome"],
+    queryFn: async () => parseProductHome(await api.getProductHome()),
+    retry: 1,
     staleTime: 30_000,
   });
 }
