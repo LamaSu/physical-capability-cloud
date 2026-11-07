@@ -561,6 +561,56 @@ describe("wallet pages re-sign through the existing SIWE flow", () => {
     expectRemedy();
   });
 
+  it("K14: /link counts a re-sign that mints a new key, while a held session key's 401 survived renewal, as recovered", async () => {
+    // C2's state, then a re-sign that reaches the mint and gets a new key: a real recovery from a held key.
+    await act(async () => {
+      useAuthStore.getState().setSession("session-token");
+      await useAuthStore.getState().mintSessionKey();
+    });
+    expect(useAuthStore.getState()).toMatchObject({ isAuthenticated: true, sessionKeyId: "session-key-1" });
+    const stub = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
+      pathOf(input) === "/api/auth/me" ? reply(503, {}) : stub(input, init)));
+    await showFailure("link");
+    expectRemedy();
+    const renewed = ["pcc", "test", "renewed0123456789abcdef"].join("_");
+    mintReply = () => reply(201, { api_key: renewed, key_id: "session-key-2", operator_id: wallet.address, expires_at: expiry() });
+    requestReply = (call) => call.path === LOOKUP && bearer(call) === `Bearer ${renewed}` ? request() : reply(401, {});
+    await click("Sign in again");
+    expect(useAuthStore.getState().sessionKeyId).toBe("session-key-2");
+    expectRecovered();
+    expect(container.querySelector<HTMLInputElement>("input")?.value).toBe("");
+    await lookup();
+    expect(bearer(calls.filter((call) => call.path === LOOKUP).at(-1)!)).toBe(`Bearer ${renewed}`);
+    expect(buttons("Approve and link")).toHaveLength(1);
+  });
+
+  it("K14: /link keeps the 401 and its remedy when a re-sign's new session is refused at the mint, while a held session key's 401 survived renewal", async () => {
+    await act(async () => {
+      useAuthStore.getState().setSession("session-token");
+      await useAuthStore.getState().mintSessionKey();
+    });
+    expect(useAuthStore.getState()).toMatchObject({ isAuthenticated: true, sessionKeyId: "session-key-1" });
+    const stub = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (pathOf(input) === "/api/auth/me") return reply(503, {});
+      const response = await stub(input, init);
+      // This sign-in gets its own session, which the mint then refuses.
+      return pathOf(input) === "/api/auth/verify" ? reply(200, { token: "session-token-2", address: wallet.address }) : response;
+    }));
+    mintReply = () => reply(429, { error: "too_many_keys" });
+    await showFailure("link");
+    expectRemedy();
+    const sessionEpoch = useAuthStore.getState().sessionEpoch;
+    await click("Sign in again");
+    expect(useAuthStore.getState().sessionEpoch).toBeGreaterThan(sessionEpoch);
+    expect(count("/api/auth/session-key")).toBe(2);
+    expect(useAuthStore.getState().authNotice).toContain("active-key limit");
+    // The mint refused the new session, so the old key is still held: this is not a recovery.
+    expect(useAuthStore.getState().sessionKeyId).toBe("session-key-1");
+    expectRemedy();
+  });
+
   it("K3: /link drops a lookup failure that was sent before the re-sign's key", async () => {
     const signatures: ((signature: string) => void)[] = [];
     wallet.signMessageAsync.mockImplementation(() => new Promise((resolve) => { signatures.push(resolve); }));
