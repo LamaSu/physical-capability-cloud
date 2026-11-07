@@ -35,6 +35,10 @@ PID_FILE = os.path.expanduser("~/.pcc-node.pid")
 STATE_FILE = os.path.expanduser("~/.pcc-node-state.json")
 
 
+class FirstHeartbeatError(Exception):
+    """Neither heartbeat route confirmed the first heartbeat."""
+
+
 def _write_pid():
     """Write current PID to the PID file."""
     with open(PID_FILE, "w") as f:
@@ -151,7 +155,8 @@ def run_daemon(config: NodeConfig, *, on_running=None):
         Fully populated node configuration (must have pcc_api_key set).
     on_running : callable, optional
         Called once with no arguments when the daemon is up: its own kernel registration
-        succeeded and its first heartbeat went out. ``pcc-node start`` prints "Node running"
+        succeeded and the gateway answered its first heartbeat with a 200 or 201 on one
+        of the two heartbeat routes. ``pcc-node start`` prints "Node running"
         from here, never before (ChatGPT r3 finding 1). An error it raises is logged, not fatal.
 
     Raises
@@ -160,6 +165,9 @@ def run_daemon(config: NodeConfig, *, on_running=None):
         When registration is refused, malformed or raises unexpectedly. The daemon never ran: the PID file
         and any state file are removed first, so no caller can mistake it for a daemon that
         ran and stopped.
+    FirstHeartbeatError
+        When neither heartbeat route answered the first heartbeat with a 200 or 201,
+        after the same PID and state file cleanup.
     Exception
         When the first heartbeat raises, the PID and state files are also removed
         before the same exception propagates.
@@ -234,7 +242,7 @@ def run_daemon(config: NodeConfig, *, on_running=None):
         # state, or log "Daemon running". Also remove the PID file written at startup and any pre-existing
         # state file -- the same cleanup a clean shutdown does below -- so a later `status` finds no live
         # PID plus state and cannot report a false "PCC: connected".
-        log.error(f"Kernel registration failed ({e}); the node is NOT registered. Daemon not started.")
+        log.error(f"Kernel registration failed ({e}); daemon not started.")
         _remove_pid()
         try:
             os.remove(STATE_FILE)
@@ -305,14 +313,9 @@ def run_daemon(config: NodeConfig, *, on_running=None):
     camera_counter = 0
     camera_cycles = max(1, config.camera_push_interval // max(1, config.poll_interval))
 
-    log.info(
-        f"Daemon running. Kernel={config.kernel_id}, "
-        f"PCC={config.pcc_base}, poll={config.poll_interval}s"
-    )
-
     # Send initial heartbeat
     try:
-        gateway_client.send_heartbeat("online", accepting_jobs=False)
+        heartbeat_confirmed = gateway_client.send_heartbeat("online", accepting_jobs=False)
     except Exception as e:
         log.error(f"Initial heartbeat failed ({e}); daemon not started.")
         _remove_pid()
@@ -321,6 +324,20 @@ def run_daemon(config: NodeConfig, *, on_running=None):
         except OSError:
             pass
         raise
+
+    if not heartbeat_confirmed:
+        log.error("Initial heartbeat not confirmed on either heartbeat route; daemon not started.")
+        _remove_pid()
+        try:
+            os.remove(STATE_FILE)
+        except OSError:
+            pass
+        raise FirstHeartbeatError("the first heartbeat was not confirmed on either heartbeat route")
+
+    log.info(
+        f"Daemon running. Kernel={config.kernel_id}, "
+        f"PCC={config.pcc_base}, poll={config.poll_interval}s"
+    )
 
     # The daemon is up: only now may a caller say the node is running (ChatGPT r3 finding 1).
     if on_running is not None:
