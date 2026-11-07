@@ -273,6 +273,30 @@ describe("wallet pages re-sign through the existing SIWE flow", () => {
     });
     expectRemedy();
     expect(button("Sign in again")).not.toBe(first);
+    expect(button("Sign in again").disabled).toBe(true);
+    await click("Sign in again");
+    try {
+      expect(count("/api/auth/nonce")).toBe(1);
+      expect(wallet.signMessageAsync).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => { for (const finish of signatures) finish("signed"); });
+    }
+    expect(count("/api/auth/session-key")).toBeLessThanOrEqual(1);
+  });
+
+  it("K5: /link single flight survives a control remount while the signature is pending", async () => {
+    const signatures: ((signature: string) => void)[] = [];
+    wallet.signMessageAsync.mockImplementation(() => new Promise((resolve) => { signatures.push(resolve); }));
+    await showFailure("link");
+    const first = button("Sign in again");
+    await act(async () => { first.click(); first.click(); });
+    expect(count("/api/auth/nonce")).toBe(1);
+    expect(wallet.signMessageAsync).toHaveBeenCalledTimes(1);
+    // The code is still typed: Continue's lookup clears the alert, answers 401 and remounts the control.
+    await click("Continue");
+    expectRemedy();
+    expect(button("Sign in again")).not.toBe(first);
+    expect(button("Sign in again").disabled).toBe(true);
     await click("Sign in again");
     try {
       expect(count("/api/auth/nonce")).toBe(1);
@@ -330,6 +354,21 @@ describe("wallet pages re-sign through the existing SIWE flow", () => {
     expectRemedy(SIGN_IN_REFUSED, false);
     expect(buttons("Connect Wallet")).toHaveLength(0);
     expect(count("/api/auth/me")).toBe(0);
+  });
+
+  it.each(["wallets", "link"] as const)("C2: /%s offers Sign in again when a held session key's 401 survives renewal", async (page) => {
+    // A wallet sign-in holds a session key. The gateway then refuses it and /api/auth/me is down, so renewal keeps the key.
+    await act(async () => {
+      useAuthStore.getState().setSession("session-token");
+      await useAuthStore.getState().mintSessionKey();
+    });
+    expect(useAuthStore.getState()).toMatchObject({ isAuthenticated: true, sessionKeyId: "session-key-1" });
+    const stub = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
+      pathOf(input) === "/api/auth/me" ? reply(503, {}) : stub(input, init)));
+    await showFailure(page);
+    expectRemedy();
+    expect(useAuthStore.getState().sessionKeyId).toBe("session-key-1");
   });
 
   it("F5: an unlink 401 followed by its reload's 401 shows one alert and one of each remedy", async () => {
