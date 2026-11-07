@@ -110,6 +110,26 @@ describe("scope-checker — Capability Kit routes", () => {
     });
   });
 
+  describe("admin reaches the handler", () => {
+    it("ALLOWS POST /api/kits to a key scoped [\"admin\"]", async () => {
+      keyScopes = JSON.stringify(["admin"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/kits" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().reached).toBe(true);
+      await app.close();
+    });
+
+    it("ALLOWS POST /api/kits/:digest/fork to a key scoped [\"admin\"]", async () => {
+      keyScopes = JSON.stringify(["admin"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: FORK_URL });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().reached).toBe(true);
+      await app.close();
+    });
+  });
+
   describe("wildcard keys reach the handler", () => {
     it("ALLOWS POST /api/kits to a key scoped [\"*\"]", async () => {
       keyScopes = JSON.stringify(["*"]);
