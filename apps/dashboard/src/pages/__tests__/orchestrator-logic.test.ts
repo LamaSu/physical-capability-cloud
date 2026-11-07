@@ -66,7 +66,7 @@ describe("readOrchestratorResponse", () => {
     });
   });
 
-  it.each([null, ["a", "b"], "text", 12, false])(
+  it.each([[null], [["a", "b"]], ["text"], [12], [false]])(
     "accepts valid JSON without imposing a response schema: %j",
     async (body) => {
       await expect(readOrchestratorResponse(jsonResponse(body, 201))).resolves.toEqual({

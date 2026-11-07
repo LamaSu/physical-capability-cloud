@@ -158,6 +158,7 @@ describe("OrchestratorPage reports only known state", () => {
     expect(bars).toHaveLength(3);
     for (const bar of bars) {
       expect(bar.title).toMatch(/ @ .+: per-step progress is not reported$/);
+      expect((bar.firstElementChild as HTMLElement).style.width, "running steps must not invent a width").toBe("0%");
       expect(bar.querySelector(".bg-green-400"), "running steps must not be marked done").toBeNull();
       expect(bar.querySelector(".animate-pulse"), "running steps must not invent in-progress state").toBeNull();
     }
@@ -193,6 +194,7 @@ describe("OrchestratorPage reports only known state", () => {
     await renderPage();
     expect(container.textContent).toContain("Some data is not available on this gateway");
     expect(container.textContent).toContain("Graphs are not recorded here.");
+    expect(container.textContent).not.toContain("Some data failed to load");
     expect(container.textContent).toContain("Real data lives at: GET /api/kernels, GET /api/kernels/:kernelId/devices");
     expect(kpi("Transfer Graphs")).toBe("—");
   });
@@ -206,6 +208,9 @@ describe("OrchestratorPage reports only known state", () => {
     const message = [...container.querySelectorAll("p, div")].find((element) => element.textContent === N34);
     expect(message, "the gateway's N34 message must be shown verbatim").toBeDefined();
     expect(container.textContent).not.toContain("Real data lives at:");
+    expect(container.textContent).not.toContain("Some data failed to load");
+    expect(container.textContent).not.toContain("No active samples");
+    expect(container.textContent).not.toContain("No workflows found");
     for (const label of ["Transfer Graphs", "Active Samples", "Running Workflows", "Active Claims"]) {
       expect(kpi(label)).toBe("—");
     }
@@ -228,6 +233,14 @@ describe("OrchestratorPage reports only known state", () => {
     expect(kpi("Active Samples")).toBe("—");
   });
 
+  it("R3 two failed reads: each has its own error line", async () => {
+    answers.set("/api/orchestrator/graphs", () => json({ message: "Graphs failed" }, 500));
+    answers.set("/api/orchestrator/claims", () => new Response("down", { status: 503, statusText: "Service Unavailable" }));
+    await renderPage();
+    expect(container.textContent).toContain("Transfer Graphs: HTTP 500 — Graphs failed");
+    expect(container.textContent).toContain("Resource Claims: HTTP 503 — Service Unavailable");
+  });
+
   it("R5 failed claims hide Available, Ready and stale claim badges for every node", async () => {
     useOrchestratorStore.setState({ claims: CLAIMS });
     const untrustedClaims = [{ ...CLAIMS[0], claimedBy: "untrusted-claim" }];
@@ -244,6 +257,9 @@ describe("OrchestratorPage reports only known state", () => {
         expect(label.parentElement!.parentElement!.textContent).toContain("Claim status unknown");
       }
     }
+    const status = [...container.querySelectorAll("h3")].find((element) => element.textContent === "Instrument Status");
+    expect(status, "Instrument Status section").toBeDefined();
+    expect(status!.parentElement!.querySelector(".bg-green-400, .bg-amber-400"), "no claim-state dot without an ok claims read").toBeNull();
     expect(kpi("Active Claims")).toBe("—");
     expect(useOrchestratorStore.getState().claims).toEqual(CLAIMS);
   });
@@ -257,6 +273,18 @@ describe("OrchestratorPage reports only known state", () => {
     expect(container.textContent).not.toContain("Instrument Status");
     expect(kpi("Transfer Graphs")).toBe("—");
     expect(useOrchestratorStore.getState().graphs).toEqual([GRAPH]);
+  });
+
+  it("R6 failed samples and workflows hide stale store lists", async () => {
+    useOrchestratorStore.setState({ samples: SAMPLES, workflows: WORKFLOWS });
+    answers.set("/api/orchestrator/samples", () => json({ message: "Samples failed", samples: [] }, 500));
+    answers.set("/api/orchestrator/workflows", () => json({ message: "Workflows failed", workflows: [] }, 500));
+    await renderPage();
+    expect(container.textContent).not.toContain("Labware:");
+    expect(container.textContent).not.toContain("Steps:");
+    expect(kpi("Active Samples")).toBe("—");
+    expect(kpi("Running Workflows")).toBe("—");
+    expect(useOrchestratorStore.getState()).toMatchObject({ samples: SAMPLES, workflows: WORKFLOWS });
   });
 
   it("R7 all four successful reads show their counts and claim badges", async () => {
