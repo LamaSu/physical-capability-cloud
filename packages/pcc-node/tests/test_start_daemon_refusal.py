@@ -16,6 +16,7 @@ to a loopback gateway; only the gateway's answers are scripted.
 import json
 import http.client
 import io
+import logging
 import os
 import signal
 import threading
@@ -141,8 +142,10 @@ def test_start_exits_nonzero_when_the_daemons_own_registration_is_refused(surrou
         "did not start and the node is not running; check the API key and gateway, then run pcc-node start again.\n"
     )
     assert "Registration failed" not in result.stdout
-    assert "); daemon not started." in caplog.text
-    assert "NOT registered" not in caplog.text
+    daemon_errors = [r.getMessage() for r in caplog.records
+                     if r.name == "pcc-node.daemon" and r.levelno == logging.ERROR]
+    assert daemon_errors == ["Kernel registration failed (kernel registration failed (HTTP 401): "
+                             "{'error': 'unauthorized'}); daemon not started."]
     assert gateway.paths() == [KERNELS, KERNELS]  # both registrations, then no heartbeat
     assert not os.path.exists(pid_file) and not os.path.exists(state_file)
 
@@ -409,7 +412,8 @@ def test_an_unconfirmed_first_heartbeat_cleans_up_and_never_runs(surroundings, m
     assert gateway.paths() == [KERNELS, "/api/operator/heartbeat", "/api/kernels/k1/heartbeat"]
     assert not os.path.exists(pid_file)
     assert not os.path.exists(state_file)
-    assert "Initial heartbeat not confirmed on either heartbeat route; daemon not started." in caplog.text
+    assert ("pcc-node.daemon", logging.ERROR,
+            "Initial heartbeat not confirmed on either heartbeat route; daemon not started.") in caplog.record_tuples
     assert "Daemon running" not in caplog.text
 
 
@@ -441,7 +445,8 @@ def test_an_unconfirmed_first_heartbeat_stops_start(surroundings, tmp_path, monk
     pytest.param(_NoAnswer(), id="fallback-after-no-answer"),
 ])
 def test_a_first_heartbeat_the_fallback_route_confirms_starts_the_node(surroundings, tmp_path, monkeypatch,
-                                                                    heartbeat):
+                                                                    caplog, heartbeat):
+    caplog.set_level("INFO", logger="pcc-node.daemon")
     gateway = WireGateway(monkeypatch, _wire_answer(201, b'{"id":"k1"}'),
                           _wire_answer(201, b'{"id":"k1"}'), heartbeat, _wire_answer(200, b'{"ok":true}'))
     result = _start(tmp_path, gateway)
@@ -450,6 +455,9 @@ def test_a_first_heartbeat_the_fallback_route_confirms_starts_the_node(surroundi
     config = json.loads((tmp_path / "node-config.json").read_text())
     assert gateway.paths()[:4] == [KERNELS, KERNELS, "/api/operator/heartbeat",
                                   f"/api/kernels/{config['kernel_id']}/heartbeat"]
+    assert ("pcc-node.daemon", logging.INFO,
+            f"Daemon running. Kernel={config['kernel_id']}, PCC={WireGateway.url}, "
+            f"poll={config['poll_interval']}s") in caplog.record_tuples
 
 
 def test_an_unreadable_fallback_heartbeat_cleans_up_and_never_runs(surroundings, monkeypatch):
