@@ -14,12 +14,51 @@
  */
 import { isAddress, type Address } from "viem";
 import { refuse } from "./errors.js";
+import { MAX_RECLAIM_DELAY, MIN_RECLAIM_DELAY } from "./vnext.js";
 
 /** Circle USDC by chain id (decimal string). Base mainnet and Base Sepolia, as in VNextDeploySpec.sol. */
 export const CIRCLE_USDC: Readonly<Record<string, Address>> = Object.freeze({
   "8453": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
   "84532": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
 });
+
+/**
+ * Deployment windows copied from packages/contracts/deployments/vnext/base-sepolia/CANONICAL.json;
+ * a test pins them to that record. Only chain id selects a window: no caller pin, payload field,
+ * environment variable or option can set or widen one.
+ */
+export type ReclaimWindow = {
+  readonly scheduleId: string;
+  readonly testnetOnly: boolean;
+  readonly minReclaimDelay: bigint;
+  readonly maxReclaimDelay: bigint;
+};
+
+/**
+ * Values copied from packages/contracts/deployments/vnext/base-sepolia/CANONICAL.json and pinned
+ * to it by a test. Only chain id selects a window: no caller pin, payload field, environment
+ * variable or option can set or widen one.
+ */
+export const RECLAIM_WINDOWS: Readonly<Record<string, ReclaimWindow>> = Object.freeze({
+  "84532": Object.freeze({
+    scheduleId: "vnext-testnet-short-v1", testnetOnly: true,
+    minReclaimDelay: 4_500n, maxReclaimDelay: 31_536_000n,
+  }),
+});
+
+/**
+ * Select the window copied from packages/contracts/deployments/vnext/base-sepolia/CANONICAL.json,
+ * pinned to that record by a test, or the library default. Only chain id selects it: no caller
+ * pin, payload field, environment variable or option can set or widen a window.
+ */
+export function reclaimWindowFor(chainId: bigint): { readonly min: bigint; readonly max: bigint } {
+  const key = chainId.toString();
+  if (Object.prototype.hasOwnProperty.call(RECLAIM_WINDOWS, key)) {
+    const w = RECLAIM_WINDOWS[key]!;
+    return Object.freeze({ min: w.minReclaimDelay, max: w.maxReclaimDelay });
+  }
+  return Object.freeze({ min: MIN_RECLAIM_DELAY, max: MAX_RECLAIM_DELAY });
+}
 
 /** Caller pins by chain id (decimal string). */
 export type FundingPins = Readonly<Record<string, { readonly usdc?: Address; readonly factory?: Address }>>;

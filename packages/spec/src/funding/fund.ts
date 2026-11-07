@@ -301,7 +301,7 @@ export async function approveAndFund(args: ApproveAndFundArgs): Promise<FundingR
   }
   if (before.kind === "other") refuse("ALREADY_FUNDED", before.detail);
   if (before.kind === "unreadable") refuse("LIVE_CHECK_FAILED", before.detail);
-  checkTiming(prepared, block.timestamp, margin);
+  checkTiming(prepared, block.timestamp, margin, prepared.chainId);
 
   // reviewer-charlie L7: retry safety. After an indeterminate result the earlier approve or fund() may still be in
   // flight, and sending again would re-approve and re-send: fund #2 reverts AlreadySealed once fund #1 lands, but its
