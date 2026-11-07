@@ -123,8 +123,7 @@ const DEFAULT_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
 /** Default text the LLM emits when ANTHROPIC_API_KEY is missing. */
 const NEEDS_KEY_TEXT =
   "Onboarding chat isn't fully configured on this gateway yet — the operator hasn't set ANTHROPIC_API_KEY. " +
-  "You can still register your capability via the CLI (`pcc-node start`) or by following the wizard at /onboard/wizard. " +
-  "Once a key is configured, this chat will walk you through registration end-to-end.";
+  "Registration isn't available here yet.";
 
 // ── Agent package loader (cached) ──────────────────────────────────
 
