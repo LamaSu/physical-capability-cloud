@@ -8,6 +8,7 @@ import {
   configuredVNextChainId,
   paidScopeActivationTerms,
   vnextNetworkSlug,
+  VNEXT_SCHEDULE_TUPLES,
 } from "../services/paid-scope-activation-terms.js";
 
 interface FieldRule {
@@ -39,6 +40,7 @@ const READ_FIELDS = [
   "canonical", "doNotPin", "mode", "label", "broadcast",
   "factory", "implementation", "usdc", "chainId", "specVersion", "blockNumber",
   "scheduleId", "scheduleTestnetOnly",
+  "challengeWindowSec", "appealWindowSec", "backupWindowSec", "emergencyReviewWindowSec", "minReclaimDelaySec", "maxReclaimDelaySec",
 ] as const;
 
 function mainnetRecord(): Record<string, unknown> {
@@ -209,6 +211,27 @@ describe("hand-written reader / CANONICAL.schema.json structural agreement", () 
     record.scheduleTestnetOnly = !properties.scheduleTestnetOnly!.const;
     expect(resolve(record)).toBeNull();
     expect(warnings).toEqual([["vnext_record_refused R-d"]]);
+  });
+
+  it("VNEXT_SCHEDULE_TUPLES is the schema's oneOf: both ids, all 8 keys each, nothing extra", () => {
+    const keys = [
+      "scheduleId", "scheduleTestnetOnly", "challengeWindowSec", "appealWindowSec", "backupWindowSec",
+      "emergencyReviewWindowSec", "minReclaimDelaySec", "maxReclaimDelaySec",
+    ].sort();
+    const fromSchema = schema.oneOf.map(({ properties }) => Object.fromEntries(
+      Object.entries(properties).map(([key, rule]) => {
+        expect(Object.keys(rule)).toEqual(["const"]);
+        return [key, rule.const];
+      }),
+    ));
+    expect(fromSchema).toHaveLength(2);
+    expect(VNEXT_SCHEDULE_TUPLES).toHaveLength(2);
+    for (const tuple of [...fromSchema, ...VNEXT_SCHEDULE_TUPLES]) expect(Object.keys(tuple).sort()).toEqual(keys);
+    const byId = (a: { scheduleId?: unknown }, b: { scheduleId?: unknown }) => String(a.scheduleId).localeCompare(String(b.scheduleId));
+    expect([...VNEXT_SCHEDULE_TUPLES].sort(byId)).toStrictEqual(fromSchema.sort(byId));
+    for (const tuples of [fromSchema, VNEXT_SCHEDULE_TUPLES]) {
+      expect(tuples.map((tuple) => tuple.scheduleId).sort()).toEqual([...schema.properties.scheduleId!.enum!].sort());
+    }
   });
 
   it("accepts the address schema's uppercase hex and numeric min/max boundaries", () => {
