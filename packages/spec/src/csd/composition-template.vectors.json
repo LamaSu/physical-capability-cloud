@@ -1,0 +1,177 @@
+[
+  {
+    "name": "document-workflow-v1",
+    "template": {
+      "schema": "pcc.composition-template/v1",
+      "slug": "document-workflow",
+      "version": 1,
+      "supersedes": null,
+      "contractRoot": "0x65bf7d25f632fea1bbd35be9b7f5500b03339b049ad17de7016b1bc87303122d",
+      "verificationProgramHash": "0x9999999999999999999999999999999999999999999999999999999999999999",
+      "nodes": [
+        {
+          "nodeId": "compose",
+          "capabilityType": "document.compose",
+          "csd": {
+            "url": "pcc://capabilities/document-composing/v1",
+            "contractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "tier": 0,
+          "evidence": [],
+          "inputKeys": [
+            "document",
+            "layout"
+          ],
+          "constraintKeys": [
+            "pageSize"
+          ]
+        },
+        {
+          "nodeId": "dispatch",
+          "capabilityType": "mail.drop",
+          "csd": {
+            "url": "pcc://capabilities/mail-dispatch/v1",
+            "contractDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          },
+          "tier": 0,
+          "evidence": [],
+          "inputKeys": [
+            "destination"
+          ],
+          "constraintKeys": []
+        },
+        {
+          "nodeId": "print",
+          "capabilityType": "document.print",
+          "csd": {
+            "url": "pcc://capabilities/document-printing/v1",
+            "contractDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "tier": 2,
+          "evidence": [
+            {
+              "evidenceTypeId": "confirm.print-output",
+              "tier": 2
+            },
+            {
+              "evidenceTypeId": "provenance.input-source",
+              "tier": 0
+            }
+          ],
+          "inputKeys": [
+            "artifact",
+            "copies"
+          ],
+          "constraintKeys": [
+            "color",
+            "duplex"
+          ],
+          "kitDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "edges": [
+        {
+          "from": "compose",
+          "to": "print"
+        },
+        {
+          "from": "print",
+          "to": "dispatch"
+        }
+      ]
+    },
+    "preimage": "{\"domain\":\"PCC:composition-template:v1\",\"template\":{\"contractRoot\":\"0x65bf7d25f632fea1bbd35be9b7f5500b03339b049ad17de7016b1bc87303122d\",\"edges\":[{\"from\":\"compose\",\"to\":\"print\"},{\"from\":\"print\",\"to\":\"dispatch\"}],\"nodes\":[{\"capabilityType\":\"document.compose\",\"constraintKeys\":[\"pageSize\"],\"csd\":{\"contractDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"url\":\"pcc://capabilities/document-composing/v1\"},\"evidence\":[],\"inputKeys\":[\"document\",\"layout\"],\"nodeId\":\"compose\",\"tier\":0},{\"capabilityType\":\"mail.drop\",\"constraintKeys\":[],\"csd\":{\"contractDigest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"url\":\"pcc://capabilities/mail-dispatch/v1\"},\"evidence\":[],\"inputKeys\":[\"destination\"],\"nodeId\":\"dispatch\",\"tier\":0},{\"capabilityType\":\"document.print\",\"constraintKeys\":[\"color\",\"duplex\"],\"csd\":{\"contractDigest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"url\":\"pcc://capabilities/document-printing/v1\"},\"evidence\":[{\"evidenceTypeId\":\"confirm.print-output\",\"tier\":2},{\"evidenceTypeId\":\"provenance.input-source\",\"tier\":0}],\"inputKeys\":[\"artifact\",\"copies\"],\"kitDigest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"nodeId\":\"print\",\"tier\":2}],\"schema\":\"pcc.composition-template/v1\",\"slug\":\"document-workflow\",\"supersedes\":null,\"verificationProgramHash\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":1}}",
+    "digest": "sha256:108e0120a8ea3dc302d9a6c7d4323d264d3c88e9342b85bfcf35b217cfda2bea",
+    "compositeCapabilityUrl": "pcc://capabilities/composite-document-workflow/v1"
+  },
+  {
+    "name": "document-workflow-v2",
+    "template": {
+      "schema": "pcc.composition-template/v1",
+      "slug": "document-workflow",
+      "version": 2,
+      "supersedes": "sha256:108e0120a8ea3dc302d9a6c7d4323d264d3c88e9342b85bfcf35b217cfda2bea",
+      "contractRoot": "0xfe7e3fb87bdfc70c696c6688edba1b7b0aaa30ee26c6f05ab0c3aaa6140fab81",
+      "verificationProgramHash": "0x9999999999999999999999999999999999999999999999999999999999999999",
+      "nodes": [
+        {
+          "nodeId": "compose",
+          "capabilityType": "document.compose",
+          "csd": {
+            "url": "pcc://capabilities/document-composing/v1",
+            "contractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "tier": 0,
+          "evidence": [],
+          "inputKeys": [
+            "document",
+            "layout"
+          ],
+          "constraintKeys": [
+            "pageSize"
+          ]
+        },
+        {
+          "nodeId": "dispatch",
+          "capabilityType": "mail.drop",
+          "csd": {
+            "url": "pcc://capabilities/mail-dispatch/v1",
+            "contractDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          },
+          "tier": 0,
+          "evidence": [],
+          "inputKeys": [
+            "destination"
+          ],
+          "constraintKeys": []
+        },
+        {
+          "nodeId": "print",
+          "capabilityType": "document.print",
+          "csd": {
+            "url": "pcc://capabilities/document-printing/v1",
+            "contractDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "tier": 2,
+          "evidence": [
+            {
+              "evidenceTypeId": "confirm.print-output",
+              "tier": 2
+            },
+            {
+              "evidenceTypeId": "measure.output-count",
+              "tier": 2
+            },
+            {
+              "evidenceTypeId": "provenance.input-source",
+              "tier": 0
+            }
+          ],
+          "inputKeys": [
+            "artifact",
+            "copies"
+          ],
+          "constraintKeys": [
+            "color",
+            "duplex",
+            "pageCount"
+          ],
+          "kitDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "edges": [
+        {
+          "from": "compose",
+          "to": "print"
+        },
+        {
+          "from": "print",
+          "to": "dispatch"
+        }
+      ]
+    },
+    "preimage": "{\"domain\":\"PCC:composition-template:v1\",\"template\":{\"contractRoot\":\"0xfe7e3fb87bdfc70c696c6688edba1b7b0aaa30ee26c6f05ab0c3aaa6140fab81\",\"edges\":[{\"from\":\"compose\",\"to\":\"print\"},{\"from\":\"print\",\"to\":\"dispatch\"}],\"nodes\":[{\"capabilityType\":\"document.compose\",\"constraintKeys\":[\"pageSize\"],\"csd\":{\"contractDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"url\":\"pcc://capabilities/document-composing/v1\"},\"evidence\":[],\"inputKeys\":[\"document\",\"layout\"],\"nodeId\":\"compose\",\"tier\":0},{\"capabilityType\":\"mail.drop\",\"constraintKeys\":[],\"csd\":{\"contractDigest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"url\":\"pcc://capabilities/mail-dispatch/v1\"},\"evidence\":[],\"inputKeys\":[\"destination\"],\"nodeId\":\"dispatch\",\"tier\":0},{\"capabilityType\":\"document.print\",\"constraintKeys\":[\"color\",\"duplex\",\"pageCount\"],\"csd\":{\"contractDigest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"url\":\"pcc://capabilities/document-printing/v1\"},\"evidence\":[{\"evidenceTypeId\":\"confirm.print-output\",\"tier\":2},{\"evidenceTypeId\":\"measure.output-count\",\"tier\":2},{\"evidenceTypeId\":\"provenance.input-source\",\"tier\":0}],\"inputKeys\":[\"artifact\",\"copies\"],\"kitDigest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"nodeId\":\"print\",\"tier\":2}],\"schema\":\"pcc.composition-template/v1\",\"slug\":\"document-workflow\",\"supersedes\":\"sha256:108e0120a8ea3dc302d9a6c7d4323d264d3c88e9342b85bfcf35b217cfda2bea\",\"verificationProgramHash\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":2}}",
+    "digest": "sha256:ae40e54a1d1b51d45958b97a3b22aa7cde341e6b7518ffeeaae8b2fd862f3325",
+    "compositeCapabilityUrl": "pcc://capabilities/composite-document-workflow/v2"
+  }
+]
