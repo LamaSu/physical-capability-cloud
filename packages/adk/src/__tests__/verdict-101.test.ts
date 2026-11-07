@@ -283,8 +283,9 @@ describe("verdict 101 F5: endpoint semantics are validated when generating and w
   });
 
   it("builds URLs a client sends unchanged, IPv6 and base paths included", () => {
-    expect(resolveToolRequest("get_kernel", { kernelId: "k 1" }, { baseUrl: "http://[::1]:3000/pcc/" }).url).toBe(
-      "http://[::1]:3000/pcc/api/kernels/k%201",
+    // 101b: a path parameter holds only route-safe characters, so "k-1" rather than "k 1".
+    expect(resolveToolRequest("get_kernel", { kernelId: "k-1" }, { baseUrl: "http://[::1]:3000/pcc/" }).url).toBe(
+      "http://[::1]:3000/pcc/api/kernels/k-1",
     );
   });
 });
