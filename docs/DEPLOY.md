@@ -57,6 +57,7 @@ merge to master
 │  deploy-staging  │   ───► retag <sha> → :staging
 │  [env: staging]  │        Railway(staging) pulls :staging, redeploys
 │  smoke /health   │        curl loop up to 3 min
+│  smoke /mcp      │        tools/list must return tools
 └────────┬─────────┘
          │
          ▼  ┌─── Manual gate (reel 2: "continuous delivery") ───┐
@@ -68,6 +69,7 @@ merge to master
 │  deploy-prod     │   ───► retag <sha> → :prod
 │  [workflow_      │        Railway(prod) pulls :prod, redeploys
 │   dispatch]      │        https://capability.network/api/health
+│                  │        + /mcp tools/list must return tools
 └──────────────────┘
 ```
 
@@ -134,7 +136,7 @@ Your commits should follow Conventional Commits (`feat:`, `fix:`, `feat(scope)!:
 To promote a build to prod:
 1. Find the SHA you want to promote in the staging deploy run (it's the commit SHA of the master push).
 2. GitHub → Actions → **Deploy to Prod** → **Run workflow** → paste the SHA → **Run**.
-3. The workflow verifies the image exists, retags it as `:prod`, and smoke-tests `https://capability.network/api/health`.
+3. The workflow verifies the image exists, retags it as `:prod`, smoke-tests `https://capability.network/api/health`, and then checks that the hosted MCP's `tools/list` returns tools (`packages/gateway/scripts/smoke-mcp-tools-list.mjs`; see "Gateway MCP proxy base" below).
 
 If you upgrade to GitHub Pro ($4/mo) later, you can add a required-reviewer rule to the `production` environment and move the deploy-prod job back into `ci.yml` as an automatic push-to-master job — the Dockerfile/YAML is ready for that switch.
 
@@ -173,6 +175,22 @@ docker buildx imagetools create \
 ```
 
 Railway sees the manifest digest change and redeploys in seconds. No git revert, no rebuild.
+
+## Gateway MCP proxy base (`PCC_API_BASE_URL`)
+
+The hosted MCP server (`/mcp`, `/mcp/apps`) proxies tool calls to the PCC API at `PCC_API_BASE_URL`. With `NODE_ENV=production` the variable is **required**, and there is no fallback (`packages/gateway/src/mcp/mcp-api-base.ts`). If it is missing, `initialize` still answers 200, but every `tools/list` and tool call fails with -32600 "PCC_API_BASE_URL is not set", so every MCP client gets zero tools while `/api/health` stays green. Prod ran like that until 2026-09-29 (board row N88).
+
+| Railway environment | `PCC_API_BASE_URL` |
+|---|---|
+| production | `https://capability.network` |
+| staging | its own origin, e.g. `https://pcc-gateway-staging.up.railway.app` (never the production origin: the gateway rejects that from a non-production environment) |
+| any other deployed gateway (a rehearsal sandbox, a preview) | its own origin |
+
+Both deploy jobs run `node packages/gateway/scripts/smoke-mcp-tools-list.mjs <origin>` after the health check, so a deploy without the variable fails. Run it by hand to check a gateway:
+
+```bash
+node packages/gateway/scripts/smoke-mcp-tools-list.mjs https://capability.network --attempts 1
+```
 
 ## Workflow runtime SQLite path
 

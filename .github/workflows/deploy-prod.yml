@@ -106,3 +106,21 @@ jobs:
           done
           echo "prod health check did not pass within 3 minutes"
           exit 1
+
+      # /api/health stays green while the hosted MCP serves no tools: on 2026-09-29
+      # prod's /mcp answered initialize but failed every tools/list, because
+      # PCC_API_BASE_URL was unset (board row N88; the proxy fails closed by design).
+      # So also check the surface agents use: tools/list must return tools.
+      - name: Check out the MCP smoke script
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: packages/gateway/scripts/smoke-mcp-tools-list.mjs
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Smoke test prod MCP tools/list
+        run: node packages/gateway/scripts/smoke-mcp-tools-list.mjs https://capability.network
