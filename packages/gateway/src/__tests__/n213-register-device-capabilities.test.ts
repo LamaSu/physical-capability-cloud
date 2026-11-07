@@ -101,4 +101,12 @@ describe("N213 register-device capability types", () => {
       expect.objectContaining({ id: "cap-kernel-n213-n213-b", type: "n213-b" }),
     ]));
   });
+
+  it("T4: ignores a non-array capabilities object and still answers 201", async () => {
+    const response = await register("device-n213-object", { length: 1, 0: "n213-obj" });
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toMatchObject({ registered: true, action: "created" });
+
+    expect(getRepos().capabilities.findByKernel(KERNEL_ID)).toHaveLength(0);
+  });
 });
