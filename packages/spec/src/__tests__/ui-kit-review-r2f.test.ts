@@ -162,17 +162,22 @@ describe("r2f T9: an absent amount has no currency unit", () => {
       "/api/capabilities/c1": { name: "Printer", pricing: { baseCost: "not an amount", currency: "USDC" } },
       "/api/escrow/e1": { totalAmount: "not an amount", currency: "USDC" },
     });
-    expect(document.querySelector(".pcc-price-chip")!.textContent).toBe("amount not reported");
-    expect(document.querySelector(".pcc-receipt-amount")!.textContent).toBe("amount not reported");
-    expect(document.querySelector(".pcc-chain-budget")!.textContent).toBe("budget amount not reported");
+    expect(document.querySelector(".pcc-price-chip")!.textContent).toBe("listed price: amount not reported (operator's listing)");
+    expect(document.querySelector(".pcc-price-chip")!.textContent).not.toContain("USDC");
+    expect(document.querySelector(".pcc-receipt-amount")!.textContent).toBe("reported amount: amount not reported");
+    expect(document.querySelector(".pcc-receipt-amount")!.textContent).not.toContain("USDC");
+    expect(document.querySelector(".pcc-chain-budget")!.textContent).toBe("requested budget: amount not reported (this plan)");
+    expect(document.querySelector(".pcc-chain-budget")!.textContent).not.toContain("USDC");
   });
   it("omits units in plan step and total notices after the real Plan click", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => ({ steps: [{ capabilityType: "fdm", estimatedPriceUSD: "not an amount" }], totalPriceUSD: "not an amount" }) })));
     await boot({ sections: [{ windows: [{ kind: "chain", composeRef: { outcomeType: "Print parts" } }] }] });
     (document.querySelector(".pcc-chain-head")!.closest(".pcc-win")!.querySelector(".pcc-btn") as HTMLButtonElement).click();
     await settle();
-    expect(document.querySelector(".pcc-plan-row .pcc-tnum")!.textContent).toBe("amount not reported");
-    expect(document.querySelector(".pcc-plan-total")!.textContent).toBe("total amount not reported");
+    expect(document.querySelector(".pcc-plan-row .pcc-tnum")!.textContent).toBe("estimated price: amount not reported (planner's estimate)");
+    expect(document.querySelector(".pcc-plan-row .pcc-tnum")!.textContent).not.toContain("USDC");
+    expect(document.querySelector(".pcc-plan-total")!.textContent).toBe("estimated total: amount not reported (planner's estimate)");
+    expect(document.querySelector(".pcc-plan-total")!.textContent).not.toContain("USDC");
   });
 });
 
@@ -193,6 +198,6 @@ describe("r2f T11: the rendered style node is pinned", () => {
       .toEqual(Array.from(expected.sheet!.cssRules, (rule) => rule.cssText));
     expected.remove();
     // Updated only with an intentional reviewed stylesheet change; any removed rule changes this pin.
-    expect(createHash("sha256").update(css).digest("hex")).toBe("9fa72a736853448590d602053bcce7f07a7c820f74514b9e1d065c3842e22e36");
+    expect(createHash("sha256").update(css).digest("hex")).toBe("54bcb2d22bcd1423dc043353ea86586382bd423a021abd0294ecf190b988b52e");
   });
 });

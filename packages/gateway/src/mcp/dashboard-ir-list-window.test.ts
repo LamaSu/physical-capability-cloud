@@ -86,6 +86,24 @@ describe("N110 listWindow: unit table (pure, no DOM)", () => {
     expect(r.empty).toBe("no rows in this window");
   });
 
+  // The maximum accepted offset has an exact row position and never shows "from row —".
+  it("offset Number.MAX_SAFE_INTEGER: 'from row 9007199254740992', never 'from row —'", () => {
+    const r = listWindow(listNode({ path: "/api/jobs", query: { offset: Number.MAX_SAFE_INTEGER } }), undefined, 1);
+    expect(r.note).toBe("from row 9007199254740992 · total not shown");
+    expect(r.note).not.toContain("—");
+    expect(r.empty).toBe("no rows in this window");
+  });
+
+  it("offset Number.MAX_SAFE_INTEGER - 1: its next row is still safe, so 'from row 9007199254740991'", () => {
+    const r = listWindow(listNode({ path: "/api/jobs", query: { offset: Number.MAX_SAFE_INTEGER - 1 } }), undefined, 1);
+    expect(r.note).toBe("from row 9007199254740991 · total not shown");
+  });
+
+  it("offset Number.MAX_SAFE_INTEGER on a paged route with a total: the position is exact and the total fails closed", () => {
+    const r = listWindow(listNode({ path: "/api/capabilities", query: { offset: Number.MAX_SAFE_INTEGER } }), { total: Number.MAX_SAFE_INTEGER }, 1);
+    expect(r.note).toBe("from row 9007199254740992 · total not shown");
+  });
+
   it("offset 100 with jobs {total: 500}: from row 101 · 1 of 500 returned", () => {
     const r = listWindow(listNode({ path: "/api/jobs", query: { offset: 100 } }), { total: 500 }, 1);
     expect(r.note).toBe("from row 101 · 1 of 500 returned");
@@ -252,6 +270,17 @@ describe("N110 end-to-end on the rebuilt pcc-ir-kit.js", () => {
     expect(empty.textContent).toBe("no rows in this window");
     expect(empty.textContent).not.toBe("none");
     expect(s.q(".pcc-list .pcc-window").textContent).toBe("filtered by this view: type=pizza");
+    s.close();
+  });
+
+  it("an offset of Number.MAX_SAFE_INTEGER renders 'from row 9007199254740992' from the rebuilt bytes, never 'from row —'", async () => {
+    const s = scene([{ status: 200, json: { items: [], total: 0, asOf: iso(T0) } }], T0);
+    s.deliver(capsManifest({ offset: Number.MAX_SAFE_INTEGER })); await s.settle();
+    const note = s.q(".pcc-list .pcc-window");
+    expect(note).not.toBeNull();
+    expect(note.textContent).toContain("from row 9007199254740992");
+    expect(note.textContent).not.toContain("from row —");
+    expect(s.q(".pcc-list .pcc-empty").textContent).toBe("no rows in this window");
     s.close();
   });
 

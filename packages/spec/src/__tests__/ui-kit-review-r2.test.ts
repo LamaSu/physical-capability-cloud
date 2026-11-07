@@ -50,10 +50,10 @@ describe("review F1: approved formatters fail closed", () => {
     const receipt = k.renderReceipt(ctx(snapshot), { binding: { path: "/api/escrow/e1" } });
     const approval = k.approvalDetails({ amount: 12, currency: "paid" });
     await flush();
-    expect(cap.querySelector(".pcc-price-chip")!.textContent).toBe("amount not reported currency not reported");
-    expect(receipt.querySelector(".pcc-receipt-num")!.textContent).toBe("amount not reported");
+    expect(cap.querySelector(".pcc-price-chip")!.textContent).toBe("listed price: amount not reported (currency not listed) (operator's listing)");
+    expect(receipt.querySelector(".pcc-receipt-num")!.textContent).toBe("reported amount: amount not reported");
     expect(receipt.querySelector(".pcc-timeline-ts")!.textContent).toBe("time not reported");
-    expect(approval.querySelector(".pcc-approval-cost")!.textContent).toBe("12.00 currency not reported");
+    expect(approval.querySelector(".pcc-approval-cost")!.textContent).toBe("bound record reports amount: 12.00 currency not reported");
     expect(k.snapshotBanner(ctx({ _ts: "paid out" })).textContent).toBe("Snapshot — data as of time not reported · not live.");
     expect(count()).toBe(0);
   });
@@ -75,7 +75,7 @@ describe("review F3: identifiers follow the IR rule", () => {
     expect(unknown.querySelector(".pcc-win-title")!.classList.contains("pcc-agent")).toBe(true);
     const request = k.realRequestNode({ ok: true, method: "PATCH", destination: "/api/feedback", body: { custom: "value" }, amounts: [["amount", 1], ["totalAmount", 2]], refs: [["jobId", "j1"], ["escrowId", "e1"]] });
     expect(Array.from(request.querySelectorAll(".pcc-args-k"), (el) => el.textContent)).toEqual(['reported: "custom"']);
-    expect(Array.from(request.querySelectorAll(".pcc-realreq-amt"), (el) => el.firstChild?.textContent)).toEqual(['reported: "amount"', 'reported: "totalAmount"']);
+    expect(Array.from(request.querySelectorAll(".pcc-realreq-amt"), (el) => el.firstChild?.textContent)).toEqual(['reported: "amount" in this request:', 'reported: "totalAmount" in this request:']);
     expect(Array.from(request.querySelectorAll(".pcc-realreq-ref"), (el) => el.firstChild?.textContent)).toEqual(['reported: "jobId"', 'reported: "escrowId"']);
     const list = k.renderList(ctx({ "/api/jobs": { jobs: [{}] } }), { binding: { path: "/api/jobs" }, item: { title: "custom-field" } });
     await flush();
