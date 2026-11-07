@@ -428,6 +428,7 @@ export function createHost(deps: HostDeps): {
       // Recovery never drives the printer or re-posts a relay bundle.
       const records = await journal.list();
       // A possibly pending transaction owns the operator's nonce stream.
+      const capsStalled = [...retries.values()].some((r) => r.code === "submit_caps_exceeded" && now() < r.until);
       const recoverable = records.find((entry) => entry.state === "submit_attempted" || entry.state === "submit_indeterminate")
         ?? records.filter((entry) => {
           if (entry.state !== "package_built" && entry.state !== "receipt_stored" && entry.state !== "evidence_stored") return false;
@@ -438,8 +439,9 @@ export function createHost(deps: HostDeps): {
           const pendingUntil = retries.get(entry.jobId)?.until;
           if (pendingUntil !== undefined && now() < pendingUntil) return false;
           // Yield to a due poll after recovery, except for the operator's caps.
-          // A poll backoff leaves time for other ready recovery attempts.
-          if (pollAfterRecovery && now() >= nextPollAt
+          // A poll backoff leaves time for other ready recovery attempts, and so
+          // does a caps stall, during which no poll runs.
+          if (pollAfterRecovery && !capsStalled && now() >= nextPollAt
             && retries.get(entry.jobId)?.code !== "submit_caps_exceeded") return false;
           return entry.state !== "evidence_stored" || entry.code === undefined;
         }).sort((a, b) => (retries.get(a.jobId)?.until ?? -Infinity)

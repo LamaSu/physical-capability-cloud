@@ -1523,3 +1523,79 @@ describe("REVIEW A3 liveness under run() (repro)", () => {
     expect(setup.gateway.pollJobs).toHaveBeenCalledTimes(polls + 1);
   });
 });
+
+describe("REVIEW r3 caps stall under run()", () => {
+  it.each([0, 2])("a persistent caps_exceeded keeps run() from polling, with %i recovered refusal units", async (others) => {
+    const setup = await fixture();
+    let sim = false;
+    let start = 0;
+    const stop = new AbortController();
+    const timers: HostTimers = {
+      setTimeout(callback, ms) {
+        if (!sim) return setTimeout(callback, ms);
+        setup.advance(ms + 1);
+        if (setup.deps.clock!() - start >= 10 * 60_000) stop.abort();
+        return setTimeout(callback, 0);
+      },
+      clearTimeout(handle) { if (handle !== undefined) clearTimeout(handle as ReturnType<typeof setTimeout>); },
+    };
+    setup.host = createHost({ ...setup.deps, timers });
+    setup.broadcaster.submit.mockResolvedValue({ code: "caps_exceeded", cap: "gasCap" });
+    expect(await finish(setup)).toMatchObject({ state: "receipt_stored", waitMs: 5_000 });
+    const pkg = await setup.diskPackage();
+    for (let i = 0; i < others; i++) {
+      const other = `a${i}:package-built`;
+      await setup.journal.append(other, "evidence_stored");
+      await setup.journal.savePackage(other, pkg);
+      await setup.journal.append(other, "package_built", undefined, { packageDigest: pkg.packageDigest, evidenceBlockHash: pkg.evidenceBlockHash });
+    }
+    setup.gateway.postReceipt.mockResolvedValue({ ok: false, code: "receipt_refused", status: 422, sub: "package_challenge_refused" });
+    const polls = setup.gateway.pollJobs.mock.calls.length;
+    const submits = setup.broadcaster.submit.mock.calls.length;
+    start = setup.deps.clock!();
+    sim = true;
+    await setup.host.run(stop.signal);
+    expect(setup.gateway.pollJobs).toHaveBeenCalledTimes(polls);
+    expect(setup.broadcaster.submit.mock.calls.length - submits).toBeGreaterThan(1);
+    expect(setup.sentData).toEqual([]);
+  });
+
+  it("other recovered units keep their retries during a caps stall", async () => {
+    const setup = await fixture();
+    let sim = false;
+    let start = 0;
+    const stop = new AbortController();
+    const timers: HostTimers = {
+      setTimeout(callback, ms) {
+        if (!sim) return setTimeout(callback, ms);
+        setup.advance(ms + 1);
+        if (setup.deps.clock!() - start >= 10 * 60_000) stop.abort();
+        return setTimeout(callback, 0);
+      },
+      clearTimeout(handle) { if (handle !== undefined) clearTimeout(handle as ReturnType<typeof setTimeout>); },
+    };
+    setup.host = createHost({ ...setup.deps, timers });
+    setup.broadcaster.submit.mockResolvedValue({ code: "caps_exceeded", cap: "gasCap" });
+    expect(await finish(setup)).toMatchObject({ state: "receipt_stored", waitMs: 5_000 });
+    const pkg = await setup.diskPackage();
+    const others = ["a0:package-built", "a1:package-built"];
+    for (const other of others) {
+      await setup.journal.append(other, "evidence_stored");
+      await setup.journal.savePackage(other, pkg);
+      await setup.journal.append(other, "package_built", undefined, { packageDigest: pkg.packageDigest, evidenceBlockHash: pkg.evidenceBlockHash });
+    }
+    setup.gateway.postReceipt.mockResolvedValue({ ok: false, code: "receipt_refused", status: 422, sub: "package_challenge_refused" });
+    const polls = setup.gateway.pollJobs.mock.calls.length;
+    const submits = setup.broadcaster.submit.mock.calls.length;
+    const receiptPosts = others.map((other) => setup.gateway.postReceipt.mock.calls.filter(([id]) => id === other).length);
+    start = setup.deps.clock!();
+    sim = true;
+    await setup.host.run(stop.signal);
+    expect(setup.gateway.pollJobs).toHaveBeenCalledTimes(polls);
+    expect(setup.broadcaster.submit.mock.calls.length - submits).toBeGreaterThan(1);
+    for (const [index, other] of others.entries()) {
+      expect(setup.gateway.postReceipt.mock.calls.filter(([id]) => id === other).length - receiptPosts[index]).toBeGreaterThanOrEqual(3);
+    }
+    expect(setup.sentData).toEqual([]);
+  });
+});

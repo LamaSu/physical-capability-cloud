@@ -379,9 +379,8 @@ unit or job that a rehearsal directory already printed.
 Before a sending run, check:
 - the data directory follows the rule above: never used by a `--no-submit`
   run, and the same one for every later sending run and restart;
-- the run is supervised and covers one unit, unless CODE #38's r5d chain
-  change (the collapse review's F1) has also merged. This host includes the
-  recovery polling and fairness fix; the separate chain change narrows which
+- the run is supervised and covers one unit, unless r5d's chain change
+  (the collapse review's F1) has also merged. That change narrows which
   decoded send-time escrow errors release the operator's nonce; see
   "Evidence transaction caps".
 
@@ -591,7 +590,8 @@ After an attempt the run loop waits until the backoff ends or the next
 heartbeat is due, whichever is sooner. The exception is the
 operator's spend caps: while any stored receipt backs off on
 `submit_caps_exceeded`, the host polls and claims nothing because new units
-would face the same caps. `submit_attempted` and `submit_indeterminate` still
+would face the same caps. Other recovered units keep their retries during the
+stall. `submit_attempted` and `submit_indeterminate` still
 block: every tick reads them back first, and the host polls and claims nothing
 until read-back resolves them.
 Escrow accepts one `submitEvidence` per unit; preserving the attempt before
