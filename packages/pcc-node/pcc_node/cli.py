@@ -491,14 +491,25 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
     saved_path = save_config(config, config_file)
     click.echo(f"  Config saved to {saved_path}")
 
-    # Start daemon
-    click.echo("")
-    click.echo("Node running. It keeps the kernel online and does not take jobs: devices run only through the operating agent's typed operations.")
-    click.echo(f"  Dashboard: {config.pcc_base}/operator")
-    click.echo("  Press Ctrl+C to stop.")
-    click.echo("")
+    # Start daemon. It registers the kernel again; "Node running" is printed only once that
+    # registration succeeded and the daemon is up, and a refusal there ends `start` with exit 1
+    # (ChatGPT r3 finding 1): a launcher must not read a node that never ran as started.
+    def _say_running():
+        click.echo("")
+        click.echo("Node running. It keeps the kernel online and does not take jobs: devices run only through the operating agent's typed operations.")
+        click.echo(f"  Dashboard: {config.pcc_base}/operator")
+        click.echo("  Press Ctrl+C to stop.")
+        click.echo("")
 
-    run_daemon(config)
+    try:
+        run_daemon(config, on_running=_say_running)
+    except RegistrationError as exc:
+        click.echo(
+            f"Registration failed (HTTP {exc.status}) at {config.pcc_base}: {exc.data}. "
+            "The node is NOT registered and the daemon did not start; check the API key and gateway.",
+            err=True,
+        )
+        sys.exit(1)
 
 
 @main.command("discover")
