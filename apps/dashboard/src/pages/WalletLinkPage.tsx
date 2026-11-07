@@ -36,9 +36,10 @@ export function WalletLinkPage() {
     signInAttempted.current = true;
     setAttempted(signInAttempted.current);
     setSignInPending(true);
+    const keyEpoch = useAuthStore.getState().keyEpoch;
     try {
       await login();
-      if (useAuthStore.getState().isAuthenticated) {
+      if (useAuthStore.getState().isAuthenticated && useAuthStore.getState().keyEpoch !== keyEpoch) {
         setError(null);
         setState({ step: "code", input: "" });
       }

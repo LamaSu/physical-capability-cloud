@@ -539,6 +539,28 @@ describe("wallet pages re-sign through the existing SIWE flow", () => {
     expect(container.textContent).not.toContain(restoreNotice);
   });
 
+  it.each(["signature", "nonce"] as const)("K14: /link keeps a re-sign that fails at the %s, while a held session key's 401 survived renewal, on screen", async (where) => {
+    // C2's state: a wallet sign-in holds a session key, the gateway refuses it and /api/auth/me is down, so renewal keeps the key.
+    await act(async () => {
+      useAuthStore.getState().setSession("session-token");
+      await useAuthStore.getState().mintSessionKey();
+    });
+    expect(useAuthStore.getState()).toMatchObject({ isAuthenticated: true, sessionKeyId: "session-key-1" });
+    const stub = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
+      pathOf(input) === "/api/auth/me" ? reply(503, {}) : pathOf(input) === "/api/auth/nonce" && where === "nonce" ? reply(500, {}) : stub(input, init)));
+    await showFailure("link");
+    expectRemedy();
+    const failure = where === "signature" ? "Signature refused by wallet" : "Failed to get nonce";
+    if (where === "signature") wallet.signMessageAsync.mockRejectedValueOnce(new Error(failure));
+    await click("Sign in again");
+    // The attempt minted no key: the old one is still held, so this is not a recovery.
+    expect(useAuthStore.getState().sessionKeyId).toBe("session-key-1");
+    expect(count("/api/auth/session-key")).toBe(1);
+    expect(alerts(failure)).toHaveLength(1);
+    expectRemedy();
+  });
+
   it("K3: /link drops a lookup failure that was sent before the re-sign's key", async () => {
     const signatures: ((signature: string) => void)[] = [];
     wallet.signMessageAsync.mockImplementation(() => new Promise((resolve) => { signatures.push(resolve); }));
