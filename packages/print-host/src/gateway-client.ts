@@ -12,13 +12,16 @@ export type GwCode =
   | "job_not_found" | "settlement_owned_status" | "job_kernel_changed" | "invalid_status"
   | "payload_too_large" | "bad_bundle" | "stored_mismatch" | "not_stored"
   | "evidence_refused" | "indeterminate"
-  | "receipt_exists" | "receipt_signer_unavailable" | "kernel_emergency_stopped";
+  | "receipt_exists" | "receipt_signer_unavailable" | "kernel_emergency_stopped"
+  | "receipt_refused" | "receipt_kernel_mismatch";
 
 export type GwSubCode =
   | "job_not_found" | "storage_failed" | "kernel_mismatch" | "job_mismatch"
   | "malformed_envelope" | "ambiguous_envelope" | "events_malformed"
   | "event_hash_mismatch" | "bundle_hash_mismatch" | "bundle_hash_malformed"
-  | "evidence_not_lo_ev" | "evidence_not_canonical" | "evidence_not_bound" | "other";
+  | "evidence_not_lo_ev" | "evidence_not_canonical" | "evidence_not_bound" | "other"
+  | "invalid_package_body" | "invalid_settlement_unit" | "invalid_package_signatures"
+  | "package_challenge_refused" | "package_registry_refused" | "package_operator_refused" | "receipt_storage_unavailable";
 
 export type GwResult<T> = { ok: true; value: T } | {
   ok: false;
@@ -187,6 +190,17 @@ const evidenceInvalid = [
   "evidence_not_canonical", "evidence_not_bound",
 ] as const;
 
+const receiptRefusals = [
+  [404, "job_not_found"],
+  [400, "invalid_package_body"],
+  [400, "invalid_settlement_unit"],
+  [422, "invalid_package_signatures"],
+  [422, "package_challenge_refused"],
+  [422, "package_registry_refused"],
+  [422, "package_operator_refused"],
+  [503, "receipt_storage_unavailable"],
+] as const;
+
 /** Only our allowlist constants can become error codes or subcodes. */
 function classify(status: number, body: ObjectBody, headers: Headers, kind: CallKind): Failure {
   const error = own(body, "error");
@@ -194,6 +208,10 @@ function classify(status: number, body: ObjectBody, headers: Headers, kind: Call
     if (status === 409 && error === "receipt_exists") return failure("receipt_exists", status);
     if (status === 409 && error === "kernel_emergency_stopped") return failure("kernel_emergency_stopped", status);
     if (status === 503 && error === "receipt_signer_unavailable") return failure("receipt_signer_unavailable", status);
+    if (status === 409 && error === "kernel_mismatch") return failure("receipt_kernel_mismatch", status);
+    for (const [refusalStatus, refusal] of receiptRefusals) {
+      if (status === refusalStatus && error === refusal) return failure("receipt_refused", status, refusal);
+    }
   }
   if (status === 401) return failure("unauthenticated", status);
   if (status === 403) {
@@ -234,7 +252,7 @@ function classify(status: number, body: ObjectBody, headers: Headers, kind: Call
   if (kind === "evidence" && status >= 500 && status <= 599) {
     // Only these refusals establish that the non-idempotent post stored nothing.
     if (status === 500 && error === "evidence_store_failed") return failure("server_error", status);
-    if (status === 503 && (error === "read_failed" || error === "scope_requirements_unavailable")) {
+    if (status === 503 && (error === "read_failed" || error === "scope_requirements_unavailable" || error === "wallet_link_unavailable")) {
       return failure("unavailable", status);
     }
     return failure("indeterminate", status);
