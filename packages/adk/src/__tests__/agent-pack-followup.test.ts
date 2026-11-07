@@ -15,6 +15,13 @@ const PLACEHOLDER_ZERO = /\bamount"?\s*:\s*0\s*[,}]/;
 const DROPPED = { name: "pcc_dht_announce", method: "POST", path: "/api/dht/announce" };
 const PIZZA_REQUEST = "Order me a pizza for delivery to 728 Geary St SF.";
 const COURIER_POST = /\bpost(?:s|ing)? the courier\b/i;
+const OFFER_POST = /\bPOST \/api\/job-offers(?!\/)/;
+const FIXED_MODEL = /\bmodel"?\s*:\s*["']fixed["']/;
+const DRIVER_CONFIRM = "Present the driver's price from the listing to the user, as in step 2, and post step 5's offer only once they confirm that price.";
+const DASHBOARD_REQUEST = "Order me a pizza and dispatch a courier to bring it";
+const DASHBOARD_CONFIRM = "?type=courier.dispatch, present the driver's price from the listing to the user, as in step 3, and only once they confirm that price, then POST /api/job-offers";
+const STEP3_CURRENCY = "amount: totalPrice, currency: <step 3's currency> }";
+const COMPOSITION_TIMING = "When composing pizza.order + courier.dispatch (or any two offers that share a handoff), DO NOT wait for the first offer's status change to post the second. Set requirements.pickupReadyAt yourself on the pizza offer using `now + capability.estimatedWaitMinutes + 5min buffer`, then post the courier offer as soon as the user confirms the driver's price (don't wait for the pizza offer's status), with `dispatchAt = pickupReadyAt - capability.driverETA`. Fire-and-poll-both is the right pattern; serial wait inflates total time for no gain.";
 
 const REPO = resolve(dirname(SOURCE), "../../..");
 
@@ -23,7 +30,7 @@ type Example = { user_request: string; what_claude_does: string };
 type Pack = {
   tools: Tool[];
   examples: Example[];
-  dtos: { JobOffer: { shape: { pricing: { amount: string } } } };
+  dtos: { JobOffer: { shape: { pricing: { amount: string } }; composition_timing: string } };
 };
 
 function readPack(): Pack {
@@ -121,6 +128,45 @@ describe("CODE #53 agent pack follow-up", () => {
         problems.push(`agent-package.json ${path}: courier post does not require the driver's price and confirmation: ${beforeDispatch}`);
       }
     }
+    expect(problems).toEqual([]);
+  });
+
+  it("FT6 every numbered step that posts a job offer states its pricing, no fixed price is the placeholder 0, and the ruled confirm, currency and timing texts keep their wording", () => {
+    const pkg = readPack();
+    const problems: string[] = [];
+    const pccMd = readFileSync(resolve(REPO, SKILL_COPIES[0]), "utf8");
+    const steps: [string, string][] = [];
+    const lines = pccMd.split("\n");
+    for (const [i, line] of lines.entries()) {
+      if (!/^\d+\. /.test(line)) continue;
+      let step = line;
+      for (let j = i + 1; j < lines.length && /^ {3}\S/.test(lines[j]); j++) step += `\n${lines[j]}`;
+      steps.push([`${SKILL_COPIES[0]}:${i + 1}`, step]);
+    }
+    for (const [i, example] of pkg.examples.entries()) {
+      for (const step of example.what_claude_does.split("\n")) steps.push([`agent-package.json examples[${i}]`, step]);
+    }
+    const posts = steps.filter(([, step]) => OFFER_POST.test(step));
+    for (const source of [SKILL_COPIES[0], "agent-package.json"]) {
+      if (!posts.some(([where]) => where.startsWith(source))) problems.push(`${source}: no numbered step posts a job offer`);
+    }
+    for (const [where, step] of posts) {
+      if (!step.match(PRICING_EXAMPLE)) problems.push(`${where}: a step posts a job offer with no pricing example: ${step}`);
+    }
+    const texts: [string, string][] = SKILL_COPIES.map((file) => [file, readFileSync(resolve(REPO, file), "utf8")]);
+    texts.push(["agent-package.json examples", pkg.examples.map((example) => example.what_claude_does).join("\n")]);
+    for (const [file, text] of texts) {
+      for (const [example] of text.matchAll(PRICING_EXAMPLE)) {
+        if (FIXED_MODEL.test(example) && PLACEHOLDER_ZERO.test(example)) problems.push(`${file}: a fixed price is the placeholder 0: ${example}`);
+      }
+    }
+    const pizza = pkg.examples.find((example) => example.user_request === PIZZA_REQUEST)?.what_claude_does ?? "";
+    const dashboard = pkg.examples.find((example) => example.user_request.startsWith(DASHBOARD_REQUEST))?.what_claude_does ?? "";
+    if (!pccMd.includes(`find a driver.\n   ${DRIVER_CONFIRM}\n5. `)) problems.push(`${SKILL_COPIES[0]}: step 4 lacks the ruled confirm line`);
+    if (!pizza.includes(`find a driver. ${DRIVER_CONFIRM}\n5. `)) problems.push("agent-package.json pizza example: step 4 lacks the ruled confirm sentence");
+    if (!dashboard.includes(DASHBOARD_CONFIRM)) problems.push("agent-package.json dashboard example: step 5 lacks the ruled confirm");
+    if (!dashboard.includes(STEP3_CURRENCY)) problems.push("agent-package.json dashboard example: the pizza post does not take step 3's currency");
+    if (pkg.dtos.JobOffer.composition_timing !== COMPOSITION_TIMING) problems.push("dtos.JobOffer.composition_timing is not the steward's wording");
     expect(problems).toEqual([]);
   });
 });
