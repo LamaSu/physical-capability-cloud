@@ -1592,7 +1592,8 @@ describe("REVIEW r3 caps stall under run()", () => {
     sim = true;
     await setup.host.run(stop.signal);
     expect(setup.gateway.pollJobs).toHaveBeenCalledTimes(polls);
-    expect(setup.broadcaster.submit.mock.calls.length - submits).toBeGreaterThan(1);
+    // The capped unit keeps its own retry cadence: 12 retries in these 10 minutes.
+    expect(setup.broadcaster.submit.mock.calls.length - submits).toBeGreaterThanOrEqual(10);
     for (const [index, other] of others.entries()) {
       expect(setup.gateway.postReceipt.mock.calls.filter(([id]) => id === other).length - receiptPosts[index]).toBeGreaterThanOrEqual(3);
     }
