@@ -467,4 +467,42 @@ describe("review pins: row-exact unbinding, refusal order, each fixed-leaf rule,
     const accessor = Object.defineProperty({ templateHash: e.templateHash, params: {} }, "templateKey", { enumerable: true, get: () => "spare-printer@1" });
     expect(resultCodes(verifyTemplateOrigin(e.template.body, accessor as never))).toEqual(["TEMPLATE_UNKNOWN"]);
   });
+  it("a catalog entry is read once: a second read can neither throw out nor swap the template", () => {
+    const sp = byId("spare-printer");
+    const pm = byId("print-and-mail");
+    const spAgreement = instantiateTemplate(sp.template, {});
+    const pmAgreement = instantiateTemplate(pm.template, {});
+    expect(spAgreement.ok && pmAgreement.ok).toBe(true);
+    if (!spAgreement.ok || !pmAgreement.ok) return;
+    // Getters: the first reads answer spare-printer; a second template read answers print-and-mail, a second hash read throws.
+    const reads = { template: 0, templateHash: 0 };
+    const shifting = () => {
+      reads.template = 0;
+      reads.templateHash = 0;
+      return [{
+        get template() { reads.template += 1; return reads.template === 1 ? sp.template : pm.template; },
+        get templateHash(): `0x${string}` { reads.templateHash += 1; if (reads.templateHash > 1) throw new Error("second read"); return sp.templateHash; },
+        compileOptions: sp.compileOptions,
+      }];
+    };
+    expect(verifyTemplateOrigin(spAgreement.agreement, origin("spare-printer"), shifting())).toEqual({ ok: true });
+    expect(reads).toEqual({ template: 1, templateHash: 1 });
+    expect(resultCodes(verifyTemplateOrigin(pmAgreement.agreement, origin("spare-printer"), shifting()))).toEqual(["TEMPLATE_ORIGIN_MISMATCH"]);
+    expect(reads).toEqual({ template: 1, templateHash: 1 });
+    // A template object that turns into print-and-mail once it has been copied: only that first copy may be instantiated.
+    const turning = (): AgreementTemplateV1 => {
+      let copies = 0;
+      return new Proxy(copyTemplate("spare-printer"), {
+        ownKeys(t) { copies += 1; if (copies > 1) Object.assign(t, copyTemplate("print-and-mail")); return Reflect.ownKeys(t); },
+      });
+    };
+    const entry = (template: AgreementTemplateV1) => [{ template, templateHash: sp.templateHash, compileOptions: sp.compileOptions }];
+    expect(verifyTemplateOrigin(spAgreement.agreement, origin("spare-printer"), entry(turning()))).toEqual({ ok: true });
+    expect(resultCodes(verifyTemplateOrigin(pmAgreement.agreement, origin("spare-printer"), entry(turning())))).toEqual(["TEMPLATE_ORIGIN_MISMATCH"]);
+    // A two-faced template: its property reads say spare-printer, its data is print-and-mail. The key comes from the data.
+    const twoFaced = new Proxy(copyTemplate("print-and-mail"), {
+      get(t, k, r) { return k === "templateId" ? "spare-printer" : Reflect.get(t, k, r); },
+    });
+    expect(resultCodes(verifyTemplateOrigin(pmAgreement.agreement, origin("spare-printer"), entry(twoFaced)))).toEqual(["TEMPLATE_UNKNOWN"]);
+  });
 });
