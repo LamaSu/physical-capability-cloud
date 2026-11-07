@@ -181,6 +181,16 @@ describe("composition templates", () => {
     expect(extracted.verificationProgramHash).toBe(tiered ? PROGRAM : null);
   });
 
+  it("T2 lowercases an uppercase committed program and keeps the sealed root", () => {
+    const input = makePlan(0, true);
+    input.nodes[1] = { ...input.nodes[1]!, committedProgramHash: `0x${"D2".repeat(32)}` };
+    const deal = compile(input);
+    expect(deal.nodeToUnit.find((binding) => binding.nodeId === "b-inspect")!.committedProgramHash).toBe(`0x${"D2".repeat(32)}`);
+    const extracted = unwrap(extractCompositionTemplate(extraction(deal)));
+    expect(extracted.verificationProgramHash).toBe(PROGRAM);
+    expect(extracted.contractRoot).toBe(deal.capabilityContractRoot);
+  });
+
   it("T3 publishes a successor without changing either frozen accepted deal", () => {
     const priorDeal = freezeDeep(compile(makePlan(0, true)));
     const nextDeal = freezeDeep(compile(makePlan(1, true)));
@@ -241,6 +251,19 @@ describe("composition templates", () => {
     expect(normalized.nodes[0]!.inputKeys).toEqual(["a", "z", "😀", "\ue000"]);
     expect(normalized.nodes.every((node) => !Object.hasOwn(node, "kitDigest"))).toBe(true);
     expect(diffCompositionTemplates(original, reordered).identical).toBe(true);
+  });
+
+  it("T5 orders evidence by tier when one evidence type appears at two tiers", () => {
+    const input = makePlan(0, true);
+    input.nodes[1] = { ...input.nodes[1]!, evidenceRequirements: [
+      { requirementId: "r-high", evidenceTypeId: "receipt.photo", tier: 2 },
+      { requirementId: "r-low", evidenceTypeId: "receipt.photo", tier: 0 },
+    ] };
+    const extracted = unwrap(extractCompositionTemplate(extraction(compile(input))));
+    expect(extracted.nodes[1]!.evidence).toEqual([{ evidenceTypeId: "receipt.photo", tier: 0 }, { evidenceTypeId: "receipt.photo", tier: 2 }]);
+    const reordered = clone(extracted);
+    reordered.nodes[1]!.evidence.reverse();
+    expect(compositionTemplateDigest(reordered)).toBe(compositionTemplateDigest(extracted));
   });
 
   it.each(vectors)("T6 matches golden bytes and both SHA-256 implementations for $name", (vector) => {
@@ -406,6 +429,25 @@ describe("composition templates", () => {
     expect(refusalCodes(validateCompositionTemplate(manyEvidence))).toContain("invalid-node-field");
   });
 
+  it("T9 accepts every list at exactly its maximum length", () => {
+    const keys = clone(template());
+    keys.nodes[0]!.inputKeys = Array.from({ length: PLAN_JSON_LIMITS.maxKeysPerObject }, (_, index) => `input-${index}`);
+    keys.nodes[0]!.constraintKeys = Array.from({ length: PLAN_JSON_LIMITS.maxKeysPerObject }, (_, index) => `constraint-${index}`);
+    expect(validateCompositionTemplate(keys).ok).toBe(true);
+    const evidence = clone(template());
+    evidence.nodes[0]!.evidence = Array.from({ length: MAX_EVIDENCE_REQUIREMENTS_PER_NODE }, (_, index) => ({ evidenceTypeId: `receipt-${index}`, tier: 0 }));
+    expect(validateCompositionTemplate(refreshRoot(evidence)).ok).toBe(true);
+    const nodes = clone(template());
+    nodes.nodes = Array.from({ length: MAX_PLAN_NODES }, (_, index) => ({ ...clone(nodes.nodes[0]!), nodeId: `n-${index}` }));
+    nodes.edges = [];
+    expect(validateCompositionTemplate(refreshRoot(nodes)).ok).toBe(true);
+    const edges = clone(template());
+    edges.nodes = Array.from({ length: 92 }, (_, index) => ({ ...clone(edges.nodes[0]!), nodeId: `n-${index}` }));
+    edges.edges = edges.nodes.flatMap((from, index) => edges.nodes.slice(index + 1).map((to) => ({ from: from.nodeId, to: to.nodeId }))).slice(0, MAX_PLAN_EDGES);
+    expect(edges.edges).toHaveLength(MAX_PLAN_EDGES);
+    expect(validateCompositionTemplate(refreshRoot(edges)).ok).toBe(true);
+  });
+
   it("T9 refuses duplicate evidence and malformed node fields", () => {
     const duplicate = clone(template());
     duplicate.nodes[0]!.evidence.push(clone(duplicate.nodes[0]!.evidence[0]!));
@@ -523,6 +565,15 @@ describe("composition templates", () => {
     expect(diff.identical).toBe(false);
     expect(diff.nodesChanged).toEqual([{ nodeId: "b-inspect", fields: [field] }]);
     expect(diffCompositionTemplates(changed, base).nodesChanged).toEqual([{ nodeId: "b-inspect", fields: [field] }]);
+  });
+
+  it("T11 sorts the fields of a node changed in two ways", () => {
+    const base = template(true);
+    const changed = clone(base);
+    changed.nodes[1]!.tier = 3;
+    changed.nodes[1]!.kitDigest = digest("56");
+    refreshRoot(changed);
+    expect(diffCompositionTemplates(base, changed).nodesChanged).toEqual([{ nodeId: "b-inspect", fields: ["kitDigest", "tier"] }]);
   });
 
   it("T11 reports sorted added and removed edges and all top-level fields", () => {
@@ -672,6 +723,17 @@ describe("composition templates", () => {
     input.nodes[0]!.constraintKeys.push("changed");
     input.edges[0]!.from = "changed";
     expect(compositionTemplatePreimage(result)).toBe(preimage);
+  });
+
+  it("T14 reads each deal field once, so a getter cannot change what the checks saw", () => {
+    const deal = clone(compile());
+    const sealed = deal.nodeToUnit[0]!.canonicalPlan;
+    const tampered = { ...sealed, inputs: { injected: "value" } };
+    let reads = 0;
+    Object.defineProperty(deal.nodeToUnit[0]!, "canonicalPlan", { enumerable: true, get() { reads++; return reads === 1 ? sealed : tampered; } });
+    const extracted = unwrap(extractCompositionTemplate(extraction(deal)));
+    expect(reads).toBe(1);
+    expect(extracted.nodes[0]!.inputKeys).toEqual(["a", "z", "😀", "\ue000"]);
   });
 
   it("T14 sorts all refusals by canonical JSON independently of node order", () => {
