@@ -664,7 +664,7 @@ function getWorkflowEngine(): WorkflowEngine {
 
 /** Minimal interface for the JobFacade subset that createProductionBinding needs. */
 export interface JobSubmitter {
-  submit(input: SubmitJobInput): Promise<Result<JobSubmitResult>>;
+  submit(input: SubmitJobInput, localRunAuthority: "decide" | "none"): Promise<Result<JobSubmitResult>>;
 }
 
 /**
@@ -691,7 +691,7 @@ export function createProductionBinding(
         capabilityId: step.capabilityId,
         assuranceTier: step.assuranceTier,
         description: `Composition step: ${step.capabilityType}`,
-      });
+      }, "none");
       if (!result.success) {
         throw new Error(
           `Job submission failed for step ${step.index} (${step.capabilityId}): ${result.error?.message ?? "unknown error"}`,

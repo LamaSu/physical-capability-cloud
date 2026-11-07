@@ -11,7 +11,9 @@ import { operatorRelayRoutes } from "../routes/operator-relay.js";
 import { jobSubmitRoutes } from "../routes/job-submit.js";
 import { kernelRoutes } from "../routes/kernels.js";
 import { jobRoutes } from "../routes/jobs.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
+import { provisionApiKey } from "../auth/api-key-auth.js";
+import { apiGate } from "../middleware/api-gate.js";
 import { initKernelService, resetKernelService } from "../services/kernel-service.js";
 import type { KernelConfig } from "@pcc/kernel";
 
@@ -44,6 +46,14 @@ async function buildApp(): Promise<FastifyInstance> {
   initKernelService(mockConfig);
 
   const app = Fastify({ logger: false });
+  // Both heartbeat routes require the kernel's operator. Authenticate the protocol fixture
+  // as kernel-nyc's recorded operator; these checks exercise capability handling and routing.
+  const operator = getRepos().kernels.findById("kernel-nyc")!.operatorAddress;
+  const { rawKey } = provisionApiKey({ operatorId: operator, name: "protocol-fixes-test", scopes: ["*"] });
+  app.addHook("onRequest", async (req) => {
+    req.headers.authorization ??= `Bearer ${rawKey}`;
+  });
+  await app.register(apiGate);
   await app.register(kernelRoutes);
   await app.register(jobRoutes);
   await app.register(operatorRelayRoutes);

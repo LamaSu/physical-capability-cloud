@@ -10,6 +10,7 @@ import {
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { scopeErrorMessage } from "../lib/scope-notice.js";
 import { CdpFundedKeyOnramp } from "../components/CdpFundedKeyOnramp.js";
 
 // ── Types ────────────────────────────────────────────────────────
@@ -235,6 +236,7 @@ function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void 
 // ── Tab: Fund Wallet ─────────────────────────────────────────────
 
 function FundWalletTab() {
+  const [notice, setNotice] = React.useState<string | null>(null);
   const [stripeAmount, setStripeAmount] = React.useState("");
   const [stripeSubmitting, setStripeSubmitting] = React.useState(false);
 
@@ -250,16 +252,18 @@ function FundWalletTab() {
 
   const handleStripe = async () => {
     setStripeSubmitting(true);
+    setNotice(null);
     await authorizedFetch("/api/fiat-ramp/stripe/onramp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ amountUsd: stripeAmount }),
-    }).catch(() => {});
+    }).then(async (res) => setNotice(await scopeErrorMessage(res, "/api/fiat-ramp/stripe/onramp", "POST"))).catch(() => {});
     setTimeout(() => setStripeSubmitting(false), 1500);
   };
 
   const handleYellowcard = async () => {
     setYcSubmitting(true);
+    setNotice(null);
     await authorizedFetch("/api/fiat-ramp/yellowcard/deposit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -268,12 +272,13 @@ function FundWalletTab() {
         country: selectedCountry.code,
         channel: selectedCountry.channels[ycChannel],
       }),
-    }).catch(() => {});
+    }).then(async (res) => setNotice(await scopeErrorMessage(res, "/api/fiat-ramp/yellowcard/deposit", "POST"))).catch(() => {});
     setTimeout(() => setYcSubmitting(false), 1500);
   };
 
   return (
     <div className="grid grid-cols-2 gap-4">
+      {notice && <p role="status" className="col-span-2 text-xs text-amber-400/80">{notice}</p>}
       {/* Stripe Card */}
       <GlassPanel padding="lg">
         <div className="space-y-4">
@@ -445,6 +450,7 @@ function FundWalletTab() {
 // ── Tab: Withdraw ────────────────────────────────────────────────
 
 function WithdrawTab() {
+  const [notice, setNotice] = React.useState<string | null>(null);
   const [amount, setAmount] = React.useState("");
   const [countryIdx, setCountryIdx] = React.useState(0);
   const [payoutMethod, setPayoutMethod] = React.useState(0);
@@ -468,6 +474,7 @@ function WithdrawTab() {
 
   const handleSubmit = async () => {
     setSubmitting(true);
+    setNotice(null);
     await authorizedFetch("/api/fiat-ramp/yellowcard/withdrawal", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -478,12 +485,13 @@ function WithdrawTab() {
         accountName,
         accountNumber: isMobileMoney ? phone : accountNumber,
       }),
-    }).catch(() => {});
+    }).then(async (res) => setNotice(await scopeErrorMessage(res, "/api/fiat-ramp/yellowcard/withdrawal", "POST"))).catch(() => {});
     setTimeout(() => setSubmitting(false), 1500);
   };
 
   return (
     <div className="grid grid-cols-3 gap-4">
+      {notice && <p role="status" className="col-span-3 text-xs text-amber-400/80">{notice}</p>}
       {/* Form */}
       <div className="col-span-2 space-y-4">
         {/* Amount */}

@@ -8,7 +8,7 @@ export interface SyntaxFloorIssue {
   rule: string;
 }
 
-const NEWER_APIS = new Set(["fromEntries", "flatMap", "padEnd", "padStart", "includes"]);
+const NEWER_APIS = new Set(["fromEntries", "flatMap", "padEnd", "padStart", "includes", "values", "entries"]);
 
 function isImmediateInvocation(node: ts.Node): boolean {
   let expression = node;

@@ -57,4 +57,31 @@ describe("global API rate-limit headers", () => {
     );
     await app.close();
   });
+
+  it("counts wallet routes at onRequest before body parsing or preValidation", async () => {
+    const app = Fastify({ logger: false });
+    await app.register(rateLimiter);
+    const counts: string[] = [];
+    app.addHook("onRequest", async (_req, reply) => {
+      counts.push(String(reply.getHeader("RateLimit-Remaining")));
+    });
+    app.post("/api/wallets/link-requests", async () => ({ ok: true }));
+    const response = await app.inject({
+      method: "POST", url: "/api/wallets/link-requests", remoteAddress: "192.0.2.30", payload: { privateKey: "rate-test-marker" },
+    });
+    expect(counts).toEqual(["199"]);
+    expect(response.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it("accepts an undefined request IP without throwing from onRequest", async () => {
+    const app = Fastify({ logger: false });
+    app.addHook("onRequest", async req => { Object.defineProperty(req, "ip", { value: undefined }); });
+    await app.register(rateLimiter);
+    app.get("/api/test", async () => ({ ok: true }));
+    const response = await app.inject({ method: "GET", url: "/api/test" });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["ratelimit-remaining"]).toBe("199");
+    await app.close();
+  });
 });

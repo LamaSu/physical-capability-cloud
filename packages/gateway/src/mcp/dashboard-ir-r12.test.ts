@@ -9,8 +9,8 @@ import { SCHEMA_FIELDS } from "./dashboard-ir-renderer.js";
 describe("R12: the IR capability card attributes its price to the operator's listing", () => {
   it("labels the price field as the operator's listing, and keeps the currency a separate closed field", () => {
     const fields = SCHEMA_FIELDS["capability-summary-v1"].fields;
-    expect(fields.find((f) => f.key === "pricing.baseCost")?.label).toBe("Listed price (operator's listing)");
-    expect(fields.find((f) => f.key === "pricing.currency")?.label).toBe("Currency");
-    expect(fields.some((f) => f.label === "Base cost")).toBe(false);
+    expect(fields.find((f) => f.key === "pricing.baseCost")?.label.t).toBe("Listed price (operator's listing)");
+    expect(fields.find((f) => f.key === "pricing.currency")?.label.t).toBe("Currency");
+    expect(fields.some((f) => f.label.t === "Base cost")).toBe(false);
   });
 });

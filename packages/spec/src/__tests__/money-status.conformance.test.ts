@@ -26,7 +26,7 @@ import {
   idText, hexText, timeText, traceText, nameText, fieldDefaultText, ESCROW_SERVICE_REPORTS, NOT_CONFIRMED_ON_CHAIN,
   assetRealityClass, ASSET_REALITY_ENVELOPE_KEYS, ASSET_REGISTRY_ID_RE,
 } from "../money/money-status.js";
-import { foldForClaims, isMoneyClaim, isProseClaim, WITHHELD_PROSE, WITHHELD_FIELD } from "../money/plain-text-claims.js";
+import { foldForClaims, isMoneyClaim, isProseClaim, hasBidiControl, WITHHELD_PROSE, WITHHELD_FIELD } from "../money/plain-text-claims.js";
 import { PLAIN_TEXT_CASES, PLAIN_TIME_ACCEPTED, PLAIN_TIME_REJECTED, FIELD_DEFAULT_CASES, PLAIN_CLAIM_CASES } from "./plain-text-fixtures.js";
 import { assertKitTextBeforeBoot, assertKitTextViolations, flushKitText, checkKitClicks } from "./ui-kit-text-counter.js";
 
@@ -92,10 +92,8 @@ function extractRegion(): KitRegion {
       " assetRealityClass, ASSET_REALITY_ENVELOPE_KEYS, ASSET_REGISTRY_ID_RE," +
       " SAFE_STATUS_WORDS, SAFE_MONEY_STATUS_WORDS, statusPillText, reportedText, idText, hexText, timeText, traceText, nameText, fieldDefaultText, foldForClaims, isMoneyClaim, isProseClaim, WITHHELD_PROSE, WITHHELD_FIELD };\n})();");
   if (helperSrc === kitSrc) throw new Error("plain kit's final boot dispatch not found");
-  vm.runInNewContext(
-    helperSrc,
-    ctx,
-  );
+  // The genuine helpers and plain-object fixture rows share Object.prototype.
+  new Function(...Object.keys(ctx), helperSrc)(...Object.values(ctx));
   return (ctx.window as { kitRegion: KitRegion }).kitRegion;
 }
 
@@ -146,11 +144,13 @@ describe("plain typed-text helper grammars, kit == canonical spec", () => {
     }
   });
 
+  it.each(PLAIN_CLAIM_CASES)("spec prose-claim expectation for %j", (raw, expected) => {
+    expect(isProseClaim(raw)).toBe(expected);
+  });
+  it.each(PLAIN_CLAIM_CASES)("shipped kit prose-claim expectation for %j", (raw, expected) => {
+    expect(kit.isProseClaim(raw)).toBe(expected);
+  });
   it("the existing claim detector agrees, including reserved notices and folded spellings", () => {
-    for (const [raw, expected] of PLAIN_CLAIM_CASES) {
-      expect(isProseClaim(raw), raw).toBe(expected);
-      expect(kit.isProseClaim(raw), raw).toBe(expected);
-    }
     const inputs = new Set([
       ...PLAIN_CLAIM_CASES.map(([raw]) => raw),
       ...Object.values(PLAIN_TEXT_CASES).flatMap((cases) => cases.map(([raw]) => raw)),
@@ -271,7 +271,7 @@ const flush = flushKitText;
 let clickCheck: ReturnType<typeof checkKitClicks>;
 beforeEach(() => { clickCheck = checkKitClicks(); });
 afterEach(async () => {
-  // Pure helper cases run in an isolated VM; DOM boots and driven interactions use flush.
+  // Pure helper cases use their private test window; DOM boots and driven interactions use flush.
   try {
     if ((window as unknown as { __PCC_UI_BOOTED__?: boolean }).__PCC_UI_BOOTED__) await flush();
   } finally { clickCheck.mockRestore(); }
@@ -2269,7 +2269,7 @@ describe("R12 r2b (b) (lane review, MEDIUM): each value an approval's bound reco
       ["provider id, totalAmount (a string)", { provider: { id: "kernel_1" }, totalAmount: "12.5" }, ["bound record reports payee: kernel_1", "bound record reports amount: 12.50"]],
       ["operator address, price.base + price.currency", { operatorAddress: OPERATOR, price: { base: 7, currency: "USDC" } }, ["bound record reports payee: " + OPERATOR, "bound record reports amount: 7.00 USDC"]],
       ["payee, price.amount not a plain sum (shown as sent)", { payee: "kernel_2", price: { amount: "0.0049" } }, ["bound record reports payee: kernel_2", 'bound record reports amount: "0.0049"']],
-      ["provider name outside the id grammar, no amount", { provider: { name: "Mill A" } }, ["bound record reports payee: reported: Mill A"]],
+      ["provider name outside the id grammar, no amount", { provider: { name: "Mill A" } }, ["bound record reports payee: Mill A"]],
       ["an amount and no party", { amount: 3, currency: "USDC" }, ["bound record reports amount: 3.00 USDC"]],
     ];
     for (const [tag, rec, lines] of CASES) {
@@ -2406,9 +2406,9 @@ describe("R12 r2c N3 (lane, MEDIUM): every value a list or metric window paints 
     for (const mode of ["live", "snapshot"] as const) {
       await paint([listWin("/api/jobs", "id", ["payment.payee.id", "payment.payee.name", "payment.amount"])], "/api/jobs", JOBS, mode);
       expect(texts(".pcc-list-meta"), "jobs meta " + mode).toEqual([[rep("kernel_1"), rep("Mill A"), rep("250")].join(" · ")]);
-      expect(texts(".pcc-list-title"), "jobs title " + mode).toEqual(["j1"]); // the job's own id is not reached through a money record
+      expect(texts(".pcc-list-title"), "jobs title " + mode).toEqual(["reported: j1"]); // the job's own id is not reached through a money record
       await paint([listWin("/api/capabilities", "name", ["id", "type", "pricing.baseCost"])], "/api/capabilities", CAPS, mode);
-      expect(texts(".pcc-list-meta"), "capabilities meta " + mode).toEqual([["c1", "fdm", rep("12")].join(" · ")]);
+      expect(texts(".pcc-list-meta"), "capabilities meta " + mode).toEqual([["reported: c1", "reported: fdm", rep("12")].join(" · ")]);
       expect(texts(".pcc-list-title"), "capabilities title " + mode).toEqual(["name: Printer"]);
     }
   });
@@ -2435,7 +2435,7 @@ describe("R12 r2c N3 (lane, MEDIUM): every value a list or metric window paints 
       await paint(wins, "/api/jobs/j1", { ...MONEY_REC, timestamp: 1759708800000 }, mode);
       expect(texts(".pcc-metric-amount"), "money, a number for a time " + mode).toEqual([rep("job-1"), "time not reported"]);
       await paint(wins, "/api/jobs/j1", { id: "job-1", timestamp: "2026-10-06T00:00:00Z" }, mode);
-      expect(texts(".pcc-metric-amount"), "non-money " + mode).toEqual(["job-1", new Date("2026-10-06T00:00:00Z").toLocaleString()]);
+      expect(texts(".pcc-metric-amount"), "non-money " + mode).toEqual(["reported: job-1", new Date("2026-10-06T00:00:00Z").toLocaleString()]);
     }
   });
 
@@ -2483,10 +2483,10 @@ describe("R12 r2c N3 (lane, MEDIUM): every value a list or metric window paints 
     for (const mode of ["live", "snapshot"] as const) {
       await paint([metricWin("/api/kernels/k1", "kernel.id"), metricWin("/api/kernels/k1", "kernel.name"), metricWin("/api/kernels/k1", "kernel.type"), metricWin("/api/kernels/k1", "kernel.reputation")],
         "/api/kernels/k1", KERNEL, mode);
-      expect(texts(".pcc-metric-amount"), "kernel metrics " + mode).toEqual(["k1", "name: Bench", "fdm", "4.8"]);
+      expect(texts(".pcc-metric-amount"), "kernel metrics " + mode).toEqual(["reported: k1", "name: Bench", "reported: fdm", "4.8"]);
       await paint([listWin("/api/kernels", "name", ["id", "type"])], "/api/kernels", [{ name: "Bench", id: "kernel_1", type: "fdm" }], mode);
       expect(texts(".pcc-list-title"), "kernel list title " + mode).toEqual(["name: Bench"]);
-      expect(texts(".pcc-list-meta"), "kernel list meta " + mode).toEqual(["kernel_1 · fdm"]);
+      expect(texts(".pcc-list-meta"), "kernel list meta " + mode).toEqual(["reported: kernel_1 · reported: fdm"]);
       await paint([metricWin("/api/escrow/e1", "status"), metricWin("/api/escrow/e1", "payeeState")], "/api/escrow/e1", { status: "running", payeeState: R2B_PAYEE, totalAmount: 250 }, mode);
       expect(texts(".pcc-metric-amount"), "status path " + mode).toEqual(["running", "reported status: " + R2B_PAYEE + " - settlement unconfirmed"]);
     }
@@ -2545,7 +2545,7 @@ const R2D_NAME_WITHHELD = "name withheld: stated money or verification";
 // LIST_FIELD_KINDS `name: "text"`), painted by reportedFieldText: WITHHELD_FIELD when boundValueText withholds it
 // (astra r2 F2: "a capability NAMED 'Paid $1M - verified' would read as a payment fact"), else "reported: <name>".
 const irKitPath = path.resolve(here, "../../../../apps/dashboard/public/ui-kit/v1/pcc-ir-kit.js");
-type IrKitRegion = { reportedFieldText: (field: string, value: string) => string; WITHHELD_FIELD: string };
+type IrKitRegion = { reportedFieldText: (field: string, value: string) => { readonly t: string }; WITHHELD_FIELD: { readonly t: string } };
 function irKitRegion(): IrKitRegion {
   const src = readFileSync(irKitPath, "utf8");
   const bootTail = /  if \(typeof window !== "undefined" && typeof document !== "undefined"\) boot\(\);\n\}\)\(\);\s*$/;
@@ -2612,15 +2612,15 @@ describe("R12 r2d F1 (lane review, MEDIUM): a name that states money or verifica
   it("parity with the shipped IR kit (live and snapshot): over the review's names, the IR's own example and the shared claim corpus, the plain kit withholds a name exactly when the IR kit does, on money and on non-money data, in a metric and in both list slots; a name both kits show keeps its tier's text", async () => {
     const ir = irKitRegion();
     const irWithholds = (v: string) => ir.reportedFieldText("name", v) === ir.WITHHELD_FIELD;
-    for (const v of PARITY_NAMES) expect(ir.reportedFieldText("name", v), "IR " + v).toBe(irWithholds(v) ? "withheld: stated money or verification" : "reported: " + v);
+    for (const v of PARITY_NAMES) expect(ir.reportedFieldText("name", v).t, "IR " + v).toBe(irWithholds(v) ? "withheld: stated money or verification" : "reported: " + v);
     for (const v of ["Paid in full - verified $250", "Payment received", "250 USDC settled", "withheld: stated money or verification", "Paid $1M - verified"]) {
       expect(irWithholds(v), "the IR withholds the review's name " + v).toBe(true);
     }
     const shown = PARITY_NAMES.filter((v) => !irWithholds(v));
     expect(shown.length, "the corpus holds names both kits show").toBeGreaterThan(0);
     expect(shown.length, "the corpus holds names both kits withhold").toBeLessThan(PARITY_NAMES.length);
-    const onMoney = (v: string) => (irWithholds(v) ? R2D_NAME_WITHHELD : r2dRep(v)); // a name that passes is a report
-    const offMoney = (v: string) => (irWithholds(v) ? R2D_NAME_WITHHELD : "name: " + v); // ... and framed off money data
+    const onMoney = (v: string) => (irWithholds(v) ? hasBidiControl(v) ? WITHHELD_FIELD : R2D_NAME_WITHHELD : r2dRep(v)); // a name that passes is a report
+    const offMoney = (v: string) => (irWithholds(v) ? hasBidiControl(v) ? WITHHELD_FIELD : R2D_NAME_WITHHELD : "name: " + v); // ... and framed off money data
     const rows = (extra: (i: number) => Record<string, unknown>) => PARITY_NAMES.map((v, i) => ({ ...extra(i), name: v, payeeName: v }));
     const names = PARITY_NAMES.map((v) => ({ name: v }));
     const metrics = (p: string) => PARITY_NAMES.map((_, i) => r2dMetric(p, "names." + i + ".name"));

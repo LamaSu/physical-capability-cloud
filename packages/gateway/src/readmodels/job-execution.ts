@@ -814,8 +814,16 @@ export function hasValidAdminKey(provided: unknown, expected: string | undefined
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-const sameWallet = (recorded: unknown, wallet: string) =>
-  typeof recorded === "string" && ADDRESS.test(recorded.trim()) && recorded.trim().toLowerCase() === wallet;
+// Mirror auth/kernel-authority.ts UNOWNED placeholders.
+const UNOWNED = new Set(["", "0x0000000000000000000000000000000000000000"]);
+const sameWallet = (recorded: unknown, wallet: string) => {
+  if (
+    typeof recorded !== "string" ||
+    UNOWNED.has(recorded.trim().toLowerCase()) ||
+    UNOWNED.has(wallet.trim().toLowerCase())
+  ) return false;
+  return ADDRESS.test(recorded.trim()) && recorded.trim().toLowerCase() === wallet;
+};
 
 /**
  * May this PROVEN wallet read this job's execution, evidence and money? Only when it is:

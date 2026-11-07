@@ -10,7 +10,7 @@ This is money, so ask; never pick the rate yourself.
 
 ## How contributor pay works (tell the human this before they choose)
 - **The rate:** publishing gives the kit a license of 0 to 100 bps of each job's gross, at the rate the human chose (0 is allowed).
-- **Who pays:** the buyer. The buyer's total is the job's gross, which includes the royalty and PCC's fee on it; the operator's price is not reduced (economics #4807).
+- **Who pays:** the buyer. The buyer's total is the job's gross, which includes the royalty; the operator's price is not reduced (economics #4807).
 - **Forks keep upstream shares:** weights halve per generation, so a direct fork splits 2 : 1 with its parent, and deeper forks 4 : 2 : 1.
 - **When pay arrives:** only when a job that ran the kit is **released** (paid out).
 - **For now:** until the operator approves the rates (operator item 99), attribution and the computed split are **shown in test mode**, not paid.
@@ -23,7 +23,7 @@ The kit is what you built:
 - the research citations;
 - the pcc-node configuration **without any key**.
 
-Never publish `.pcc/api-key`, `.pcc/auth.header`, `.pcc/buyer.header`, `.pcc/node-keys.json` or `.pcc/provision.json`, or anything copied from them.
+Secrets live in `.pcc/`, except the node's signing key at the selected key location: default `~/.pcc-node/keys.json` or `PCC_NODE_KEY_PATH` outside every checkout. Never publish the `.pcc/` directory, its secret files (`api-key`, `auth.header`, `buyer.header`, `node-keys.json`, `provision.json`), the selected node signing-key file, or anything copied from those secrets. Publish only the public kit files listed above.
 
 **Coming:** the kit registry (kits, #397) and the split helper (economics' `computeKitSplit`, #492) will turn this into one publish call, with the exact split shown before you confirm. The rate is the License's `requires.payments[0].rule.bps`, and test mode is `kitRoyaltyMode: preview`. Until they land, record the human's decision exactly:
 ```bash

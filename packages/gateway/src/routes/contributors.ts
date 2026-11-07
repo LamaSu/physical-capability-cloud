@@ -34,6 +34,7 @@ import { z } from "zod";
 import { getRepos } from "../db.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { getEmbeddedWalletAdapter } from "../auth/embedded-wallet.js";
+import { refuseCookieCredentialWrite } from "../auth/explicit-session.js";
 import {
   RateSegmentSchema,
   assertScheduleIsWellFormed,
@@ -519,6 +520,8 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post("/api/contributors/quickstart", async (req, reply) => {
+    const refusal = refuseCookieCredentialWrite(req);
+    if (refusal) return reply.code(401).send(refusal);
     const parse = QuickstartBodySchema.safeParse(req.body);
     if (!parse.success) {
       return reply.code(400).send({

@@ -86,7 +86,7 @@ function adminOk(req: FastifyRequest, reply: FastifyReply): boolean {
 
 export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
   // Mobile-first summit signup page (self-contained; public — mounted before apiGate).
-  app.get("/summit", async (_req, reply) => {
+  app.get("/summit", { config: { cspInlineScripts: true } }, async (_req, reply) => {
     return reply.header("content-type", "text/html; charset=utf-8").send(SUMMIT_HTML);
   });
 

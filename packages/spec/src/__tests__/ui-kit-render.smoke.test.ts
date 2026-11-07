@@ -144,7 +144,7 @@ describe("pcc-ui kit renders a manifest in snapshot mode (offline, no gateway)",
     // anything else is reported; never "unrecognised value" for a valid kernel id), never a payer -> payee layout.
     expect(document.querySelector(".pcc-receipt-parties")).toBeNull();
     expect(Array.from(document.querySelectorAll(".pcc-receipt-claims .pcc-receipt-claim")).map((node) => node.textContent))
-      .toEqual(["PCC escrow service reports payer: reported: you@example.com", "PCC escrow service reports payee: kernel_dominos_7764"]);
+      .toEqual(["PCC escrow service reports payer: unrecognised value", "PCC escrow service reports payee: kernel_dominos_7764"]);
     expect(document.querySelector(".pcc-receipt-rail")!.textContent).toContain("escrow-milestone");
   });
 

@@ -77,6 +77,34 @@ none of them re-introduces the `running`-gets-a-400 problem:
    legitimately uses `running`; intentionally untouched (including its enum in the
    agent-package catalogs).
 
+## Operator relay authorization (board N85)
+
+`GET /api/operator/jobs` and `POST /api/operator/heartbeat`, `/job-status`
+require the shared kernel-authority `operate` permission: the kernel's recorded
+operator identity, its proven operator wallet, or the gateway admin secret.
+`POST /api/kernels` records the registering caller as `operatorAddress`; use a
+key for that same identity for polling, heartbeat and job-status. A key for
+another identity gets 403, even with `scopes: ["*"]`.
+
+`POST /api/operator/evidence` requires `decide`: the kernel's proven operator
+wallet or the gateway admin secret. A matching claimed operator key gets 403
+`reason: "operator_proof_required"`. Evidence takes decide, per DECISIONS 2026-10-04 01:25 (N31c).
+Evidence is posted with the kernel's proven operator
+wallet authority (`decide`).
+
+An anonymous caller gets 401 before the job read. A non-admin targeting an
+unregistered kernel gets 404. Non-string kernel IDs are rejected with 400
+before the kernel lookup.
+
+Evidence and job-status authorization use the stored job's `kernelId`, never
+the body's kernel ID. A known job without a kernel gets 403 for a non-admin
+(`reason: "job_has_no_kernel"`). Unknown jobs retain the HTTP 200
+`warning: "job_not_found"` response. The existing evidence kernel-mismatch
+rejection and paid-job settlement-owned status guard still apply after
+authorization.
+
+Operator identity proof for operate is completed by WP-A (DECISIONS items 136 and 138).
+
 ## Recommended follow-up (if a full reconciliation is wanted)
 
 Pick ONE canonical job-status union; converge `@pcc/spec` `StepStatus` + the

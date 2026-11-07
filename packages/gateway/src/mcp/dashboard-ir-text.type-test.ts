@@ -12,7 +12,7 @@ import type { GetResult } from "./dashboard-ir-binder.js";
 function checkTextTypes(doc: RDocument, node: RElement, ir: IrNode, raw: string, agent: AgentText): void {
   const displayed: KitText[] = [
     kitText("PCC copy"), UNAVAILABLE, boundValueText("name", raw), boundStatusText(raw),
-    identifierText("id", raw), reportedFieldText("name", raw), recordValueText("status", raw),
+    identifierText("id", raw), reportedFieldText("name", raw),
     bindScalar(ir, {}), listFieldLabel("name"), httpStatusText(401),
   ];
   el(doc, "pcc-value", displayed[0]);
@@ -21,11 +21,20 @@ function checkTextTypes(doc: RDocument, node: RElement, ir: IrNode, raw: string,
   const failure: KitText | null = schemaCardFailure("run-summary-v1", {});
   if (failure !== null) setText(node, failure);
 
+  // @ts-expect-error Legacy record formatting is unbranded and cannot enter a display sink.
+  setText(node, recordValueText("status", raw));
+
+  node.textContent = kitText("PCC copy");
+  const readBack: string = node.textContent;
+  void readBack;
+  // @ts-expect-error Direct renderer writes require KitText too.
+  node.textContent = raw;
+
   // @ts-expect-error A raw string must not reach the element-creation sink.
   el(doc, "pcc-value", raw);
   // @ts-expect-error A raw string must not reach a slot-write sink.
   setText(node, raw);
-  const widened: string = kitText("PCC copy");
+  const widened: string = kitText("PCC copy").t;
   // @ts-expect-error Widening loses the brand; a sink cannot silently regain it.
   setText(node, widened);
   // @ts-expect-error Schema staging retains the helper's brand when its text is read back.

@@ -53,9 +53,16 @@ function boundary(options: { forceClaimInitFailure?: boolean; before?: string; R
     setTimeout(callback: () => void) { timers.push(callback); return timers.length; },
   };
   expect(source.match(bootTail)).toHaveLength(1);
-  if (options.before) vm.runInNewContext(options.before, sandbox);
-  vm.runInNewContext(source.replace(bootTail,
-    "  window.boundary = { kitText, agentText, agentEl, WITHHELD_FIELD, WITHHELD_PROSE, HOST_WRITE_NOTE, joinText, el, setText, setAttrText, setValue, baseUnitsText, amountText, fmtTs, postErrorText, hostOpErrorText, errorLine, nameText, fieldDefaultText, isMoneyClaim, isProseClaim, renderNote, writeButton, inlineConfirm, intentChip, realRequestNode, requestReasonText, plainBody, collectForm, intentState, INTENT_STATE };"), sandbox);
+  const instrumented = source.replace(bootTail,
+    "  window.boundary = { kitText, agentText, agentEl, WITHHELD_FIELD, WITHHELD_PROSE, HOST_WRITE_NOTE, joinText, el, setText, setAttrText, setValue, baseUnitsText, amountText, fmtTs, postErrorText, hostOpErrorText, errorLine, nameText, fieldDefaultText, isMoneyClaim, isProseClaim, renderNote, writeButton, inlineConfirm, intentChip, realRequestNode, requestReasonText, plainBody, collectForm, intentState, INTENT_STATE };");
+  if (options.before) {
+    // Keep prototype-removal probes isolated from the shared test realm.
+    vm.runInNewContext(options.before, sandbox);
+    vm.runInNewContext(instrumented, sandbox);
+  } else {
+    // Ordinary fixture data and the kit must share Object.prototype.
+    new Function(...Object.keys(sandbox), instrumented)(...Object.values(sandbox));
+  }
   expect(sandbox.window.__PCC_UI_TEXT_VIOLATIONS__).toBe(0);
   return { kit: sandbox.window.boundary!, count: () => sandbox.window.__PCC_UI_TEXT_VIOLATIONS__, timers, copied };
 }
@@ -135,6 +142,7 @@ describe("the shipped plain kit's runtime boundary", () => {
       expect(typeof text.t).toBe("string");
       expect(kit.el("span", null, text).textContent).toBe(text.t);
     }
+    expect(kit.fmtTs("invalid").t).toBe("time not reported");
     expect(kit.errorLine("server error").textContent).toBe("reported: server error Nothing was fabricated.");
     expect(kit.errorLine(kit.kitText("PCC error")).textContent).toBe("PCC error Nothing was fabricated.");
     expect(count()).toBe(0);
@@ -274,13 +282,12 @@ describe("compatibility failure and restored plain objects", () => {
 
   it("restores plainBody's ordinary object copy, own-key precedence and __proto__ rejection", () => {
     const { kit, count } = boundary();
-    const base = Object.create({ inherited: "ignored" });
-    base.amount = 1;
-    base.extra = "kept";
+    const base = { amount: 1, extra: "kept" };
     const body = kit.plainBody(base, { amount: 2 });
     expect(Object.keys(body!)).toEqual(["amount", "extra"]);
     expect(body).toEqual({ amount: 2, extra: "kept" });
     expect(Object.getPrototypeOf(body!)).not.toBeNull();
+    expect(Object.keys(kit.plainBody(Object.create({ inherited: "x" }), { amount: 2 })!)).toEqual(["amount"]);
     expect(kit.plainBody(JSON.parse('{"__proto__":{"amount":5}}'))).toBeNull();
     expect(kit.plainBody({}, JSON.parse('{"__proto__":{"amount":5}}'))).toBeNull();
     expect(count()).toBe(0);
@@ -371,7 +378,7 @@ describe("a helper deleted from a mapped sink", () => {
     expect(text(".pcc-cap-name")).toBe("name: Printer");
     expect(text(".pcc-cap-desc")).toBe("reported: Prints parts");
     expect(text(".pcc-list-title")).toBe("name: Bench");
-    expect(text(".pcc-list-meta")).toBe("kernel_1 · reported: Analyst note");
+    expect(text(".pcc-list-meta")).toBe("reported: kernel_1 · reported: Analyst note");
     expect(text(".pcc-field-label")).toBe("The dashboard calls this: “Quantity” *");
     const inputs = document.querySelectorAll<HTMLInputElement | HTMLSelectElement>(".pcc-form-fields .pcc-input");
     expect(Array.from(inputs).map((input) => input.value)).toEqual(["", "12.5", "", ""]);
@@ -385,9 +392,12 @@ describe("a helper deleted from a mapped sink", () => {
     // R12 r2 B: a legacy party is a claim naming the escrow service (an id in the grammar stays an id)
     expect(Array.from(document.querySelectorAll(".pcc-receipt-claims .pcc-receipt-claim")).map((node) => node.textContent))
       .toEqual(["PCC escrow service reports payer: short", "PCC escrow service reports payee: 0x" + "ab".repeat(20)]);
-    expect(text(".pcc-receipt-rail")).toContain(" · PCC escrow service reports rail: reported: bad rail");
+    expect(text(".pcc-receipt-rail")).toContain(" · PCC escrow service reports rail: unrecognised value");
     expect(text(".pcc-receipt-tx")).toBe("PCC escrow service reports transaction: unrecognised value");
-    expect(text(".pcc-chain-outcome")).toBe("reported: bad type");
+    expect(text(".pcc-chain-outcome")).toBe("bad type");
+    const labelRule = document.getElementById("pcc-ui-styles")!.textContent!.match(/([^{}]+)\{content:"agent-authored"/)!;
+    const labelSelectors = labelRule[1]!.split(",").map((selector) => selector.replace(/::before$/, ""));
+    expect(labelSelectors.some((selector) => document.querySelector(".pcc-chain-outcome")!.matches(selector)), "chain outcome draws agent-authored attribution").toBe(true);
     const formWindow = document.querySelector(".pcc-form-fields")!.closest(".pcc-win")!;
     (formWindow.querySelector(".pcc-btn") as HTMLButtonElement).click();
     assertKitTextViolations();
@@ -419,7 +429,7 @@ describe("a helper deleted from a mapped sink", () => {
       expect(node.textContent).toBe(irNotice("WITHHELD_FIELD"));
       expect(node.classList.contains("pcc-withheld")).toBe(true);
     }
-    expect(document.querySelector(".pcc-metric-amount")!.textContent).toBe("job-1");
+    expect(document.querySelector(".pcc-metric-amount")!.textContent).toBe("reported: job-1");
     (document.querySelector(".pcc-actionbar .pcc-btn") as HTMLButtonElement).click();
     expect(document.querySelector(".pcc-chip")!.textContent).toBe(irNotice("WITHHELD_FIELD"));
     expect(document.querySelector(".pcc-chip .pcc-withheld")).not.toBeNull();
@@ -448,8 +458,8 @@ describe("a helper deleted from a mapped sink", () => {
     for (const selector of [".pcc-section-heading", ".pcc-note-p"]) expect(document.querySelector(selector)!.textContent).toBe(irNotice("WITHHELD_PROSE"));
     for (const selector of [".pcc-win-title", ".pcc-btn-label"]) expect(document.querySelector(selector)!.textContent).toBe(irNotice("WITHHELD_FIELD"));
     expect(Array.from(document.querySelectorAll<HTMLInputElement>(".pcc-form-fields .pcc-input")).map((node) => node.value)).toEqual(["", "12"]);
-    expect(document.querySelector(".pcc-metric-amount")!.textContent).toBe("job-1");
-    expect(document.querySelector(".pcc-cap-meta .pcc-tag")!.textContent).toBe("fdm");
+    expect(document.querySelector(".pcc-metric-amount")!.textContent).toBe(irNotice("WITHHELD_FIELD"));
+    expect(document.querySelector(".pcc-cap-meta .pcc-tag")!.textContent).toBe(irNotice("WITHHELD_FIELD"));
     expect(document.querySelector(".pcc-banner")!.textContent).toBe("Snapshot · not live.");
     assertKitTextViolations();
   });

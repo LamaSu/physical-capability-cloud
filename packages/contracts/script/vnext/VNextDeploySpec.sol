@@ -37,7 +37,8 @@ library VNextDeploySpec {
     string internal constant NAMESPACE = "pcc.vnext.settlement";
     /// @notice Deploy-spec revision. Bump ONLY to deliberately re-address a cohort; it is inside every
     ///         salt, so a bump is the sanctioned way to publish a second, non-conflicting deployment.
-    uint256 internal constant SPEC_VERSION = 1;
+    /// @dev Revision 2 binds the compiled settlement schedule into the deployment-record digest.
+    uint256 internal constant SPEC_VERSION = 2;
 
     // ── Modes ───────────────────────────────────────────────────────────────────────────────────────
     /// @notice The canonical, pinnable deployment. One per (chainId, SPEC_VERSION).
@@ -145,11 +146,12 @@ library VNextDeploySpec {
     ///         reports "No transactions to broadcast"), so nothing is lost.
     ///
     ///         Consequences worth stating plainly:
-    ///           1. the library address is CHAIN- and MODE-independent — one address, one codehash, for
-    ///              canonical and provisional, Base and Base Sepolia. "The same audited bytecode backs
-    ///              both networks" becomes a one-command check: compare the two chains' `EXTCODEHASH`.
+    ///           1. within ONE schedule profile, the library address is CHAIN- and MODE-independent —
+    ///              one address, one codehash, for canonical and provisional on both chains allowed by
+    ///              that profile. Different schedule profiles can have different metadata and codehashes;
+    ///              consumers must pin per (chainId, scheduleId).
     ///           2. a consumer that pins the library codehash off a PROVISIONAL stack does not have to
-    ///              re-pin when the canonical stack lands.
+    ///              re-pin when the canonical stack lands within that same schedule profile.
     ///         Contrast {contractSalt}: the factory and attesters carry NETWORK-SPECIFIC configuration
     ///         (settlement asset, signer set, cohort), so their addresses are chain- AND mode-scoped on
     ///         purpose — a Base Sepolia factory must never be confusable with a Base one by address alone.

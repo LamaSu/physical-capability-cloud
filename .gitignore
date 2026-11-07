@@ -35,3 +35,17 @@ ai/
 # Python bytecode (N4a: a tracked .pyc of ot2-executor.py was a runnable copy of the unguarded executor)
 __pycache__/
 *.py[cod]
+
+# Python build artifacts: never commit bytecode or setuptools metadata.
+__pycache__/
+*.py[cod]
+*.egg-info/
+# Older pcc-node (0.1.0 and 0.1.1 r2) wrote its key pair to ./pcc-keys.json.
+# Current pcc-node refuses that file and never writes it. Never commit one.
+# Anchored, so a public .well-known/pcc-keys.json (gateway public key) is never hidden.
+/pcc-keys.json
+/packages/pcc-node/pcc-keys.json
+/pcc-keys.json.exposed
+/packages/pcc-node/pcc-keys.json.exposed
+/starter/pcc-keys.json
+/starter/pcc-keys.json.exposed

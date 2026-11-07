@@ -5,6 +5,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
+import { refuseCookieCredentialWrite } from "../auth/explicit-session.js";
 import { litEncryptionService } from "../services.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
@@ -18,6 +19,8 @@ export async function litProvisionRoutes(app: FastifyInstance) {
   // Provisions a scoped Lit usage key for an operator.
   // Uses the ACCOUNT key (LIT_API_KEY) to create a limited usage key.
   app.post("/api/lit/provision", async (req, reply) => {
+    const refusal = refuseCookieCredentialWrite(req);
+    if (refusal) return reply.status(401).send(refusal);
     const body = (req.body ?? {}) as {
       kernelId?: string;
       operatorDid?: string;

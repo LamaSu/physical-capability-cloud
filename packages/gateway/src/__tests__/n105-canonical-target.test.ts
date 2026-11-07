@@ -17,7 +17,8 @@ import type { AddressInfo } from "node:net";
 
 process.env.PCC_DB_PATH = ":memory:";
 process.env.NODE_ENV = "test";
-process.env.PCC_SEED_DATA = "false";
+// The control cases read the governance-seeded endpoint_scopes rows.
+process.env.PCC_SEED_DATA = "true";
 process.env.PCC_ADMIN_KEY = "n105-test-admin-secret-0123456789";
 
 let app: FastifyInstance;

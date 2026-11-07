@@ -40,7 +40,7 @@
 
 import type { EscrowStatus } from "../types/common.js";
 import type { Escrow } from "../types/settlement.js";
-import { isProseClaim } from "./plain-text-claims.js";
+import { hasBidiControl, isProseClaim, isIdentifierClaim, WITHHELD_FIELD } from "./plain-text-claims.js";
 
 /** Semantic tone. Presentation maps tone -> color; tone never comes from a manifest. */
 export type MoneyTone = "settled" | "refunded" | "waiting" | "running" | "failed" | "unknown";
@@ -265,7 +265,16 @@ export function classifySettlementRecord(record: unknown): MoneyStatusClassifica
 }
 
 /** The only routes whose LIVE reads may present a settlement state, final or not (settlement-read.ts UNIT_ID_RE). */
-export const SETTLEMENT_READ_ROUTE = /^\/api\/settlement\/units\/0x[0-9a-fA-F]{64}\/(receipt|lifecycle)$/;
+// Export a frozen matcher facade rather than a RegExp identity: compile() changes a
+// frozen RegExp's internal pattern before throwing on its non-writable lastIndex.
+function immutableMatcher(pattern: RegExp) {
+  return Object.freeze({
+    source: pattern.source,
+    test: (text: string): boolean => pattern.test(text),
+    exec: (text: string): RegExpExecArray | null => pattern.exec(text),
+  });
+}
+export const SETTLEMENT_READ_ROUTE = immutableMatcher(/^\/api\/settlement\/units\/0x[0-9a-fA-F]{64}\/(receipt|lifecycle)$/);
 const SETTLEMENT_ROUTE_UNIT_RE = /^\/api\/settlement\/units\/(0x[0-9a-fA-F]{64})\/(?:receipt|lifecycle)$/;
 
 // ── R12: a money fact renders only from a pinned, finalized chain read (spec R12, operator 10/06) ──
@@ -453,6 +462,7 @@ export const UNVERIFIED_SUFFIX = " - status unverified";
  */
 export function statusPillText(raw: unknown, verified: boolean, money: boolean): string {
   const t = raw == null ? "" : String(raw);
+  if (hasBidiControl(t)) return WITHHELD_FIELD;
   if (verified || t === "") return t;
   const k = normalizeMoneyStatus(t);
   const safe = money ? SAFE_MONEY_STATUS_WORDS : SAFE_STATUS_WORDS;
@@ -470,20 +480,21 @@ export function statusPillText(raw: unknown, verified: boolean, money: boolean):
  */
 export function reportedText(raw: unknown, verified: boolean, money: boolean): string {
   const t = raw == null ? "" : String(raw);
+  if (hasBidiControl(t)) return WITHHELD_FIELD;
   if (verified || t === "") return t;
   return "reported: " + t + (money ? UNCONFIRMED_SUFFIX : "");
 }
 
 // These closed grammars are mirrored by the dependency-free plain browser kit.
 // Conformance compares accepted and rejected inputs against the real shipped bytes.
-export const PLAIN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-export const PLAIN_HEX_RE = /^0x(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/;
-export const PLAIN_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
-export const PLAIN_TRACE_RE = /^[A-Za-z0-9_-]{8,64}$/;
+export const PLAIN_ID_RE = immutableMatcher(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
+export const PLAIN_HEX_RE = immutableMatcher(/^0x(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/);
+export const PLAIN_TIME_RE = immutableMatcher(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/);
+export const PLAIN_TRACE_RE = immutableMatcher(/^[A-Za-z0-9_-]{8,64}$/);
 
-/** Identifiers keep their spelling only inside the bounded ASCII grammar. */
+/** Identifiers can spell prose: withhold claims and attribute all remaining values, as in the IR. */
 export function idText(raw: unknown): string {
-  return typeof raw === "string" && PLAIN_ID_RE.test(raw) ? raw : reportedText(raw, false, false);
+  return typeof raw === "string" && isIdentifierClaim(raw) ? WITHHELD_FIELD : reportedText(raw, false, false);
 }
 
 /** Addresses and transaction hashes admit exactly their two wire lengths. */
@@ -506,11 +517,28 @@ export function canonicalPlainTime(raw: unknown): raw is string {
     d.getUTCMilliseconds() === ms;
 }
 
-/** Preserve the kit's locale-formatted timestamp after the UTC grammar check. */
-export function timeText(raw: unknown): string {
-  if (!canonicalPlainTime(raw)) return "time not reported";
-  const d = new Date(raw);
+/** Finite numbers or decimal strings only; coercible objects and prose fail closed. */
+export function fmtUsdRaw(raw: unknown): string {
+  if (!(typeof raw === "number" || (typeof raw === "string" && /^-?\d+(\.\d+)?$/.test(raw)))) return "amount not reported";
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return "amount not reported";
+  return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+export function fmtUsd(raw: unknown): string { return fmtUsdRaw(raw); }
+/** Presentation text depends on the runtime locale/timezone; it is not canonical wire data. */
+export function fmtTs(raw: unknown): string {
+  if (!(canonicalPlainTime(raw) || (typeof raw === "number" && Number.isFinite(raw)))) return "time not reported";
+  const d = new Date(raw as string | number);
+  if (!Number.isFinite(d.getTime())) return "time not reported";
   try { return d.toLocaleString(); } catch { return d.toISOString(); }
+}
+/** Locale presentation after the canonical UTC grammar check. */
+export function timeText(raw: unknown): string {
+  return canonicalPlainTime(raw) ? fmtTs(raw) : "time not reported";
+}
+/** The plain kit's closed currency vocabulary. */
+export function currencyText(raw: unknown): string {
+  return raw === "USDC" || raw === "ETH" || raw === "DAI" ? raw : "currency not reported";
 }
 
 /** An invalid trace is omitted, so arbitrary response-header text is never shown. */
@@ -521,6 +549,7 @@ export function traceText(raw: unknown): string {
 /** Operator-chosen names are visibly framed; claims use PCC's withheld notice. */
 export function nameText(raw: unknown): string {
   if (typeof raw !== "string") return reportedText(raw, false, false);
+  if (hasBidiControl(raw)) return WITHHELD_FIELD;
   return isProseClaim(raw) ? "name withheld: stated money or verification" : "name: " + raw;
 }
 

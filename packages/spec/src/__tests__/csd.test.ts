@@ -593,9 +593,9 @@ describe("loadBuiltinCsds", () => {
     expect(() => loadBuiltinCsds()).not.toThrow();
   });
 
-  it("loads exactly 9 built-in CSDs (8 base + the reference vertical's workflow CSD)", () => {
+  it("loads exactly 10 built-in CSDs (9 base + the reference vertical's workflow CSD)", () => {
     const registry = loadBuiltinCsds();
-    expect(registry.size).toBe(9);
+    expect(registry.size).toBe(10);
   });
 
   // Board N64: the reference vertical's capability type must resolve on the builtin registry, the one the
@@ -635,10 +635,10 @@ describe("loadBuiltinCsds", () => {
     expect(registry.get(PRINT_AND_MAIL_URL)).toBeDefined();
   });
 
-  it("the 8 capability built-ins have kind = 'base'; the reference vertical is the one 'workflow'", () => {
+  it("the 9 capability built-ins have kind = 'base'; the reference vertical is the one 'workflow'", () => {
     const registry = loadBuiltinCsds();
     const bases = registry.findByKind("base");
-    expect(bases).toHaveLength(8);
+    expect(bases).toHaveLength(9);
     expect(registry.findByKind("workflow").map((c) => c.url)).toEqual([PRINT_AND_MAIL_URL]);
   });
 

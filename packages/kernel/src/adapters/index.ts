@@ -35,7 +35,7 @@ export type {
 } from "./sila/index.js";
 
 // IPP (Internet Printing Protocol) adapter for standard 2D printers
-export { IppAdapter, type IppAdapterConfig, type IppCapabilities } from "./ipp-adapter.js";
+export { IppAdapter, type IppAdapterConfig, type IppCapabilities, type IppDiagnostic } from "./ipp-adapter.js";
 export { discoverIppPrinters, generatePrinterCsd, type DiscoveredPrinter } from "./ipp-discovery.js";
 
 // PrinterLogAdapter — hash-chained printer log evidence sensor
@@ -48,3 +48,6 @@ export type { MachineAdapter, SensorAdapter, CameraAdapter, MachineCommand, Mach
 export { OutstandingWork } from "./outstanding-work.js";
 export type { UniversalSensorAdapter } from "./universal-sensor-adapter.js";
 export { isUniversalSensor } from "./universal-sensor-adapter.js";
+export type { IppValue, IppAttribute, IppGroup, IppMessage } from "./ipp-codec.js";
+export type { IppTransportRequest, IppTransportResult, IppTransport } from "./ipp-transport.js";
+export type { IppClientConfig, IppClientFailure } from "./ipp-client.js";
