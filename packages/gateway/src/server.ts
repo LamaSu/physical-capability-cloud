@@ -172,6 +172,8 @@ import { traceIdPlugin } from "./middleware/trace-id.js";
 import { agentFeedbackRoutes } from "./routes/agent-feedback.js";
 import { funnelTrackerPlugin } from "./services/funnel-tracker.js";
 import { adminObservabilityRoutes } from "./routes/admin-observability.js";
+import { adminPostureRoutes } from "./routes/admin-posture.js";
+import { logBootPosture } from "./services/posture.js";
 import { setSessionStore } from "@pcc/orchestrator-sdk";
 import { OrchestratorSessionStore } from "./services/orchestrator-session-store.js";
 import { startEventBusOtelBridge } from "./services/event-bus-otel-bridge.js";
@@ -207,6 +209,7 @@ export async function createGateway(port = 3200) {
   const dispatch = localJobDispatchDecision(kernelService.kernelId, kernelService.kernelId, kernelService.hasExplicitConfig);
   app.log.info({ queueOnly: jobSubmitQueueOnly(), localDispatch: dispatch.ok, reason: dispatch.ok ? undefined : dispatch.reason },
     "[jobs] Effective local dispatch policy");
+  logBootPosture(app.log);
 
   // Sentry error handler — captures Fastify errors and attaches request context
   // Must be registered before other error handlers
@@ -659,6 +662,7 @@ export async function createGateway(port = 3200) {
   // apiGate (caller is authenticated) + admin-allowlisted. 404 unless
   // PCC_FUNNEL_ENABLED=true.
   await app.register(adminObservabilityRoutes);
+  await app.register(adminPostureRoutes);
 
   // REST routes
   await app.register(capabilityRoutes);

@@ -168,6 +168,8 @@ ENV PCC_DB_PATH=/app/data/pcc.sqlite
 ENV SERVE_DASHBOARD=true
 ENV DASHBOARD_PATH=/app/apps/dashboard/dist
 
+RUN node packages/gateway/dist/env-reads-cli.js /app/packages/*/dist > /app/ENV_READS.json && chmod 0444 /app/ENV_READS.json
+
 # Build provenance (N5): the commit this image was built from, written into the image's FILES
 # (not an ENV), so no runtime variable can change what /api/health reports.
 #   PCC_BUILD_SHA           CI's GHCR image build passes github.sha (ci.yml build-args).
