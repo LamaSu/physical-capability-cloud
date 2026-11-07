@@ -184,6 +184,18 @@ def _cut_short(status, raw, count):
     return answer
 
 
+def _cut_log_under_framing(name, value):
+    def answer(handler):
+        handler.send_response(200)
+        handler.send_header(name, value)
+        handler.end_headers()
+        handler.wfile.write(LOG[:10])
+        handler.wfile.flush()
+        handler.connection.shutdown(socket.SHUT_RDWR)
+
+    return answer
+
+
 def _sources(result):
     return [entry["payload"]["source"] for entry in result.evidence["logChain"]] if result.evidence else []
 
@@ -321,9 +333,9 @@ def test_a_deadline_while_the_log_body_arrives_leaves_the_log_out():
         started = time.monotonic()
         result = _run(runtime)
         assert time.monotonic() - started < 1.3, "the log body outlived the run's 1 s deadline"
-        # Master reports success here; verdict 117d asks for timeout:run_finished (#512, and the
-        # 0.1.1 release line). Either way N214's rule holds: no partial log is signed.
-        assert result.ok is True or result.error == "timeout:run_finished", result
+        # Verdict 117d: a deadline during the log fetch is timeout:run_finished, never success (N243
+        # brought the release line's fix to master). N214's rule holds too: no partial log is signed.
+        assert result.ok is False and result.error == "timeout:run_finished", result
         assert _sources(result) == ["device:run"], _sources(result)
     finally:
         dev.close()
@@ -406,6 +418,21 @@ def test_a_cancel_while_an_unframed_log_arrives_is_not_swallowed():
 
 def test_a_log_one_byte_short_is_left_out():
     dev = Device(log=_cut_short(200, LOG, len(LOG) - 1))
+    try:
+        result = _run(AdapterRuntime.from_profile(_profile(dev.url, log=True), *_keys()))
+        assert result.ok is True, result
+        assert _sources(result) == ["device:run"], _sources(result)
+    finally:
+        dev.close()
+
+
+@pytest.mark.parametrize("name,value", [
+    ("Content-Length", f"{len(LOG)}, {len(LOG)}"),
+    ("Content-Length", f"{len(LOG)}x"),
+    ("Transfer-Encoding", "gzip, chunked"),
+])
+def test_a_log_cut_under_framing_http_client_cannot_read_is_left_out(name, value):
+    dev = Device(log=_cut_log_under_framing(name, value))
     try:
         result = _run(AdapterRuntime.from_profile(_profile(dev.url, log=True), *_keys()))
         assert result.ok is True, result
