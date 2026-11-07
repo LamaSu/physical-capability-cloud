@@ -226,6 +226,7 @@ describe("hand-written reader / CANONICAL.schema.json structural agreement", () 
     ));
     expect(fromSchema).toHaveLength(2);
     expect(VNEXT_SCHEDULE_TUPLES).toHaveLength(2);
+    expect([VNEXT_SCHEDULE_TUPLES, ...VNEXT_SCHEDULE_TUPLES].every((value) => Object.isFrozen(value))).toBe(true);
     for (const tuple of [...fromSchema, ...VNEXT_SCHEDULE_TUPLES]) expect(Object.keys(tuple).sort()).toEqual(keys);
     const byId = (a: { scheduleId?: unknown }, b: { scheduleId?: unknown }) => String(a.scheduleId).localeCompare(String(b.scheduleId));
     expect([...VNEXT_SCHEDULE_TUPLES].sort(byId)).toStrictEqual(fromSchema.sort(byId));

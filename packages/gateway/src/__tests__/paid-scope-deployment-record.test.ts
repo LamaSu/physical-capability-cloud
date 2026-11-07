@@ -77,6 +77,8 @@ function expectReads(count: number): void {
   const suffix = join("vnext", "base-sepolia", "CANONICAL.json");
   expect(vi.mocked(openSync).mock.calls.filter(([path]) => String(path).endsWith(suffix))).toHaveLength(count);
   expect(vi.mocked(readFileSync).mock.calls).toHaveLength(count);
+  // Each read goes through the descriptor the O_NOFOLLOW open returned, never the path again.
+  expect(vi.mocked(readFileSync).mock.calls.every(([target]) => typeof target === "number")).toBe(true);
 }
 
 beforeEach(() => {
@@ -183,6 +185,18 @@ describe("NS-1 validated V-next deployment record", () => {
     warnings = [];
     expect(vnextDeploymentRecord(root, "base-sepolia")).toBeNull();
     expect(warnings).toEqual([["vnext_record_refused R-d"]]);
+  });
+
+  it.each([
+    { rule: "R-a", network: "base-sepolia", change: { specVersion: 1 }, optIn: "1" },
+    { rule: "R-b", network: "base", change: { chainId: 8453, scheduleId: "vnext-testnet-short-v1-unknown" }, optIn: "1" },
+    { rule: "R-c", network: "base-sepolia", change: {}, optIn: undefined },
+  ])("T8 (neg-tuple-order) a tuple near-miss still answers the earlier $rule first", ({ rule, network, change, optIn }) => {
+    setEnv("PCC_VNEXT_ALLOW_TESTNET_RECORD", optIn);
+    setEnv("PCC_VNEXT_RECORD_NETWORK", network);
+    const record = { ...onChain84532("vnext-testnet-short-v1"), challengeWindowSec: 601, ...change };
+    expect(configuredVNextChainId(writeRecord(network, record))).toBeNull();
+    expect(warnings).toEqual([[`vnext_record_refused ${rule}`]]);
   });
 
   const provisional = { mode: "PROVISIONAL", label: "run1", canonical: false, doNotPin: true };
