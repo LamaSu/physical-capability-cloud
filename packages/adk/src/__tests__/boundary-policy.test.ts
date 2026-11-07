@@ -210,6 +210,19 @@ describe("verdict 101c: the installed-graph walk fails closed, not open", () => 
     expect(linkedShim.problems.some((problem) => problem.includes("opaque") && problem.includes(".bin"))).toBe(true);
   });
 
+  it("rejects a package directly inside the shim directory", () => {
+    const dir = "node_modules/.pnpm/wrapper@1.0.0/node_modules/wrapper/node_modules/.bin";
+    const { installed, problems } = scan((root) => {
+      writePkg(join(root, "node_modules/.pnpm/wrapper@1.0.0/node_modules/wrapper"), "wrapper");
+      writePkg(join(root, dir), "tool");
+      writeFileSync(join(root, dir, "index.js"), "module.exports = 1;\n");
+    });
+    expect(installed).toContainEqual({ name: "tool", version: "1.0.0", dir, bundledIn: "wrapper" });
+    expect(problems).toEqual([
+      `installed graph contains tool@1.0.0 (${dir}), bundled inside wrapper: a bundled package is in no dependency list`,
+    ]);
+  });
+
   it("accepts a real bundled shim directory containing only regular files", () => {
     const { installed, problems } = scan((root) => {
       const wrapper = join(root, "node_modules/.pnpm/wrapper@1.0.0/node_modules/wrapper");
@@ -246,6 +259,28 @@ describe("verdict 101c: the installed-graph walk fails closed, not open", () => 
       });
       expect(problems.some((problem) => problem.includes("opaque store entry")), kind).toBe(true);
     }
+  });
+
+  it("rejects a regular file in pnpm store modules as opaque", () => {
+    const dir = "node_modules/.pnpm/x@1.0.0/node_modules/stray.js";
+    const { problems } = scan((root) => {
+      writePkg(join(root, "node_modules/.pnpm/x@1.0.0/node_modules/x"), "x");
+      writeFileSync(join(root, dir), "module.exports = 1;\n");
+    });
+    expect(problems).toEqual([
+      `installed graph has an opaque store entry at ${dir}: stray.js is not a package directory`,
+    ]);
+  });
+
+  it("rejects a broken dependency symlink in pnpm store modules as opaque", () => {
+    const dir = "node_modules/.pnpm/x@1.0.0/node_modules/missing";
+    const { problems } = scan((root) => {
+      writePkg(join(root, "node_modules/.pnpm/x@1.0.0/node_modules/x"), "x");
+      symlinkSync(join(root, "absent"), join(root, dir), "dir");
+    });
+    expect(problems).toEqual([
+      `installed graph has an opaque store entry at ${dir}: missing does not link to a recorded package directory`,
+    ]);
   });
 
   it("accepts real scoped packages and dependency links to recorded store packages", () => {

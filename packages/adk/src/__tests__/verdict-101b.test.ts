@@ -68,6 +68,17 @@ describe("101b M2: the snapshot is bounded in breadth and bytes, not only depth"
     expect(errorCode(() => resolveToolRequest("setup_validate", { config }, base))).toBe("bad_input");
   });
 
+  it("accepts omitted fields at the exact value budget", () => {
+    const config = Object.fromEntries(Array.from({ length: 99_999 }, (_, i) => [`k${i}`, undefined]));
+    const req = resolveToolRequest("setup_validate", { config }, base);
+    expect(req.body).toBe('{"config":{}}');
+  });
+
+  it("refuses omitted fields one value over the budget", () => {
+    const config = Object.fromEntries(Array.from({ length: 100_000 }, (_, i) => [`k${i}`, undefined]));
+    expect(errorCode(() => resolveToolRequest("setup_validate", { config }, base))).toBe("bad_input");
+  });
+
   it("refuses an over-budget object before reading its property descriptors", () => {
     const huge = Object.fromEntries(Array.from({ length: 100_001 }, (_, i) => [`k${i}`, undefined]));
     const guarded = new Proxy(huge, {
