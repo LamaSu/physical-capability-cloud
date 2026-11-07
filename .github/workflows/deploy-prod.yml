@@ -28,7 +28,9 @@ jobs:
         env:
           SHA: ${{ inputs.sha }}
         run: |
-          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+          # An explicit list, not a range: a range follows the locale's collation.
+          case "$SHA" in *[!0123456789abcdef]*) SHA= ;; esac
+          if [ "${#SHA}" -ne 40 ]; then
             echo "::error::Pass the full 40-hex lower-case SHA."
             exit 1
           fi
@@ -120,9 +122,9 @@ jobs:
             result="curl failed (miss)"
             if body=$(curl -sS -m 10 -H 'cache-control: no-cache' https://capability.network/api/health); then
               result="non-JSON or non-object body (miss)"
-              if printf '%s\n' "$body" | jq -e 'type == "object"' >/dev/null 2>&1; then
-                served_commit=$(printf '%s\n' "$body" | jq -r '(.commit | select(type == "string" and length > 0)) // "none" | .[0:12]')
-                served_build_arg=$(printf '%s\n' "$body" | jq -r '(.buildArg | select(type == "string" and length > 0)) // "none"')
+              if printf '%s\n' "$body" | jq -se 'length == 1 and (.[0] | type == "object")' >/dev/null 2>&1; then
+                served_commit=$(printf '%s\n' "$body" | jq -r '(.commit | select(type == "string" and length > 0) | .[0:12] | gsub("[^0-9A-Za-z_]"; "?")) // "none"')
+                served_build_arg=$(printf '%s\n' "$body" | jq -r '(.buildArg | select(type == "string" and length > 0) | .[0:40] | gsub("[^0-9A-Za-z_]"; "?")) // "none"')
                 result=miss
                 if printf '%s\n' "$body" | jq -e --arg sha "$SHA" '.commit == $sha and .buildArg == "PCC_BUILD_SHA"' >/dev/null; then
                   result=match
