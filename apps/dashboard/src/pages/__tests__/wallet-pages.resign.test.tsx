@@ -475,6 +475,70 @@ describe("wallet pages re-sign through the existing SIWE flow", () => {
     expectRemedy();
   });
 
+  it.each(["signature", "nonce"] as const)("K12: /link keeps the restore notice hidden after a re-sign fails at the %s and a later lookup remounts the control", async (where) => {
+    await act(async () => { await useAuthStore.getState().mintSessionKey(); });
+    const restoreNotice = useAuthStore.getState().authNotice!;
+    expect(restoreNotice).toEqual(expect.any(String));
+    if (where === "signature") wallet.signMessageAsync.mockRejectedValueOnce(new Error("Signature refused by wallet"));
+    else {
+      const stub = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => pathOf(input) === "/api/auth/nonce" ? reply(500, {}) : stub(input, init)));
+    }
+    await showFailure("link");
+    await click("Sign in again");
+    expect(container.textContent).not.toContain(restoreNotice);
+    const first = button("Sign in again");
+    // The code is still typed: Continue sends it again, the lookup answers 401 and the control remounts.
+    await click("Continue");
+    expectRemedy();
+    expect(button("Sign in again")).not.toBe(first);
+    expect(container.textContent).not.toContain(restoreNotice);
+  });
+
+  it("RW: /wallets keeps the restore notice hidden after a refused signature and an account change remounts the control", async () => {
+    await act(async () => { await useAuthStore.getState().mintSessionKey(); });
+    const restoreNotice = useAuthStore.getState().authNotice!;
+    expect(restoreNotice).toEqual(expect.any(String));
+    const refusal = "Signature refused by wallet";
+    wallet.signMessageAsync.mockRejectedValueOnce(new Error(refusal));
+    await showFailure("wallets");
+    await click("Sign in again");
+    expect(alerts(refusal)).toHaveLength(1);
+    expect(container.textContent).not.toContain(restoreNotice);
+    const first = button("Sign in again");
+    await act(async () => {
+      wallet.address = "0x9999999999999999999999999999999999999999";
+      useAuthStore.getState().setAddress(wallet.address);
+    });
+    expectRemedy();
+    expect(button("Sign in again")).not.toBe(first);
+    expect(useAuthStore.getState().error).toBeNull();
+    expect(container.textContent).not.toContain(restoreNotice);
+  });
+
+  it.each(["wallets", "link"] as const)("K13: /%s shows the mint refusal reason after a second attempt follows a refused signature", async (page) => {
+    await act(async () => { await useAuthStore.getState().mintSessionKey(); });
+    const restoreNotice = useAuthStore.getState().authNotice!;
+    expect(restoreNotice).toEqual(expect.any(String));
+    const refusal = "Signature refused by wallet";
+    wallet.signMessageAsync.mockRejectedValueOnce(new Error(refusal));
+    mintReply = () => reply(429, { error: "too_many_keys" });
+    await showFailure(page);
+    await click("Sign in again");
+    expect(alerts(refusal)).toHaveLength(1);
+    expect(container.textContent).not.toContain(restoreNotice);
+    expect(count("/api/auth/session-key")).toBe(0);
+    await click("Sign in again");
+    expect(wallet.signMessageAsync).toHaveBeenCalledTimes(2);
+    expect(count("/api/auth/verify")).toBe(1);
+    expect(count("/api/auth/session-key")).toBe(1);
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    const notice = useAuthStore.getState().authNotice!;
+    expect(notice).toContain("active-key limit");
+    expect([...container.querySelectorAll('[role="status"]')].map((status) => status.textContent)).toContain(notice);
+    expect(container.textContent).not.toContain(restoreNotice);
+  });
+
   it("K3: /link drops a lookup failure that was sent before the re-sign's key", async () => {
     const signatures: ((signature: string) => void)[] = [];
     wallet.signMessageAsync.mockImplementation(() => new Promise((resolve) => { signatures.push(resolve); }));
