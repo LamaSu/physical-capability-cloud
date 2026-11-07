@@ -148,9 +148,9 @@
 
       <div class="card" style="margin-top:24px">
         <label>Or paste this into your LLM</label>
-        <p class="steps" style="margin:6px 0 14px;color:#c5cbd5">230+ tools, role-aware system prompt, install recipes baked in. Paste into Claude / ChatGPT / Cursor / any LLM with shell access — it bootstraps onboarding end-to-end.</p>
+        <p class="steps" style="margin:6px 0 14px;color:#c5cbd5">250+ tools, role-aware system prompt, install recipes baked in. Paste into Claude / ChatGPT / Cursor / any LLM with shell access — it bootstraps onboarding end-to-end.</p>
         <button class="big-copy" id="copy-agent-pkg-btn">📋 Copy agent-package.json</button>
-        <p class="big-copy-hint">~207&nbsp;KB. Once copied, paste into the LLM and tell it what you have — for example <em>“I have a [your device] at <code>http://192.168.1.50</code>, here are the credentials. Register it and start the kernel daemon.”</em> The LLM picks the OPERATOR role from the prompt and walks the rest. If your device isn't on a first-class adapter yet, the LLM scaffolds one from the API docs.</p>
+        <p class="big-copy-hint">Once copied, paste into the LLM and tell it what you have — for example <em>“I have a [your device] at <code>http://192.168.1.50</code>, here are the credentials. Register it and start the kernel daemon.”</em> The LLM picks the OPERATOR role from the prompt and walks the rest. If your device isn't on a first-class adapter yet, the LLM scaffolds one from the API docs.</p>
       </div>
     </div>
     <div>
@@ -360,14 +360,14 @@ function showHandoff(c) {
 'Steps:\n' +
 '1. Fetch the agent package and read the OPERATOR-role section:\n' +
 '   curl https://capability.network/agent-package.json\n' +
-'2. Read the generic-http adapter template as a starting point:\n' +
-'   curl https://capability.network/api/sdk/adapter-template/generic-http\n' +
-'3. Locate the device API documentation:' + docsLine + '\n' +
-'4. In a new directory, scaffold a TypeScript package implementing the MachineAdapter interface from @pcc/kernel:\n' +
-'   - connect(), disconnect(), getHealth(), executeJob(jobSpec), getEvidence(jobId)\n' +
+'2. Provision a PCC API key via POST /api/auth/provision (or POST /api/onboard/redeem if you have an invite code). The next step needs it.\n' +
+'3. Read the generic-http adapter template as a starting point:\n' +
+'   curl -H "Authorization: Bearer <your key>" https://capability.network/api/sdk/adapter-template/generic-http\n' +
+'4. Locate the device API documentation:' + docsLine + '\n' +
+'5. @pcc/kernel is not published to npm, so work in a clone of https://github.com/LamaSu/physical-capability-cloud and add the adapter there as a new workspace package, implementing the MachineAdapter interface in packages/kernel/src/adapters/types.ts:\n' +
+'   - getStatus(), execute(command), getProgress(), onEvidence(callback), dispose()\n' +
 '   - Map the device endpoints onto each method.\n' +
 '   - Add a vitest suite with at least one happy-path test (mock the HTTP layer).\n' +
-'5. Provision a PCC API key via POST /api/auth/provision (or POST /api/onboard/redeem if you have an invite code).\n' +
 '6. Use POST /api/setup/generate-config and POST /api/setup/validate to build a working KERNEL_CONFIG that points at the new adapter.\n' +
 '7. Register the kernel and device via POST /api/kernels and POST /api/setup/register-device.\n' +
 '8. Run POST /api/setup/test-job to verify end-to-end, then POST /api/onboard/registrations/:id/prove with a tier-1 evidence bundle to fast-track activation.\n' +

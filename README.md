@@ -24,12 +24,16 @@ curl https://capability.network/agent-package.json
 
 **Connect a machine (Python operator node):**
 ```bash
-pip install pcc-node
+pip install "pcc-node[crypto]>=0.1.1"
 pcc-node start
 # Auto-discovers hardware, provisions an API key, registers a kernel, accepts jobs.
 ```
 
-**MCP server (Claude Code / Codex):**
+**MCP server (Claude Code / Codex):** the gateway serves MCP over Streamable HTTP, so there is nothing to install:
+```bash
+claude mcp add --transport http pcc https://capability.network/mcp
+```
+Any MCP client that supports remote servers can use `https://capability.network/mcp`. To run the local stdio server instead, build it from a clone (it is not published to npm):
 ```json
 { "pcc": { "command": "node", "args": ["packages/mcp-server/dist/index.js"], "env": { "PCC_URL": "https://capability.network" } } }
 ```

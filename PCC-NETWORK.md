@@ -58,20 +58,18 @@ Pick whichever fits you:
   shape.
 - **Operators who just want their machine online:** one command —
   ```bash
-  pip install pcc-node && pcc-node start
+  pip install "pcc-node[crypto]>=0.1.1" && pcc-node start
   ```
   Auto-detects hardware, generates signing keys, provisions an API key, registers your
   site, announces capabilities, and starts processing jobs.
-- **Developers who want their agent to *be* the operator:** wire the standing operator
-  runtime into your own agent —
-  ```bash
-  pnpm add @pcc/operator-agent-runtime
-  ```
-  `startOperator({ capabilityTypes, budget, executeJob })` runs the
-  poll → evaluate → claim → execute → heartbeat → evidence loop for you; you supply one
-  `executeJob` handler. This is how a coding agent becomes a *persistent* PCC operator
-  that keeps interfacing with you — not a one-shot tool call. (Pairs with the Anthropic
-  Agent SDK for LLM-assisted quoting/evaluation; inert if you override every handler.)
+- **Developers who want their agent to *be* the operator:** there is no packaged operator
+  runtime yet; no `@pcc/operator-agent-runtime` package exists. The intended design is
+  `startOperator({ capabilityTypes, budget, executeJob })`, running the
+  poll → evaluate → claim → execute → heartbeat → evidence loop around one `executeJob`
+  handler you supply, so a coding agent becomes a *persistent* PCC operator rather than a
+  one-shot tool call. Until it exists, an agent can run that loop against the API itself:
+  `GET /api/job-offers/open?capabilityType=<type>`, then `POST /api/job-offers/:id/claim`
+  with an API key and a JSON body naming the claiming kernel (`{"kernelId": "..."}`).
 
 ---
 
