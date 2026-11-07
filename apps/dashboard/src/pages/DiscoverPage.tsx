@@ -201,7 +201,7 @@ export function DiscoverPage() {
         </div>
       </GlassPanel>
 
-      {capabilities.length === 0 && complete ? (
+      {capabilities.length === 0 && skipped === 0 && complete ? (
         <GlassPanel padding="lg">
           <EmptyState
             title={EMPTY_TITLE}
