@@ -615,6 +615,23 @@ export function createOperatorSessionKeeper(options: OperatorSessionKeeperOption
     unrefTimer(mintTimer);
   };
 
+  const armRetry = (delayMs: number) => {
+    clearMintTimer();
+    if (stopped || inflight) return;
+    // Backoff is elapsed time, independent of the host's injected epoch clock.
+    mintTimer = setTimeout(() => {
+      mintTimer = null;
+      if (stopped || inflight) return;
+      const awake = maybeNow(config);
+      if (minimumNextMintAtMs !== null && awake !== null && awake < minimumNextMintAtMs) {
+        armMint(minimumNextMintAtMs);
+        return;
+      }
+      startMint();
+    }, timerDelay(delayMs));
+    unrefTimer(mintTimer);
+  };
+
   const startMint = () => {
     if (stopped || inflight) return;
     clearMintTimer();
@@ -647,10 +664,7 @@ export function createOperatorSessionKeeper(options: OperatorSessionKeeperOption
         nextRetryMs = Math.min(RETRY_CAP_MS, nextRetryMs * 2);
         event({ kind: "mint_failed", code: failed.error.code, status: failed.error.status,
           retryInMs: delay, step: failed.step });
-        if (!stopped) {
-          const reading = maybeNow(config);
-          scheduledAfterFlight = reading === null ? null : reading + delay;
-        }
+        if (!stopped) retryAfterFlightMs = delay;
       }
     })();
     // Continuations above cannot access the timer until work is assigned.
@@ -658,9 +672,9 @@ export function createOperatorSessionKeeper(options: OperatorSessionKeeperOption
     void work.then(() => {
       if (inflight === work) inflight = null;
       if (stopped) return;
-      const target = scheduledAfterFlight;
-      scheduledAfterFlight = null;
-      if (target !== null) armMint(Math.max(target, minimumNextMintAtMs ?? target));
+      const retryDelayMs = retryAfterFlightMs;
+      retryAfterFlightMs = null;
+      if (retryDelayMs !== null) armRetry(retryDelayMs);
       else if (current) {
         armMint(Math.max(current.key.expiresAtMs - config.renewBeforeMs,
           current.mintedAtMs + MIN_MINT_SPACING_MS));
@@ -672,7 +686,7 @@ export function createOperatorSessionKeeper(options: OperatorSessionKeeperOption
     });
   };
 
-  let scheduledAfterFlight: number | null = null;
+  let retryAfterFlightMs: number | null = null;
   let minimumNextMintAtMs: number | null = null;
 
   const ready = (): Promise<OperatorSessionKey | null> => {

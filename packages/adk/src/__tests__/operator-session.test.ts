@@ -486,6 +486,46 @@ describe("T6 — checked response fields, bytes and content types", () => {
     expect(gateway.count("verify")).toBe(0);
   });
 
+  it("rejects invalid UTF-8 inside an ignored string of otherwise valid nonce JSON", async () => {
+    const { gateway, signer, options } = setup();
+    gateway.queue("nonce", { kind: "transform", fn: () => {
+      const bytes = new TextEncoder().encode(JSON.stringify({
+        nonce: gateway.nonceValues.at(-1), ignored: "!",
+      }));
+      // Permissive decoding would replace only this ignored value and leave
+      // a valid JSON object with the gateway's live nonce.
+      bytes[bytes.indexOf(0x21)] = 0xff;
+      return new Response(bytes, { headers: { "content-type": "application/json" } });
+    } });
+    await expect(mintOperatorSessionKey(options)).rejects.toMatchObject({
+      code: "malformed_response", status: 200,
+    });
+    expect(signer).not.toHaveBeenCalled();
+    expect(gateway.count("verify")).toBe(0);
+  });
+
+  it("rejects invalid UTF-8 inside an ignored string of otherwise valid verify and session-key JSON", async () => {
+    for (const route of ["verify", "session-key"] as const) {
+      const { gateway, options } = setup();
+      gateway.queue(route, { kind: "transform", fn: () => {
+        const body = route === "verify"
+          ? { token: gateway.sessionTokens.at(-1), address: ADDRESS, ignored: "!" }
+          : { api_key: gateway.mintedKeys.at(-1), key_id: "key-1", operator_id: ADDRESS,
+            expires_at: new Date(Date.now() + KEY_LIFETIME).toISOString(),
+            created_at: new Date(Date.now()).toISOString(), ignored: "!" };
+        const bytes = new TextEncoder().encode(JSON.stringify(body));
+        // Permissive decoding would leave a valid reply for the live session or key.
+        bytes[bytes.indexOf(0x21)] = 0xff;
+        return new Response(bytes, { status: route === "verify" ? 200 : 201,
+          headers: { "content-type": "application/json" } });
+      } });
+      await expect(mintOperatorSessionKey(options)).rejects.toMatchObject({
+        code: "malformed_response", status: route === "verify" ? 200 : 201,
+      });
+      expect(gateway.count("session-key")).toBe(route === "verify" ? 0 : 1);
+    }
+  });
+
   it("rejects oversized bodies, wrong content type and invalid UTF-8 on any success step", async () => {
     for (const route of ["nonce", "verify", "session-key"] as const) {
       for (const response of [
@@ -812,9 +852,11 @@ describe("T12 — failure preserves key, exact margin, backoff and event steps",
   });
 
   it("classifies an invalid runtime clock as bad_clock at the sign step and sends no verify", async () => {
-    const { gateway, options } = setup();
+    const { gateway, signer, options } = setup();
     const events: OperatorSessionEvent[] = [];
-    const keeper = createOperatorSessionKeeper({ ...options, now: () => Number.NaN,
+    let validClock = false;
+    const start = Date.now();
+    const keeper = createOperatorSessionKeeper({ ...options, now: () => validClock ? Date.now() : Number.NaN,
       onEvent: value => events.push(value),
     });
     await flush();
@@ -822,6 +864,39 @@ describe("T12 — failure preserves key, exact margin, backoff and event steps",
     expect(gateway.count("nonce")).toBe(1);
     expect(gateway.count("verify")).toBe(0);
     expect(keeper.key()).toBeNull();
+
+    const retryDelays = [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000, 300_000];
+    for (let i = 0; i < retryDelays.length - 1; i++) {
+      await tick(retryDelays[i] - 1);
+      expect(gateway.count("nonce")).toBe(i + 1);
+      await tick(1);
+      expect(gateway.count("nonce")).toBe(i + 2);
+    }
+    const failures = events.filter((event): event is Extract<OperatorSessionEvent, { kind: "mint_failed" }> =>
+      event.kind === "mint_failed");
+    expect(failures.map(event => event.retryInMs)).toEqual(retryDelays);
+    expect(failures.every(event => event.code === "bad_clock" && event.step === "sign" && event.status === null)).toBe(true);
+    expect(gateway.routeCalls("nonce").map(call => call.at - start)).toEqual([
+      0, 5_000, 15_000, 35_000, 75_000, 155_000, 315_000, 615_000, 915_000,
+    ]);
+    expect(signer).not.toHaveBeenCalled();
+    expect(gateway.count("verify")).toBe(0);
+    expect(keeper.key()).toBeNull();
+
+    const ready = keeper.ready();
+    validClock = true;
+    await tick(299_999);
+    expect(gateway.count("nonce")).toBe(retryDelays.length);
+    await tick(1);
+    expect(gateway.count("nonce")).toBe(retryDelays.length + 1);
+    expect(gateway.count("verify")).toBe(1);
+    expect(signer).toHaveBeenCalledTimes(1);
+    const recovered = await ready;
+    expect(recovered).not.toBeNull();
+    expect(recovered).toBe(keeper.key());
+    // The recovered key's renewal is the next attempt: no retry delay outlives the recovery.
+    await tick(10 * 60_000);
+    expect(gateway.count("nonce")).toBe(retryDelays.length + 1);
     await keeper.stop();
   });
 
