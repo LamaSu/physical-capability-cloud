@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import { schema } from "@pcc/store";
 import { setupRoutes } from "../routes/setup.js";
@@ -35,6 +36,8 @@ describe("N104 setup test-job local dispatch", () => {
   beforeEach(async () => {
     savedQueueOnly = process.env.PCC_JOB_SUBMIT_QUEUE_ONLY;
     vi.stubEnv("NODE_ENV", "test");
+    const adminKey = randomUUID();
+    vi.stubEnv("PCC_ADMIN_KEY", adminKey);
     delete process.env.PCC_JOB_SUBMIT_QUEUE_ONLY;
     process.env.PCC_DB_PATH = ":memory:";
     initStore({ seed: false });
@@ -74,6 +77,9 @@ describe("N104 setup test-job local dispatch", () => {
     }));
     app = Fastify({ logger: false });
     app.decorateRequest("userId", OWNER);
+    app.addHook("onRequest", async (req) => {
+      req.headers["x-admin-key"] = adminKey;
+    });
     await app.register(setupRoutes);
     await app.ready();
   });

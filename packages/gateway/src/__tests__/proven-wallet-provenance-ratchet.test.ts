@@ -138,6 +138,51 @@ function authoritySourceViolations(fn: ts.FunctionDeclaration, file: ts.SourceFi
   return [...violations];
 }
 
+// Inside authorityOf, its first parameter and the reviewed cast of it may appear only as the
+// receiver of a member read (or as that cast's source): no helper call, spread or reassignment
+// can hand the request to code outside this check.
+function authorityIdentifierViolations(fn: ts.FunctionDeclaration, file: ts.SourceFile): string[] {
+  const checker = checkerFor(file);
+  const parameter = fn.parameters[0];
+  if (!parameter || !ts.isIdentifier(parameter.name)) return ["authorityOf: its first parameter must be an identifier"];
+  const parameterSymbol = checker.getSymbolAtLocation(parameter.name);
+  const guarded = new Set<ts.Symbol>(parameterSymbol ? [parameterSymbol] : []);
+  const castSources = new Set<ts.Node>();
+  for (const statement of fn.body!.statements) {
+    if (!ts.isVariableStatement(statement) || !(statement.declarationList.flags & ts.NodeFlags.Const)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      let source = declaration.initializer;
+      let assertions = 0;
+      while (source && (ts.isParenthesizedExpression(source) || ts.isAsExpression(source))) {
+        if (ts.isAsExpression(source)) assertions++;
+        source = source.expression;
+      }
+      const sourceSymbol = source && ts.isIdentifier(source) ? checker.getSymbolAtLocation(source) : undefined;
+      const nameSymbol = ts.isIdentifier(declaration.name) ? checker.getSymbolAtLocation(declaration.name) : undefined;
+      if (assertions > 0 && source && sourceSymbol && guarded.has(sourceSymbol) && nameSymbol) {
+        guarded.add(nameSymbol);
+        castSources.add(source);
+      }
+    }
+  }
+  const violations: string[] = [];
+  visit(fn.body!, (node) => {
+    if (!ts.isIdentifier(node)) return;
+    const symbol = checker.getSymbolAtLocation(node);
+    if (!symbol || !guarded.has(symbol)) return;
+    const parent = node.parent;
+    const receiver = (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === node;
+    const declared = ts.isVariableDeclaration(parent) && parent.name === node;
+    // Destructuring reads named members, which the allow-list checks; a rest element copies them all.
+    const destructured = ts.isVariableDeclaration(parent) && parent.initializer === node
+      && ts.isObjectBindingPattern(parent.name) && parent.name.elements.every((element) => !element.dotDotDotToken);
+    if (!receiver && !declared && !destructured && !castSources.has(node)) {
+      violations.push(`authorityOf: ${node.text} is used outside a member read: ${parent.getText(file)}`);
+    }
+  });
+  return violations;
+}
+
 function reviewedAdminHeaderAccess(access: ts.Node, name: string, file: ts.SourceFile): boolean {
   const member = memberName(access);
   // authorityOf already authenticates the admin using this one header.
@@ -160,7 +205,9 @@ function boundaryViolations(file: ts.SourceFile): string[] {
     const name = node.name.text;
     if (!BOUNDARY_NAMES.includes(name)) return;
     if (name === "bindProof") violations.push(...roleSourceViolations(node, file));
-    if (name === "authorityOf") violations.push(...authoritySourceViolations(node, file));
+    if (name === "authorityOf") {
+      violations.push(...authoritySourceViolations(node, file), ...authorityIdentifierViolations(node, file));
+    }
     const forbidden = new Set(["body", "query", "params", "cookies"]);
     visit(node.body, (access) => {
       if (name === "authorityOf" && (
@@ -218,8 +265,9 @@ function scan(source: string, filename: string) {
     occurrences.push({ kind: ts.SyntaxKind[parent.kind], text: parent.getText(file) });
     if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
       let inType = false;
-      for (let ancestor: ts.Node | undefined = node.parent; ancestor; ancestor = ancestor.parent) {
-        if (ts.isTypeNode(ancestor)) { inType = true; break; }
+      for (let child: ts.Node = node, ancestor: ts.Node | undefined = node.parent; ancestor; child = ancestor, ancestor = ancestor.parent) {
+        if (ts.isExpressionWithTypeArguments(ancestor) && ancestor.expression === child) break;
+        if (ts.isTypeNode(ancestor) || ts.isTypeElement(ancestor)) { inType = true; break; }
       }
       if (!inType) valueLiterals.push(parent.getText(file));
     }
@@ -452,6 +500,50 @@ describe("buyer provenance source ratchet (W1b r4 F-b)", () => {
       }
     `, "sentinel.ts");
     expect(scanned.violations, WRITER_REVIEW_MESSAGE).toEqual([]);
+  });
+
+  it.each([
+    "req = helper(req); const r = req as unknown as { provenWalletVia?: unknown }; return r.provenWalletVia;",
+    "hydrate(req); const r = req as unknown as { provenWalletVia?: unknown }; return r.provenWalletVia;",
+    "const r = req as unknown as { provenWalletVia?: unknown }; return { via: r.provenWalletVia, ...hints(r) };",
+    "const { ...trim } = req; return trim;",
+  ])("rejects authorityOf handing its request to code outside the check: %s", (body) => {
+    const scanned = scan(`function authorityOf(req) { ${body} }`, "sentinel.ts");
+    expect(scanned.violations.some((violation) => violation.includes(" is used outside a member read: ")),
+      WRITER_REVIEW_MESSAGE).toBe(true);
+  });
+
+  it.each(["query", "body", "params", "cookies"])("rejects authorityOf reading client channel %s", (member) => {
+    for (const access of [`req.${member}`, `req["${member}"]`, `req[\`${member}\`]`]) {
+      const scanned = scan(`function authorityOf(req) { return ${access}; }`, "sentinel.ts");
+      expect(scanned.violations, WRITER_REVIEW_MESSAGE).toEqual([`authorityOf: unreviewed member access ${access}`]);
+    }
+  });
+
+  it.each([
+    'hasAdminSecret(other.headers["x-admin-key"])',
+    'hasAdminSecret(req.headers["x-admin-key"], other)',
+    'check(req.headers["x-admin-key"])',
+  ])("refuses a near miss of the admin header shape: %s", (expression) => {
+    const scanned = scan(`function authorityOf(req, other) { return ${expression}; }`, "sentinel.ts");
+    expect(scanned.violations.length, WRITER_REVIEW_MESSAGE).toBeGreaterThan(0);
+  });
+
+  it("flags a compound-assignment writer", () => {
+    expect(scan('req.provenWalletVia ??= "self-link:agent"', "sentinel.ts").writes, WRITER_REVIEW_MESSAGE)
+      .toEqual([{ file: "sentinel.ts", kind: "assignment", value: '"self-link:agent"' }]);
+  });
+
+  it("reads comment-free text, keeping string contents, for the coverage check", () => {
+    const scanned = scan('// provenWalletVia\n/* provenWalletVia */\nconst url = "https://x.invalid//provenWalletVia";', "sentinel.ts");
+    expect(scanned.commentFreeSource.split(FIELD).length - 1, WRITER_REVIEW_MESSAGE).toBe(1);
+  });
+
+  it.each([
+    ['class Via extends mixin("provenWalletVia") {}', 1],
+    ['interface Quoted { "provenWalletVia"?: string }', 0],
+  ] as const)("classifies a provenance literal's position: %s", (source, count) => {
+    expect(scan(source, "sentinel.ts").valueLiterals, WRITER_REVIEW_MESSAGE).toHaveLength(count);
   });
 
   it("rejects a body-sourced role even when its local name stays role", () => {

@@ -1,7 +1,6 @@
 import React, { useState, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { OnboardChatHandoff } from "../components/onboard/OnboardChatHandoff.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -265,13 +264,11 @@ function StepRate({
   setForm,
   onNext,
   onBack,
-  submitting,
 }: {
   form: FormState;
   setForm: React.Dispatch<React.SetStateAction<FormState>>;
   onNext: () => void;
   onBack: () => void;
-  submitting: boolean;
 }) {
   return (
     <div className="space-y-8">
@@ -315,14 +312,6 @@ function StepRate({
         </div>
       </div>
 
-      <div className="rounded-xl bg-white/[0.02] ring-1 ring-white/[0.05] p-4">
-        <p className="text-xs text-white/30 leading-relaxed">
-          Your rate is visible to anyone searching for your capability.
-          You'll get notified when someone wants to place an order, and you
-          can accept or decline. You keep 100% — no platform fees.
-        </p>
-      </div>
-
       <div className="flex gap-3">
         <button
           onClick={onBack}
@@ -332,73 +321,11 @@ function StepRate({
         </button>
         <button
           onClick={onNext}
-          disabled={submitting}
           className="flex-[2] rounded-xl bg-emerald-500 py-3.5 text-sm font-semibold text-black transition-all hover:bg-emerald-400 disabled:opacity-50"
         >
-          {submitting ? "Setting up…" : "Go live"}
+          Continue
         </button>
       </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Step 4: You're live
-// ---------------------------------------------------------------------------
-
-function StepDone({ form }: { form: FormState }) {
-  const navigate = useNavigate();
-  const cat = CATEGORIES.find((c) => c.id === form.category);
-
-  return (
-    <div className="space-y-8 text-center">
-      <motion.div
-        initial={{ scale: 0 }}
-        animate={{ scale: 1 }}
-        transition={{ type: "spring", stiffness: 200, damping: 15, delay: 0.1 }}
-        className="mx-auto w-20 h-20 rounded-2xl bg-emerald-500/20 ring-1 ring-emerald-400/30 flex items-center justify-center text-4xl"
-      >
-        ✓
-      </motion.div>
-
-      <div>
-        <h1 className="text-3xl font-semibold tracking-tight text-white">
-          You're live
-        </h1>
-        <p className="mt-2 text-white/40 text-base">
-          {cat?.icon} {form.machineName || cat?.label || "Your machine"} is on the network.
-        </p>
-      </div>
-
-      <div className="rounded-xl bg-white/[0.03] ring-1 ring-white/[0.06] p-5 text-left space-y-3">
-        <Row label="Capability" value={cat?.label || form.category} />
-        <Row label="Connection" value={form.connectionType === "manual" ? "Manual updates" : form.connectionUrl} />
-        <Row label="Rate" value={`$${form.rate || "0"} / ${form.rateUnit}`} />
-      </div>
-
-      <div className="space-y-3">
-        <button
-          onClick={() => navigate("/operator")}
-          className="w-full rounded-xl bg-emerald-500 py-3.5 text-sm font-semibold text-black transition-all hover:bg-emerald-400"
-        >
-          Go to dashboard
-        </button>
-        <button
-          onClick={() => navigate("/start")}
-          className="w-full rounded-xl bg-white/[0.04] ring-1 ring-white/[0.08] py-3.5 text-sm text-white/50 hover:bg-white/[0.08] transition-all"
-        >
-          Add another machine
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between items-center">
-      <span className="text-xs text-white/30">{label}</span>
-      <span className="text-sm text-white/70">{value}</span>
     </div>
   );
 }
@@ -410,7 +337,6 @@ function Row({ label, value }: { label: string; value: string }) {
 export function StartPage() {
   const [step, setStep] = useState(0);
   const [form, setForm] = useState<FormState>(INITIAL);
-  const [submitting, setSubmitting] = useState(false);
   const [direction, setDirection] = useState(1);
 
   const goNext = useCallback(() => {
@@ -423,50 +349,11 @@ export function StartPage() {
     setStep((s) => s - 1);
   }, []);
 
-  const handleSubmit = useCallback(async () => {
-    setSubmitting(true);
-    try {
-      // Map to API types
-      const adapterType =
-        form.connectionType === "octoprint"
-          ? "octoprint"
-          : form.connectionType === "manual"
-            ? "mock"
-            : "generic-http";
-
-      const deviceId = `dev_${form.category}_${Date.now().toString(36)}`;
-      const kernelId = "kernel_dev_001";
-
-      await authorizedFetch("/api/setup/register-device", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          kernelId,
-          deviceId,
-          type: "machine",
-          model: form.description || form.machineName || form.category,
-          adapterType,
-          adapterConfig: form.connectionUrl
-            ? { url: form.connectionUrl }
-            : undefined,
-          capabilities: [form.category],
-        }),
-      });
-
-      setDirection(1);
-      setStep(3);
-    } catch (err) {
-      console.error("Registration failed:", err);
-    } finally {
-      setSubmitting(false);
-    }
-  }, [form]);
-
   const steps = [
     <StepCapability key="cap" form={form} setForm={setForm} onNext={goNext} />,
     <StepConnect key="conn" form={form} setForm={setForm} onNext={goNext} onBack={goBack} />,
-    <StepRate key="rate" form={form} setForm={setForm} onNext={handleSubmit} onBack={goBack} submitting={submitting} />,
-    <StepDone key="done" form={form} />,
+    <StepRate key="rate" form={form} setForm={setForm} onNext={goNext} onBack={goBack} />,
+    <OnboardChatHandoff key="done" />,
   ];
 
   return (

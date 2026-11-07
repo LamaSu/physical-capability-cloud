@@ -5,7 +5,10 @@
  * committing jobs. Ordering is strictly by assuranceScore (desc by default).
  * Kernels with no score yet sink to the bottom.
  *
- * Data source: GET /api/capabilities (enriched PaginatedResult<CapabilityDTO>).
+ * Data source: GET /api/capabilities (enriched PaginatedResult<CapabilityDTO>),
+ * read page by page (useAllCapabilities): one request returns at most 200 rows,
+ * and a ranking over some of them is not the network's ranking. If paging
+ * stops early, the page says the ranking covers only what was read.
  * We roll capabilities up per-kernel because a kernel can offer many
  * capabilities, and the leaderboard surface is kernel-oriented.
  */
@@ -21,7 +24,9 @@ import {
   LoadingShell,
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
-import { useCapabilities, useKernels } from "../api/hooks/use-pcc-data.js";
+import { useAllCapabilities, useKernels } from "../api/hooks/use-pcc-data.js";
+import { CAPABILITY_PAGES_NOTICE, UnavailableState, StaleNotice } from "../components/ReadState.js";
+import { formatCount } from "../lib/live-list.js";
 import {
   AssuranceScoreBadge,
   scoreToColor,
@@ -39,6 +44,18 @@ export {
 } from "./kernel-leaderboard-logic.js";
 export type { SortDir, LeaderboardRow } from "./kernel-leaderboard-logic.js";
 
+const PARTIAL_RANKING_NOTICE = (n: number, total: number) =>
+  `Ranked over the first ${n} of the ${total} capabilities the gateway lists. Kernels whose capabilities weren't read may be missing or placed differently.`;
+const PARTIAL_AVERAGE_LABEL = "over the capabilities read";
+const NOTHING_TO_RANK = "Nothing to rank yet";
+const REGISTERED_KERNELS_NOTICE = (n: number) =>
+  `${n} kernel${n === 1 ? " is" : "s are"} registered, but none has listed a capability yet. Kernels are ranked by the capabilities they list.`;
+const NO_CAPABILITY_READ = "No capability was read, so there is nothing to rank.";
+const UNKNOWN_QUEUE = "—";
+const SKIPPED_CAPABILITY_NOTICE = "1 listed capability couldn't be read, so the ranking leaves it out.";
+const SKIPPED_CAPABILITIES_NOTICE = (n: number) =>
+  `${n} listed capabilities couldn't be read, so the ranking leaves them out.`;
+
 export function KernelLeaderboardPage() {
   const navigate = useNavigate();
   const setPageMeta = useUIStore((s) => s.setPageMeta);
@@ -52,10 +69,8 @@ export function KernelLeaderboardPage() {
     );
   }, [setPageMeta]);
 
-  const { data: capabilitiesPage, isLoading: capsLoading } = useCapabilities({
-    limit: 500,
-  });
-  const { data: kernels = [], isLoading: kernelsLoading } = useKernels();
+  const capabilitiesQ = useAllCapabilities();
+  const kernelsQ = useKernels();
 
   const minScore = React.useMemo(() => {
     const raw = minScoreInput.trim();
@@ -68,10 +83,29 @@ export function KernelLeaderboardPage() {
   // Every hook above must run before this early return: a hook called after
   // an early return changes the hook count between the loading and loaded
   // renders on a cold load (React #310).
-  if (capsLoading || kernelsLoading) return <LoadingShell rows={6} />;
+  if (capabilitiesQ.isLoading || kernelsQ.isLoading) return <LoadingShell rows={6} />;
 
-  const capabilities = capabilitiesPage?.items ?? [];
+  // Ranking needs both reads; an unavailable read is not an empty list.
+  if (!capabilitiesQ.data || !kernelsQ.data) {
+    return (
+      <GlassPanel padding="lg">
+        <UnavailableState
+          what="the leaderboard"
+          error={capabilitiesQ.error ?? kernelsQ.error}
+          onRetry={() => {
+            void capabilitiesQ.refetch();
+            void kernelsQ.refetch();
+          }}
+        />
+      </GlassPanel>
+    );
+  }
+
+  const { items: capabilities, total, complete, pages, skipped } = capabilitiesQ.data;
+  const kernels = kernelsQ.data;
   const rows = buildLeaderboard(capabilities, kernels);
+  const stale = capabilitiesQ.isError || kernelsQ.isError;
+  const count = (n: number) => formatCount(n, !complete);
 
   const filtered = minScore != null
     ? rows.filter((r) => r.avgScore != null && r.avgScore >= minScore)
@@ -86,13 +120,36 @@ export function KernelLeaderboardPage() {
 
   return (
     <div className="space-y-6">
+      {stale && (
+        <StaleNotice
+          what="the leaderboard"
+          updatedAt={Math.min(capabilitiesQ.dataUpdatedAt, kernelsQ.dataUpdatedAt)}
+          onRetry={() => {
+            void capabilitiesQ.refetch();
+            void kernelsQ.refetch();
+          }}
+        />
+      )}
+      {skipped > 0 && (
+        <p role="status" className="text-xs text-amber-200/70">
+          {skipped === 1 ? SKIPPED_CAPABILITY_NOTICE : SKIPPED_CAPABILITIES_NOTICE(skipped)}
+        </p>
+      )}
+      {!complete && (
+        <p role="status" className="text-xs text-amber-200/70">
+          {PARTIAL_RANKING_NOTICE(capabilities.length + skipped, total)}
+        </p>
+      )}
+      {pages > 1 && (
+        <p className="text-xs text-white/30">{CAPABILITY_PAGES_NOTICE(pages)}</p>
+      )}
       {/* KPI strip */}
       <div className="grid grid-cols-3 gap-4">
         <GlassPanel padding="md">
-          <DataCell label="Kernels" value={rows.length} mono />
+          <DataCell label="Kernels" value={count(rows.length)} mono />
         </GlassPanel>
         <GlassPanel padding="md">
-          <DataCell label="With Scores" value={scored.length} mono />
+          <DataCell label="With Scores" value={count(scored.length)} mono />
         </GlassPanel>
         <GlassPanel
           padding="md"
@@ -105,6 +162,7 @@ export function KernelLeaderboardPage() {
                 <AssuranceScoreBadge score={avgOfAvgs} size="md" />
               </span>
             }
+            sub={complete ? undefined : PARTIAL_AVERAGE_LABEL}
           />
         </GlassPanel>
       </div>
@@ -159,14 +217,21 @@ export function KernelLeaderboardPage() {
       {/* Leaderboard */}
       {rows.length === 0 ? (
         <GlassPanel padding="lg">
-          <EmptyState
-            title="No kernels on the network yet"
-            description="Leaderboard populates as kernels register capabilities and complete jobs with evidence."
-            action={{
-              label: "Onboard Equipment",
-              onClick: () => navigate("/onboard"),
-            }}
-          />
+          {kernels.length === 0 && complete ? (
+            <EmptyState
+              title="No kernels on the network yet"
+              description="Leaderboard populates as kernels register capabilities and complete jobs with evidence."
+              action={{
+                label: "Onboard Equipment",
+                onClick: () => navigate("/onboard"),
+              }}
+            />
+          ) : (
+            <EmptyState
+              title={NOTHING_TO_RANK}
+              description={kernels.length > 0 ? REGISTERED_KERNELS_NOTICE(kernels.length) : NO_CAPABILITY_READ}
+            />
+          )}
         </GlassPanel>
       ) : (
         <GlassPanel padding="none" className="overflow-hidden">
@@ -208,11 +273,7 @@ export function KernelLeaderboardPage() {
                     </span>
                   </div>
                   <div className="col-span-4 flex items-center gap-2 min-w-0">
-                    <PulseIndicator
-                      status={
-                        row.kernelStatus === "online" ? "online" : "offline"
-                      }
-                    />
+                    <PulseIndicator status={row.online ? "online" : "offline"} />
                     <div className="min-w-0">
                       <div className="text-sm font-medium text-white/85 truncate">
                         {row.kernelName}
@@ -242,7 +303,7 @@ export function KernelLeaderboardPage() {
                   </div>
                   <div className="col-span-1 flex items-center justify-end">
                     <span className="font-mono text-xs text-white/60">
-                      {row.queueDepth}
+                      {row.queueDepth ?? UNKNOWN_QUEUE}
                     </span>
                   </div>
                   <div className="col-span-2 flex items-center justify-end">

@@ -346,7 +346,7 @@ describe("OperatorDashboardPage signed-in operator's machines", () => {
     authorizedFetch.mockResolvedValueOnce(stopReply(LATHE.id));
     await click(`EMERGENCY STOP: ${LATHE.name}`);
     expect(machine(LATHE.name).textContent).toContain(`EMERGENCY STOP ACTIVE for ${LATHE.name}`);
-    await click("earnings");
+    await click("approvals");
     await click("overview");
     expect(machine(LATHE.name).textContent).toContain(`EMERGENCY STOP ACTIVE for ${LATHE.name}`);
     expect(button(`Resume Operations: ${LATHE.name}`).disabled).toBe(false);
