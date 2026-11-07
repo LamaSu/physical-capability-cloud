@@ -51,6 +51,37 @@ Anything else — gate disabled, no pricing, `"0"` price, missing
 change in response shape (other than the absence of a `payment`
 field on the response body).
 
+"Paid" is exactly `pricing.perCallUsdc` parsing to a finite number
+`> 0`. A tool with no `pricing`, or a price of `"0"`, is free.
+
+#### Misconfiguration fails CLOSED
+
+`PCC_X402_ENABLED` not being `"true"` is the **only** way the gate is
+off. If it IS `"true"` but the gate's required configuration is
+unusable, the gate does not switch itself off and does not fall back to
+testnet. The unusable cases are:
+
+- `PCC_AGGREGATOR_TREASURY` missing, empty, malformed (not `0x` + 40 hex
+  characters) or the zero address;
+- `PCC_X402_CHAIN` **set** to an unknown value (an empty string counts
+  as set; only an *unset* variable takes the `base-sepolia` default).
+
+Every **paid** call is then refused with `503` before any 402
+challenge, upstream call or settlement:
+
+```json
+{
+  "error": "payment_gate_misconfigured",
+  "message": "paid aggregator calls are unavailable: the payment gate is misconfigured"
+}
+```
+
+Free tools keep working. One alert is raised per process (Sentry when
+`SENTRY_DSN` is set, and always a `[x402] MISCONFIGURED:` line on
+stderr), at boot when the aggregator routes register, and each refused
+request writes a structured error log line with the same prefix. See
+section 8 for the fix.
+
 ### 3.2 Settle ordering
 
 Settle happens **after** the upstream call returns 2xx (scope §3.3
@@ -96,7 +127,7 @@ before reaching the facilitator.
 
 | Var | Default | Description |
 |---|---|---|
-| `PCC_X402_CHAIN` | `base-sepolia` | `"base-sepolia"` or `"base-mainnet"` |
+| `PCC_X402_CHAIN` | `base-sepolia` when unset | `"base-sepolia"`, `"base-mainnet"` (alias `"base"`). Any other value, including an empty string, fails closed (503) |
 
 `base-sepolia` resolves to CAIP-2 `eip155:84532`, USDC
 `0x036CbD53842c5426634e7929541eC2318f3dCF7e`, default facilitator
@@ -118,7 +149,7 @@ before reaching the facilitator.
 
 | Var | Default | Description |
 |---|---|---|
-| `PCC_AGGREGATOR_TREASURY` | required when gate enabled | 0x... address receiving all per-call fees |
+| `PCC_AGGREGATOR_TREASURY` | required when gate enabled | 0x... address (40 hex, not the zero address) receiving all per-call fees. Missing or invalid fails closed (503) |
 | `PCC_X402_HMAC_KEY` | falls back to `PCC_AGGREGATOR_HMAC_KEY` | 32-byte hex used for the price-tag HMAC |
 | `PCC_AGGREGATOR_HMAC_KEY` | ephemeral with warning | Shared with receipt-signer; if unset, ephemeral fallback |
 
@@ -206,11 +237,22 @@ the signature bytes — those live on-chain).
 
 ## 8. Troubleshooting
 
-### "PCC_X402_ENABLED=true but PCC_AGGREGATOR_TREASURY is missing or invalid; gate disabled"
+### "[x402] MISCONFIGURED: ..." / 503 payment_gate_misconfigured
 
-The gate refuses to start without a valid treasury address. Set
-`PCC_AGGREGATOR_TREASURY` to a 0x-prefixed 40-hex-char Ethereum
-address and restart.
+`PCC_X402_ENABLED=true` but the gate configuration is unusable, so the
+gateway is failing CLOSED: paid aggregator calls return
+`503 payment_gate_misconfigured` until it is fixed. (Before N67 this
+logged "gate disabled" and served every paid call for free.) The alert
+names each problem by env var:
+
+- `PCC_AGGREGATOR_TREASURY is not set` / `is empty or blank` / `is not a
+  valid address` / `is the zero address`: set it to a 0x-prefixed
+  40-hex-char Ethereum address that is not the zero address.
+- `PCC_X402_CHAIN="..." is not a known chain`: use `base-mainnet`,
+  `base` or `base-sepolia`, or unset it to get `base-sepolia`.
+
+Fix the variable and restart. The alert never prints the treasury value
+(a pasted private key is a realistic typo), only the problem class.
 
 ### "no PCC_X402_HMAC_KEY or PCC_AGGREGATOR_HMAC_KEY set; using ephemeral key"
 
@@ -250,7 +292,9 @@ within 10 minutes, but a fresh nonce signs a new authorization.
 3. Re-check the env at gateway boot (the gate config is built once
    and cached; restart to pick up env changes).
 4. Confirm `PCC_AGGREGATOR_TREASURY` is set and a valid 0x address
-   — the gate disables itself silently if treasury is missing.
+   (not the zero address). The gate no longer disables itself if the
+   treasury is wrong: paid calls return `503 payment_gate_misconfigured`
+   instead (see above).
 
 ---
 

@@ -8,6 +8,13 @@
  *   3. **x402 payment gate**: if tool has `pricing.perCallUsdc > 0` AND
  *      gate is enabled, require a verified PAYMENT-SIGNATURE header.
  *      Returns 402 with PAYMENT-REQUIRED if absent / invalid.
+ *      **Fails closed**: if the gate is ENABLED but misconfigured (unusable
+ *      treasury or unknown chain), a paid tool is refused with
+ *      503 `payment_gate_misconfigured` BEFORE any challenge, upstream call
+ *      or settlement. "Paid" is the same predicate the gate itself uses
+ *      (`isPaidPrice(pricing.perCallUsdc)`: a number > 0); free tools (no
+ *      `pricing`, or a price of "0") keep working. A gate that is simply OFF
+ *      (`PCC_X402_ENABLED` not "true") serves everything free, by design.
  *   4. Forward args to the upstream tool (the adapter type drives the
  *      transport — MCP uses tools/call JSON-RPC, OpenAPI uses HTTP).
  *   5. **Settle the payment** AFTER upstream returns 2xx (scope §3.3
@@ -42,10 +49,16 @@ import {
   signReceipt,
   requirePayment,
   recordSettlement,
+  isPaidPrice,
   type GateVerdict,
+  type X402GateConfig,
 } from "@pcc/aggregator";
 import { evaluateReceipt } from "@pcc/verifier";
-import { getAggregatorRegistry, getX402GateConfig } from "./index.js";
+import {
+  getAggregatorRegistry,
+  getX402GateConfig,
+  isX402GateMisconfigured,
+} from "./index.js";
 import { getRepos } from "../../db.js";
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex } from "@noble/hashes/utils";
@@ -149,8 +162,40 @@ export async function invokeRoutes(app: FastifyInstance): Promise<void> {
     }
 
     // ---- x402 payment gate ------------------------------------------------
+    // Tri-state (see getX402GateConfig):
+    //   undefined         -> gate OFF by configuration: every call is free.
+    //   X402GateConfig    -> gate ON: requirePayment() decides per tool.
+    //   misconfigured     -> the operator ENABLED the gate but its config is
+    //                        unusable: fail CLOSED for paid tools (N67).
     let gateVerdict: GateVerdict = { kind: "free" };
-    const gateConfig = getX402GateConfig();
+    const gateState = getX402GateConfig();
+    let gateConfig: X402GateConfig | undefined;
+    if (isX402GateMisconfigured(gateState)) {
+      // "Paid" is decided exactly as requirePayment() decides it:
+      // pricing.perCallUsdc parses to a finite number > 0. Free tools (no
+      // pricing, or "0") have nothing to charge for and keep working. Refuse
+      // BEFORE any challenge, upstream call or settlement; never serve a paid
+      // call for free because the gate is broken. (A price so small it rounds
+      // to 0 atomic units is free under a healthy gate but is refused here:
+      // the conservative direction.)
+      if (isPaidPrice(tool.pricing?.perCallUsdc)) {
+        req.log.error(
+          {
+            code: "payment_gate_misconfigured",
+            toolId: tool.id,
+            reasons: gateState.reasons,
+          },
+          "[x402] MISCONFIGURED: refusing paid aggregator call (503 payment_gate_misconfigured)",
+        );
+        return reply.status(503).send({
+          error: "payment_gate_misconfigured",
+          message:
+            "paid aggregator calls are unavailable: the payment gate is misconfigured",
+        });
+      }
+    } else {
+      gateConfig = gateState;
+    }
     if (gateConfig) {
       gateVerdict = await requirePayment(
         tool,
