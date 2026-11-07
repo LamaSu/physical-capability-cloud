@@ -9,11 +9,23 @@ const path = "/api/admin/posture";
 const secret = "synthetic-admin-secret-n237";
 let app: FastifyInstance;
 let keys: ReturnType<typeof provisionApiKey>[];
+const lines: string[] = [];
+let restoreLog: (() => void) | undefined;
+function streamSymbol(log: object): symbol {
+  for (let current: object | null = log; current; current = Object.getPrototypeOf(current)) {
+    for (const symbol of Object.getOwnPropertySymbols(current)) if (symbol.description === "pino.stream") return symbol;
+  }
+  throw new Error("No pino stream");
+}
+function expectNoLogMarkers(markers: string[] = []) {
+  const output = lines.join("\n");
+  for (const marker of [...markers, secret, ...keys.map((key) => key.rawKey)]) expect(output).not.toContain(marker);
+}
 const readRows = () => auditService.query({ eventType: "admin.posture.read", limit: 1000 });
 const refusalRows = () => auditService.query({ eventType: "admin.posture.refused", limit: 1000 });
 const bearer = (index = 0) => ({ authorization: `Bearer ${keys[index].rawKey}` });
 const admin = () => ({ "x-admin-key": process.env.PCC_ADMIN_KEY });
-const request = (headers = admin()) => app.inject({ method: "GET", url: path, headers });
+const request = (headers: Record<string, string | undefined> = admin()) => app.inject({ method: "GET", url: path, headers });
 
 beforeAll(async () => {
   vi.stubEnv("NODE_ENV", "test");
@@ -27,15 +39,24 @@ beforeAll(async () => {
   delete process.env.PCC_POSTURE_POLICY;
   const server = await import("../server.js");
   app = (await server.createGateway(0)).app as unknown as FastifyInstance;
+  const stream = (app.log as unknown as Record<symbol, { write(line: string): unknown }>)[streamSymbol(app.log)];
+  const originalWrite = stream.write;
+  const write = originalWrite.bind(stream);
+  stream.write = (line: string) => { lines.push(line); return write(line); };
+  restoreLog = () => { stream.write = originalWrite; };
   await app.ready(); // inject only: never listen in the runnable cells
   keys = [["admin"], ["*"], ["*", "admin"], ["operator"], ["operator:basic"]].map((scopes, n) => provisionApiKey({ operatorId: `syn-operator-${n}`, name: `syn-key-${n}`, scopes }));
 }, 180_000);
 beforeEach(() => {
+  lines.length = 0;
   vi.stubEnv("PCC_ADMIN_KEY", secret);
   vi.stubEnv("PCC_POSTURE_POLICY", "");
   delete process.env.PCC_POSTURE_POLICY;
 });
-afterAll(async () => { await app?.close(); vi.unstubAllEnvs(); });
+afterAll(async () => {
+  try { await app?.close(); }
+  finally { restoreLog?.(); vi.unstubAllEnvs(); }
+});
 
 describe("admin posture through createGateway and inject", () => {
   it("A1: admin secret alone reads with one restricted audit row", async () => {
@@ -45,9 +66,7 @@ describe("admin posture through createGateway and inject", () => {
     expect(res.json().spec).toBe("pcc.posture/v1");
     expect(res.headers["cache-control"]).toBe("no-store");
     expect(readRows()).toHaveLength(before + 1);
-    expect(readRows()[0]).toMatchObject({ eventType: "admin.posture.read", actor: "admin-key", action: "read", resourceType: "posture", metadata: { verdict: "no_policy", flags: [], errors: [] } });
-    expect(readRows()[0].ip).toBeUndefined();
-    expect(readRows()[0].userAgent).toBeUndefined();
+    expect(readRows()[0]).toEqual({ eventType: "admin.posture.read", actor: "admin-key", action: "read", resourceType: "posture", resourceId: undefined, metadata: { verdict: "no_policy", flags: [], errors: [] }, ip: undefined, userAgent: undefined });
     const health = (await app.inject({ url: "/api/health" })).json();
     expect(res.json().build).toEqual(Object.fromEntries(["commit", "commitSource", "buildArg", "sourceDigest", "sourceDigestSpec"].map((key) => [key, health[key]])));
   });
@@ -72,14 +91,13 @@ describe("admin posture through createGateway and inject", () => {
     const res = await request({ "x-admin-key": "*" });
     expect(res.statusCode).toBe(403);
     expect(res.json()).toEqual({ error: "forbidden" });
-    expect(refusalRows()[0]).toMatchObject({ action: "read", resourceType: "posture", metadata: { credential: "wildcard_admin_secret" } });
-    expect(refusalRows()[0].actor).toBeUndefined();
+    expect(refusalRows()[0]).toEqual({ eventType: "admin.posture.refused", actor: undefined, action: "read", resourceType: "posture", resourceId: undefined, metadata: { credential: "wildcard_admin_secret" }, ip: undefined, userAgent: undefined });
   });
   it.each([1, 2])("A5: wildcard-scoped key %s is refused even with admin scope", async (index) => {
     const res = await request(bearer(index));
     expect(res.statusCode).toBe(403);
     expect(res.json()).toEqual({ error: "forbidden" });
-    expect(refusalRows()[0]).toMatchObject({ actor: keys[index].record.id, metadata: { credential: "wildcard_scope" } });
+    expect(refusalRows()[0]).toEqual({ eventType: "admin.posture.refused", actor: keys[index].record.id, action: "read", resourceType: "posture", resourceId: undefined, metadata: { credential: "wildcard_scope" }, ip: undefined, userAgent: undefined });
   });
   it.each([3, 4])("A7: operator key %s is refused by scopeChecker without posture audit", async (index) => {
     const before = [readRows().length, refusalRows().length];
@@ -117,11 +135,14 @@ describe("admin posture through createGateway and inject", () => {
     expect(readRows()).toHaveLength(before);
   });
   it("A10: response and audit never echo synthetic secret or url parts", async () => {
-    const res = await request();
+    const query = "?syn_probe=synthetic-log-control-n237";
+    const res = await app.inject({ method: "GET", url: `${path}${query}`, headers: admin() });
     expect(res.statusCode).toBe(200);
     expect(res.json().env.find((row: { name: string }) => row.name === "SYN_N237_URL")).toMatchObject({ class: "url", provider: "other", credentialShaped: true });
     const output = res.body + JSON.stringify([...readRows(), ...refusalRows()]);
     for (const marker of [process.env.SYN_N237_TOKEN!, process.env.SYN_N237_URL!, "syn-private-n237.test", "abcdefghijklmnop", "syn-query=private", secret]) expect(output).not.toContain(marker);
+    expect(lines.join("\n")).toContain(`${path}${query}`);
+    expectNoLogMarkers([process.env.SYN_N237_TOKEN!, process.env.SYN_N237_URL!, "syn-private-n237.test", "abcdefghijklmnop", "syn-query=private"]);
   });
   it("A11: flagging result and audit metadata contain exactly verdict flags errors", async () => {
     vi.stubEnv("PCC_POSTURE_POLICY", JSON.stringify([{ id: "syn-1", all: [{ name: "SYN_N237_TOKEN", present: true }] }]));
@@ -138,6 +159,7 @@ describe("admin posture through createGateway and inject", () => {
       const output = res.body + JSON.stringify([...readRows(), ...refusalRows()]);
       expect(output).not.toContain("synthetic-policy-marker-n237");
       expect(output).not.toContain(raw);
+      expectNoLogMarkers(["synthetic-policy-marker-n237", raw]);
     }
   });
   it("A13: a presented invalid or wildcard admin header never falls back to an admin key", async () => {
@@ -145,14 +167,13 @@ describe("admin posture through createGateway and inject", () => {
       const res = await request({ ...bearer(), "x-admin-key": value });
       expect(res.statusCode).toBe(403);
       expect(res.json()).toEqual({ error: "forbidden" });
-      expect(refusalRows()[0]).toMatchObject({ actor: keys[0].record.id, metadata: { credential: value === "*" ? "wildcard_admin_secret" : "admin_key_mismatch" } });
+      expect(refusalRows()[0]).toEqual({ eventType: "admin.posture.refused", actor: keys[0].record.id, action: "read", resourceType: "posture", resourceId: undefined, metadata: { credential: value === "*" ? "wildcard_admin_secret" : "admin_key_mismatch" }, ip: undefined, userAgent: undefined });
+      expectNoLogMarkers([value]);
     }
   });
 });
 
-// Written, not test-run: light-my-request collapses repeated fields. As in
-// relay-admin-gate.test.ts, real raw duplicates require the socket transport.
-it.skip("A6: duplicate raw headers alone get 401; with admin key get handler 403 (socket, written not test-run)", async () => {
+it("A6: duplicate raw headers alone get 401; with admin key get handler 403", async () => {
   await app.listen({ port: 0, host: "127.0.0.1" });
   const address = app.server.address();
   if (!address || typeof address === "string") throw new Error("No test address");
@@ -174,7 +195,9 @@ it.skip("A6: duplicate raw headers alone get 401; with admin key get handler 403
     expect(refusalRows()).toHaveLength(before[1] + (authenticated ? 1 : 0));
     if (authenticated) {
       expect(JSON.parse(res.body)).toEqual({ error: "forbidden" });
-      expect(refusalRows()[0]).toMatchObject({ actor: keys[0].record.id, metadata: { credential: "duplicate_admin_key" } });
+      expect(refusalRows()[0]).toEqual({ eventType: "admin.posture.refused", actor: keys[0].record.id, action: "read", resourceType: "posture", resourceId: undefined, metadata: { credential: "duplicate_admin_key" }, ip: undefined, userAgent: undefined });
     }
+    expect(JSON.stringify(refusalRows())).not.toContain(secret);
+    expectNoLogMarkers();
   }
 });

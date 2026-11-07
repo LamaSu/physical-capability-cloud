@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { classifyEnv, parsePosturePolicy, buildPostureReport, logBootPosture } from "../services/posture.js";
 import { readBuildInfo } from "../build-info.js";
+import { walletLinkConfig } from "../services/wallet-links/config.js";
 
 const reads = { names: new Set(["SYN_LIVE"]), prefixes: ["SYN_PREFIX_"] };
 const record = (name: string, value?: string) => classifyEnv(name, value === undefined ? {} : { [name]: value }, reads);
@@ -51,7 +52,16 @@ describe("posture classification", () => {
   it.each(["PCC_PUBLIC_URL", "PCC_GATEWAY_URL", "PCC_API_BASE_URL"])("C5: public origin %s", (name) => {
     expect(record(name, "https://SYNTHETIC.test:443/").value).toBe("https://synthetic.test");
     expect(record(name, "https://synthetic.test:8443").value).toBe("https://synthetic.test:8443");
-    for (const value of ["https://synthetic.test/path", "https://synthetic.test/?q=x", "https://u:p@synthetic.test/", "http://synthetic.test/", "not-a-url", "https://synthetic.test/#x"]) expect(record(name, value).value).toBe("other");
+    for (const value of ["https://synthetic.test/path", "https://synthetic.test/?q=x", "https://u:p@synthetic.test/", "http://synthetic.test/", "not-a-url", "https://synthetic.test/#x", " https://synthetic.test/", "https://synthetic.test/ "]) expect(record(name, value).value).toBe("other");
+  });
+  it.each(["https://capability.network", "https://capability.network/", "https://gw.example.test:8443"])("T22: production public origin agrees with wallet links for %s", (value) => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("PCC_PUBLIC_URL", value);
+    try {
+      expect(classifyEnv("PCC_PUBLIC_URL", process.env, null)).toEqual({
+        name: "PCC_PUBLIC_URL", readByCode: null, class: "public", value: walletLinkConfig().publicOrigin,
+      });
+    } finally { vi.unstubAllEnvs(); }
   });
   it("C6 NODE_ENV: public precedes platform; platform names never become set", () => {
     expect(record("NODE_ENV", "test").class).toBe("public");
@@ -95,7 +105,11 @@ describe("policy parsing", () => {
     ["not array", {}], ["null", null], ["empty rules", []], ["too many rules", Array.from({ length: 65 }, (_, n) => ({ id: `syn-${n}`, all: [{ name: "SYN_A", present: true }] }))],
     ["null rule", [null]], ["array rule", [[]]], ["missing id", [{ all: [{ name: "SYN_A", present: true }] }]],
     ["unknown rule key", [{ id: "syn", all: [{ name: "SYN_A", present: true }], extra: 1 }]],
-    ["invalid id", [{ id: "bad id", all: [{}] }]], ["nonstring id", [{ id: 1, all: [{}] }]], ["long id", [{ id: "x".repeat(33), all: [{}] }]],
+    ["invalid id", [{ id: "bad id", all: [{ name: "SYN_A", present: true }] }]],
+    ["nonstring id", [{ id: 1, all: [{ name: "SYN_A", present: true }] }]],
+    ["long id", [{ id: "x".repeat(33), all: [{ name: "SYN_A", present: true }] }]],
+    ["empty id", [{ id: "", all: [{ name: "SYN_A", present: true }] }]],
+    ["newline id", [{ id: "syn\n", all: [{ name: "SYN_A", present: true }] }]],
     ["duplicate id", [{ id: "syn", all: [{ name: "SYN_A", present: true }] }, { id: "syn", all: [{ name: "SYN_A", present: true }] }]],
     ["missing all", [{ id: "syn" }]], ["all not array", [{ id: "syn", all: {} }]], ["empty all", [{ id: "syn", all: [] }]],
     ["too many conditions", [{ id: "syn", all: Array(17).fill({ name: "SYN_A", present: true }) }]],
@@ -119,6 +133,7 @@ describe("policy parsing", () => {
   it.each(malformed)("P1 %s is unreadable", (_label, input) => expect(parsePosturePolicy(JSON.stringify(input)).policy).toBe("unreadable"));
   it.each(["", "{synthetic-policy-marker", " ".repeat(16385)])("P2: malformed or oversized text is unreadable", (raw) => expect(parsePosturePolicy(raw).policy).toBe("unreadable"));
   it("P3: exact length cap and valid full shape", () => {
+    expect(parsePosturePolicy(policy([{ name: "SYN_A", present: true }], "s".repeat(32))).policy).toBe("ok");
     const raw = policy([{ name: ["SYN_A", "SYN_B"], class: "url", present: true, value: "other", valueNot: "x", credentialShaped: false, readByCode: true }, { table: "SYN_T", countGt: 2147483647 }]);
     expect(parsePosturePolicy(raw).policy).toBe("ok");
     expect(parsePosturePolicy(raw.padEnd(16384)).policy).toBe("ok");
@@ -127,6 +142,26 @@ describe("policy parsing", () => {
 });
 
 describe("policy evaluation and report", () => {
+  it("E8 read-count: a 200-name env is enumerated once and each value is read once", () => {
+    const values = Object.fromEntries([
+      ["PCC_POSTURE_POLICY", policy([{ name: "constructor", class: "unset" }])],
+      ...Array.from({ length: 199 }, (_, n) => [`SYN_${n}`, "synthetic-value"]),
+    ]);
+    let ownKeys = 0;
+    const gets = new Map<string, number>();
+    const env = new Proxy(values, {
+      ownKeys(target) { ownKeys++; return Reflect.ownKeys(target); },
+      get(target, name, receiver) {
+        if (typeof name === "string") gets.set(name, (gets.get(name) ?? 0) + 1);
+        return Reflect.get(target, name, receiver);
+      },
+    });
+    const result = report(env);
+    expect(ownKeys).toBe(1);
+    expect(gets).toEqual(new Map(Object.keys(values).map((name) => [name, 1])));
+    expect(result.env.find((row) => row.name === "constructor")).toEqual({ name: "constructor", class: "unset", readByCode: false });
+    expect(classifyEnv("constructor", {}, null)).toEqual({ name: "constructor", class: "unset", readByCode: null });
+  });
   it("E1: class, absent names, present, value and valueNot", () => {
     for (const condition of [{ name: "SYN_MISSING", class: "unset" }, { name: "SYN_MISSING", present: false }, { name: "SYN_EMPTY", present: false }, { name: "SYN_SET", present: true }, { name: "NODE_ENV", value: "test" }, { name: "SYN_SET", valueNot: "test" }]) {
       expect(check([condition], { SYN_EMPTY: "", SYN_SET: "synthetic", NODE_ENV: "test" }).flags).toEqual(["syn-1"]);
@@ -188,7 +223,7 @@ describe("policy evaluation and report", () => {
     }
   });
   it("B2: unexpected input throw logs check failed without error text", () => {
-    const env = new Proxy({}, { get() { throw new Error("synthetic-secret"); } });
+    const env = new Proxy({}, { ownKeys() { throw new Error("synthetic-secret"); } });
     expect(boot(env)).toEqual({ info: [], warn: [["[posture] check failed"]] });
   });
   it("B3 boot-count: boot counts named tables once; admin counts every table and quotes names", () => {

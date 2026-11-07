@@ -83,6 +83,17 @@ describe("env-read scanner", () => {
       for (const name of setNames) expect(["public", "platform"].includes(classifyEnv(name, { [name]: "synthetic" }, null).class) || names.has(name), name).toBe(true);
     }
   });
+  it("S5 Dockerfile: one env-read RUN follows the turbo build and precedes provenance", () => {
+    const lines = readFileSync(join(root, "Dockerfile"), "utf8").split(/\r?\n/);
+    const run = "RUN node packages/gateway/dist/env-reads-cli.js /app/packages/*/dist > /app/ENV_READS.json && chmod 0444 /app/ENV_READS.json";
+    expect(lines.filter((line) => line === run)).toHaveLength(1);
+    const build = lines.findIndex((line) => /^RUN\b.*\bturbo build\b/.test(line));
+    const provenance = lines.findIndex((line) => /^ARG PCC_BUILD_SHA\b/.test(line));
+    expect(build).toBeGreaterThanOrEqual(0);
+    expect(provenance).toBeGreaterThanOrEqual(0);
+    expect(lines.indexOf(run)).toBeGreaterThan(build);
+    expect(lines.indexOf(run)).toBeLessThan(provenance);
+  });
 });
 
 describe("env-read loader", () => {
@@ -96,30 +107,55 @@ describe("env-read loader", () => {
   it("L3: reader throw is swallowed without text", () => expect(readEnvReads(() => { throw new Error("synthetic-secret"); })).toBeNull());
 });
 
-// Written, not test-run: this sandbox also rejects spawnSync(node) with EPERM
-// (empty pipes), in addition to the git/sh restriction in the brief. Build the
-// CLI first and enable these cells in the lane's unrestricted tree.
-describe.skip("CLI subprocess (written, not test-run in sandbox)", () => {
+describe("CLI subprocess", () => {
   it("CLI1: shape/sorting, multiple roots, exclusions and no symlink following", () => {
     const dir = mkdtempSync(join(tmpdir(), "n237-env-reads-"));
     try {
-      for (const part of ["one/node_modules", "one/__tests__", "two", "outside"]) mkdirSync(join(dir, part), { recursive: true });
+      for (const part of ["one/node_modules", "one/__tests__", "two", "outside", "a.test.b/dist"]) mkdirSync(join(dir, part), { recursive: true });
       writeFileSync(join(dir, "one/a.js"), "process.env.SYN_Z; env.SYN_A");
       writeFileSync(join(dir, "two/b.mjs"), "process.env.SYN_B");
       writeFileSync(join(dir, "two/c.cjs"), "env.SYN_C");
+      writeFileSync(join(dir, "a.test.b/dist/d.js"), "env.SYN_D");
       for (const path of ["one/a.test.js", "one/a.spec.mjs", "one/a.js.map", "one/a.ts", "one/node_modules/a.js", "one/__tests__/a.js", "outside/a.js"]) writeFileSync(join(dir, path), "process.env.SYN_SKIPPED");
       symlinkSync(join(dir, "outside"), join(dir, "one/link"), "dir");
-      const result = spawnSync(process.execPath, [join(root, "packages/gateway/dist/env-reads-cli.js"), join(dir, "one"), join(dir, "two")], { encoding: "utf8" });
+      const result = spawnSync(process.execPath, [join(root, "packages/gateway/dist/env-reads-cli.js"), join(dir, "one"), join(dir, "two"), join(dir, "a.test.b/dist")], { encoding: "utf8" });
       expect(result.error).toBeUndefined();
       expect(result.status).toBe(0);
       expect(result.stderr).toBe("");
-      expect(JSON.parse(result.stdout)).toEqual({ spec: "pcc.env-reads/v1", names: [...new Set(["SYN_A", "SYN_B", "SYN_C", "SYN_Z", ...COMPUTED_READS.names])].sort(), prefixes: [...new Set(COMPUTED_READS.prefixes)].sort() });
+      expect(JSON.parse(result.stdout)).toEqual({ spec: "pcc.env-reads/v1", names: [...new Set(["SYN_A", "SYN_B", "SYN_C", "SYN_D", "SYN_Z", ...COMPUTED_READS.names])].sort(), prefixes: [...new Set(COMPUTED_READS.prefixes)].sort() });
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
   it("CLI2: empty tree exits 1 with one safe line", () => {
     const dir = mkdtempSync(join(tmpdir(), "n237-empty-"));
     try {
       const result = spawnSync(process.execPath, [join(root, "packages/gateway/dist/env-reads-cli.js"), dir], { encoding: "utf8" });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toMatch(/^[^\n]+\n$/);
+      expect(result.stderr).not.toContain(dir);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+  it("CLI3: a JS file without env reads exits 1 with one safe line", () => {
+    const dir = mkdtempSync(join(tmpdir(), "n237-no-reads-"));
+    try {
+      writeFileSync(join(dir, "a.js"), "export const synthetic = 1;");
+      const result = spawnSync(process.execPath, [join(root, "packages/gateway/dist/env-reads-cli.js"), dir], { encoding: "utf8" });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toMatch(/^[^\n]+\n$/);
+      expect(result.stderr).not.toContain(dir);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+  it("CLI4: a missing root plus a good root exits 1 with one safe line", () => {
+    const dir = mkdtempSync(join(tmpdir(), "n237-missing-root-"));
+    try {
+      const good = join(dir, "good");
+      mkdirSync(good);
+      writeFileSync(join(good, "a.js"), "process.env.SYN_LIVE;");
+      const missing = join(dir, "missing");
+      const result = spawnSync(process.execPath, [join(root, "packages/gateway/dist/env-reads-cli.js"), good, missing], { encoding: "utf8" });
       expect(result.error).toBeUndefined();
       expect(result.status).toBe(1);
       expect(result.stdout).toBe("");

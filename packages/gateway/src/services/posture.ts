@@ -42,8 +42,7 @@ function publicValue(name: string, value: string): string {
 }
 
 /** Classifications are the only projection of raw environment values. */
-export function classifyEnv(name: string, env: NodeJS.ProcessEnv, reads: ReturnType<typeof readEnvReads>): EnvRecord {
-  const values = new Map(Object.entries(env));
+export function classifyEnv(name: string, env: NodeJS.ProcessEnv, reads: ReturnType<typeof readEnvReads>, values: ReadonlyMap<string, string | undefined> = new Map(Object.entries(env))): EnvRecord {
   const readByCode = reads === null ? null : reads.names.has(name) || reads.prefixes.some((prefix) => name.startsWith(prefix));
   const base = { name, readByCode };
   const value = values.get(name);
@@ -143,15 +142,17 @@ function matches(record: EnvRecord, condition: EnvCondition): boolean {
 
 function makeReport(opts: Options, boot: boolean) {
   const env = opts.env ?? process.env;
+  const values = new Map(Object.entries(env));
   const reads = opts.envReads === undefined ? readEnvReads() : opts.envReads;
-  const parsed = parsePosturePolicy(env.PCC_POSTURE_POLICY);
-  const names = new Set([...Object.keys(env), ...(reads?.names ?? []), ...PUBLIC_NAMES]);
+  // env.PCC_POSTURE_POLICY is read from the snapshot, without a second env access.
+  const parsed = parsePosturePolicy(values.get("PCC_POSTURE_POLICY"));
+  const names = new Set([...values.keys(), ...(reads?.names ?? []), ...PUBLIC_NAMES]);
   const namedTables = new Set<string>();
   for (const rule of parsed.rules) for (const condition of rule.all) {
     if ("table" in condition) namedTables.add(condition.table);
     else if (condition.name !== "*") for (const name of typeof condition.name === "string" ? [condition.name] : condition.name) names.add(name);
   }
-  const records = [...names].sort().map((name) => classifyEnv(name, env, reads));
+  const records = [...names].sort().map((name) => classifyEnv(name, env, reads, values));
   const byName = new Map(records.map((record) => [record.name, record]));
   const db = opts.db === undefined ? rawDatabase() : opts.db;
   const tables = tableCounts(db, boot ? namedTables : undefined);
