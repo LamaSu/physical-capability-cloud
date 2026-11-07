@@ -44,6 +44,12 @@ const recordJson = (over: Record<string, unknown> = {}) =>
     specVersion: 2,
     scheduleId: "vnext-mainnet-v1",
     scheduleTestnetOnly: false,
+    challengeWindowSec: 172800,
+    appealWindowSec: 432000,
+    backupWindowSec: 172800,
+    emergencyReviewWindowSec: 432000,
+    minReclaimDelaySec: 864000,
+    maxReclaimDelaySec: 31536000,
     blockNumber: 123,
     ...over,
   });

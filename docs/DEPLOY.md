@@ -281,8 +281,11 @@ activates, because the expected chain is unavailable:
 - `R-c`: the record is testnet-only and `PCC_VNEXT_ALLOW_TESTNET_RECORD` is not exactly `1`.
 - `R-d`: the file is not a JSON object; or a field the gateway reads fails its check (`mode`,
   `label`, `canonical`, `doNotPin`, `broadcast`, `factory`, `implementation`, `usdc`, `chainId`,
-  `blockNumber`, or a `scheduleId` that does not match `scheduleTestnetOnly`); or `chainId` is not
-  the chain of the `PCC_VNEXT_RECORD_NETWORK` directory.
+  `blockNumber`); or the schedule is not exactly one of the schema's two tuples: `scheduleId` is
+  unknown, or `scheduleTestnetOnly` or a window (`challengeWindowSec`, `appealWindowSec`,
+  `backupWindowSec`, `emergencyReviewWindowSec`, `minReclaimDelaySec`, `maxReclaimDelaySec`)
+  differs from that `scheduleId`'s tuple; or `chainId` is not the chain of the
+  `PCC_VNEXT_RECORD_NETWORK` directory.
 
 The reader also refuses, with no warning, when `PCC_VNEXT_RECORD_NETWORK` is unset or is not
 `base`, `base-sepolia`, `anvil` or `chain-<id>`; when the gateway cannot find the `@pcc/contracts`
