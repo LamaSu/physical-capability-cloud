@@ -220,6 +220,31 @@ describe("Command Center reads", () => {
     expect(text()).toContain("1/3");
     expect(text()).not.toMatch(/job-2|job-3|\$0\.00|Evidence Events|Recent Activity|Total Value Locked|Total Locked/);
   });
+  it("counts an executing job on Command Center, Revenue and the Jobs active filter", async () => {
+    liveRoutes(jobRows([{ id: "job-executing", status: "executing" }]));
+    expect(await renderPage(<DashboardPage />)).toMatch(/Active Jobs\s*1/);
+    expect(text()).toContain("job-executing");
+    expect(text()).not.toContain("Submit a job or discover capabilities to get started.");
+    await remount(<RevenueDashboardPage />);
+    const activeCount = elementWithText("Active Jobs").nextElementSibling!.cloneNode(true) as HTMLElement;
+    activeCount.querySelectorAll("style").forEach((style) => style.remove());
+    expect(activeCount.textContent).toBe("1");
+    await remount(<JobsPage />);
+    await act(async () => elementWithText("active", "button").click());
+    expect(text()).toContain("job-executing");
+    expect(text()).not.toContain("No active jobs");
+  });
+  it.each(["preparing", "collecting_evidence", "awaiting_pickup"])("counts %s as active on Command Center", async (status) => {
+    liveRoutes(jobRows([{ id: `job-${status}`, status }]));
+    expect(await renderPage(<DashboardPage />)).toMatch(/Active Jobs\s*1/);
+    expect(text()).toContain(`job-${status}`);
+  });
+  it.each(["completed", "failed", "cancelled", "evidence_submitted", "settled"])("excludes %s from active jobs on Command Center", async (status) => {
+    liveRoutes(jobRows([{ id: `job-${status}`, status }]));
+    expect(await renderPage(<DashboardPage />)).toMatch(/Active Jobs\s*0/);
+    expect(text()).toContain("No active jobs");
+    expect(text()).not.toContain(`job-${status}`);
+  });
   it("rejects the entire jobs read when one status is missing", async () => {
     liveRoutes(jobRows([{ id: "job-a", status: "in_progress" }, { id: "job-b" }]));
     expect(await renderPage(<DashboardPage />)).toContain("Some live data couldn't be loaded");

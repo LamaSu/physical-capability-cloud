@@ -1,15 +1,10 @@
+import { executionPhaseOf, isTerminalExecutionPhase } from "@pcc/spec";
 import type { JobDTO, KernelDTO } from "../types/dto.js";
 
-/** The job states included in the account read's in-flight work. */
-export const ACTIVE_JOB_STATUSES: ReadonlySet<string> = new Set([
-  "pending",
-  "queued",
-  "in_progress",
-  "paused",
-]);
-
+/** A job is active when its execution phase is known and not terminal, as the gateway's product home counts it. */
 export function isActiveJob(job: Pick<JobDTO, "status">): boolean {
-  return ACTIVE_JOB_STATUSES.has(job.status);
+  const phase = executionPhaseOf(job.status);
+  return phase !== "unknown" && !isTerminalExecutionPhase(phase);
 }
 
 /** The default number of rows returned by the jobs read. */
