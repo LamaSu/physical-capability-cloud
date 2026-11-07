@@ -141,7 +141,9 @@ describe("PrinterLogAdapter — startRecording", () => {
     adapter.onEvidence((e) => events.push(e));
 
     await adapter.startRecording("job-003");
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await vi.waitFor(() => {
+      expect(events.filter((e) => e.type === "log_hash_chain_entry")).toHaveLength(3);
+    }, { timeout: 2_000, interval: 10 });
     await adapter.dispose();
 
     const chainEvents = events.filter((e) => e.type === "log_hash_chain_entry");
