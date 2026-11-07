@@ -246,7 +246,7 @@ function firstMatch(
 /**
  * Extract scopes from the API key record; missing or unreadable scopes grant nothing.
  */
-function getCallerScopes(req: FastifyRequest): string[] {
+export function getCallerScopes(req: FastifyRequest): string[] {
   if (!req.apiKeyId) return [];
 
   try {
