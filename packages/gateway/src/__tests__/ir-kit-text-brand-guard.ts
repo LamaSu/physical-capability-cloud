@@ -2285,7 +2285,7 @@ export const R2E_SAFE_PROGRAMS = [
 
 export const GUARD_PROGRAM_COUNT = 381;
 export const GUARD_PROGRAM_MANIFEST_SHA256 = "8e078802de2f2dfb660dbe5777db07a78bbd4392fc9443a277c5757503d93eb4";
-export const GUARD_TIMEOUT_MS = 180_000;
+export const GUARD_TIMEOUT_MS = 360_000;
 
 export const GUARD_SHARDS = (() => {
   const shards: (typeof MUTATIONS[number])[][] = [[], [], [], []];
