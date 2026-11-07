@@ -116,6 +116,12 @@ describe("populateEscrowDTO()", () => {
     expect(dto.currency).toBe("USDC");
   });
 
+  it("currency comes from the escrow row for a non-USDC row too", () => {
+    const escrow = makeRawEscrow({ currency: "ETH" });
+    const dto = populateEscrowDTO(escrow, [], makeCtx({ currency: "USDC" }));
+    expect(dto.currency).toBe("ETH");
+  });
+
   it("challengeWindowEnd from escrow", () => {
     const escrow = makeRawEscrow({ challengeWindowEnd: "2026-04-10T00:00:00.000Z" });
     const dto = populateEscrowDTO(escrow, [], makeCtx());
