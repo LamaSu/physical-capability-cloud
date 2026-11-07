@@ -214,20 +214,23 @@ class TestAcknowledgements:
 class Device:
     """A scripted generic-HTTP device: answers POST /runs with a run id, polls with a state."""
 
-    def __init__(self, run_id="run-1", poll_body=None, drip=None):
+    def __init__(self, run_id="run-1", poll_body=None, drip=None, *, drip_start=True, start_after=0.0):
         self.requests = []
         dev = self
 
         class Handler(BaseHTTPRequestHandler):
-            def _send(self, code, raw):
+            def _send(self, code, raw, *, drip_body=True):
                 self.send_response(code)
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
-                if drip:
-                    for i in range(len(raw)):
-                        self.wfile.write(raw[i:i + 1])
-                        self.wfile.flush()
-                        time.sleep(drip)
+                if drip and drip_body:
+                    try:
+                        for i in range(len(raw)):
+                            self.wfile.write(raw[i:i + 1])
+                            self.wfile.flush()
+                            time.sleep(drip)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
                 else:
                     self.wfile.write(raw)
 
@@ -240,7 +243,8 @@ class Device:
                 length = int(self.headers.get("Content-Length", "0"))
                 self.rfile.read(length)
                 dev.requests.append(("POST", self.path))
-                self._send(201, json.dumps({"id": run_id}).encode())
+                time.sleep(start_after)
+                self._send(201, json.dumps({"id": run_id}).encode(), drip_body=drip_start)
 
             def log_message(self, *args):
                 pass
@@ -306,13 +310,25 @@ class TestBoundedDeviceIO:
             dev.close()
 
     def test_a_dripping_response_cannot_outlast_the_deadline(self):
-        dev = Device(poll_body=json.dumps({"id": "run-1", "status": "succeeded"}).encode(), drip=0.2)
+        dev = Device(drip=0.8)
         try:
             runtime = AdapterRuntime.from_profile(_profile(dev.url, timeout_s=1), *_keys())
             started = time.monotonic()
             result = runtime.run("read_absorbance", {"wavelengthNm": 450}, claim=CLAIM)
-            assert time.monotonic() - started < 2.2  # the 1 s deadline, not the device's pace
-            assert result.ok is False and result.error.startswith("timeout")
+            assert time.monotonic() - started < 1.3
+            assert result.ok is False and result.error == "timeout:device_state_unknown"
+        finally:
+            dev.close()
+
+    def test_a_dripping_poll_gets_only_what_is_left_of_the_runs_deadline(self):
+        dev = Device(drip=0.8, drip_start=False, start_after=0.6)
+        try:
+            runtime = AdapterRuntime.from_profile(_profile(dev.url, timeout_s=1), *_keys())
+            started = time.monotonic()
+            result = runtime.run("read_absorbance", {"wavelengthNm": 450}, claim=CLAIM)
+            assert time.monotonic() - started < 1.3
+            assert result.ok is False and result.error == "timeout:device_state_unknown"
+            assert dev.requests == [("POST", "/runs"), ("GET", "/runs/run-1")]
         finally:
             dev.close()
 

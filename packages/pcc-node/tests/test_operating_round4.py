@@ -12,6 +12,7 @@
 """
 
 import json
+import socket
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,7 @@ from pcc_node.operating.runtime import AdapterRuntime
 KERNEL = "kernel_bench"
 JOBS = f"/api/operator/jobs?kernelId={KERNEL}&status=queued"
 OPS = {"lab.absorbance": "read_absorbance"}
+LOG = b"read complete: A1=0.12 A2=0.34 A3=0.56 A4=0.78"
 
 
 def _keys():
@@ -156,6 +158,36 @@ def _run(runtime, claim=None):
     return runtime.run("read_absorbance", {"wavelengthNm": 450}, claim=claim or Claim())
 
 
+def _held_log(lead_s=0.0):
+    def answer(handler):
+        handler.send_response(200)
+        handler.send_header("Content-Length", str(len(LOG)))
+        handler.end_headers()
+        handler.wfile.flush()
+        time.sleep(lead_s)
+        handler.wfile.write(LOG[:10])
+        handler.wfile.flush()
+        time.sleep(3.0)
+
+    return answer
+
+
+def _cut_short(status, raw, count):
+    def answer(handler):
+        handler.send_response(status)
+        handler.send_header("Content-Length", str(len(raw)))
+        handler.end_headers()
+        handler.wfile.write(raw[:count])
+        handler.wfile.flush()
+        handler.connection.shutdown(socket.SHUT_RDWR)
+
+    return answer
+
+
+def _sources(result):
+    return [entry["payload"]["source"] for entry in result.evidence["logChain"]] if result.evidence else []
+
+
 # ── CRITICAL: a 3xx or 4xx after the start was sent ──────────────────────────
 
 @pytest.mark.parametrize("status,headers", [(303, {"Location": "/runs/run-1"}), (302, {"Location": "/elsewhere"}),
@@ -258,6 +290,87 @@ def test_a_cancel_during_the_log_fetch_is_not_swallowed():
         threading.Timer(0.5, runtime.cancel).start()
         result = _run(runtime)
         assert result.ok is False and result.error.startswith("cancelled"), result.error
+    finally:
+        dev.close()
+
+
+def test_a_cancel_while_the_log_body_arrives_is_not_swallowed():
+    dev = Device(log=_held_log())
+    try:
+        runtime = AdapterRuntime.from_profile(_profile(dev.url, log=True, timeout_s=30), *_keys())
+        timer = threading.Timer(0.5, runtime.cancel)
+        timer.start()
+        try:
+            result = _run(runtime)
+        finally:
+            timer.cancel()
+        assert result.ok is False and result.error == "cancelled:run_finished", result
+        assert _sources(result) == ["device:run"], _sources(result)
+    finally:
+        dev.close()
+
+
+def test_a_deadline_while_the_log_body_arrives_leaves_the_log_out():
+    dev = Device(log=_held_log(lead_s=0.5))
+    try:
+        runtime = AdapterRuntime.from_profile(_profile(dev.url, log=True, timeout_s=1.0), *_keys())
+        started = time.monotonic()
+        result = _run(runtime)
+        assert time.monotonic() - started < 1.3, "the log body outlived the run's 1 s deadline"
+        assert result.ok is True, result
+        assert _sources(result) == ["device:run"], _sources(result)
+    finally:
+        dev.close()
+
+
+def test_a_cancel_while_the_start_answer_arrives_is_reported_and_stops_one_run_only():
+    starts = []
+
+    def start(handler):
+        starts.append(True)
+        first = len(starts) == 1
+        raw = b'{"id": "run-1"}'
+        handler.send_response(201)
+        handler.send_header("Content-Length", str(len(raw)))
+        handler.end_headers()
+        handler.wfile.write(raw[:5] if first else raw)
+        handler.wfile.flush()
+        if first:
+            time.sleep(3.0)
+
+    dev = Device(post=start)
+    try:
+        runtime = AdapterRuntime.from_profile(_profile(dev.url, timeout_s=30), *_keys())
+        timer = threading.Timer(0.3, runtime.cancel)
+        timer.start()
+        try:
+            first = _run(runtime)
+        finally:
+            timer.cancel()
+        second = _run(runtime)
+        assert first.ok is False and first.error == "cancelled:device_state_unknown", first
+        assert second.ok is True, second
+        assert [request for request in dev.requests if request[0] == "POST"] == [("POST", "/runs")] * 2, dev.requests
+    finally:
+        dev.close()
+
+
+def test_a_log_the_device_cuts_short_is_left_out():
+    dev = Device(log=_cut_short(200, LOG, 10))
+    try:
+        result = _run(AdapterRuntime.from_profile(_profile(dev.url, log=True), *_keys()))
+        assert result.ok is True, result
+        assert _sources(result) == ["device:run"], _sources(result)
+    finally:
+        dev.close()
+
+
+def test_a_start_answer_the_device_cuts_short_is_state_unknown():
+    dev = Device(post=_cut_short(201, b'{"id": "run-1"}', 5))
+    try:
+        result = _run(AdapterRuntime.from_profile(_profile(dev.url), *_keys()))
+        assert result.ok is False and result.error == "no_run_id:device_state_unknown", result
+        assert dev.requests == [("POST", "/runs")], dev.requests
     finally:
         dev.close()
 
