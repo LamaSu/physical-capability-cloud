@@ -12,6 +12,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { courierJobsRoutes } from "../routes/courier-jobs.js";
+import { jobOffersRoutes } from "../routes/job-offers.js";
+import { getJobOffersStore } from "../services/job-offers-store.js";
 import {
   initCourierJobsStore,
   _resetCourierJobsStoreForTests,
@@ -41,11 +43,12 @@ const stubVerify: VerifyFn = async (url) => {
   };
 };
 
-// ── Test app — courier routes only, no apiGate (we trust X-Posted-By) ──────
+// ── Test app — courier and generic reads, no apiGate (we trust X-Posted-By) ──
 
 async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
   await app.register(courierJobsRoutes);
+  await app.register(jobOffersRoutes);
   await app.ready();
   return app;
 }
@@ -105,6 +108,43 @@ describe("POST /api/courier-jobs", () => {
       expect(body.status).toBe("open");
       expect(body.verified).toBe(false);
       expect(body.validUntil).toBeDefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("F1: posting without feeUSD stores and reads back an unknown amount on both surfaces", async () => {
+    const app = await buildApp();
+    try {
+      const res = await app.inject({
+        method: "POST", url: "/api/courier-jobs",
+        payload: { deliveryId: "no-fee", pickup: { name: "A" }, dropoff: { name: "B" } },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(getJobOffersStore().get("no-fee")!.pricing.amount).toBeNull();
+      const generic = await app.inject({ method: "GET", url: "/api/job-offers/no-fee" });
+      expect(generic.statusCode).toBe(200);
+      expect(generic.json().offer.pricing.amount).toBeNull();
+      const courier = await app.inject({ method: "GET", url: "/api/courier-jobs/no-fee" });
+      expect(courier.statusCode).toBe(200);
+      expect(courier.json().job.feeUSD).toBeNull();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("F3: posting an explicit feeUSD zero preserves zero", async () => {
+    const app = await buildApp();
+    try {
+      const res = await app.inject({
+        method: "POST", url: "/api/courier-jobs",
+        payload: { deliveryId: "zero-fee", pickup: { name: "A" }, dropoff: { name: "B" }, feeUSD: 0 },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(getJobOffersStore().get("zero-fee")!.pricing.amount).toBe(0);
+      const courier = await app.inject({ method: "GET", url: "/api/courier-jobs/zero-fee" });
+      expect(courier.statusCode).toBe(200);
+      expect(courier.json().job.feeUSD).toBe(0);
     } finally {
       await app.close();
     }
@@ -501,6 +541,57 @@ describe("PATCH /api/courier-jobs/:id", () => {
       const body = res.json();
       expect(body.job.feeUSD).toBe(8.5);
       expect(body.job.description).toBe("patched");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("F2: a null feeUSD PATCH clears the amount and a numeric PATCH restores it", async () => {
+    const app = await buildApp();
+    try {
+      const created = await app.inject({
+        method: "POST", url: "/api/courier-jobs", headers: { "x-posted-by": "alice" },
+        payload: { deliveryId: "clear-fee", pickup: { name: "A" }, dropoff: { name: "B" }, feeUSD: 8 },
+      });
+      expect(created.statusCode).toBe(201);
+      for (const feeUSD of [null, 5]) {
+        const patched = await app.inject({
+          method: "PATCH", url: "/api/courier-jobs/clear-fee", headers: { "x-posted-by": "alice" },
+          payload: { feeUSD },
+        });
+        expect(patched.statusCode).toBe(200);
+        expect(patched.json().job.feeUSD).toBe(feeUSD);
+        expect(getJobOffersStore().get("clear-fee")!.pricing.amount).toBe(feeUSD);
+        const generic = await app.inject({ method: "GET", url: "/api/job-offers/clear-fee" });
+        expect(generic.statusCode).toBe(200);
+        expect(generic.json().offer.pricing.amount).toBe(feeUSD);
+        const courier = await app.inject({ method: "GET", url: "/api/courier-jobs/clear-fee" });
+        expect(courier.statusCode).toBe(200);
+        expect(courier.json().job.feeUSD).toBe(feeUSD);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("F2b: a non-number feeUSD PATCH stores null instead of the input", async () => {
+    const app = await buildApp();
+    try {
+      const created = await app.inject({
+        method: "POST", url: "/api/courier-jobs", headers: { "x-posted-by": "alice" },
+        payload: { deliveryId: "invalid-fee", pickup: { name: "A" }, dropoff: { name: "B" }, feeUSD: 8 },
+      });
+      expect(created.statusCode).toBe(201);
+      const patched = await app.inject({
+        method: "PATCH", url: "/api/courier-jobs/invalid-fee", headers: { "x-posted-by": "alice" },
+        payload: { feeUSD: "abc" },
+      });
+      expect(patched.statusCode).toBe(200);
+      expect(patched.json().job.feeUSD).toBeNull();
+      expect(getJobOffersStore().get("invalid-fee")!.pricing.amount).toBeNull();
+      const generic = await app.inject({ method: "GET", url: "/api/job-offers/invalid-fee" });
+      expect(generic.statusCode).toBe(200);
+      expect(generic.json().offer.pricing.amount).toBeNull();
     } finally {
       await app.close();
     }
