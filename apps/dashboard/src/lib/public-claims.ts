@@ -226,6 +226,9 @@ export const PUBLISHED_SURFACES: readonly string[] = [
   "docs/quickstart/claude-code.md",
   "docs/quickstart/claude-desktop.md",
   "docs/quickstart/claude-web.md",
+  "docs/CAPABILITY_PROFILES.md",
+  "docs/SETUP_AGENT_SPEC.md",
+  "docs/STORY_PROTOCOL_INTEGRATION_PLAN.md",
 ];
 
 /**
