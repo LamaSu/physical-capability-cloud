@@ -15,7 +15,8 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { randomBytes, randomUUID } from "node:crypto";
-import { verifyEvmMessageSignature } from "./evm-signature.js";
+import { isAddress } from "viem";
+import { signInChainId, verifyEvmMessageSignature } from "./evm-signature.js";
 import { eq, schema } from "@pcc/store";
 import { getRepos, getStore } from "../db.js";
 import { classifyProvisionError, provisionApiKey } from "./api-key-auth.js";
@@ -29,6 +30,25 @@ import { walletLinkConfig } from "../services/wallet-links/config.js";
 // ---------------------------------------------------------------------------
 
 const nonces = new Map<string, number>(); // nonce -> expiry timestamp
+// Issued messages are claimed by their exact text, once, before verification yields.
+const issuedSignIns = new Map<string, { message: string; address: string; chainId: number; expiresAt: number }>();
+const signInIssueWindows = new Map<string, { count: number; windowStart: number }>();
+const ISSUE_LIMIT_PER_IP = 60;
+const ISSUE_WINDOW_MS = 60_000;
+const ISSUED_LIVE_CAP = 10_000;
+let issueLimitPerIp = ISSUE_LIMIT_PER_IP;
+let issuedLiveCap = ISSUED_LIVE_CAP;
+
+export function __resetSignInIssueForTests(limits?: { perIpPerMinute?: number; liveCap?: number }): void {
+  issuedSignIns.clear();
+  signInIssueWindows.clear();
+  issueLimitPerIp = limits?.perIpPerMinute ?? ISSUE_LIMIT_PER_IP;
+  issuedLiveCap = limits?.liveCap ?? ISSUED_LIVE_CAP;
+}
+
+export function __issuedSignInCountForTests(): number {
+  return issuedSignIns.size;
+}
 
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const NONCE_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -259,17 +279,132 @@ export function listSessions(): Array<{
   }));
 }
 
+async function completeSignIn(reply: FastifyReply, signer: { address: string; message: string; signature: string; chainId: number }): Promise<FastifyReply> {
+  // Verify EOA, deployed smart-account and counterfactual smart-account signatures.
+  try {
+    const check = await verifyEvmMessageSignature({
+      address: signer.address,
+      message: signer.message,
+      signature: signer.signature,
+      chainId: signer.chainId,
+    });
+
+    if (!check.ok) {
+      switch (check.reason) {
+        case "malformed":
+          return reply.status(400).send({ error: "Invalid signature format" });
+        case "invalid":
+          return reply.status(401).send({ error: "Invalid signature" });
+        case "wrong_chain":
+          return reply.status(401).send({ error: "wrong_chain" });
+        case "unconfigured":
+          return reply.status(503).send({ error: "smart_account_signin_unavailable" });
+        case "unavailable":
+          return reply.header("Retry-After", "5").status(503).send({ error: "signature_verifier_unavailable" });
+        default: {
+          const _exhaustiveReason: never = check.reason;
+          break;
+        }
+      }
+      return reply.status(401).send({ error: "Invalid signature" });
+    }
+  } catch {
+    return reply
+      .status(401)
+      .send({ error: "Signature verification failed" });
+  }
+
+  // Create session
+  const token = randomUUID();
+  const now = Date.now();
+  const createdAt = new Date(now).toISOString();
+  const expiresAt = new Date(now + SESSION_TTL_MS).toISOString();
+  getRepos().sessions.insert({
+    id: randomUUID(),
+    walletAddress: signer.address,
+    token,
+    createdAt,
+    expiresAt,
+    lastActiveAt: createdAt,
+  });
+
+  // Set HTTP-only HMAC-signed cookie (red team #52 fix — actually wired now)
+  return reply
+    .setCookie("pcc_session", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: 24 * 60 * 60, // 24 hours in seconds
+      signed: true,
+    })
+    .send({
+      token,
+      address: signer.address,
+      expiresAt,
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Fastify Plugin
 // ---------------------------------------------------------------------------
 
 export async function siweAuthPlugin(app: FastifyInstance) {
   // ----- GET /api/auth/nonce -----
-  app.get("/api/auth/nonce", async (_req, reply) => {
+  app.get("/api/auth/nonce", async (req, reply) => {
+    const { address, purpose } = req.query as { address?: unknown; purpose?: unknown };
+    if (address === undefined && purpose === undefined) {
     cleanExpired();
     const nonce = randomBytes(16).toString("hex");
     nonces.set(nonce, Date.now() + NONCE_TTL_MS);
     return reply.send({ nonce });
+    }
+    if (req.method === "HEAD") return reply.header("Cache-Control", "no-store").status(200).send();
+    if (typeof address !== "string" || !isAddress(address, { strict: true })) {
+      return reply.status(400).send({ error: "Invalid address" });
+    }
+    if (purpose !== undefined && purpose !== "operator-host") {
+      return reply.status(400).send({ error: "Invalid purpose" });
+    }
+    let config: ReturnType<typeof walletLinkConfig>;
+    try {
+      config = walletLinkConfig();
+    } catch {
+      return reply.status(503).send({ error: "Sign-in unavailable" });
+    }
+    const chainId = signInChainId();
+    if (chainId === undefined) return reply.status(503).send({ error: "Sign-in unavailable" });
+    cleanExpired();
+    const now = Date.now();
+    for (const [text, entry] of issuedSignIns) {
+      if (entry.expiresAt <= now) issuedSignIns.delete(text);
+    }
+    for (const [ip, window] of signInIssueWindows) {
+      if (now - window.windowStart > ISSUE_WINDOW_MS) signInIssueWindows.delete(ip);
+    }
+    const window = signInIssueWindows.get(req.ip) ?? { count: 0, windowStart: now };
+    if (window.count >= issueLimitPerIp) {
+      return reply.status(429).send({ error: "rate_limited", message: "Too many sign-in requests. Try again in a minute." });
+    }
+    if (issuedSignIns.size >= issuedLiveCap) {
+      return reply.header("Retry-After", "5").status(503).send({ error: "Sign-in unavailable" });
+    }
+    const nonce = randomBytes(16).toString("hex");
+    const issuedAt = new Date(now).toISOString();
+    const expirationTime = new Date(now + NONCE_TTL_MS).toISOString();
+    const { domain, publicOrigin } = config;
+    const statement = purpose === "operator-host"
+      ? "Sign in to Physical Capability Cloud as an operator host."
+      : "Sign in to Physical Capability Cloud";
+    const message = [
+      `${domain} wants you to sign in with your Ethereum account:`, address, "", statement, "",
+      `URI: ${publicOrigin}`, "Version: 1", `Chain ID: ${chainId}`, `Nonce: ${nonce}`,
+      `Issued At: ${issuedAt}`, `Expiration Time: ${expirationTime}`,
+    ].join("\n");
+    issuedSignIns.set(message, { message, address, chainId, expiresAt: now + NONCE_TTL_MS });
+    window.count++;
+    signInIssueWindows.set(req.ip, window);
+    return reply.header("Cache-Control", "no-store").send({ nonce, message, issuedAt, expiresAt: expirationTime, chainId });
   });
 
   // ----- POST /api/auth/verify -----
@@ -291,6 +426,15 @@ export async function siweAuthPlugin(app: FastifyInstance) {
       return reply
         .status(400)
         .send({ error: "Missing message or signature" });
+    }
+
+    const entry = typeof body.message === "string" ? issuedSignIns.get(body.message) : undefined;
+    if (entry && entry.message === body.message) {
+      issuedSignIns.delete(body.message);
+      if (Date.now() >= entry.expiresAt) {
+        return reply.status(401).send({ error: "Nonce expired or invalid" });
+      }
+      return completeSignIn(reply, { address: entry.address, message: entry.message, signature: body.signature, chainId: entry.chainId });
     }
 
     // Parse the SIWE message
@@ -353,69 +497,7 @@ export async function siweAuthPlugin(app: FastifyInstance) {
       }
     }
 
-    // Verify EOA, deployed smart-account and counterfactual smart-account signatures.
-    try {
-      const check = await verifyEvmMessageSignature({
-        address: parsed.address,
-        message: body.message,
-        signature: body.signature,
-        chainId: parsed.chainId,
-      });
-
-      if (!check.ok) {
-        switch (check.reason) {
-          case "malformed":
-            return reply.status(400).send({ error: "Invalid signature format" });
-          case "invalid":
-            return reply.status(401).send({ error: "Invalid signature" });
-          case "wrong_chain":
-            return reply.status(401).send({ error: "wrong_chain" });
-          case "unconfigured":
-            return reply.status(503).send({ error: "smart_account_signin_unavailable" });
-          case "unavailable":
-            return reply.header("Retry-After", "5").status(503).send({ error: "signature_verifier_unavailable" });
-          default: {
-            const _exhaustiveReason: never = check.reason;
-            break;
-          }
-        }
-        return reply.status(401).send({ error: "Invalid signature" });
-      }
-    } catch {
-      return reply
-        .status(401)
-        .send({ error: "Signature verification failed" });
-    }
-
-    // Create session
-    const token = randomUUID();
-    const now = Date.now();
-    const createdAt = new Date(now).toISOString();
-    const expiresAt = new Date(now + SESSION_TTL_MS).toISOString();
-    getRepos().sessions.insert({
-      id: randomUUID(),
-      walletAddress: parsed.address,
-      token,
-      createdAt,
-      expiresAt,
-      lastActiveAt: createdAt,
-    });
-
-    // Set HTTP-only HMAC-signed cookie (red team #52 fix — actually wired now)
-    return reply
-      .setCookie("pcc_session", token, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: "lax",
-        path: "/",
-        maxAge: 24 * 60 * 60, // 24 hours in seconds
-        signed: true,
-      })
-      .send({
-        token,
-        address: parsed.address,
-        expiresAt,
-      });
+    return completeSignIn(reply, { address: parsed.address, message: body.message, signature: body.signature, chainId: parsed.chainId });
   });
 
   // Session keys hold self-service scopes, expire within twelve hours or at session expiry, and are revoked on logout.

@@ -1,4 +1,4 @@
-import { deploymentEnvName } from "../../mcp/mcp-api-base.js";
+import { deploymentEnvName, isDeployed } from "../../mcp/mcp-api-base.js";
 
 /** Current server settings are read at proof/approval time, never from a request. */
 export interface WalletLinkConfig {
@@ -28,4 +28,21 @@ export function walletLinkConfig(): WalletLinkConfig {
     env: env === "production" ? "prod" : env,
     allowedChainIds: [84532],
   };
+}
+
+export function assertPublicOriginConfigured(): void {
+  if (!isDeployed()) return;
+  const message = "PCC_PUBLIC_URL must be set to this deployment's https public origin when NODE_ENV=production";
+  const raw = process.env.PCC_PUBLIC_URL;
+  if (!raw) throw new Error(message);
+  let config: WalletLinkConfig;
+  try {
+    config = walletLinkConfig();
+  } catch {
+    throw new Error(message);
+  }
+  const { publicOrigin } = config;
+  if (!publicOrigin.startsWith("https://") || (raw !== publicOrigin && raw !== publicOrigin + "/")) {
+    throw new Error(message);
+  }
 }

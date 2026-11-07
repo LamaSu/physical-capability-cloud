@@ -162,7 +162,7 @@ export async function wellKnownRoutes(app: FastifyInstance) {
         },
         siwe: {
           type: "oauth2",
-          description: "Sign-In with Ethereum (SIWE / EIP-4361). Nonce at GET /api/auth/nonce, verify at POST /api/auth/verify. Returns session cookie or bearer token.",
+          description: "Sign-In with Ethereum (SIWE / EIP-4361). GET /api/auth/nonce?address=<address> returns the message; sign it unchanged, verify at POST /api/auth/verify. Returns session cookie or bearer token.",
           flows: {
             authorizationCode: {
               authorizationUrl: "https://capability.network/api/auth/nonce",

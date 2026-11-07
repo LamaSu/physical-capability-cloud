@@ -42,6 +42,10 @@ function positiveInteger(value: string | undefined, fallback?: number): number |
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+export function signInChainId(): number | undefined {
+  return positiveInteger(process.env.PCC_SIGVERIFY_CHAIN_ID, 84532);
+}
+
 function configuredUrl(): string | undefined {
   const value = process.env.PCC_SIGVERIFY_RPC_URL;
   if (!value) return undefined;
@@ -111,7 +115,7 @@ export async function verifyEvmMessageSignature({ address, message, signature, c
       }
     }
 
-    const configuredChain = positiveInteger(process.env.PCC_SIGVERIFY_CHAIN_ID, 84532);
+    const configuredChain = signInChainId();
     if (configuredChain === undefined) return { ok: false, reason: "unconfigured" };
     if (chainId !== configuredChain) return { ok: false, reason: "wrong_chain" };
     const url = configuredUrl();

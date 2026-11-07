@@ -33,7 +33,7 @@ ${baseUrl}
 
 ## Authentication
 - **API Key**: Send \`X-PCC-API-Key: <key>\` header. Provision keys via \`POST /api/auth/provision\`.
-- **SIWE (Sign-In With Ethereum)**: Wallet-based session auth via \`/auth/siwe/*\` endpoints.
+- **SIWE (Sign-In With Ethereum)**: Wallet-based session auth: \`GET /api/auth/nonce?address=<address>\` returns the message; sign it unchanged, then \`POST /api/auth/verify\`.
 - **x402**: HTTP 402 micropayments (Coinbase x402 protocol) are on the roadmap; no endpoint requires them today.
 
 ## Available API Endpoints

@@ -208,6 +208,7 @@ describe.each(["production", "development"] as const)("CSP through createGateway
   beforeAll(async () => {
     for (const [key, value] of Object.entries({
       NODE_ENV: environment,
+      PCC_PUBLIC_URL: "https://capability.network",
       DATABASE_URL: ":memory:",
       PCC_DB_PATH: ":memory:",
       WORKFLOW_DB_PATH: ":memory:",
