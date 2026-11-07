@@ -1366,6 +1366,8 @@ export const MUTATIONS = [
   {"name":"r2g X21 binder instance constructor member","file":"dashboard-ir-binder.ts","rule":"builtin-write","code":"export function probeBinderX21(status: number): KitText {\n  const p = (new Set<unknown>() as { constructor: { prototype: { has(v: unknown): boolean } } }).constructor.prototype;\n  return httpStatusText(status);\n}","lineOffset":1},
   {"name":"r2g X21 core constructor destructuring","file":"dashboard-ir.ts","rule":"builtin-write","code":"export function probeCoreConstructorBinding(raw: string): KitText {\n  const { constructor: owner } = new Set<unknown>();\n  return boundStatusText(raw);\n}","lineOffset":1},
   {"name":"r2g X21 binder constructor destructuring","file":"dashboard-ir-binder.ts","rule":"builtin-write","code":"export function probeBinderConstructorBinding(status: number): KitText {\n  const { constructor: owner } = new Set<unknown>();\n  return httpStatusText(status);\n}","lineOffset":1},
+  {"name":"core constructor element access","file":"dashboard-ir.ts","rule":"builtin-write","code":"export function probeCoreConstructorElement(): void {\n  (new Set<unknown>() as { constructor: { prototype: object } })[\"constructor\"];\n}","lineOffset":1},
+  {"name":"core computed constructor destructuring","file":"dashboard-ir.ts","rule":"builtin-write","code":"export function probeCoreComputedConstructorBinding(): void {\n  const { [\"constructor\"]: owner } = new Set<unknown>();\n}","lineOffset":1},
   {"name": "r2f N9 exact capture initializer TEXT_STORE_GET", "file": "dashboard-ir.ts", "rule": "captures-first", "needle": "= WeakMap.prototype.get;", "code": "= (WeakMap.prototype.get);"} ,
   {"name": "r2f N9 exact capture initializer TEXT_STORE_SET", "file": "dashboard-ir.ts", "rule": "captures-first", "needle": "= WeakMap.prototype.set;", "code": "= (WeakMap.prototype.set);"} ,
   {"name": "r2f N9 exact capture initializer TEXT_FREEZE", "file": "dashboard-ir.ts", "rule": "captures-first", "needle": "= Object.freeze;", "code": "= (Object.freeze);"} ,
@@ -2281,8 +2283,8 @@ export const R2E_SAFE_PROGRAMS = [
   }
 ] as const;
 
-export const GUARD_PROGRAM_COUNT = 379;
-export const GUARD_PROGRAM_MANIFEST_SHA256 = "bfba8b0432cb67d69a8ae6e656fe56c1eb35d8e6dc36091367fd3b4bfc1499b1";
+export const GUARD_PROGRAM_COUNT = 381;
+export const GUARD_PROGRAM_MANIFEST_SHA256 = "8e078802de2f2dfb660dbe5777db07a78bbd4392fc9443a277c5757503d93eb4";
 export const GUARD_TIMEOUT_MS = 180_000;
 
 export const GUARD_SHARDS = (() => {

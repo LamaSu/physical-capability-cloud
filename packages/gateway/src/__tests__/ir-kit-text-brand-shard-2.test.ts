@@ -1,11 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import ts from "typescript";
 import { beforeAll, describe, expect, it } from "vitest";
-import { LIST_PROFILES } from "../mcp/dashboard-ir.js";
-import { listFieldLabel, UNAVAILABLE } from "../mcp/dashboard-ir-renderer.js";
-import { lintTextSinks } from "../../../spec/src/__tests__/ui-kit-text-sinks-lint.js";
 
 import {
   mutationAudits,

@@ -48,6 +48,31 @@ describe("IR kit closed text brand and DOM surface", () => {
     expect(programs.length).toBe(GUARD_PROGRAM_COUNT);
     expect(new Set(programs.map(({ name }) => name)).size).toBe(GUARD_PROGRAM_COUNT);
     expect(createHash("sha256").update(serialized).digest("hex")).toBe(GUARD_PROGRAM_MANIFEST_SHA256);
+    const shardFiles = ["ir-kit-text-brand.test.ts", ...[1, 2, 3].map((index) => `ir-kit-text-brand-shard-${index}.test.ts`)].map((file) => join(src, "__tests__", file));
+    const testSources = new Map(allTsFiles(src).filter((path) => path.endsWith(".test.ts")).map((path) => [path, ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true)]));
+    for (const [index, path] of shardFiles.entries()) {
+      const source = testSources.get(path);
+      expect(source, path).toBeDefined();
+      const bindings: ts.VariableDeclaration[] = [];
+      const calls: ts.CallExpression[] = [];
+      const walk = (node: ts.Node): void => {
+        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === "MUTATIONS") bindings.push(node);
+        if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "initializeGuard") calls.push(node);
+        ts.forEachChild(node, walk);
+      };
+      walk(source!);
+      expect(bindings.map((binding) => {
+        const initializer = binding.initializer && ts.isNonNullExpression(binding.initializer) ? binding.initializer.expression : binding.initializer;
+        return initializer && ts.isElementAccessExpression(initializer) ? [initializer.expression.getText(source), initializer.argumentExpression.getText(source)] : [];
+      }), path).toEqual([["GUARD_SHARDS", String(index)]]);
+      expect(calls.map((call) => call.arguments.map((argument) => argument.getText(source))), path).toEqual([["MUTATIONS", String(index)]]);
+    }
+    const shardImporters = [...testSources].filter(([, source]) => source.statements.some((statement) => {
+      if (!ts.isImportDeclaration(statement)) return false;
+      const bindings = statement.importClause?.namedBindings;
+      return bindings && ts.isNamedImports(bindings) && bindings.elements.some((element) => (element.propertyName ?? element.name).text === "GUARD_SHARDS");
+    })).map(([path]) => path).sort();
+    expect(shardImporters).toEqual([...shardFiles].sort());
     console.log("IR-TEXT-GUARD-MANIFEST", JSON.stringify({ count: programs.length, sha256: GUARD_PROGRAM_MANIFEST_SHA256, shardCounts: GUARD_SHARDS.map((shard) => shard.length) }));
   });
   it("accepts the pinned owner declarations with CRLF line endings", () => {

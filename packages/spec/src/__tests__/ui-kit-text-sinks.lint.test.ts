@@ -935,3 +935,81 @@ describe("round 2g: capture use confinement", () => {
     expect(lintTextSinks(changed, plainConfig)).toContainEqual(expect.objectContaining({ line, rule: `brand capture reference outside reviewed owner: ${capture}` }));
   });
 });
+
+
+describe("plain kit store declarations and module function bindings", () => {
+  const source = readFileSync(plainConfig.file, "utf8");
+  it.each([
+    ["kit store declaration", "var TEXT_BRANDS = replacement;", "brand store reference outside reviewed owner: TEXT_BRANDS"],
+    ["agent store declaration", "var AGENT_TEXT_BRANDS = replacement;", "brand store reference outside reviewed owner: AGENT_TEXT_BRANDS"],
+    ["kit predicate assignment", "isKitText = replacement;", "module function binding must not be written: isKitText"],
+    ["text reader assignment", "readText = replacement;", "module function binding must not be written: readText"],
+    ["element function declaration", "var el = replacement;", "module function binding must have exactly one declaration: el"],
+  ])("rejects %s at its own Program line", (_name, code, rule) => {
+    const marker = "  function mintText(t) {";
+    const changed = source.replace(marker, code + "\n" + marker);
+    const line = changed.slice(0, changed.indexOf(code)).split("\n").length;
+    expect(lintTextSinks(changed, plainConfig)).toContainEqual(expect.objectContaining({ line, rule }));
+  });
+});
+
+
+describe("plain kit store declaration text", () => {
+  it.each(["TEXT_BRANDS", "AGENT_TEXT_BRANDS"])("pins the exact %s initializer", (name) => {
+    const source = readFileSync(plainConfig.file, "utf8");
+    const declaration = `var ${name} = new WeakSet();`;
+    const changed = source.replace(declaration, `var ${name} = replacement;`);
+    expect(lintTextSinks(changed, plainConfig)).toContainEqual(expect.objectContaining({ rule: `brand store must match the reviewed declaration: ${name}` }));
+  });
+});
+
+describe("location receivers and navigation window methods", () => {
+  const source = readFileSync(plainConfig.file, "utf8");
+  it.each([
+    ...["document", "top", "parent", "frames", "opener"].flatMap((receiver) => [
+      [`${receiver} location assign`, `${receiver}.location.assign(raw);`, "navigation method call: assign"],
+      [`${receiver} location replace`, `${receiver}.location.replace(raw);`, "navigation method call: replace"],
+    ]),
+    ["document location method read", "var navigate = document.location.assign;", "navigation method read: assign"],
+    ["document location method destructuring", "var { assign: navigate } = document.location;", "navigation method destructuring: assign"],
+    ["bare location alias", "var l = location; l.assign(raw);", "location reference must be a direct member receiver"],
+    ["window location alias", "var l = window.location; l.replace(raw);", "location reference must be a direct member receiver"],
+    ["location binding destructuring", "var { location: l } = window;", "location alias destructuring"],
+    ["location assignment destructuring", "({ location: l } = window);", "location alias destructuring"],
+    ["window variable open", "var w = window; w.open(raw);", "navigation method call: open"],
+    ["bare window open", "open(raw);", "navigation method call: open"],
+    ["bare open read", "var navigate = open;", "navigation method read: open"],
+    ...["top", "parent", "frames", "opener", "window.top", "window.parent", "window.frames", "window.opener"].map((receiver) => [
+      `${receiver} open call`, `${receiver}.open(raw);`, "navigation method call: open",
+    ]),
+    ["top open read", "var navigate = top.open;", "navigation method read: open"],
+    ["parent open destructuring", "var { open: navigate } = parent;", "navigation method destructuring: open"],
+  ])("rejects %s at its own Program line", (_name, code, rule) => {
+    const prefix = source + "\nfunction navigationReceiverProgram(raw) {\n";
+    expect(lintTextSinks(prefix + code + "\n}", plainConfig)).toContainEqual(expect.objectContaining({ line: prefix.split("\n").length, rule }));
+  });
+});
+
+describe("namespace location and Intl intrinsic policy", () => {
+  const source = readFileSync(plainConfig.file, "utf8");
+  it.each([
+    ["window location assignment method", "window.location.assign(raw);", "navigation method call: assign"],
+    ["Intl formatter prototype write", "Intl.NumberFormat.prototype.format = replacement;", "intrinsic target write"],
+  ])("rejects %s at its own Program line", (_name, code, rule) => {
+    const prefix = source + "\nfunction namespacePolicyProgram(raw, replacement) {\n";
+    expect(lintTextSinks(prefix + code + "\n}", plainConfig)).toContainEqual(expect.objectContaining({ line: prefix.split("\n").length, rule }));
+  });
+});
+
+
+describe("stylesheet media list policy", () => {
+  const source = readFileSync(plainConfig.file, "utf8");
+  it.each([
+    ["media list text write", "node.sheet.media.mediaText = raw;", "stylesheet state write: mediaText"],
+    ["media list append", "node.sheet.media.appendMedium(raw);", "named text API call: appendMedium"],
+    ["media list deletion", "node.sheet.media.deleteMedium(raw);", "named text API call: deleteMedium"],
+  ])("rejects %s at its own Program line", (_name, code, rule) => {
+    const prefix = source + "\nfunction mediaListPolicyProgram(node, raw) {\n";
+    expect(lintTextSinks(prefix + code + "\n}", plainConfig)).toContainEqual(expect.objectContaining({ line: prefix.split("\n").length, rule }));
+  });
+});

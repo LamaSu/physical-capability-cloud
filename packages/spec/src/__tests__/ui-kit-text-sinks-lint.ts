@@ -83,6 +83,10 @@ const HTML_METHODS = new Set(["insertAdjacentHTML", "write", "writeln", "setHTML
 const PARSER_METHODS = new Set(["createContextualFragment", "parseFromString", "parseHTMLUnsafe"]);
 const NAMED_TEXT_METHODS = new Set(["setRangeText", "setCustomValidity", "insertRule", "replaceSync", "fillText", "strokeText", "execCommand", "setNamedItem", "setProperty", "addRule", "replaceState", "pushState", "deleteRule", "removeRule"]);
 const FORBIDDEN_METHODS = new Set([...NODE_OR_TEXT_METHODS, ...TEXT_INSERTION_METHODS, ...HTML_METHODS, ...PARSER_METHODS, ...NAMED_TEXT_METHODS, "replace", "setAttribute", "setAttributeNS", "setAttributeNode", "remove"]);
+for (const method of ["appendMedium", "deleteMedium"]) {
+  NAMED_TEXT_METHODS.add(method);
+  FORBIDDEN_METHODS.add(method);
+}
 const OBJECT_REFLECTION_METHODS = new Set(["defineProperty", "defineProperties", "setPrototypeOf", "getOwnPropertyDescriptor", "getOwnPropertyDescriptors"]);
 const SETTER_METHODS = new Set(["__defineSetter__", "__lookupSetter__"]);
 const TEXT_CONSTRUCTORS = new Set(["Text", "Option", "DOMParser", "Notification"]);
@@ -104,11 +108,16 @@ const GLOBAL_NAMESPACES = new Set(["window", "globalThis", "self"]);
 for (const name of ["parseInt", "parseFloat", "isNaN", "isFinite", "decodeURI", "decodeURIComponent", "encodeURI", "encodeURIComponent", "escape", "unescape", "eval", "Reflect", "Proxy"]) INTRINSIC_GLOBALS.add(name);
 const INTL_CONSTRUCTORS = new Set(["Collator", "DateTimeFormat", "DisplayNames", "DurationFormat", "ListFormat", "Locale", "NumberFormat", "PluralRules", "RelativeTimeFormat", "Segmenter"]);
 for (const property of ["href", "action", "formAction"]) TEXT_PROPERTIES.add(property);
+const NAVIGATION_WINDOW_NAMES = new Set(["top", "parent", "frames", "opener"]);
 const BRAND_CAPTURE_DECLARATIONS = [
   "var brandHas = Function.prototype.call.bind(WeakSet.prototype.has);",
   "var brandAdd = Function.prototype.call.bind(WeakSet.prototype.add);",
   "var freezeText = Object.freeze;",
 ];
+const BRAND_STORE_DECLARATIONS = new Map([
+  ["TEXT_BRANDS", "var TEXT_BRANDS = new WeakSet();"],
+  ["AGENT_TEXT_BRANDS", "var AGENT_TEXT_BRANDS = new WeakSet();"],
+]);
 const BRAND_OWNER_DECLARATIONS = new Map<string, string>([
   ["mintText","function mintText(t) {\n    if (typeof t !== 'string') { window.__PCC_UI_TEXT_VIOLATIONS__++; t = '—'; }\n    var text = freezeText({ t: t });\n    brandAdd(TEXT_BRANDS, text);\n    return text;\n  }"],
   ["isKitText","function isKitText(text) { return !!text && typeof text === 'object' && brandHas(TEXT_BRANDS, text); }"],
@@ -462,6 +471,13 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
   }
   const brandCaptureBindings = new Map<string, ts.Node>();
   for (const statement of exactCaptureStatements) if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations) if (ts.isIdentifier(declaration.name)) brandCaptureBindings.set(declaration.name.text, declaration);
+  const brandStoreBindings = new Set<ts.Node>();
+  if (isPlainKit) for (const [name, text] of BRAND_STORE_DECLARATIONS) {
+    const statements = moduleBody?.statements.filter((statement) => normalizedText(statement, file) === text) ?? [];
+    const statement = statements.length === 1 ? statements[0] : undefined;
+    if (statement && ts.isVariableStatement(statement)) brandStoreBindings.add(statement.declarationList.declarations[0]);
+    else report(statements[1] ?? moduleBody ?? file, `brand store must match the reviewed declaration: ${name}`);
+  }
   const isCapturedFunction = (node: ts.Node): boolean => {
     if (!isPlainKit || !ts.isIdentifier(node) || node.text !== "Function" || !isValueIdentifier(node)) return false;
     for (let ancestor: ts.Node | undefined = node.parent; ancestor && ancestor !== moduleBody; ancestor = ancestor.parent) if (exactCaptureStatements.has(ancestor)) return true;
@@ -524,6 +540,7 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
   const checkIntrinsicTarget = (target: ts.Node): void => {
     target = unwrap(target);
     const state = memberName(target);
+    if (state === "mediaText") report(target, "stylesheet state write: mediaText");
     if ((state === "media" || state === "disabled") && !isControlDisabledWrite(target)) report(target, `stylesheet state write: ${state}`);
     if (ts.isObjectLiteralExpression(target)) {
       for (const property of target.properties) {
@@ -543,11 +560,20 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
   };
   const navigationReceiver = (node: ts.Node, kind: "location" | "window"): boolean => {
     node = unwrap(node);
+    if (kind === "location" && isBuiltinReference(node, "location")) return true;
+    if (kind === "window" && ts.isIdentifier(node) && NAVIGATION_WINDOW_NAMES.has(node.text) && !resolveBinding(node, node.text)) return true;
+    if (kind === "window" && (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && NAVIGATION_WINDOW_NAMES.has(memberName(node) ?? "") && navigationReceiver(node.expression, "window")) return true;
+    if (kind === "window" && ts.isIdentifier(node)) {
+      const bindings = resolveBinding(node, node.text) ?? [];
+      const binding = bindings.length === 1 ? bindings[0] : undefined;
+      if (binding && ts.isVariableDeclaration(binding) && binding.initializer && globalNamespace(binding.initializer)) return true;
+    }
     if (kind === "window") return globalNamespace(node);
     return (ts.isIdentifier(node) && node.text === "location" && !resolveBinding(node, "location")) || ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && memberName(node) === "location" && globalNamespace(node.expression));
   };
   const navigationMember = (node: ts.Node): string | undefined => {
     node = calledExpression(node);
+    if (ts.isIdentifier(node) && node.text === "open" && !resolveBinding(node, "open")) return "open";
     if (!(ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))) return;
     const name = memberName(node);
     return ((name === "assign" || name === "replace") && navigationReceiver(node.expression, "location")) || (name === "open" && navigationReceiver(node.expression, "window")) ? name : undefined;
@@ -601,6 +627,15 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
     ts.forEachChild(node, findReassignments);
   };
   findReassignments(file);
+  const moduleFunctionBindings = new Set<ts.Node>();
+  if (isPlainKit && moduleBody) for (const declaration of moduleBody.statements) {
+    if (!ts.isFunctionDeclaration(declaration) || !declaration.name) continue;
+    moduleFunctionBindings.add(declaration);
+    const bindings = resolveBinding(declaration, declaration.name.text) ?? [];
+    if (bindings.length !== 1 || bindings[0] !== declaration) {
+      for (const binding of bindings.filter((binding) => binding !== declaration)) report(binding, `module function binding must have exactly one declaration: ${declaration.name.text}`);
+    }
+  }
   const usedComputedAllowances = new Set<TextComputedWriteAllowance>();
   const computedAllowances = config.allowedComputedWrites ?? [];
   const allowanceKeys = new Set<string>();
@@ -739,6 +774,11 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
       if ((isValueIdentifier(node) || declarationName) && (resolveBinding(node, node.text) ?? []).includes(capture) && node.parent !== capture && !brandOwners.has(nearestFunction(node) as ts.Node)) report(node, `brand capture reference outside reviewed owner: ${node.text}`);
     }
 
+    if (isPlainKit && ts.isIdentifier(node)) {
+      const declarationName = (ts.isVariableDeclaration(node.parent) || ts.isFunctionDeclaration(node.parent) || ts.isParameter(node.parent) || ts.isBindingElement(node.parent)) && node.parent.name === node;
+      if (BRAND_STORE_DECLARATIONS.has(node.text) && declarationName && !brandStoreBindings.has(node.parent) && !brandOwners.has(nearestFunction(node) as ts.Node)) report(node, `brand store reference outside reviewed owner: ${node.text}`);
+      if (isReassignmentIdentifier(node) && (resolveBinding(node, node.text) ?? []).some((binding) => moduleFunctionBindings.has(binding) && reassignedBindings.has(binding))) report(node, `module function binding must not be written: ${node.text}`);
+    }
     if (ts.isIdentifier(node) && isValueIdentifier(node) && isPlainKit && ["TEXT_BRANDS", "AGENT_TEXT_BRANDS"].includes(node.text) && !brandOwners.has(nearestFunction(node) as ts.Node)) report(node, `brand store reference outside reviewed owner: ${node.text}`);
     if ((ts.isIdentifier(node) && isValueIdentifier(node) || ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && intrinsicObject(node) && !receiverOnly(node)) report(node, "intrinsic reference must be a direct receiver");
     if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) checkIntrinsicTarget(node.left);
@@ -824,16 +864,21 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
     if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
       const method = memberName(node);
       if (method && NAVIGATION_METHODS.has(method) && !isDirectCallTarget(node)) report(node, `forbidden method read: ${method}`);
+      if (method === "location" && !isMemberReceiver(node)) report(node, "location reference must be a direct member receiver");
       if (method === "history" && !isMemberReceiver(node)) report(node, "history reference must be a direct member receiver");
     }
+    if (ts.isIdentifier(node) && node.text === "open" && isValueIdentifier(node) && !resolveBinding(node, "open") && !isDirectCallTarget(node)) report(node, "navigation method read: open");
+    if (ts.isIdentifier(node) && node.text === "location" && isValueIdentifier(node) && !isMemberReceiver(node)) report(node, "location reference must be a direct member receiver");
     if (ts.isIdentifier(node) && node.text === "history" && isValueIdentifier(node) && !isMemberReceiver(node)) report(node, "history reference must be a direct member receiver");
     if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent)) {
       const name = literalName(node.propertyName ?? node.name);
+      if (name === "location") report(node, "location alias destructuring");
       if (name === "history") report(node, "history alias destructuring");
       if (name && NAVIGATION_METHODS.has(name)) report(node, `forbidden method destructuring: ${name}`);
     }
     if (ts.isPropertyAssignment(node) && ts.isObjectLiteralExpression(node.parent) && ts.isBinaryExpression(node.parent.parent) && node.parent.parent.left === node.parent) {
       const name = literalName(node.name);
+      if (name === "location") report(node, "location alias destructuring");
       if (name === "history") report(node, "history alias destructuring");
       if (name && NAVIGATION_METHODS.has(name)) report(node, `forbidden method destructuring: ${name}`);
     }

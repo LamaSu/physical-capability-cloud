@@ -1,10 +1,6 @@
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { beforeAll, describe, expect, it } from "vitest";
-import { LIST_PROFILES } from "../mcp/dashboard-ir.js";
-import { listFieldLabel, UNAVAILABLE } from "../mcp/dashboard-ir-renderer.js";
 import { lintTextSinks } from "../../../spec/src/__tests__/ui-kit-text-sinks-lint.js";
 
 import {
@@ -45,6 +41,7 @@ describe("IR text guard Program shard 1", () => {
       const findings = mutationAudits.get(mutation.name)!.findings.filter((finding) => finding.line >= mutationLines.get(mutation.name)!.line);
       return { name: mutation.name, guard: findings.map(({ rule, detail }) => ({ rule, detail })), node: codes[0], browser: codes[1], lint: lintTextSinks(mutation.code, { file: path, scriptKind: ts.ScriptKind.TS, sinks: [] }).map((issue) => issue.rule) };
     });
+    expect(rows).toHaveLength(GUARD_SHARDS.flat().filter((mutation) => mutation.name.startsWith("N5")).length);
     console.log("N5-ROUTE-INVENTORY", JSON.stringify(rows));
     // Opaque objects make some former string-widening routes fail tsc before
     // runtime. Keep every Program and still require its guard finding above.
