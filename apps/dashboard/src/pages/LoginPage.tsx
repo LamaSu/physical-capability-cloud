@@ -39,7 +39,7 @@ export function LoginPage() {
                 Physical Capability Cloud
               </h1>
               <p className="text-xs text-white/30">
-                Enter your API key to access the operator dashboard
+                Sign in with your wallet or an API key to continue.
               </p>
             </div>
 
@@ -96,10 +96,7 @@ export function LoginPage() {
             {/* Help text */}
             <div className="text-center">
               <p className="text-[10px] text-white/20">
-                API keys are provisioned via the gateway API.{" "}
-                <span className="text-white/30">
-                  POST /api/auth/keys to create one.
-                </span>
+                API keys are provisioned via the gateway API.
               </p>
             </div>
           </form>
