@@ -15,6 +15,7 @@ import {
   formatOperatorPrincipalId, principalTupleWord,
   type SubjectBinding, type SubjectBlockFields,
 } from "@pcc/spec";
+import { DRY_RUN_UNIT_TESTNET_V1 } from "@pcc/spec/funding";
 import { main } from "../src/cli.js";
 import { generateHostKeys } from "../src/keygen.js";
 import { loadHostTerms, loadJobPolicyInput, PolicyJsonError } from "../src/policy-json.js";
@@ -161,7 +162,72 @@ async function fixture() {
   return { root, generated, configFile, termsFile, inputFile, outputFile, argv, input, terms, commitments };
 }
 
+async function dryRunFixture(reclaimSecondsShort = 0n) {
+  const current = await fixture();
+  const p = DRY_RUN_UNIT_TESTNET_V1;
+  const creation = BigInt(Math.floor(Date.now() / 1000));
+  Object.assign(current.terms, {
+    chainId: p.chainId, reclaimMinSeconds: 6_000, reclaimMaxSeconds: 7_800,
+    maxAcceptanceSeconds: Number(p.maxAcceptanceSeconds), settlementToken: p.usdc,
+    allowedRequiredTiers: [p.requiredTier], maxFeeBps: p.feeBps, allowedFeeRecipients: [p.feeRecipient],
+    subjectPins: { committedProgramHash: p.committedProgramHash },
+  });
+  const original = current.input.units[0]!;
+  const unit = {
+    ...buildUnitConfig({
+      milestoneIndex: original.milestoneIndex, stepId: original.stepId, requiredTier: p.requiredTier,
+      g: p.g, feeBps: p.feeBps, feeRecipient: p.feeRecipient,
+      reclaimAt: creation + p.reclaimDelaySeconds - reclaimSecondsShort,
+      compositionSchemaVersion: p.compositionSchemaVersion, compositionRoot: p.compositionRoot,
+      payouts: [{ recipient: current.terms.operatorPayoutRecipient, amount: p.n }],
+    }),
+    requestedTier: p.requestedTier,
+  };
+  current.input.units = [unit];
+  Object.assign(current.input.policy, {
+    chainId: BigInt(p.chainId), expiry: creation + p.maxAcceptanceSeconds,
+    termsHash: computeTermsHash({
+      token: p.usdc, assuranceTier: p.requiredTier,
+      milestones: [{ milestoneIndex: unit.milestoneIndex, stepId: unit.stepId, amount: unit.g, deadline: unit.reclaimAt }],
+    }),
+  });
+  Object.assign(current.input.subjectBlock, p.zeroSubjectFields, {
+    committedProgramHash: p.committedProgramHash, integrityGrade: p.integrityGrade,
+  });
+  current.input.bindings = [...p.bindings];
+  current.commitments = bindAccepted(current.input);
+  bindEscrow(current.input);
+  await writeFile(current.termsFile, json(current.terms));
+  await writeFile(current.inputFile, json(current.input));
+  return current;
+}
+
 describe("print-host sign-policy CLI", () => {
+  it("signs DRY_RUN_UNIT_TESTNET_V1 end to end on Base Sepolia", async () => {
+    const current = await dryRunFixture();
+    const captured = capture();
+    const code = await main(current.argv, captured.io);
+    expect(captured.output()).toEqual({ stdout: "", stderr: "" });
+    expect(code).toBe(0);
+    const output = JSON.parse(await readFile(current.outputFile, "utf8"));
+    expect(output.chainId).toBe(DRY_RUN_UNIT_TESTNET_V1.chainId);
+    expect(output.acceptanceDigest).toBe(acceptanceDigest(
+      domainSeparator(current.input.policy.chainId, current.input.policy.escrow), jobPolicyHash(current.input.policy),
+    ));
+    expect(await recoverAddress({ hash: output.acceptanceDigest, signature: output.signature }))
+      .toBe(current.generated.identity.operatorAddress);
+  });
+
+  it("refuses the dry-run unit one second below the operator's 6000-second floor with reclaim_too_soon", async () => {
+    const current = await dryRunFixture(1n);
+    expect(current.input.units[0]!.reclaimAt)
+      .toBe(current.input.policy.expiry + BigInt(current.terms.reclaimMinSeconds) - 1n);
+    const captured = capture();
+    expect(await main(current.argv, captured.io)).toBe(1);
+    expect(captured.output()).toEqual({ stdout: "", stderr: "reclaim_too_soon\n" });
+    await expect(stat(current.outputFile)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("writes the public acceptance fields and three producer commitments at mode 0644 with compiler digest parity", async () => {
     const current = await fixture();
     // Vitest workers cannot change process.umask. Force the restrictive creation
@@ -405,7 +471,7 @@ describe("print-host sign-policy CLI", () => {
     ["numeric maxPassThrough", (value) => { value.maxPassThrough = 0; }],
     ["negative maxPassThrough", (value) => { value.maxPassThrough = "-1"; }],
     ["operator payout recipient outside the allowlist", (value) => { value.operatorPayoutRecipient = address("aa"); }],
-    ["reclaim minimum below the protocol minimum", (value) => { value.reclaimMinSeconds = 863999; }],
+    ["Base Sepolia reclaim minimum of 4499", (value) => { value.reclaimMinSeconds = 4_499; }],
     ["reclaim maximum above the protocol maximum", (value) => { value.reclaimMaxSeconds = 31536001; }],
     ["empty allowedPayoutRecipients", (value) => { value.allowedPayoutRecipients = []; }],
     ["duplicate payout recipients differing only in case", (value) => {
@@ -420,6 +486,20 @@ describe("print-host sign-policy CLI", () => {
     const captured = capture();
     expect(await main(current.argv, captured.io)).toBe(1);
     expect(captured.output()).toEqual({ stdout: "", stderr: "bad_terms\n" });
+  });
+
+  it("strictly refuses reclaim minimum below the protocol minimum", async () => {
+    const current = await fixture();
+    current.terms.chainId = 31337;
+    current.terms.reclaimMinSeconds = 863999;
+    await writeFile(current.termsFile, json(current.terms));
+    const config = JSON.parse(await readFile(current.configFile, "utf8"));
+    config.chain.chainId = 31337;
+    await writeFile(current.configFile, json(config));
+    const captured = capture();
+    expect(await main(current.argv, captured.io)).toBe(1);
+    expect(captured.output()).toEqual({ stdout: "", stderr: "bad_terms\n" });
+    await expect(stat(current.outputFile)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("discards JSON parser details and input paths", async () => {
@@ -584,6 +664,13 @@ describe("policy JSON file boundaries", () => {
     const current = await fixture();
     expect((await loadHostTerms(current.termsFile)).reclaimMinSeconds).toBe(864000);
     expect((await loadHostTerms(current.termsFile)).reclaimMaxSeconds).toBe(31536000);
+  });
+
+  it("loads the Base Sepolia reclaim minimum of 4500 in terms JSON", async () => {
+    const current = await fixture();
+    current.terms.reclaimMinSeconds = 4_500;
+    await writeFile(current.termsFile, json(current.terms));
+    expect((await loadHostTerms(current.termsFile)).reclaimMinSeconds).toBe(4_500);
   });
 
   it("checks the terms owner and default owner without exposing a path", async () => {

@@ -92,7 +92,8 @@ total pass-through is the sum of each unit's `n` minus that operator amount, and
 must be at most `maxPassThrough`. A CARRIER unit paying only the treasury counts
 its entire `n`; the cap applies across the policy, including all its units.
 Other scalar limits are integer numbers. `reclaimMinSeconds` must be at least
-864000 (10 days), and `reclaimMaxSeconds` at most 31536000 (365 days).
+4500 on Base Sepolia (84532) and 864000 (10 days) on a local chain (31337), and
+`reclaimMaxSeconds` at most 31536000 (365 days).
 The file also requires a valid non-zero address `settlementToken` and a
 `subjectPins` object. A `termsHash` field in a terms file is refused with `bad_terms`.
 On chain 84532, `settlementToken` must equal Base Sepolia USDC
