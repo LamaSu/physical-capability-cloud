@@ -31,38 +31,12 @@
  * validates such targets.
  */
 
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import { getRepos } from "../db.js";
+import { requestActor, sameEvmAddress } from "../services/operator-identity.js";
 import { serializeAvailability, type AvailabilityRecord } from "./operator-channels.js";
-
-const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
-
-type Actor = { kind: "siwe"; address: string } | { kind: "api-key" } | { kind: "none" };
-
-/**
- * Who authenticated this request, as api-gate recorded it: an API key sets
- * apiKeyId (and copies the key's self-declared operatorId into userId); a SIWE
- * session sets only userId, the address the wallet signature proved.
- */
-function requestActor(req: FastifyRequest): Actor {
-  const r = req as unknown as { apiKeyId?: unknown; userId?: unknown };
-  if (typeof r.apiKeyId === "string" && r.apiKeyId !== "") return { kind: "api-key" };
-  if (typeof r.userId === "string" && r.userId !== "") return { kind: "siwe", address: r.userId };
-  return { kind: "none" };
-}
-
-/** Two EVM addresses are the same account: both well-formed, hex compared case-insensitively (ASCII only). */
-function sameEvmAddress(a: unknown, b: unknown): boolean {
-  return (
-    typeof a === "string" &&
-    typeof b === "string" &&
-    EVM_ADDRESS.test(a) &&
-    EVM_ADDRESS.test(b) &&
-    a.toLowerCase() === b.toLowerCase()
-  );
-}
 
 /** True when the runtime's IANA time-zone database knows the zone. */
 function isKnownTimezone(tz: string): boolean {
