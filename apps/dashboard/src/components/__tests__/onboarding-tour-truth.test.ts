@@ -85,7 +85,13 @@ describe("onboarding tour and login copy", () => {
       status: "roadmap",
       match: "Every job that uses your work\n          pays you",
     });
-    for (const text of ["Your wallet (this is where you'll get paid)", "It pays contributors automatically."]) {
+    for (const text of [
+      "Your wallet (this is where you'll get paid)",
+      "It pays contributors automatically.",
+      "When the job settles, the smart contract sends\n          your cut directly to the wallet above.",
+      "Get paid every time\n          your work is used.",
+      "We pay you automatically.",
+    ]) {
       expect(findClaimViolations(text).map((violation) => violation.id), text)
         .toContain("automatic-contributor-payout");
     }
