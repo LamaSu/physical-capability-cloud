@@ -967,7 +967,11 @@
       if (typeof raw === 'string' && PLAIN_ID_RE.test(raw)) return mintText(t);
       return isProseClaim(t) ? WITHHELD_FIELD : kitText('unrecognised value');
     }
-    if (sourceKind === 'name') return isProseClaim(t) ? nameText(raw) : mintText(t);
+    if (sourceKind === 'name') {
+      if (isProseClaim(t)) return nameText(raw);
+      if (!CLAIM_DETECTOR || CLAIM_DETECTOR.identifier(t)) return WITHHELD_FIELD;
+      return mintText(t);
+    }
     if (verified || t === '') return mintText(t);
     return mintText('reported: ' + t + (money ? UNCONFIRMED_SUFFIX : ''));
   }
@@ -2307,8 +2311,9 @@
       var claimText = function (role, valueText) { return joinText(reporter, kitText(' reports '), role, kitText(': '), valueText); };
       var econ = (e.economics && typeof e.economics === 'object') ? e.economics : {};
       var refunded = statePin !== null && rec[0] === 'st-refunded';
+      var omitParties = statePin !== null && (rec[0] === 'st-refunded' || rec[2] === 'REFUND_ALLOCATED' || rec[2] === 'allocated');
       var amtRow = el('div', 'pcc-receipt-amount pcc-tnum');
-      if (refunded) amtRow.appendChild(el('span', 'pcc-receipt-cur', kitText('refunded amount')));
+      if (refunded) amtRow.appendChild(el('span', 'pcc-receipt-cur', kitText('refunded amount: ')));
       if (vnext) {
         // economics.amount is in the token's BASE units: never through fmtUsd, never with an invented currency.
         if (econ.amount == null) amtRow.appendChild(el('span', 'pcc-receipt-num pcc-muted', kitText('amount not reported')));
@@ -2328,11 +2333,11 @@
       }
       wrap._body.appendChild(amtRow);
       // R12 r2 B: a party is a bare chain fact ONLY on a live, pinned, readable V-next read, where the payer->payee
-      // layout uses economics.recipient. A refund establishes no recipient and paints no party line.
+      // layout uses economics.recipient. A refund or unknown allocation direction paints no party line.
       // The settlement read carries no payer, so a payer in its body is a claim even there. Every other
       // receipt lists its parties as claims naming their source, never laid out as a payer->payee payment.
       var payer = e.payer || e.funder;
-      if (statePin && !refunded) {
+      if (statePin && !omitParties) {
         var pay = el('div', 'pcc-receipt-parties');
         pay.appendChild(payer ? el('span', 'pcc-mono pcc-receipt-claim', claimText(kitText('payer'), partyText(payer))) : el('span', 'pcc-mono', kitText('payer not reported')));
         pay.appendChild(el('span', 'pcc-arrow', kitText('→')));

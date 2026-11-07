@@ -2571,6 +2571,20 @@ describe("R12 r2d F1 (lane review, MEDIUM): a name that states money or verifica
   const REPRO_ROW = r2dEsc({ status: "funded", name: "Paid in full - verified $250", payeeName: "Payment received" });
   const REPRO_REC = r2dEsc({ status: "funded", name: "Paid in full - verified $250", displayName: "250 USDC settled", payeeName: "withheld: stated money or verification" });
 
+  it("P1 the rule-1 bound on the provider-name path: a claiming or bidi provider name stays withheld under 'bound record reports payee:'", async () => {
+    for (const mode of ["live", "snapshot"] as const) {
+      for (const [name, want] of [
+        ["Paid in full - verified $250", "bound record reports payee: name withheld: stated money or verification"],
+        ["Mill \u202EA", "bound record reports payee: withheld: stated money or verification"],
+        ["Mill A", "bound record reports payee: Mill A"],
+      ] as const) {
+        await r2dPaint([{ kind: "approval", binding: { path: "/api/jobs/j1" }, approve: { method: "POST", path: "/api/feedback" } }],
+          { "/api/jobs/j1": { id: "j1", provider: { name } } }, mode);
+        expect(r2dTexts(".pcc-approval-line .pcc-mono"), mode + " " + name).toEqual([want]);
+      }
+    }
+  });
+
   it("the lane review's repro (live and snapshot): on money data a list's title and meta and a metric naming money or verification read 'name withheld: stated money or verification', never the name attributed", async () => {
     for (const mode of ["live", "snapshot"] as const) {
       await r2dPaint([r2dList("/api/escrow", "name", ["payeeName"])], { "/api/escrow": [REPRO_ROW] }, mode);
@@ -3045,6 +3059,58 @@ describe("settlement reads use unqueried sources and route-specific attribution"
       expect.soft(document.querySelector(".pcc-pin-ref")).not.toBeNull();
     });
   }
+
+  for (const [route, path, body] of [
+    ["lifecycle", R2_LC, r2Lifecycle(7, { economics: ECON })],
+    ["receipt", R2_RC, r2Receipt(7, { unitState: 7, economics: ECON })],
+  ] as const) {
+    it(`pinned ${route} refund allocation omits the payment arrow and recipient`, async () => {
+      await r2dPaint([{ kind: "receipt", binding: { path } }], { [path]: body }, "live");
+      expect.soft(document.querySelector(".pcc-receipt-rail")!.textContent).toContain("refund decided - payer not yet refunded");
+      expect.soft(document.querySelector(".pcc-pin-ref")).not.toBeNull();
+      expect.soft(document.querySelector(".pcc-arrow")).toBeNull();
+      expect.soft(document.querySelector(".pcc-receipt-parties")).toBeNull();
+      expect.soft(document.querySelector(".pcc-win")!.textContent).not.toContain(PAYEE);
+      expect.soft(document.querySelector(".pcc-receipt-amount")!.textContent).not.toContain("refunded amount");
+    });
+  }
+
+  it("pinned allocated receipt without unitState omits the payment arrow and recipient", async () => {
+    await r2dPaint([{ kind: "receipt", binding: { path: R2_RC } }], { [R2_RC]: r2Receipt(7, { economics: ECON }) }, "live");
+    expect.soft(document.querySelector(".pcc-receipt-rail")!.textContent).toContain("outcome decided - not yet paid out");
+    expect.soft(document.querySelector(".pcc-pin-ref")).not.toBeNull();
+    expect.soft(document.querySelector(".pcc-arrow")).toBeNull();
+    expect.soft(document.querySelector(".pcc-receipt-parties")).toBeNull();
+    expect.soft(document.querySelector(".pcc-win")!.textContent).not.toContain(PAYEE);
+    expect.soft(document.querySelector(".pcc-receipt-amount")!.textContent).not.toContain("refunded amount");
+  });
+
+  for (const [route, path, body] of [
+    ["lifecycle", R2_LC, r2Lifecycle(6, { economics: ECON })],
+    ["receipt", R2_RC, r2Receipt(6, { unitState: 6, economics: ECON })],
+  ] as const) {
+    it(`pinned ${route} release allocation retains the payment arrow and recipient`, async () => {
+      await r2dPaint([{ kind: "receipt", binding: { path } }], { [path]: body }, "live");
+      expect.soft(document.querySelector(".pcc-receipt-rail")!.textContent).toContain("release decided - payout outstanding");
+      expect.soft(document.querySelector(".pcc-pin-ref")).not.toBeNull();
+      expect.soft(document.querySelector(".pcc-arrow")!.textContent).toBe("\u2192");
+      expect.soft(document.querySelector(".pcc-receipt-parties")!.textContent).toContain(PAYEE);
+      expect.soft(document.querySelector(".pcc-receipt-amount")!.textContent).not.toContain("refunded amount");
+    });
+  }
+
+  it("refunded amount label separates the label from the amount in textContent", async () => {
+    await r2dPaint([{ kind: "receipt", binding: { path: R2_RC } }], { [R2_RC]: r2Receipt(9, { economics: ECON }) }, "live");
+    expect(document.querySelector(".pcc-receipt-amount")!.textContent).toBe("refunded amount: 250000000 base units (decimals not reported)");
+  });
+
+  it("provider name matching the identifier claim rule is withheld in approval context", async () => {
+    for (const mode of ["live", "snapshot"] as const) {
+      await r2dPaint([{ kind: "approval", binding: { path: "/api/jobs/j1" }, approve: { method: "POST", path: "/api/feedback" } }],
+        { "/api/jobs/j1": { id: "j1", provider: { name: "Payment team: we build parts, then delivery is completed" } } }, mode);
+      expect.soft(r2dTexts(".pcc-approval-line .pcc-mono"), mode).toEqual(["bound record reports payee: withheld: stated money or verification"]);
+    }
+  });
 
   it("pinned refunded receipts label the refunded amount and omit the payment arrow and recipient, while released receipts retain the payee", async () => {
     await r2dPaint([{ kind: "receipt", binding: { path: R2_RC } }], { [R2_RC]: r2Receipt(9, { economics: ECON }) }, "live");
