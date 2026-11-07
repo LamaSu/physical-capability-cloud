@@ -13,9 +13,9 @@ Public beta: payments settle on a test network.
 Every capability in this paper carries one of two labels.
 
 - **Live** means it is in PCC's code today. The table at the end gives each live item's proof level on this scale: specified, implemented, integrated locally, deployed, observed successfully, observed under failure, repeatedly operated.
-- **Planned** means it is not built yet. A planned item says where PCC is going, not what it does today.
+- **Planned** means it is not built yet, or not yet working end to end. A planned item says where PCC is going, not what it does today.
 
-Where PCC does not guarantee something, this paper says so.
+This paper names the main things PCC does not guarantee.
 
 ---
 
@@ -23,7 +23,7 @@ Where PCC does not guarantee something, this paper says so.
 
 PCC is built to make physical work purchasable as a composable, verifiable obligation: specify an outcome, assemble the capabilities needed to produce it, agree on acceptance and payment, execute across organizations, and carry the evidence forward. That is the aim. Today, putting those steps together often needs a coordinator who understands each supplier's interfaces, reads their records, reconciles invoices and absorbs the failures between organizations.
 
-The unit PCC is built around is an agreed physical obligation: an executable acceptance rule, attributable evidence and a funded payment consequence. **Live:** each of the three pieces exists in PCC's code: committed acceptance programs, evidence signed by the executing kernel's key, and escrow units that release only against committed evidence. **Planned:** one such obligation run end to end on a real job, funded, executed, evidenced, verified and paid.
+The unit PCC is built around is an agreed physical obligation: an executable acceptance rule, attributable evidence and a funded payment consequence. **Live:** each of the three pieces exists in PCC's code: committed acceptance programs, evidence signed by the executing kernel's key, and escrow units that, above assurance tier 0, release only against committed evidence. **Planned:** one such obligation run end to end on a real job, funded, executed, evidenced, verified and paid.
 
 If this works, several things become practical. **Planned:**
 
@@ -56,11 +56,11 @@ This table lists requirements, not services PCC offers today. **Planned.**
 
 ## 2. How PCC works: two sides, each with its own agent
 
-PCC has two sides, and each reaches PCC through its own agent. Buyers' agents discover capabilities, compose plans and pay for work. Suppliers' agents onboard a lab, an operator or a device. **Live:** both entry points exist: an agent connection for buyers, and a step-by-step runbook that a supplier's coding agent follows.
+PCC has two sides, and each reaches PCC through its own agent. In PCC's design, buyers' agents discover capabilities, compose plans and pay for work. Suppliers' agents onboard a lab, an operator or a device. **Live:** both entry points exist: an agent connection for buyers, and a step-by-step runbook that a supplier's coding agent follows.
 
 In PCC's design, the buyer's agent authors the plan, and PCC's part is to check it, price it, fund it and settle it, not to write it. **Planned:** the route that accepts a plan the buyer's agent wrote.
 
-Buyers and operators bring their own agent and their own model. **Live:** PCC's execution, evidence and settlement path makes no model call. PCC's code does call a hosted model in a few assisting features: onboarding chat, document analysis, device identification and an older request-decomposition service. PCC's own hosted agent, described in section 4, also calls a hosted model.
+Buyers and operators bring their own agent and their own model. **Live:** PCC's execution, evidence and settlement path makes no model call. PCC's code does call a hosted model in some assisting features, such as onboarding chat, document analysis, device identification, an optional embedding search of the tool catalog and an older request-decomposition service. PCC's own hosted agent, described in section 4, also calls a hosted model.
 
 ---
 
@@ -70,7 +70,7 @@ Buyers and operators bring their own agent and their own model. **Live:** PCC's 
 
 **Live:**
 
-- Agents connect to PCC's MCP server at the path /mcp on PCC's gateway, capability.network. A separate, read-only MCP surface at /mcp/apps serves interface views.
+- Agents connect to PCC's MCP server at the path /mcp on PCC's gateway, capability.network. A separate, read-only MCP surface at /mcp/apps serves interface views; in production it serves them only when an app domain is configured.
 - The agent package at capability.network/agent-package.json gives any LLM agent PCC's tools, auth modes and worked examples in one file.
 - The API is published as an OpenAPI document at /openapi.json, and a documentation MCP server at /mcp/docs serves PCC's guides with a search tool.
 - An agent holding a PCC API key can search PCC's tool catalog by intent.
@@ -91,7 +91,7 @@ This paper gives no tool counts. The catalog changes, and a hand-kept number goe
 
 **Planned:** the buyer funds the job's escrow from its own wallet, as the payer on chain.
 
-**Live:** The buyer follows the money through settlement reads that report each settlement unit's lifecycle, receipt and provenance. Each read is pinned to a block (section 9).
+**Live:** PCC's code defines the settlement reads a buyer will follow the money through: each settlement unit's lifecycle, receipt and provenance, each pinned to a block (section 9). **Planned:** the chain reader behind them; until it lands, they answer 'not ready'.
 
 **Planned:** a watched acceptance run in which a fresh buyer agent goes from nothing to a quoted, composed plan.
 
@@ -172,11 +172,11 @@ Templates would let one operator's work serve many others. The plan is to pay th
 
 Section 1's limits apply here: a signed record shows which key signed it, not that it is true.
 
-**Live:** evidence that a PCC kernel emits for a job is signed with that kernel's registered key.
+**Live:** a PCC kernel can sign the evidence it emits for a job with that kernel's registered key.
 
-**Live:** acceptance is defined by committed programs: each program is identified by its hash, and an evidence bundle is checked against the program committed for its assurance tier.
+**Live:** acceptance is defined by committed programs: each program is identified by its hash and checked against the assurance tier it backs.
 
-**Live:** operators issue receipts for completed jobs.
+**Live:** when an operator submits a completed job's signed evidence package, PCC's gateway issues a signed receipt recording when it arrived.
 
 **Planned:** an independent oracle checks the evidence against the committed program and signs the verdict that releases or withholds payment.
 
@@ -190,9 +190,9 @@ Evidence that a machine accepted a command is not evidence that the output met t
 
 **Live:** a job's escrow funding can carry up to 16 settlement units, and each unit up to 16 payout legs. Each unit has its own required assurance tier, its own evidence gate and its own reclaim deadline.
 
-**Live:** a unit's funds are released only against the evidence its operator committed: on an attested verdict over that evidence, after the unit's challenge window, or, for a unit at assurance tier 0, on the buyer's own signed approval of it. Otherwise the buyer can reclaim the funds after the deadline. These rules are in the deployed contract; running a real job through them end to end is planned (section 1).
+**Live:** at assurance tier 1 and above, a unit's funds are released only against the evidence its operator committed, on an attested verdict over that evidence after the unit's challenge window. A unit at assurance tier 0 is released only on the buyer's own signed approval. Otherwise the buyer can reclaim the funds after the deadline. These rules are in the deployed contract; running a real job through them end to end is planned (section 1).
 
-**Live:** every money fact that PCC's settlement reads serve is a chain read pinned to a block. Each reply echoes the block number and hash, and a mismatch is refused, so anyone can re-check a reply against their own node.
+**Live:** PCC's settlement read routes are built so that every money fact comes from one chain read pinned to a block: each reply echoes the block number and hash, and a mismatch is refused. **Planned:** the chain reader behind them, so anyone can re-check a reply against their own node.
 
 **Planned:** every money display and receipt on screen shows its block reference, and nothing shows as paid before finality.
 
@@ -216,7 +216,7 @@ Evidence that a machine accepted a command is not evidence that the output met t
 
 **Live:** remote control of a device runs under an execution scope: a grant that names the allowed tools and sets a command budget, which the operator can revoke, with an audit trail.
 
-**Live:** an operator's emergency stop rejects the kernel's pending approvals and queued commands, so nothing queued before the stop runs after the resume.
+**Live:** an operator's emergency stop rejects the kernel's pending approvals and queued relay commands, so none of those runs after the resume. Queued jobs are held during the stop, not cancelled, and can start after the resume.
 
 Permission to spend money on a job does not make a command safe for a device or a site. **Planned:** safety controls at the point where commands are dispatched.
 
@@ -228,10 +228,10 @@ PCC's interface design, in the operator's words: "Operator interfaces are compil
 
 **Live:**
 
-- Every node in a rendered interface view comes from deterministic PCC code and a closed catalog, and carries a provenance class: authoritative, accepted, proposed, preference or ephemeral.
+- In PCC's closed render format, every node of a rendered view is chosen by deterministic PCC code from a closed catalog, and each data or prose node carries a provenance class: authoritative, accepted, proposed, preference or ephemeral.
 - A composed dashboard uses a closed set of window kinds: note, metric, capability, list, form, run, approval, receipt, chain and actions.
-- Interface views reach MCP hosts as MCP App views, and a reader on another origin gets only render fields, through a server-side projection.
-- Third-party and composed views are read-only: the only operation they can name is a request for a quote. Approvals and payments are confirmed on PCC's own pages.
+- Interface views reach MCP hosts as MCP App views (in production, only when an app domain is configured), and a reader on another origin gets only render fields, through a server-side projection.
+- Views inside a third-party host, composed ones included, are read-only: the only operation they can run is a request for a quote. Approvals and payments are confirmed on PCC's own pages.
 - A routine run makes no model call: it loads a stored interface, renders it and reads live state. PCC hosts no model to generate or render interfaces.
 
 **Planned:**
@@ -278,12 +278,12 @@ This table is generated from the claim list behind this paper, not kept by hand.
 | Capability | Status | Proof level |
 |---|---|---|
 | The aim: physical work as a composable, verifiable obligation | Planned | - |
-| The three pieces of an obligation: committed acceptance programs, kernel-signed evidence, evidence-gated escrow units | Live | implemented; deployed on a test network |
+| The three pieces of an obligation: committed acceptance programs, kernel-signed evidence, escrow units gated on evidence above tier 0 | Live | implemented; deployed on a test network |
 | One obligation run end to end on a real job | Planned | - |
 | Two entry points: an agent connection for buyers, a runbook for suppliers' coding agents | Live | implemented |
 | Accepting a plan the buyer's agent wrote | Planned | - |
 | No model call on the execution, evidence and settlement path | Live | implemented |
-| MCP server at /mcp and a read-only interface surface at /mcp/apps | Live | implemented |
+| MCP server at /mcp; read-only interface surface at /mcp/apps (in production, only with an app domain) | Live | implemented |
 | Agent package (tools, auth modes, examples) | Live | implemented |
 | OpenAPI document and documentation MCP server | Live | implemented |
 | Tool search by intent (with an API key) | Live | implemented |
@@ -293,7 +293,7 @@ This table is generated from the claim list behind this paper, not kept by hand.
 | Capability registry search and /discover | Live | implemented |
 | Price, negotiate, quote, commit and submit | Live | implemented |
 | Buyer funds escrow from its own wallet | Planned | - |
-| Settlement reads: lifecycle, receipt, provenance | Live | implemented |
+| Settlement read routes: lifecycle, receipt, provenance (the chain reader is planned) | Live | implemented (routes only) |
 | Watched acceptance runs (buyer and supplier) | Planned | - |
 | Joining produces an honestly described, safely executable, evidence-capable supplier | Planned | - |
 | Starter runbook for an operator's coding agent | Live | implemented |
@@ -320,14 +320,14 @@ This table is generated from the claim list behind this paper, not kept by hand.
 | Re-authenticated snapshots and evidence contracts | Planned | - |
 | Saved, shared and forked dashboards | Live | implemented |
 | Republishing an improved composition | Planned | - |
-| Kernel-signed evidence | Live | implemented |
-| Committed acceptance programs per tier | Live | implemented |
-| Operator receipts | Live | implemented |
+| Kernel signing of emitted evidence (available, not on every path) | Live | implemented |
+| Committed acceptance programs, checked against their tier | Live | implemented |
+| Gateway-signed receipts for submitted evidence packages | Live | implemented |
 | Independent oracle verdicts | Planned | - |
 | Settlement escrow on the Base Sepolia test network | Live | implemented; deployed on a test network |
 | Settlement units and payout legs | Live | implemented; deployed on a test network |
-| Release, buyer-approval and reclaim rules | Live | implemented; deployed on a test network |
-| Money facts as block-pinned chain reads | Live | implemented |
+| Release rules: evidence and verdict above tier 0, buyer approval at tier 0, reclaim | Live | implemented; deployed on a test network |
+| Block-pinned money facts in the settlement read routes (the chain reader is planned) | Live | implemented (routes only) |
 | Block references on every money display | Planned | - |
 | Multi-party legs | Planned | - |
 | PCC holds the vendor accounts | Planned | - |
@@ -337,12 +337,12 @@ This table is generated from the claim list behind this paper, not kept by hand.
 | Test-network funding of a linked wallet | Live | implemented |
 | Durable spending limits bound to a principal | Planned | - |
 | Execution scopes | Live | implemented |
-| Emergency stop clears queued commands | Live | implemented |
+| Emergency stop rejects pending approvals and queued relay commands; queued jobs are held | Live | implemented |
 | Safety controls at the dispatch point | Planned | - |
-| Closed catalog and provenance classes | Live | implemented |
+| Closed render format: closed catalog and provenance classes | Live | implemented |
 | Closed set of dashboard window kinds | Live | implemented |
-| MCP App views and the cross-origin projection | Live | implemented |
-| Read-only third-party views; one operation | Live | implemented |
+| MCP App views (in production, only with an app domain) and the cross-origin projection | Live | implemented |
+| Read-only views inside third-party hosts; one operation | Live | implemented |
 | No model call to load, render or generate interfaces | Live | implemented |
 | Style-locked trust surfaces | Planned | - |
 | Operator-published interfaces bound to identity | Planned | - |
