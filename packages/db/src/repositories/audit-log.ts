@@ -17,6 +17,7 @@ export class AuditLogRepository implements IAuditLogRepository {
     eventType?: string;
     actor?: string;
     resourceType?: string;
+    resourceId?: string;
     since?: string;
     limit?: number;
   }): AuditLogRow[] {
@@ -30,6 +31,9 @@ export class AuditLogRepository implements IAuditLogRepository {
     }
     if (opts.resourceType) {
       conditions.push(eq(auditLog.resourceType, opts.resourceType));
+    }
+    if (opts.resourceId) {
+      conditions.push(eq(auditLog.resourceId, opts.resourceId));
     }
     if (opts.since) {
       conditions.push(gte(auditLog.timestamp, opts.since));

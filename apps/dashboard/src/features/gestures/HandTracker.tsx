@@ -62,7 +62,7 @@ export function HandTracker() {
       await loadMediaPipe();
 
       // Access the global Hands class
-      const HandsClass = (window as any).Hands;
+      const HandsClass = window.Hands;
       if (!HandsClass) {
         throw new Error("MediaPipe Hands failed to load");
       }
@@ -94,7 +94,7 @@ export function HandTracker() {
       handsRef.current = hands;
 
       // Start camera
-      const CameraClass = (window as any).Camera;
+      const CameraClass = window.Camera;
       if (!CameraClass || !videoRef.current) {
         throw new Error("Camera utils failed to load");
       }

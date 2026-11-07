@@ -2,13 +2,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useParams } from "react-router-dom";
 import { GlassPanel, GlowBadge, cn } from "@pcc/ui";
 import { useUIStore } from "../../stores/ui-store.js";
-import { getAuthHeaders } from "../../stores/auth-store.js";
+import { authorizedFetch } from "../../lib/authorized-fetch.js";
+import { scopeErrorMessage } from "../../lib/scope-notice.js";
 import {
   ChatThread,
   type ChatMessage,
 } from "../../components/onboard/ChatThread.js";
-
-const API = (import.meta.env.VITE_PCC_URL ?? "") + "/api";
 
 /**
  * Operator agent dashboard — React port of navi v1
@@ -179,9 +178,7 @@ export function OperatorA2APage() {
     let cancelled = false;
     async function pollStatus() {
       try {
-        const res = await fetch(`${API}/onboard/${sessionId}/status`, {
-          headers: { ...getAuthHeaders() },
-        });
+        const res = await authorizedFetch(`/api/onboard/${sessionId}/status`);
         if (!res.ok || cancelled) return;
         const j = (await res.json()) as OnboardStatus;
         if (!cancelled) setStatus(j);
@@ -191,9 +188,7 @@ export function OperatorA2APage() {
     }
     async function loadLive() {
       try {
-        const res = await fetch(`${API}/onboard/${sessionId}/live-data`, {
-          headers: { ...getAuthHeaders() },
-        });
+        const res = await authorizedFetch(`/api/onboard/${sessionId}/live-data`);
         if (!res.ok || cancelled) return;
         const j = (await res.json()) as LiveData;
         if (!cancelled) setLiveData(j);
@@ -267,11 +262,10 @@ export function OperatorA2APage() {
         `Locking $${amount} USDC in MilestoneEscrow on Base Sepolia · funded from CDP wallet · escrow released on milestone evidence + verifier ATTESTED…`,
       );
       try {
-        const res = await fetch(`${API}/escrow/fund`, {
+        const res = await authorizedFetch("/api/escrow/fund", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            ...getAuthHeaders(),
           },
           body: JSON.stringify({
             sessionId,
@@ -294,7 +288,8 @@ export function OperatorA2APage() {
           // Failure is still informative; surface it as a chat message.
           pushMsg(
             "bot",
-            `Escrow lock failed (${res.status}). Try again, or check that wave2-alpha's gateway has /api/escrow/fund wired.`,
+            (await scopeErrorMessage(res, "/api/escrow/fund", "POST")) ??
+              `Escrow lock failed (${res.status}). Try again, or check that wave2-alpha's gateway has /api/escrow/fund wired.`,
           );
         }
       } catch (err) {

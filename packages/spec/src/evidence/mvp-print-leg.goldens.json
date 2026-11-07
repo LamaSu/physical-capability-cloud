@@ -1,0 +1,139 @@
+{
+  "schema": "pcc.evidence.mvp-print-leg-goldens/v1",
+  "description": "Goldens for the Thursday 10/15 PRINT unit at R5(a)'s print-leg tier, consumed by pcc-oracle task D and pcc-printhost's job inputs.",
+  "capabilityContractId": "pcc://capabilities/document-print-leg/v1",
+  "capabilityContractDigest": "sha256:e24f691b9dbe5fcb519782cc0d57ddfca2439f9d5841b76b5636cc6138e3d837",
+  "tierKey": "tier1",
+  "requiredTier": 1,
+  "program": {
+    "version": 1,
+    "schemaHash": "verification-program/v1",
+    "stages": [
+      {
+        "id": "print-ok",
+        "predicate": "event-present",
+        "eventType": "execution_completed"
+      },
+      {
+        "id": "print-not-failed",
+        "predicate": "event-absent",
+        "eventType": "execution_failed"
+      },
+      {
+        "id": "auth",
+        "predicate": "not-simulated"
+      }
+    ]
+  },
+  "programHash": "0x56c1897725442876a5b7adfde81b81c83b9ef09aade75aa3a81a911856330e4a",
+  "ladderDigest": "0x8d353c7ce7a41e60c1e6167ccd7a7fe0f66d7d031c3c8db45127b2c53b0cf14b",
+  "ladder": {
+    "version": 1,
+    "schemaHash": "tier-ladder/v1",
+    "capabilityContractId": "pcc://capabilities/document-print-leg/v1",
+    "capabilityContractDigest": "sha256:e24f691b9dbe5fcb519782cc0d57ddfca2439f9d5841b76b5636cc6138e3d837",
+    "tiers": [
+      {
+        "tier": 0,
+        "description": "The authenticated floor (evidence Q-E1): the operator's committed package declares the job (decl.self_attested), the bundle is signed by the unit's session key under the funded device key with every event bound to the unit and its challenge nonce, and the print started (execution_started). Tier 0 never releases on chain (Tier0NotEvidence); it gives a failed print a signed verdict.",
+        "requiredEventTypes": [
+          [
+            "execution_started"
+          ]
+        ],
+        "minimumEvents": 1,
+        "nonEventRequirements": [],
+        "primitives": [
+          {
+            "id": "decl.self_attested",
+            "bind": null,
+            "supporting": false,
+            "params": null
+          }
+        ]
+      },
+      {
+        "tier": 1,
+        "description": "The print-leg release tier: tier 0 plus the kernel-signed success receipt (execution_completed, receipt.kernel_signed). The committed program also requires execution_failed to be absent and no simulated event; event absence is a program predicate, never a CSD binding.",
+        "requiredEventTypes": [
+          [
+            "execution_completed"
+          ],
+          [
+            "execution_started"
+          ]
+        ],
+        "minimumEvents": 2,
+        "nonEventRequirements": [],
+        "primitives": [
+          {
+            "id": "receipt.kernel_signed",
+            "bind": "execution_completed",
+            "supporting": false,
+            "params": {
+              "capability": "document-printing"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "attestationSetRoot": "0xafe770b61a150099cc2ab8a2585d8ecb33bdf345de947d6c4cf49c625471f366",
+  "attestationSetRootDomain": "PCC:vnext:attestation-set:v1",
+  "attestationSetRootSelfCheck": [
+    {
+      "programHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "root": "0xfa5d8d6e62798ae6c9a812af6ebcb3a9e74b26bf2f7334911769b136ed2fd8f9"
+    },
+    {
+      "programHash": "0xabababababababababababababababababababababababababababababababab",
+      "root": "0x96c3e7c793a4bc2dda245ef16c490b408f5ee6aaf200b4008750eb93750d942a"
+    }
+  ],
+  "workProductRoot": "0x75325f8e90829d6e5d7c91479290dd711f3b7c314ab16fb147c3a7af5030c089",
+  "workProductRootTag": "PCC:vnext:work-product:none:v1",
+  "oracleVerifiedPrimitivesRequired": [
+    "receipt.kernel_signed"
+  ],
+  "oracleVerifiedPerRequest": [
+    "decl.self_attested"
+  ],
+  "achievedTier": [
+    {
+      "events": [
+        "execution_completed",
+        "execution_started"
+      ],
+      "tier": 1
+    },
+    {
+      "events": [
+        "execution_failed",
+        "execution_started"
+      ],
+      "tier": 0
+    },
+    {
+      "events": [
+        "execution_completed"
+      ],
+      "tier": null
+    },
+    {
+      "events": [],
+      "tier": null
+    }
+  ],
+  "definitions": {
+    "capabilityContractId": "packages/spec/src/csd/schema.ts: CsdSchema.parse (url)",
+    "capabilityContractDigest": "packages/spec/src/csd/capability-contract-identity.ts: computeContractDigest",
+    "programHash": "packages/spec/src/evidence/committed-program.ts: computeCommittedProgramHash",
+    "ladder": "packages/spec/src/evidence/tier-ladder.ts: compileTierLadder",
+    "ladderDigest": "packages/spec/src/evidence/tier-ladder.ts: computeTierLadderDigest",
+    "attestationSetRoot": "packages/spec/src/__tests__/mvp-print-leg.test.ts: emptyAttestationSetRoot (independent 128-byte ABI encoder)",
+    "attestationSetRootDomain": "@noble/hashes/sha3: keccak_256 (UTF-8 tag)",
+    "attestationSetRootSelfCheck": "packages/spec/src/__tests__/mvp-print-leg.test.ts: emptyAttestationSetRoot (D4 empty-set goldens)",
+    "workProductRoot": "@noble/hashes/sha3: keccak_256 (UTF-8 workProductRootTag)",
+    "achievedTier": "packages/spec/src/evidence/tier-ladder.ts: achievedTierFromEventTypes"
+  }
+}

@@ -214,8 +214,10 @@ def test_signing_refuses_real_hmac_fallback_key(monkeypatch):
     """
     import pcc_node.crypto as crypto_mod
 
-    monkeypatch.setattr(crypto_mod, "_HAS_NACL", False)
-    pub, sec = crypto_mod.generate_node_keys()  # HMAC fallback shape
+    # The legacy HMAC-fallback shape: crypto.py no longer makes such keys, but an
+    # old key file can still hold one.
+    sec = "5a" * 32
+    pub = hashlib.sha256(bytes.fromhex(sec)).hexdigest()
     # Confirm this really is the fallback shape: public == sha256(secret).
     assert pub == hashlib.sha256(bytes.fromhex(sec)).hexdigest()
 

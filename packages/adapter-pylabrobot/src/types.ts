@@ -55,6 +55,13 @@ export interface MachineAdapter {
   execute(command: MachineCommand): Promise<MachineCommandResult>;
   getProgress(): Promise<number>;
   onEvidence(callback: EvidenceCallback): void;
+  /**
+   * Resolves once the adapter has emitted every evidence event of the work it was given,
+   * and never while that work can still emit; it emits nothing for that work afterwards.
+   * Called again with no new work, it resolves at once. Required: the kernel's JobRunner
+   * refuses an adapter without it (kernel adapters/types.ts states the full contract).
+   */
+  quiesceEvidence(): Promise<void>;
   dispose(): Promise<void>;
 }
 

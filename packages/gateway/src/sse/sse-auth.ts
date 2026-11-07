@@ -12,7 +12,9 @@
  *   - falsy / unset                → auth is opt-in; all connections pass (backward compat)
  *
  * Sets req.userId / req.apiKeyId / req.operatorId as a side-effect when auth succeeds,
- * mirroring what api-gate.ts does for REST endpoints.
+ * mirroring what api-gate.ts does for REST endpoints. A SIWE session also sets
+ * req.provenWallet (its signed address), as WP-A's API gate does, so the job read gate can
+ * authorize a per-job stream; an API key sets none here.
  */
 
 import type { FastifyRequest } from "fastify";
@@ -47,6 +49,11 @@ export interface SSEAuthResult {
 // ---------------------------------------------------------------------------
 // Core resolver
 // ---------------------------------------------------------------------------
+
+/** A SIWE session's address is proven by its signature (the same rule as WP-A's API gate). */
+function setProvenWallet(req: FastifyRequest, address: string): void {
+  (req as FastifyRequest & { provenWallet?: string | null }).provenWallet = address.toLowerCase();
+}
 
 /**
  * Resolve SSE authentication from the incoming request.
@@ -83,6 +90,7 @@ export async function resolveSSEAuth(req: FastifyRequest): Promise<SSEAuthResult
     const session = resolveSession(syntheticReq);
     if (session) {
       req.userId = session.address;
+      setProvenWallet(req, session.address);
       return { authenticated: true, userId: session.address };
     }
   }
@@ -92,6 +100,7 @@ export async function resolveSSEAuth(req: FastifyRequest): Promise<SSEAuthResult
   const session = resolveSession(req);
   if (session) {
     req.userId = session.address;
+    setProvenWallet(req, session.address);
     return { authenticated: true, userId: session.address };
   }
 

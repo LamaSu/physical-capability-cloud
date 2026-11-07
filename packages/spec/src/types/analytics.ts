@@ -35,8 +35,22 @@ export interface AnalyticsEvent {
   timestamp: Timestamp;
   /** Actor who caused the event */
   actorId: string;
-  /** Actor type */
-  actorType: "operator" | "requestor" | "verifier" | "agent" | "system";
+  /**
+   * Actor type. Two values are set only by first-party intent capture (R44):
+   * "authenticated_operator" = a PROVEN wallet (an /a2a SIWE session, or the
+   * wallet the gateway binds on the request), the only one @pcc/demand-intel
+   * counts as verified breadth;
+   * "authenticated_key" = an API-key holder whose identity is self-asserted at
+   * provisioning, counted as volume only.
+   */
+  actorType:
+    | "operator"
+    | "requestor"
+    | "verifier"
+    | "agent"
+    | "system"
+    | "authenticated_operator"
+    | "authenticated_key";
   /** Resource affected */
   resourceType: string;
   resourceId: Id;

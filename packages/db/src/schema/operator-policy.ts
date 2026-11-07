@@ -105,10 +105,14 @@ export const toolCallRelay = sqliteTable("tool_call_relay", {
   kernelId: text("kernel_id").notNull(),
   toolName: text("tool_name").notNull(),
   toolArgs: text("tool_args", { mode: "json" }).notNull().$type<Record<string, unknown>>(),
-  status: text("status").notNull().default("pending"), // pending | claimed | completed | failed | rejected
+  status: text("status").notNull().default("pending"), // pending | claimed | executing | completed | failed | rejected
   result: text("result"),
   error: text("error"),
   createdAt: text("created_at").notNull(),
   claimedAt: text("claimed_at"),
   completedAt: text("completed_at"),
+  /** SHA-256 hex of the claim token the poll handed to a lease-capable executor (N4b-gw r7 F3). */
+  claimTokenHash: text("claim_token_hash"),
+  /** When the executor's start lease moved the call claimed -> executing. */
+  startedAt: text("started_at"),
 });

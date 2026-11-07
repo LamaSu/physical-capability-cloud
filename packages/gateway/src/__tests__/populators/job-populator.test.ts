@@ -203,11 +203,26 @@ describe("populateJobDetailDTO()", () => {
     expect(verifiedEvent).toBeDefined();
   });
 
-  it("timeline includes settled event for status=settled", () => {
-    const model = makeRawJob({ status: "settled", completedAt: "2026-01-01T15:00:00.000Z" });
+  it("NEGATIVE: a job row saying `settled` (mock settlement writes it) is a completed event, never settled", () => {
+    for (const status of ["settled", "evidence_stored", "evidence_submitted"]) {
+      const model = makeRawJob({ status, completedAt: "2026-01-01T15:00:00.000Z" });
+      const dto = populateJobDetailDTO(model, mockKernelMap, mockCapabilityMap, emptyBundles, makeCtx());
+      expect(dto.timeline.some((e) => e.type === "completed"), status).toBe(true);
+      expect(dto.timeline.some((e) => e.type === "settled"), status).toBe(false);
+    }
+  });
+
+  it("NEGATIVE: status=completed emits a completed event, never settled (completed is not paid)", () => {
+    const model = makeRawJob({ status: "completed", completedAt: "2026-01-01T15:00:00.000Z" });
     const dto = populateJobDetailDTO(model, mockKernelMap, mockCapabilityMap, emptyBundles, makeCtx());
-    const settledEvent = dto.timeline.find((e) => e.type === "settled");
-    expect(settledEvent).toBeDefined();
+    expect(dto.timeline.find((e) => e.type === "completed")?.timestamp).toBe("2026-01-01T15:00:00.000Z");
+    expect(dto.timeline.some((e) => e.type === "settled")).toBe(false);
+  });
+
+  it("JobDTO carries the server-read execution phase; undocumented statuses are unknown", () => {
+    expect(populateJobDTO(makeRawJob({ status: "in_progress" }), mockKernelMap, mockCapabilityMap, makeCtx()).executionPhase).toBe("running");
+    expect(populateJobDTO(makeRawJob({ status: "settled" }), mockKernelMap, mockCapabilityMap, makeCtx()).executionPhase).toBe("completed");
+    expect(populateJobDTO(makeRawJob({ status: "weird" }), mockKernelMap, mockCapabilityMap, makeCtx()).executionPhase).toBe("unknown");
   });
 
   it("timeline includes failed event for status=failed", () => {

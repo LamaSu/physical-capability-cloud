@@ -19,13 +19,12 @@
 
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-
-const API_BASE =
-  (import.meta as { env?: { VITE_API_URL?: string; PROD?: boolean } }).env
-    ?.VITE_API_URL ??
-  ((import.meta as { env?: { PROD?: boolean } }).env?.PROD
-    ? "https://capability.network"
-    : "http://localhost:3200");
+import { fetchWithKey, gatewayUrl } from "../lib/gateway-base.js";
+import { authorizedFetch, hasStoredApiKey } from "../lib/authorized-fetch.js";
+import { useAuthStore } from "../stores/auth-store.js";
+import { useAuth } from "../hooks/use-auth.js";
+import { SignInAgainButton } from "../components/ConnectWallet.js";
+import { scopeErrorMessage } from "../lib/scope-notice.js";
 
 const sg = "'Space Grotesk', sans-serif";
 const inter = "'Inter', sans-serif";
@@ -84,6 +83,11 @@ type QuickstartResponse = {
 
 type Stage = "form" | "loading" | "backup" | "done" | "error";
 
+function QuickstartSignInAgain() {
+  const { login, isVerifying } = useAuth();
+  return <SignInAgainButton login={login} isVerifying={isVerifying} />;
+}
+
 export function EarnFromYourWorkPage(): React.JSX.Element {
   const [stage, setStage] = useState<Stage>("form");
   const [email, setEmail] = useState("");
@@ -92,6 +96,7 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
   const [contributionDescription, setContributionDescription] = useState("");
   const [name, setName] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [sessionRequired, setSessionRequired] = useState(false);
   const [response, setResponse] = useState<QuickstartResponse | null>(null);
   const [mnemonicConfirmed, setMnemonicConfirmed] = useState(false);
 
@@ -110,9 +115,10 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
   async function handleSubmit(e: React.FormEvent): Promise<void> {
     e.preventDefault();
     setErrorMessage(null);
+    setSessionRequired(false);
     setStage("loading");
     try {
-      const res = await fetch(`${API_BASE}/api/contributors/quickstart`, {
+      const init: RequestInit = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -122,9 +128,17 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
           contributionDescription: contributionDescription || undefined,
           name: name || undefined,
         }),
-      });
+      };
+      const bearer = useAuthStore.getState().sessionToken;
+      // Prefer a held key; otherwise use a real SIWE bearer, never the cookie placeholder.
+      const res = hasStoredApiKey()
+        ? await authorizedFetch("/api/contributors/quickstart", init)
+        : bearer && bearer !== "cookie"
+          ? await fetchWithKey("/api/contributors/quickstart", bearer, { ...init, credentials: "omit" })
+          : await fetch(gatewayUrl("/api/contributors/quickstart"), init);
       if (!res.ok) {
-        const err = (await res.json().catch(() => ({}))) as { message?: string };
+        const err = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+        if (res.status === 401 && err.error === "session_required") setSessionRequired(true);
         throw new Error(err.message ?? `Signup failed (${res.status})`);
       }
       const data = (await res.json()) as QuickstartResponse;
@@ -170,18 +184,21 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
   async function openOnramp(): Promise<void> {
     if (!response) return;
     try {
-      const res = await fetch(`${API_BASE}/api/fiat-ramp/onramp/session`, {
+      // The new key goes to the gateway that issued it and nowhere else.
+      const res = await fetchWithKey("/api/fiat-ramp/onramp/session", response.apiKey, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${response.apiKey}`,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           destinationAddress: response.walletAddress,
           amountUsd: 20,
           currency: "USDC",
         }),
       });
+      const notice = await scopeErrorMessage(res, "/api/fiat-ramp/onramp/session", "POST");
+      if (notice) {
+        alert(notice);
+        return;
+      }
       const data = (await res.json().catch(() => ({}))) as {
         url?: string;
         sessionUrl?: string;
@@ -296,6 +313,7 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
         <div style={card}>
           <h1 style={{ ...h1, color: AMBER }}>Hit a snag</h1>
           <p style={sub}>{errorMessage ?? "Unknown error."}</p>
+          {sessionRequired && <QuickstartSignInAgain />}
           <button type="button" style={button} onClick={() => setStage("form")}>
             Try again
           </button>
@@ -314,7 +332,9 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
             12 words. Write them on paper. Whoever has these words can move your money. We don't keep
             them.
           </p>
+          {/* ph-no-capture: session recording and autocapture never see the words (N50). */}
           <div
+            className="ph-no-capture"
             style={{
               display: "grid",
               gridTemplateColumns: "repeat(3, 1fr)",
@@ -389,7 +409,10 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
           <div style={codeBlock}>{response.walletAddress}</div>
 
           <div style={label}>Your API key (save it — we won't show it again)</div>
-          <div style={codeBlock}>{response.apiKey}</div>
+          {/* ph-no-capture: session recording and autocapture never see the key (N50). */}
+          <div className="ph-no-capture" style={codeBlock}>
+            {response.apiKey}
+          </div>
 
           <div style={label}>Your published rate</div>
           <div style={codeBlock}>

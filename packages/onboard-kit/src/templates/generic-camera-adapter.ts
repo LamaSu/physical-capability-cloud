@@ -5,6 +5,7 @@
  */
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
+import { OutstandingWork } from "./outstanding-work.js";
 
 export interface GenericCameraConfig {
   /** URL to capture a snapshot (POST) */
@@ -42,6 +43,8 @@ export class GenericCameraAdapter {
   private config: GenericCameraConfig;
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
   private mockImageCounter = 0;
+  /** Captures and inspections in flight: the only things that emit. */
+  private readonly work = new OutstandingWork();
 
   constructor(id: string, config: GenericCameraConfig) {
     this.id = id;
@@ -54,7 +57,11 @@ export class GenericCameraAdapter {
     };
   }
 
-  async captureSnapshot(): Promise<{ imageHash: string; storageRef: string }> {
+  captureSnapshot(): Promise<{ imageHash: string; storageRef: string }> {
+    return this.work.track(this.capture());
+  }
+
+  private async capture(): Promise<{ imageHash: string; storageRef: string }> {
     if (this.config.mockMode) return this.captureMock();
 
     const headers = this.buildHeaders();
@@ -75,7 +82,16 @@ export class GenericCameraAdapter {
     return { imageHash, storageRef };
   }
 
-  async runInspection(referenceHash?: string): Promise<{
+  runInspection(referenceHash?: string): Promise<{
+    passed: boolean;
+    confidence: number;
+    findings: string[];
+    imageHash: string;
+  }> {
+    return this.work.track(this.inspect(referenceHash));
+  }
+
+  private async inspect(referenceHash?: string): Promise<{
     passed: boolean;
     confidence: number;
     findings: string[];
@@ -115,6 +131,15 @@ export class GenericCameraAdapter {
 
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void {
     this.listeners.push(callback);
+  }
+
+  /**
+   * Required by the PCC kernel: resolves once every evidence event of the work this adapter
+   * was given has been emitted. Here: once no capture or inspection is in flight (each emits
+   * before it returns).
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
   }
 
   async dispose(): Promise<void> {

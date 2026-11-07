@@ -1,0 +1,195 @@
+{
+  "contract": "pcc.spec.content-hash-order.v1",
+  "rule": "Every content hash sorts strings by UTF-16 code unit (the order canonicalize gives object keys), never by locale collation. For ASCII strings that is byte order; beyond ASCII it is neither UTF-8 byte order nor code-point order (see codeUnitOrder).",
+  "codeUnitOrder": {
+    "function": "compareCodeUnits",
+    "rule": "UTF-16 code-unit order. U+10000 (d800 dc00) sorts before U+E000, unlike UTF-8 byte order or code-point order; lone surrogates are ordinary code units and a lone d800 sorts before the pair d800 dc00.",
+    "strings": [
+      "\u00e9",
+      "\uffff",
+      "\ud800\udc00",
+      "z",
+      "\udfff",
+      "\ue000",
+      "\ud800",
+      "Z",
+      "\udbff\udfff",
+      "\ufffd",
+      "\udc00"
+    ],
+    "sorted": [
+      "Z",
+      "z",
+      "\u00e9",
+      "\ud800",
+      "\ud800\udc00",
+      "\udbff\udfff",
+      "\udc00",
+      "\udfff",
+      "\ue000",
+      "\ufffd",
+      "\uffff"
+    ],
+    "utf16be": [
+      "005a",
+      "007a",
+      "00e9",
+      "d800",
+      "d800dc00",
+      "dbffdfff",
+      "dc00",
+      "dfff",
+      "e000",
+      "fffd",
+      "ffff"
+    ]
+  },
+  "mapSnapshot": {
+    "function": "computeMapSnapshotHash",
+    "entries": [
+      {
+        "key": "kernel_a",
+        "value": "ed25519:0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "key": "kernel-1",
+        "value": "ed25519:0x1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      {
+        "key": "kernel-a",
+        "value": "ed25519:0x2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      {
+        "key": "kernel:a",
+        "value": "ed25519:0x3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      {
+        "key": "kernel.a",
+        "value": "ed25519:0x4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      {
+        "key": "kernela",
+        "value": "ed25519:0x5555555555555555555555555555555555555555555555555555555555555555"
+      }
+    ],
+    "sortedKeys": [
+      "kernel-1",
+      "kernel-a",
+      "kernel.a",
+      "kernel:a",
+      "kernel_a",
+      "kernela"
+    ],
+    "snapshotHash": "0xfcb26a94ef8bb2214672fe5ae997129dd64f8fe5ce17fdb697850d73a69f14ce",
+    "negativeIcuOrderHash": "0x55dd2ccce4c28f72ddf94b65a365b8fac3b69135c0e93d853f6c0dc07aba5b94"
+  },
+  "workSchema": {
+    "function": "computeWorkSchemaHash",
+    "schema": {
+      "version": 1,
+      "eventTypes": [
+        {
+          "id": "cmm_2",
+          "payloadSchema": {
+            "type": "object"
+          }
+        },
+        {
+          "id": "cmm2",
+          "payloadSchema": {
+            "type": "object"
+          }
+        },
+        {
+          "id": "cmm-1",
+          "payloadSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      "workProducts": [
+        {
+          "kind": "photo_set"
+        },
+        {
+          "kind": "photo2"
+        },
+        {
+          "kind": "photo-1"
+        }
+      ]
+    },
+    "schemaHash": "0xbc8bb0c600b113221dc3a86781df5e45c2a7e018e71a6b3b55926b769d27d6d2"
+  },
+  "jobSpec": {
+    "function": "computeJobSpecHash",
+    "job": {
+      "version": 1,
+      "capabilityId": "cap-1",
+      "schemaHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "programHash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+      "params": {},
+      "constraints": {},
+      "buyer": "0xab00000000000000000000000000000000000001",
+      "seller": "0x3333333333333333333333333333333333333333",
+      "resolverId": "resolver-1",
+      "cofundedBy": [
+        {
+          "buyer": "0xab00000000000000000000000000000000000001",
+          "amountCents": 100
+        },
+        {
+          "buyer": "0xAB00000000000000000000000000000000000002",
+          "amountCents": 101
+        },
+        {
+          "buyer": "0xAb00000000000000000000000000000000000003",
+          "amountCents": 102
+        }
+      ]
+    },
+    "jobSpecHash": "0x6afbc39c8010b5bcc27b9ef0a69a0b7d1edf5001fb30e47035f3e5386b501355"
+  },
+  "jobSpecDuplicateBuyers": {
+    "function": "computeJobSpecHash",
+    "rule": "Buyers may repeat. cofundedBy sorts by buyer, then by the canonical JSON of the whole entry, both in UTF-16 code-unit order (so amountCents 10 sorts before 2).",
+    "job": "jobSpec.job with cofundedBy replaced by the list below",
+    "cofundedBy": [
+      {
+        "buyer": "0xab00000000000000000000000000000000000001",
+        "amountCents": 2
+      },
+      {
+        "buyer": "0xAB00000000000000000000000000000000000002",
+        "amountCents": 10
+      },
+      {
+        "buyer": "0xab00000000000000000000000000000000000001",
+        "amountCents": 10
+      },
+      {
+        "buyer": "0xab00000000000000000000000000000000000001",
+        "amountCents": 1
+      }
+    ],
+    "sortedCofundedBy": [
+      {
+        "buyer": "0xAB00000000000000000000000000000000000002",
+        "amountCents": 10
+      },
+      {
+        "buyer": "0xab00000000000000000000000000000000000001",
+        "amountCents": 1
+      },
+      {
+        "buyer": "0xab00000000000000000000000000000000000001",
+        "amountCents": 10
+      },
+      {
+        "buyer": "0xab00000000000000000000000000000000000001",
+        "amountCents": 2
+      }
+    ],
+    "jobSpecHash": "0xe8424ee827157ba1d6fdc5a202480a22089e9d3b210e19e806c4e7baa45d6867"
+  }
+}

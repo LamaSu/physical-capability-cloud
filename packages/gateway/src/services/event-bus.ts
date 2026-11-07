@@ -34,7 +34,7 @@ class PCCEventBus extends EventEmitter {
     eventType: string;
     category: AnalyticsEventCategory;
     actorId: string;
-    actorType: "operator" | "requestor" | "verifier" | "agent" | "system";
+    actorType: AnalyticsEvent["actorType"];
     resourceType: string;
     resourceId: string;
     payload?: Record<string, unknown>;

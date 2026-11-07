@@ -1,0 +1,68 @@
+// PCC Agent — hand this + agent-package.json to GPT-4
+// npm install openai && node pcc-agent-openai.js
+
+const OpenAI = require("openai");
+const pkg = require("./agent-package.json");
+
+const PCC_BASE = pkg.api_base;
+let PCC_API_KEY = null; // Agent provisions this itself
+
+const client = new OpenAI();
+const tools = pkg.tools.map((t) => ({
+  type: "function",
+  function: { name: t.name, description: t.description, parameters: t.input_schema },
+}));
+
+async function callPCC(toolName, args) {
+  const tool = pkg.tools.find((t) => t.name === toolName);
+  if (!tool) throw new Error(`Unknown tool: ${toolName}`);
+
+  let path = tool.endpoint.path;
+  const input = JSON.parse(args);
+  for (const [key, val] of Object.entries(input)) {
+    path = path.replace(`{${key}}`, String(val));
+  }
+
+  const headers = { "Content-Type": "application/json" };
+  if (PCC_API_KEY) headers["Authorization"] = `Bearer ${PCC_API_KEY}`;
+
+  const res = await fetch(`${PCC_BASE}${path}`, {
+    method: tool.endpoint.method,
+    headers,
+    body: tool.endpoint.method === "POST" ? args : undefined,
+  });
+
+  const data = await res.json();
+  if (toolName === "provision_api_key" && data.api_key) {
+    PCC_API_KEY = data.api_key;
+    console.log("API key provisioned.");
+  }
+  return JSON.stringify(data);
+}
+
+async function chat(userMessage) {
+  let messages = [
+    { role: "system", content: pkg.system_prompt },
+    { role: "user", content: userMessage },
+  ];
+
+  while (true) {
+    const response = await client.chat.completions.create({ model: "gpt-4o", tools, messages });
+    const choice = response.choices[0];
+
+    if (choice.finish_reason === "stop") {
+      console.log(choice.message.content);
+      return choice.message.content;
+    }
+
+    if (choice.message.tool_calls) {
+      messages.push(choice.message);
+      for (const call of choice.message.tool_calls) {
+        const result = await callPCC(call.function.name, call.function.arguments);
+        messages.push({ role: "tool", tool_call_id: call.id, content: result });
+      }
+    }
+  }
+}
+
+chat(__PCC_FIRST_MESSAGE__);

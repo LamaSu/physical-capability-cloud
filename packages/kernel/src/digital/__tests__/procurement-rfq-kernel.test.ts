@@ -15,7 +15,7 @@
 
 import { describe, expect, it } from "vitest";
 import nacl from "tweetnacl";
-import { canonicalize, sha256 } from "@pcc/spec";
+import { canonicalize, sha256, verifyEvidenceSubjectBinding } from "@pcc/spec";
 import type { SessionKey } from "@pcc/spec";
 import {
   ProcurementRFQKernel,
@@ -280,6 +280,27 @@ describe("ProcurementRFQKernel", () => {
       sessionKey.publicKey,
     );
     expect(ok).toBe(true);
+  });
+
+  // ---- 5b. Every event names the job, so the bundle binds (LO-EV-9) -------
+  it("every event commits payload.jobId, and the bundle binds {jobId, kernelId}", async () => {
+    const { sessionKey, sessionPrivateKey } = makeSessionKey();
+    const kernel = new ProcurementRFQKernel();
+    const result = await kernel.execute({
+      rfqSpec: happyRFQ(),
+      vendorList: happyVendors(),
+      sessionKey,
+      sessionPrivateKey,
+      jobId: "job-bind",
+    });
+    const bundle = result.evidenceBundle;
+    for (const e of bundle.events) expect((e.payload as Record<string, unknown>).jobId, e.type).toBe("job-bind");
+    const bound = await verifyEvidenceSubjectBinding({
+      bundleHash: bundle.bundleHash,
+      events: bundle.events,
+      subject: { jobId: "job-bind", kernelId: bundle.events[0]!.source.kernelId },
+    });
+    expect(bound.ok).toBe(true);
   });
 
   // ---- 6. Bundle has required lifecycle events ---------------------------

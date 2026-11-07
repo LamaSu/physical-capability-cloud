@@ -21,6 +21,11 @@
       "types": "./dist/testing.d.ts",
       "import": "./dist/testing.js",
       "default": "./dist/testing.js"
+    },
+    "./vnext": {
+      "types": "./dist/vnext/index.d.ts",
+      "import": "./dist/vnext/index.js",
+      "default": "./dist/vnext/index.js"
     }
   },
   "scripts": {

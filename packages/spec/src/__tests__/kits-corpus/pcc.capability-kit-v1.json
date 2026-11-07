@@ -1,0 +1,270 @@
+{
+  "literal": "pcc.capability-kit/v1",
+  "cases": [
+    {
+      "name": "accept: the minimal kit",
+      "expect": "accept",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}
+    },
+    {
+      "name": "accept: a full lab/workcell kit",
+      "expect": "accept",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "OT-2 dye serial dilution", "version": "1.0.0", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "serial-dilution.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "labware-definition", "name": "carrier-24x-2ml.json", "mediaType": "application/json", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"}, {"role": "plr-resource", "name": "carrier_24x_2ml.py", "mediaType": "text/x-python", "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"}, {"role": "cad", "name": "carrier.step", "mediaType": "model/step", "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"}, {"role": "tests", "name": "checks.json", "mediaType": "application/json", "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555"}, {"role": "install-recipe", "name": "INSTALL.md", "mediaType": "text/markdown", "digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666"}, {"role": "provenance-recipe", "name": "provenance.json", "mediaType": "application/json", "digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"}], "compatibility": {"deviceFamilies": ["opentrons-ot2"], "interfaces": ["http"]}, "declaredAssuranceTiers": [1, 2], "economics": {"spdxLicense": "Apache-2.0", "economicTermsHash": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}}
+    },
+    {
+      "name": "accept: a fork naming its parent by digest, with a pre-release version",
+      "expect": "accept",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "1.1.0-rc.1", "parentKitDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}
+    },
+    {
+      "name": "accept: a version with build metadata",
+      "expect": "accept",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "1.0.0+build.5", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}
+    },
+    {
+      "name": "accept: every artifact role, including intake-schema and safety-envelope",
+      "expect": "accept",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "adapter", "name": "a.ts", "mediaType": "text/typescript", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"}, {"role": "config-schema", "name": "c.json", "mediaType": "application/json", "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"}, {"role": "telemetry-map", "name": "t.json", "mediaType": "application/json", "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"}, {"role": "provenance-recipe", "name": "p.json", "mediaType": "application/json", "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555"}, {"role": "tests", "name": "t.py", "mediaType": "text/x-python", "digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666"}, {"role": "install-recipe", "name": "i.md", "mediaType": "text/markdown", "digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"}, {"role": "labware-definition", "name": "l.json", "mediaType": "application/json", "digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888"}, {"role": "plr-resource", "name": "r.py", "mediaType": "text/x-python", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}, {"role": "cad", "name": "c.step", "mediaType": "model/step", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, {"role": "deck-layout", "name": "d.json", "mediaType": "application/json", "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, {"role": "economics-terms", "name": "e.json", "mediaType": "application/json", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}, {"role": "docs", "name": "d.md", "mediaType": "text/markdown", "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}, {"role": "intake-schema", "name": "intake/device-intake.schema.json", "mediaType": "application/schema+json", "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}, {"role": "safety-envelope", "name": "safety-envelope.json", "mediaType": "application/json", "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}]}
+    },
+    {
+      "name": "accept: artifact name README.md",
+      "expect": "accept",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "README.md", "mediaType": "text/markdown", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    },
+    {
+      "name": "accept: artifact name tests/test_method_plan.py",
+      "expect": "accept",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "tests/test_method_plan.py", "mediaType": "text/markdown", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    },
+    {
+      "name": "accept: artifact name labware/pcc_carrier_24_tube_2ml_screwcap.json",
+      "expect": "accept",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "labware/pcc_carrier_24_tube_2ml_screwcap.json", "mediaType": "text/markdown", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    },
+    {
+      "name": "accept: artifact name a/b/c.d-e_f",
+      "expect": "accept",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "a/b/c.d-e_f", "mediaType": "text/markdown", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    },
+    {
+      "name": "accept: the same name under two roles is two artifacts",
+      "expect": "accept",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "m.py", "mediaType": "text/markdown", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    },
+    {
+      "name": "accept: an artifact with a source",
+      "expect": "accept",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "x.md", "mediaType": "text/markdown", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999", "source": "https://example.org/repo/blob/0123456789abcdef/x.md"}]}
+    },
+    {
+      "name": "accept: every declared assurance tier, and every compatibility list",
+      "expect": "accept",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}], "declaredAssuranceTiers": [0, 1, 2, 3], "compatibility": {"deviceFamilies": ["a"], "models": ["b"], "interfaces": ["opentrons"], "platforms": ["linux"]}}
+    },
+    {
+      "name": "accept: terms hashes in the economics lane's format",
+      "expect": "accept",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}], "economics": {"economicTermsHash": "0x1111111111111111111111111111111111111111111111111111111111111111", "rightsTermsHash": "0x2222222222222222222222222222222222222222222222222222222222222222"}}
+    },
+    {
+      "name": "accept: any license string parses (completeness judges it later)",
+      "expect": "accept",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}], "economics": {"spdxLicense": "EUPL-1.2"}}
+    },
+    {
+      "name": "accept: two capabilities",
+      "expect": "accept",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, {"csdUrl": "pcc://capabilities/fdm/v2", "capabilityContractDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}
+    },
+    {
+      "name": "accept: a name with a precomposed e-acute (NFC)",
+      "expect": "accept",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "Pipett\u00e9 kit", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}
+    },
+    {
+      "name": "accept: a combining mark with no precomposed form is already NFC",
+      "expect": "accept",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}], "description": "T\u0301 unit"}
+    },
+    {
+      "name": "reject: wrong schema literal",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v2", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}
+    },
+    {
+      "name": "reject: an unknown key (a publisher is registry metadata)",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}], "publisher": "someone"}
+    },
+    {
+      "name": "reject: a bare capability url without a version",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "liquid-handling", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}
+    },
+    {
+      "name": "reject: a url-only capability, no contract digest",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}
+    },
+    {
+      "name": "reject: a parentKitDigest in upper-case hex",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}
+    },
+    {
+      "name": "reject: a version that is not semver",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "latest", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}
+    },
+    {
+      "name": "reject: a declared tier out of range",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}], "declaredAssuranceTiers": [4]}
+    },
+    {
+      "name": "reject: a terms hash in the wrong format",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}], "economics": {"economicTermsHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}}
+    },
+    {
+      "name": "reject: no artifacts",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": []}
+    },
+    {
+      "name": "reject: no capabilities",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}
+    },
+    {
+      "name": "reject: an unknown artifact role",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "wishlist", "name": "x.json", "mediaType": "application/json", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    },
+    {
+      "name": "reject: an artifact digest that is not sha256",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "x.md", "mediaType": "text/markdown", "digest": "md5:abc"}]}
+    },
+    {
+      "name": "reject: an empty media type",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "x.md", "mediaType": "", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    },
+    {
+      "name": "reject: an artifact with a smuggled field",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "x.md", "mediaType": "text/markdown", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999", "executable": true}]}
+    },
+    {
+      "name": "reject: economics with a smuggled royalty field",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}], "economics": {"royaltyBps": 500}}
+    },
+    {
+      "name": "reject: artifact name ../x can walk out of the kit",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "../x", "mediaType": "text/markdown", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    },
+    {
+      "name": "reject: artifact name ../../etc/passwd can walk out of the kit",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "../../etc/passwd", "mediaType": "text/markdown", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    },
+    {
+      "name": "reject: artifact name /etc/passwd can walk out of the kit",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "/etc/passwd", "mediaType": "text/markdown", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    },
+    {
+      "name": "reject: artifact name a/../b can walk out of the kit",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "a/../b", "mediaType": "text/markdown", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    },
+    {
+      "name": "reject: artifact name a\\b can walk out of the kit",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "a\\b", "mediaType": "text/markdown", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    },
+    {
+      "name": "reject: artifact name ./a can walk out of the kit",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "./a", "mediaType": "text/markdown", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    },
+    {
+      "name": "reject: artifact name a//b can walk out of the kit",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "a//b", "mediaType": "text/markdown", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    },
+    {
+      "name": "reject: artifact name a/ can walk out of the kit",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "a/", "mediaType": "text/markdown", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    },
+    {
+      "name": "reject: artifact name tests/.. can walk out of the kit",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "tests/..", "mediaType": "text/markdown", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    },
+    {
+      "name": "reject: an artifact name with a space",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "a b.md", "mediaType": "text/markdown", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    },
+    {
+      "name": "reject: a duplicate artifact (same role and name)",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}
+    },
+    {
+      "name": "reject: a duplicate capability",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, {"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}
+    },
+    {
+      "name": "reject: a duplicate compatibility.deviceFamilies entry",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}], "compatibility": {"deviceFamilies": ["a", "a"]}}
+    },
+    {
+      "name": "reject: a duplicate compatibility.models entry",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}], "compatibility": {"models": ["a", "a"]}}
+    },
+    {
+      "name": "reject: a duplicate compatibility.interfaces entry",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}], "compatibility": {"interfaces": ["opentrons", "opentrons"]}}
+    },
+    {
+      "name": "reject: a duplicate compatibility.platforms entry",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}], "compatibility": {"platforms": ["linux", "linux"]}}
+    },
+    {
+      "name": "reject: a duplicate declaredAssuranceTiers entry",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}], "declaredAssuranceTiers": [1, 2, 2]}
+    },
+    {
+      "name": "reject: a name in NFD (e + combining acute)",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "Pipette\u0301 kit", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}
+    },
+    {
+      "name": "reject: a description in NFD",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}], "description": "Pipette\u0301 notes"}
+    },
+    {
+      "name": "reject: a compatibility model in NFD",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}], "compatibility": {"models": ["Pipette\u0301"]}}
+    },
+    {
+      "name": "reject: an artifact media type in NFD",
+      "expect": "reject",
+      "value": {"schema": "pcc.capability-kit/v1", "name": "golden-minimal", "version": "0.0.1", "parentKitDigest": null, "capabilities": [{"csdUrl": "pcc://capabilities/liquid-handling/v1", "capabilityContractDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "artifacts": [{"role": "method", "name": "m.py", "mediaType": "text/x-python", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"role": "docs", "name": "x.md", "mediaType": "text/e\u0301", "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+    }
+  ]
+}

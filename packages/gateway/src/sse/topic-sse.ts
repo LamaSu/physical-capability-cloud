@@ -7,86 +7,10 @@ import type { StreamTopic } from "@pcc/spec";
 import { streamHub } from "./stream-hub.js";
 import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
 import { resolveSSEAuth } from "./sse-auth.js";
-import { getJobFacade } from "../facades/index.js";
-
-// ---------------------------------------------------------------------------
-// SSE per-job ownership (gated by SSE_JOB_OWNERSHIP_CHECK)
-// ---------------------------------------------------------------------------
-//
-// Per pcc-deliberation #058 gateway item: "SSE per-job scoping — verify each
-// SSE stream only emits events for jobs the requester owns."
-//
-// Today: SSE topics route correctly by jobId, but ANY authenticated caller
-// can subscribe to ANY jobId. This adds an env-gated ownership check on the
-// per-job stream: when SSE_JOB_OWNERSHIP_CHECK is truthy AND auth resolved a
-// userId, the resolver fetches the job through the JobFacade and ensures the
-// caller is the owner (or the operator). If not, the request is rejected
-// with 403.
-//
-// Default: OFF (preserves back-compat with pcc-node clients that historically
-// streamed without an operator-bound API key). Owners can flip
-// SSE_JOB_OWNERSHIP_CHECK=true once they've verified their fleet's keys are
-// scoped per-operator.
-
-function isJobOwnershipCheckEnabled(): boolean {
-  const v = process.env.SSE_JOB_OWNERSHIP_CHECK;
-  if (!v) return false;
-  return v === "true" || v === "1" || v === "yes";
-}
-
-interface JobOwnerCheckResult {
-  authorized: boolean;
-  reason?: string;
-}
-
-/**
- * Best-effort job-ownership check. Returns `authorized: true` when:
- *   - ownership check is disabled, OR
- *   - no userId was resolved (no caller identity to compare against), OR
- *   - the userId matches the job's operatorId / ownerAddress, OR
- *   - the job cannot be loaded (open-fail — never block legitimate streams
- *     because of a transient facade error)
- *
- * Returns `authorized: false` only on a positive mismatch.
- */
-async function checkJobOwnership(
-  jobId: string,
-  userId: string | undefined,
-): Promise<JobOwnerCheckResult> {
-  if (!isJobOwnershipCheckEnabled()) return { authorized: true };
-  if (!userId) return { authorized: true };
-
-  try {
-    const facade = getJobFacade();
-    const res = await facade.getById(jobId);
-    if (!res.success) {
-      // Job not found / facade error — don't 403 on missing data; the SSE
-      // stream will simply receive no events.
-      return { authorized: true };
-    }
-    const job = res.data as {
-      operatorId?: string;
-      ownerAddress?: string;
-      payerAddress?: string;
-    };
-    const owners = [
-      job.operatorId,
-      job.ownerAddress,
-      job.payerAddress,
-    ].filter((x): x is string => typeof x === "string" && x.length > 0);
-    if (owners.length === 0) return { authorized: true };
-    const userLower = userId.toLowerCase();
-    const match = owners.some((o) => o.toLowerCase() === userLower);
-    if (match) return { authorized: true };
-    return {
-      authorized: false,
-      reason: `userId=${userId} is not the owner of jobId=${jobId}`,
-    };
-  } catch {
-    // Open-fail on facade errors.
-    return { authorized: true };
-  }
-}
+import { asSent, gateJobRead, gateKernelRead, refuseJobRead, streamEventFilterOf, type KernelReadGate } from "../readmodels/job-read-gate.js";
+import { getStore } from "../db.js";
+import { schema, eq } from "@pcc/store";
+import { batchTracker } from "../services.js";
 
 // Strict origin allowlist — prevents subdomain spoofing attacks
 const ALLOWED_SSE_ORIGINS = new Set([
@@ -112,8 +36,9 @@ export async function topicSSE(app: FastifyInstance) {
     req: { raw: { on: (event: string, cb: () => void) => void }; ip?: string },
     reply: { raw: { writeHead: (status: number, headers: Record<string, string>) => void; write: (data: string) => void } },
     topics: StreamTopic[],
-    lastEventId?: string,
-    origin?: string,
+    lastEventId: string | undefined,
+    origin: string | undefined,
+    keep: (event: unknown) => boolean,
   ) {
     // Strict origin validation — reject unknown origins with default
     const allowOrigin = origin && ALLOWED_SSE_ORIGINS.has(origin)
@@ -132,7 +57,11 @@ export async function topicSSE(app: FastifyInstance) {
     const unsubscribe = streamHub.subscribe(
       topics,
       (event) => {
-        const payload = `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event.payload)}\n\n`;
+        // The event is judged as it is sent (review r3 of #403, HIGH): its JSON form, parsed back.
+        // An event naming a job the caller may not read, at any depth, is not written (CRITICAL).
+        const sent = asSent(event.payload);
+        if (!sent || !keep(sent.value)) return;
+        const payload = `id: ${event.id}\nevent: ${event.type}\ndata: ${sent.text}\n\n`;
         try {
           reply.raw.write(payload);
         } catch {
@@ -158,66 +87,93 @@ export async function topicSSE(app: FastifyInstance) {
     });
   }
 
-  // Per-job streaming
+  // Per-job streaming. A job's live events are its records, so the job read gate runs before
+  // the stream opens (F3 round 2; it replaces #058's SSE_JOB_OWNERSHIP_CHECK, which was off by
+  // default and let a caller through when it could not decide). Only an admin, the job's
+  // kernel operator or its recorded buyer subscribes: no credential is 401, an unproven one
+  // 403, and anyone else gets the 404 a job that does not exist gets. A refused request gives
+  // back the connection slot the onRequest hook took.
   app.get("/sse/stream/job/:jobId", async (req, reply) => {
     const auth = await resolveSSEAuth(req);
     if (!auth.authenticated) {
+      trackSSEClose(req.ip);
       return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
     }
     const { jobId } = req.params as { jobId: string };
-
-    // #058 — verify the authenticated user owns this job. Gated by
-    // SSE_JOB_OWNERSHIP_CHECK to preserve back-compat with shared clients.
-    const ownership = await checkJobOwnership(jobId, auth.userId);
-    if (!ownership.authorized) {
-      return reply.status(403).send({
-        error: "SSE_JOB_FORBIDDEN",
-        message: ownership.reason ?? "not authorized for this jobId",
-      });
+    const gate = gateJobRead(req, jobId);
+    if (!gate.ok) {
+      trackSSEClose(req.ip);
+      return refuseJobRead(reply, gate, { error: "not_found", message: `job '${jobId}' not found` });
+    }
+    // Which events the caller may see is fixed when the stream opens (as on the log stream).
+    const events = streamEventFilterOf(req);
+    if (!events.ok) {
+      trackSSEClose(req.ip);
+      return refuseJobRead(reply, events);
     }
 
     const lastEventId = req.headers["last-event-id"] as string | undefined;
     const origin = req.headers.origin as string | undefined;
-    setupSSE(req, reply, [{ type: "job", id: jobId }], lastEventId, origin);
+    setupSSE(req, reply, [{ type: "job", id: jobId }], lastEventId, origin, events.keep);
     await new Promise(() => {});
   });
 
-  // Per-kernel streaming
+  // Per-kernel, per-device and per-batch streaming (F3 round 3, cross-family review r2 of #403,
+  // CRITICAL). These topics carry job-bound records: a sensor reading is published to its
+  // kernel's and device's topics, and its batch's, as well as its job's. So each takes the
+  // kernel's read rule: an admin or the kernel's operator (a proven wallet) subscribes; no
+  // credential is 401, an unproven one 403, and anyone else gets the 404 an unknown kernel,
+  // device or batch gets, before any subscription. A refused request gives back its slot.
+  const kernelStream = async (
+    req: import("fastify").FastifyRequest,
+    reply: import("fastify").FastifyReply,
+    what: string,
+    id: string,
+    kernelIdOf: () => string | null | undefined,
+    topic: StreamTopic,
+    opts: { kernelRow?: boolean; batchId?: string } = {},
+  ) => {
+    const auth = await resolveSSEAuth(req);
+    if (!auth.authenticated) {
+      trackSSEClose(req.ip);
+      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
+    }
+    const gate: KernelReadGate = gateKernelRead(req, kernelIdOf, opts);
+    if (!gate.ok) {
+      trackSSEClose(req.ip);
+      return refuseJobRead(reply, gate, { error: "not_found", message: `${what} '${id}' not found` });
+    }
+    // The kernel's stream carries job-bound readings: each one is also the record of the jobs that
+    // own it, so under TENANT_ENFORCE only the jobs of the caller's tenant reach it (review r3 of
+    // #403, CRITICAL). Who owns a reading or a batch event is what the live batch says, decided at
+    // each event, replayed ones included (reviews r4 and r5 of #403, CRITICAL). On a batch's own
+    // stream, an event naming none of its slots is the batch's.
+    const events = streamEventFilterOf(req, { batchId: opts.batchId });
+    if (!events.ok) {
+      trackSSEClose(req.ip);
+      return refuseJobRead(reply, events);
+    }
+    const lastEventId = req.headers["last-event-id"] as string | undefined;
+    const origin = req.headers.origin as string | undefined;
+    setupSSE(req, reply, [topic], lastEventId, origin, events.keep);
+    await new Promise(() => {});
+  };
+
   app.get("/sse/stream/kernel/:kernelId", async (req, reply) => {
-    const auth = await resolveSSEAuth(req);
-    if (!auth.authenticated) {
-      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
-    }
     const { kernelId } = req.params as { kernelId: string };
-    const lastEventId = req.headers["last-event-id"] as string | undefined;
-    const origin = req.headers.origin as string | undefined;
-    setupSSE(req, reply, [{ type: "kernel", id: kernelId }], lastEventId, origin);
-    await new Promise(() => {});
+    return kernelStream(req, reply, "kernel", kernelId, () => kernelId, { type: "kernel", id: kernelId }, { kernelRow: true });
   });
 
-  // Per-device streaming
   app.get("/sse/stream/device/:deviceId", async (req, reply) => {
-    const auth = await resolveSSEAuth(req);
-    if (!auth.authenticated) {
-      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
-    }
     const { deviceId } = req.params as { deviceId: string };
-    const lastEventId = req.headers["last-event-id"] as string | undefined;
-    const origin = req.headers.origin as string | undefined;
-    setupSSE(req, reply, [{ type: "device", id: deviceId }], lastEventId, origin);
-    await new Promise(() => {});
+    const kernelOfDevice = () =>
+      (getStore().db.select({ kernelId: schema.kernelDevices.kernelId }).from(schema.kernelDevices)
+        .where(eq(schema.kernelDevices.id, deviceId)).get() as { kernelId?: string } | undefined)?.kernelId;
+    return kernelStream(req, reply, "device", deviceId, kernelOfDevice, { type: "device", id: deviceId });
   });
 
-  // Per-batch streaming
   app.get("/sse/stream/batch/:batchId", async (req, reply) => {
-    const auth = await resolveSSEAuth(req);
-    if (!auth.authenticated) {
-      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
-    }
     const { batchId } = req.params as { batchId: string };
-    const lastEventId = req.headers["last-event-id"] as string | undefined;
-    const origin = req.headers.origin as string | undefined;
-    setupSSE(req, reply, [{ type: "batch", id: batchId }], lastEventId, origin);
-    await new Promise(() => {});
+    return kernelStream(req, reply, "batch", batchId, () => batchTracker.getBatch(batchId)?.kernelId, { type: "batch", id: batchId }, { batchId });
   });
 }

@@ -7,14 +7,26 @@
  */
 
 import { createHash } from "node:crypto";
+import { compareCodeUnits } from "@pcc/spec";
 import type { VerifierNodeInfo, HumanVerificationRequest } from "./types.js";
+
+/**
+ * A verifier id, and an exclusion: 1 to 128 printable ASCII characters. Ids compare
+ * after ASCII-only case folding, so the choice never depends on a host's Unicode
+ * casing tables (U+212A, the Kelvin sign, must not fold onto "k"; review E1b).
+ */
+const VERIFIER_ID = /^[\x21-\x7E]{1,128}$/;
+const asciiLower = (s: string): string => s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
 
 export class VerifierSelector {
   /**
    * Select N verifiers for a verification request.
    *
    * Algorithm:
-   *   1. Filter out excluded addresses and inactive nodes.
+   *   1. Keep online, non-excluded nodes whose id is printable ASCII, in canonical
+   *      order (ASCII-folded id, code units), so the pool's input order cannot
+   *      change the choice. A duplicate id (ASCII case folded) refuses the pool, and
+   *      an exclusion that is not printable ASCII refuses the request.
    *   2. Compute weight = stake * (reputation / 10000) for each node.
    *   3. Use sha256(seed + index) as a seeded PRNG to pick nodes via
    *      weighted random selection without replacement.
@@ -33,14 +45,25 @@ export class VerifierSelector {
     seed: string,
     excludeAddresses?: string[],
   ): VerifierNodeInfo[] {
-    const excludeSet = new Set((excludeAddresses ?? []).map((a) => a.toLowerCase()));
+    const excludeSet = new Set<string>();
+    for (const address of excludeAddresses ?? []) {
+      if (typeof address !== "string" || !VERIFIER_ID.test(address)) {
+        throw new RangeError("verifier exclusions must be 1-128 printable ASCII characters");
+      }
+      excludeSet.add(asciiLower(address));
+    }
 
-    // Step 1: Filter to eligible nodes
-    const eligible = availableNodes.filter(
-      (node) =>
-        node.status === "online" &&
-        !excludeSet.has(node.id.toLowerCase()),
-    );
+    // Step 1: eligible nodes, in canonical order (review E1b: never the pool's input order).
+    const seen = new Set<string>();
+    const eligible: VerifierNodeInfo[] = [];
+    for (const node of availableNodes) {
+      if (typeof node.id !== "string" || !VERIFIER_ID.test(node.id)) continue;
+      const key = asciiLower(node.id);
+      if (seen.has(key)) throw new RangeError(`duplicate verifier id: ${node.id}`);
+      seen.add(key);
+      if (node.status === "online" && !excludeSet.has(key)) eligible.push(node);
+    }
+    eligible.sort((a, b) => compareCodeUnits(asciiLower(a.id), asciiLower(b.id)));
 
     if (eligible.length === 0) return [];
     if (eligible.length <= count) {
@@ -111,7 +134,7 @@ export class VerifierSelector {
     return nodes.slice().sort((a, b) => {
       const hashA = createHash("sha256").update(`${seed}:${a.id}`).digest("hex");
       const hashB = createHash("sha256").update(`${seed}:${b.id}`).digest("hex");
-      return hashA.localeCompare(hashB);
+      return compareCodeUnits(hashA, hashB); // code units, never the host's collation
     });
   }
 }

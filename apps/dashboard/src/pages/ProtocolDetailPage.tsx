@@ -15,9 +15,7 @@ import "@xyflow/react/dist/style.css";
 import { GlassPanel, GlowBadge, DataCell } from "@pcc/ui";
 import type { ProtocolTemplate, ProtocolStep, ProtocolTransfer, ProtocolFork, ProtocolRun } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
-import { getAuthHeaders } from "../stores/auth-store.js";
-
-const GATEWAY = "/api";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -96,21 +94,21 @@ export function ProtocolDetailPage() {
   // Fetch template
   const { data: templateData } = useQuery({
     queryKey: ["protocol-template", templateId],
-    queryFn: () => fetch(`${GATEWAY}/protocols/${templateId}`, { headers: { ...getAuthHeaders() } }).then((r) => r.json()),
+    queryFn: () => authorizedFetch(`/api/protocols/${templateId}`).then((r) => r.json()),
     enabled: !!templateId,
   });
 
   // Fetch forks
   const { data: forksData } = useQuery({
     queryKey: ["protocol-forks", templateId],
-    queryFn: () => fetch(`${GATEWAY}/protocols/${templateId}/forks`, { headers: { ...getAuthHeaders() } }).then((r) => r.json()),
+    queryFn: () => authorizedFetch(`/api/protocols/${templateId}/forks`).then((r) => r.json()),
     enabled: !!templateId,
   });
 
   // Fetch runs for this template
   const { data: runsData } = useQuery({
     queryKey: ["protocol-runs-for-template", templateId],
-    queryFn: () => fetch(`${GATEWAY}/protocol-runs?templateId=${templateId}`, { headers: { ...getAuthHeaders() } }).then((r) => r.json()),
+    queryFn: () => authorizedFetch(`/api/protocol-runs?templateId=${templateId}`).then((r) => r.json()),
     enabled: !!templateId,
   });
 

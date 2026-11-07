@@ -1,14 +1,14 @@
 # Physical Capability Cloud (PCC)
 
-> **An open protocol for verifiable, settleable physical work.** Operators run hardware. Customers (or their AI agents) discover, negotiate, escrow, and settle — all over HTTP, all anchored on-chain.
+> **An open protocol for verifiable, settleable physical work.** Operators run hardware. Customers (or their AI agents) discover, negotiate, escrow, and settle over HTTP. Settlement runs on a test network during the public beta.
 
-**Live**: [capability.network](https://capability.network) · **License**: [Apache-2.0](LICENSE) · **Discord**: [PCC Network](https://discord.gg/CRFvvUgeV4)
+**Public beta**: [capability.network](https://capability.network) · **License**: [Apache-2.0](LICENSE) · **Discord**: [PCC Network](https://discord.gg/CRFvvUgeV4)
 
 ---
 
 ## What is PCC?
 
-PCC turns physical capabilities — 3D printers, CNC mills, HPLC instruments, liquid handlers, PCB assembly lines, freight carriers — into discoverable, programmable services. Every job is contracted over HTTP, escrowed on-chain, executed on real hardware, evidenced cryptographically, and settled when the evidence meets the agreed assurance tier.
+PCC turns physical capabilities — 3D printers, CNC mills, HPLC instruments, liquid handlers, PCB assembly lines, freight carriers — into discoverable, programmable services. Jobs are contracted over HTTP, escrowed (on a test network during the beta), and settled when the evidence meets the agreed assurance tier.
 
 It's substrate, not platform: anyone can run an operator node, contribute a capability adapter, or build an integration. The protocol charges 2.35% on settlement — that's the entire business model.
 
@@ -19,7 +19,7 @@ It's substrate, not platform: anyone can run an operator node, contribute a capa
 **Connect an AI agent (no install):**
 ```bash
 curl https://capability.network/agent-package.json
-# 230+ tools as JSON Schema. Paste into Claude, GPT, or any LLM tool harness.
+# The full agent package as JSON Schema. Paste into Claude, GPT, or any LLM tool harness.
 ```
 
 **Connect a machine (Python operator node):**
@@ -38,11 +38,11 @@ pcc-node start
 
 ## What it actually does
 
-Tell an agent what you need. PCC handles the rest:
+Tell your agent what you need. Your agent finds the capabilities and books the work; PCC holds each party to its contract:
 
 - **3D-print a bracket** — an operator with idle FDM capacity gets the job, escrow locks before the print starts, evidence streams while it's running, escrow releases when the print passes verification.
-- **HPLC compound analysis** — a regulated lab in Buenos Aires has open instrument time. A startup in Austin queues a sample. The protocol routes the work, anchors the evidence, settles in USDC.
-- **Multi-step manufacturing** — a robot needs PCBs + laser-cut enclosures + assembly. PCC decomposes the request into a capability DAG and orchestrates the supply chain across operators.
+- **HPLC compound analysis** — a regulated lab in Buenos Aires has open instrument time. A startup in Austin queues a sample through its agent. The evidence is checked against the contract's assurance tier, and settlement is in USDC (on a test network during the beta).
+- **Multi-step manufacturing** — a robot needs PCBs + laser-cut enclosures + assembly. Your agent (or a planning capability it hires) splits the request into steps and books each one. Accepting a multi-provider plan as one deal is in progress.
 
 Operators set their own pricing. Customers pay only on verified completion.
 

@@ -84,6 +84,19 @@ export interface SensorChannelDescriptor {
   evidenceGrade: boolean;
 }
 
+/**
+ * Where one reading came from: what a record derived from readings (an aggregate, an anomaly)
+ * carries for each reading it was computed from, so the record belongs to every one's owner.
+ */
+export interface SensorReadingSource {
+  kernelId: Id;
+  deviceId: Id;
+  jobId?: Id;
+  stepId?: Id;
+  batchId?: Id;
+  sampleId?: Id;
+}
+
 /** Downsampled aggregate for historical storage */
 export interface SensorAggregate {
   channel: string;
@@ -99,6 +112,8 @@ export interface SensorAggregate {
   unit: PhysicalUnit;
   jobId?: Id;
   batchId?: Id;
+  /** Each distinct source of the readings in the window. */
+  sources?: SensorReadingSource[];
 }
 
 /** Anomaly detected in a sensor stream */
@@ -114,6 +129,8 @@ export interface SensorAnomaly {
   threshold: number;
   message: string;
   jobId?: Id;
+  /** Each distinct source of the readings the anomaly was found in. */
+  sources?: SensorReadingSource[];
 }
 
 /** Structured process log entry */

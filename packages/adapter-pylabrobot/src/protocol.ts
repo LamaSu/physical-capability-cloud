@@ -29,6 +29,8 @@ export const RPC_ERROR_CODES = {
   NOT_SUPPORTED: -32004,
   /** -32005: device busy (concurrent job rejected) */
   DEVICE_BUSY: -32005,
+  /** -32006: no recording window of this job (deviceId, jobId) in this sidecar process; data.generation names the process */
+  NO_RECORDING_WINDOW: -32006,
   /** -32099: sidecar restart in progress, retry once */
   SIDECAR_RESTART: -32099,
 } as const;
@@ -132,6 +134,21 @@ export interface BackendInitResult {
   plrBackend: string;
   /** Snapshot of the freshly-loaded deck layout (for evidence) */
   deckSnapshot?: Record<string, unknown>;
+  /** This sidecar process, which attests its recording windows with it (astra pack 194). */
+  generation: string;
+}
+
+/**
+ * `evidence.startRecording` / `evidence.stopRecording` answers. Each attests the job's window
+ * and the sidecar process (its generation): an answer that does not name the same job and the
+ * generation `backend.init` named is no proof (astra pack 194).
+ */
+export interface EvidenceWindowAttestation {
+  ok: true;
+  jobId: string;
+  generation: string;
+  startedAt?: string;
+  opCount?: number;
 }
 
 /** Parameters for `backend.run` — execute a PLR protocol */

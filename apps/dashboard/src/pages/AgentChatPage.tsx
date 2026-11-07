@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useUIStore } from "../stores/ui-store.js";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 import { GlowBadge, cn } from "@pcc/ui";
 
 // ---------------------------------------------------------------------------
@@ -121,9 +121,9 @@ function FeedbackModal({ open, onClose }: { open: boolean; onClose: () => void }
     if (!message.trim()) return;
     setStatus("sending");
     try {
-      const res = await fetch("/api/feedback", {
+      const res = await authorizedFetch("/api/feedback", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type, message, page: window.location.pathname }),
       });
       if (res.ok) {

@@ -16,6 +16,16 @@ from .log_capture import sign_ed25519_utf8, LogSigningRefused
 log = logging.getLogger("pcc-node.register")
 
 
+class RegistrationError(RuntimeError):
+    """A kernel registration got a non-2xx response. Carries the HTTP status and body so callers report
+    it and fail CLOSED, instead of proceeding as if registration succeeded (item 133, board N119)."""
+
+    def __init__(self, status, data):
+        super().__init__(f"kernel registration failed (HTTP {status}): {data}")
+        self.status = status
+        self.data = data
+
+
 def kernel_signing_proof_message(kernel_id):
     """The kernelId-bound registration challenge string.
 
@@ -126,7 +136,13 @@ def register_kernel(pcc_base, api_key, config):
     Returns
     -------
     dict
-        Registration response, or error dict.
+        The gateway's registration response, on a 2xx (200 upsert / 201 create).
+
+    Raises
+    ------
+    RegistrationError
+        On any non-2xx response, carrying the status and body, so callers fail CLOSED instead of
+        mistaking an error for success (item 133).
     """
     payload = {
         "id": config.kernel_id,
@@ -145,11 +161,12 @@ def register_kernel(pcc_base, api_key, config):
         api_key=api_key,
     )
 
-    if status in (200, 201):
-        log.info(f"Kernel {config.kernel_id} registered on PCC")
-    else:
+    if status not in (200, 201):
+        # A non-2xx must never be mistaken for success: raise so `start` and the daemon fail CLOSED and
+        # never log "registered" / print "Node running" after a 401 (item 133, board N119 incident).
         log.warning(f"Kernel registration failed (HTTP {status}): {data}")
-
+        raise RegistrationError(status, data)
+    log.info(f"Kernel {config.kernel_id} registered on PCC")
     return data if isinstance(data, dict) else {"raw": data, "status": status}
 
 

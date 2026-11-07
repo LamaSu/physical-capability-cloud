@@ -246,7 +246,7 @@ export const agentTools: ToolDef[] = [
       properties: {
         path: {
           type: "string",
-          description: "Dashboard route path, e.g. /discover, /build, /jobs, /kernels, /escrow, /operator, /sensors, /protocols, /logistics, /depin, /subnet",
+          description: "Dashboard route path, e.g. /discover, /build, /jobs, /kernels, /escrow, /operator, /sensors, /protocols, /logistics, /economics, /subnet",
         },
       },
       required: ["path"],

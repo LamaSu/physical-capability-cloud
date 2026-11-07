@@ -35,6 +35,7 @@
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 import type { MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus } from "./types.js";
+import { OutstandingWork } from "./outstanding-work.js";
 
 export interface HamiltonConfig {
   /** Instrument URL, e.g. "http://192.168.1.50" (no trailing slash) */
@@ -82,6 +83,9 @@ export class HamiltonAdapter implements MachineAdapter {
   private currentRun: RunState = { runId: null, status: "idle" };
   private mockStatus: MachineStatus = "idle";
   private mockProgress = 0;
+  /** What can still emit: the poll loop, each poll and real command in flight, each mock run. */
+  private readonly work = new OutstandingWork();
+  private endPolling: (() => void) | null = null;
 
   constructor(id: string, config: HamiltonConfig) {
     this.id = id;
@@ -123,7 +127,10 @@ export class HamiltonAdapter implements MachineAdapter {
 
   async execute(command: MachineCommand): Promise<MachineCommandResult> {
     if (this.config.mockMode) return this.executeMock(command);
+    return this.work.track(this.executeReal(command));
+  }
 
+  private async executeReal(command: MachineCommand): Promise<MachineCommandResult> {
     try {
       await this.ensureAuth();
 
@@ -212,6 +219,17 @@ export class HamiltonAdapter implements MachineAdapter {
 
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void {
     this.listeners.push(callback);
+  }
+
+  /**
+   * Resolves once every run has reported how it ended and nothing more can emit: the poll
+   * loop has reported execution_completed or execution_failed and stopped, each mock run has
+   * emitted its completion, and no poll or command is in flight. At once when none is. A run
+   * the API never reports as done or failed (stop is not API-driven: it is cancelled at the
+   * instrument) keeps this pending, and the runner keeps the device from the next job.
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
   }
 
   async dispose(): Promise<void> {
@@ -371,15 +389,20 @@ export class HamiltonAdapter implements MachineAdapter {
     this.stopPolling();
     const interval = this.config.pollIntervalMs ?? 3000;
 
-    this.pollTimer = setInterval(async () => {
-      try {
-        await this.ensureAuth();
-        const run = await this.apiGet("/api/v1/protocol-run");
-        this.handleRunUpdate(run);
-      } catch {
-        // tolerate transient failures; next tick will retry
-      }
+    this.endPolling = this.work.begin();
+    this.pollTimer = setInterval(() => {
+      void this.work.track(this.poll());
     }, interval);
+  }
+
+  private async poll(): Promise<void> {
+    try {
+      await this.ensureAuth();
+      const run = await this.apiGet("/api/v1/protocol-run");
+      this.handleRunUpdate(run);
+    } catch {
+      // tolerate transient failures; next tick will retry
+    }
   }
 
   private stopPolling(): void {
@@ -387,6 +410,8 @@ export class HamiltonAdapter implements MachineAdapter {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    this.endPolling?.();
+    this.endPolling = null;
   }
 
   private handleRunUpdate(run: any): void {
@@ -475,6 +500,7 @@ export class HamiltonAdapter implements MachineAdapter {
         });
 
         const dur = this.config.mockRunDurationMs ?? 2000;
+        const endRun = this.work.begin();
         setTimeout(() => {
           this.mockStatus = "idle";
           this.mockProgress = 100;
@@ -491,6 +517,8 @@ export class HamiltonAdapter implements MachineAdapter {
               mock: true,
             },
           });
+          // Ended only after the completion is emitted.
+          endRun();
         }, dur);
         return { success: true, message: `Run ${this.currentRun.runId} started (mock)` };
       }

@@ -1,14 +1,19 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, Navigate } from "react-router-dom";
 import { useUIStore } from "../../../../stores/ui-store.js";
-import { getAuthHeaders } from "../../../../stores/auth-store.js";
+import { authorizedFetch } from "../../../../lib/authorized-fetch.js";
 import { ChatThread, type ChatMessage } from "../../../../components/onboard/ChatThread.js";
 import { ActivityFeed } from "../../../../components/onboard/ActivityFeed.js";
 import type { OnboardEvent } from "../../../../components/onboard/activity-feed-logic.js";
 import { parseInputIntent } from "../../../../components/onboard/input-parser.js";
 import { TEMPLATES } from "../../templates.js";
 
-const API_ROOT = (import.meta.env.VITE_PCC_URL ?? "");
+/**
+ * A template's API route prefix must be a plain gateway path under /api/
+ * (N50 round 2): no scheme, host, "..", "//", query or encoded characters.
+ * authorizedFetch also refuses any other origin.
+ */
+const GATEWAY_API_BASE = /^\/api(?:\/[A-Za-z0-9_-]+)+$/;
 
 /**
  * Generalized orchestrator chat console — runs ANY template's conversational
@@ -31,7 +36,7 @@ export function OrchestratorChatPage() {
   const template = slug ? TEMPLATES[slug] : undefined;
   const setPageMeta = useUIStore((s) => s.setPageMeta);
 
-  const apiBase = `${API_ROOT}${template?.api_base ?? ""}`;
+  const apiBase = template && GATEWAY_API_BASE.test(template.api_base) ? template.api_base : null;
 
   const [messages, setMessages] = useState<ChatMessage[]>(() => [
     { id: "intro", role: "bot", text: template?.greeting ?? "" }
@@ -51,9 +56,7 @@ export function OrchestratorChatPage() {
   useEffect(() => {
     const tick = async () => {
       try {
-        const res = await fetch(`${API_ROOT}/api/events?since=${lastEventTs.current}`, {
-          headers: { ...getAuthHeaders() }
-        });
+        const res = await authorizedFetch(`/api/events?since=${lastEventTs.current}`);
         if (!res.ok) return;
         const data = (await res.json()) as { events?: OnboardEvent[] };
         const incoming = data.events ?? [];
@@ -71,9 +74,10 @@ export function OrchestratorChatPage() {
 
   const post = useCallback(
     async (path: string, body: unknown): Promise<unknown> => {
-      const res = await fetch(`${apiBase}${path}`, {
+      if (!apiBase) throw new Error("This template's API route isn't a gateway path, so nothing was sent.");
+      const res = await authorizedFetch(`${apiBase}${path}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
       });
       if (!res.ok) throw new Error(`${path} failed: ${res.status}`);
@@ -105,7 +109,7 @@ export function OrchestratorChatPage() {
           setSessionId(j.session_id);
           append({ role: "bot", text: `Got it — session ${j.session_id.slice(0, 8)} for ${intent.name}. Activity feed on the right shows every backend call.` });
           if (intent.url) {
-            const r = (await post(`/${j.session_id}/scrape`, { url: intent.url })) as Record<string, unknown>;
+            const r = (await post(`/${encodeURIComponent(j.session_id)}/scrape`, { url: intent.url })) as Record<string, unknown>;
             append({ role: "bot", text: `Scrape kicked off. ${JSON.stringify(r).slice(0, 280)}` });
           }
           return;
@@ -113,30 +117,30 @@ export function OrchestratorChatPage() {
 
         switch (intent.kind) {
           case "scrape_url":
-            await post(`/${sessionId}/scrape`, { url: intent.url });
+            await post(`/${encodeURIComponent(sessionId)}/scrape`, { url: intent.url });
             append({ role: "bot", text: `Scraping ${intent.url}…` });
             return;
           case "scrape_many":
             for (const u of intent.urls) {
-              await post(`/${sessionId}/scrape`, { url: u });
+              await post(`/${encodeURIComponent(sessionId)}/scrape`, { url: u });
             }
             if (intent.docs.length) {
-              await post(`/${sessionId}/ingest-docs`, { doc_urls: intent.docs });
+              await post(`/${encodeURIComponent(sessionId)}/ingest-docs`, { doc_urls: intent.docs });
             }
             append({ role: "bot", text: `Processed ${intent.urls.length} URL(s) and ${intent.docs.length} doc(s).` });
             return;
           case "ingest_docs":
-            await post(`/${sessionId}/ingest-docs`, { doc_urls: intent.urls });
+            await post(`/${encodeURIComponent(sessionId)}/ingest-docs`, { doc_urls: intent.urls });
             append({ role: "bot", text: `Ingesting ${intent.urls.length} doc(s)…` });
             return;
           case "connections":
             for (const c of intent.connections) {
-              await post(`/${sessionId}/scrape`, { url: c });
+              await post(`/${encodeURIComponent(sessionId)}/scrape`, { url: c });
             }
             append({ role: "bot", text: `Wired ${intent.connections.length} connection(s).` });
             return;
           case "build": {
-            const j = await post(`/${sessionId}/build-agent`, {});
+            const j = await post(`/${encodeURIComponent(sessionId)}/build-agent`, {});
             append({ role: "bot", text: `Built. ${JSON.stringify(j).slice(0, 400)}` });
             return;
           }
@@ -161,7 +165,7 @@ export function OrchestratorChatPage() {
         return;
       }
       const urls = files.map((f) => `local://${f.name}`);
-      post(`/${sessionId}/ingest-docs`, { doc_urls: urls }).catch(() => {});
+      post(`/${encodeURIComponent(sessionId)}/ingest-docs`, { doc_urls: urls }).catch(() => {});
       append({ role: "you", text: files.map((f) => `📄 ${f.name}`).join("\n") });
     },
     [sessionId, post, append]

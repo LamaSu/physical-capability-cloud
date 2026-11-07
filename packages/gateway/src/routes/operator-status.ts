@@ -68,6 +68,12 @@ import {
   type OnboardingReadiness,
   type RunObservation,
 } from "../services/onboarding-readiness.js";
+import {
+  locationVisibilityOf,
+  publicLocation,
+  type PublicLocation,
+} from "../facades/populators/public-location.js";
+import type { LocationVisibility } from "../facades/types.js";
 
 const GATEWAY_URL = process.env.PCC_GATEWAY_URL ?? "https://capability.network";
 
@@ -87,7 +93,10 @@ interface OperatorStatusCapability {
   kernelId: string;
   assuranceTiers: unknown;
   pricing: unknown;
-  location: unknown;
+  /** N68: coarse unless the kernel's operator opted in, as every other read shows it. */
+  location: PublicLocation["location"];
+  locationPrecision: PublicLocation["locationPrecision"];
+  locationCell: PublicLocation["locationCell"];
 }
 
 interface OperatorStatusResponse {
@@ -243,10 +252,14 @@ export async function operatorStatusRoutes(app: FastifyInstance): Promise<void> 
             signingKeyAlgorithm: shopKernels.signingKeyAlgorithm,
             signingKeyPublicKey: shopKernels.signingKeyPublicKey,
             signingAddress: shopKernels.signingAddress,
+            location: shopKernels.location,
           })
           .from(shopKernels)
           .where(eq(shopKernels.operatorAddress, slug))
           .all();
+        const visibilityByKernel = new Map<string, LocationVisibility>(
+          kernelRows.map((r) => [r.id as string, locationVisibilityOf(r.location)]),
+        );
         kernels = kernelRows.map((r) => ({
           id: r.id as string,
           name: r.name as string,
@@ -291,7 +304,7 @@ export async function operatorStatusRoutes(app: FastifyInstance): Promise<void> 
                 kernelId: c.kernelId as string,
                 assuranceTiers: c.assuranceTiers,
                 pricing: c.pricing,
-                location: c.location,
+                ...publicLocation(c.location, visibilityByKernel.get(kid) ?? "approximate"),
               });
             }
           }

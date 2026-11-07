@@ -1,0 +1,19 @@
+{
+  "provenance": "EVIDENCE c25c8f97 integrated settlement-vector golden: packages/verifier/test-vectors/settlement-vector-golden-mirror.cjs @ 974b3ff1 (lamasu/feat/v3-evidence-signing), sent to gateway in bulletin #1202 with the SIG_DOMAIN :v2 -> :v1 correction (oracle #1414). Body values are SAMPLE values; the structure and the two digests are the byte-check. rawSigs are the mirror's sample signature set (line 109), NOT real D1/D2 signatures.",
+  "sigDomain": "0x74101076f8c06e32d4d34d5d7efa73ac446332f6e00208b72581ca9f48405685",
+  "jcsBody": "{\"challengeBinding\":{\"nonce\":\"0xdcf34d3be8a102a533f4f7102c3c56ccae8612b618cc453ef303ad9246ba08c5\",\"tChallengeRef\":\"1699999000\"},\"compositionSchemaVersion\":\"1\",\"evidence\":{\"evidenceBlockHash\":\"0x63eee02d8eb01daf2cd7aac7aceeb27d049b5f6572aaffa6b8a4de0440469062\"},\"evidenceTimeBounds\":{\"end\":\"1700000000\",\"start\":\"1699999500\"},\"packageFormat\":\"2\",\"packageSchemaVersion\":\"FinalMilestonePackageV2\",\"producer\":{\"devicePrincipalId\":\"dev-golden\",\"kernelId\":\"kernel-golden-01\",\"operatorPrincipalId\":\"op-golden\"},\"unitBinding\":{\"acceptedEnvelopeHash\":\"0xa821492ad1c9d685fc794c21485480f01169c2d690d73c86a354143f3f496a41\",\"chainId\":\"8453\",\"compositionRoot\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"escrow\":\"0x00000000000000000000000000000000000e5c0f\",\"jobIdHash\":\"0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0\",\"milestoneIndex\":\"3\",\"settlementUnitId\":\"0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1\",\"stepId\":\"0xd84e1f1dce698b3ddaa7e120bb89a540f9bcdd632420311802ac242b3d1d0e67\"}}",
+  "rawSigs": [
+    {
+      "signer": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "scheme": "secp256k1",
+      "sig": "0x2222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222"
+    },
+    {
+      "signer": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scheme": "ed25519",
+      "sig": "0x11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ],
+  "packageBodyHash": "0x94a48c1659e5138fff719c3c43d191bb983ad2686909de44b8bb1d340ddee99a",
+  "packageDigestV2": "0xf78103a17702d1fe490a36dd3a02320ba334d52fa966e730c1876501d928dea2"
+}

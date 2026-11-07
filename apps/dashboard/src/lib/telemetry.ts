@@ -13,6 +13,31 @@ const GA_MEASUREMENT_ID = import.meta.env.VITE_GA_MEASUREMENT_ID || "";
 const SENTRY_DSN = import.meta.env.VITE_SENTRY_DSN || "";
 const IS_PROD = import.meta.env.PROD;
 
+/** Request IDs remain in wallet-link API paths, and public polling can expose accountId; omit this endpoint family from network telemetry. */
+function isWalletLinkUrl(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  try {
+    const path = new URL(value, "https://pcc.invalid").pathname;
+    return path === "/api/wallets/link-requests" || path.startsWith("/api/wallets/link-requests/");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Origins that may receive beacons the egress guard can't read synchronously:
+ * the PostHog host, when PostHog is on. Its SDK wraps every beacon body in a
+ * Blob (lib/gateway-base.ts, installKeyEgressGuard).
+ */
+export function telemetryBeaconOrigins(): string[] {
+  if (!POSTHOG_KEY) return [];
+  try {
+    return [new URL(POSTHOG_HOST).origin];
+  } catch {
+    return [];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // initTelemetry — call once before ReactDOM.createRoot()
 // ---------------------------------------------------------------------------
@@ -33,9 +58,14 @@ export function initTelemetry(): void {
       capture_performance: true,
       session_recording: {
         recordCrossOriginIframes: true,
-        // networkPayloadCapture is a runtime-supported feature not yet in the PostHog TS types
-        networkPayloadCapture: { recordBody: true, recordHeaders: true },
-      } as any,
+        // Never record request or response headers and bodies, whatever the
+        // PostHog project's settings say (N50): requests carry the API key,
+        // and responses carry newly issued keys and recovery phrases. The
+        // client can only switch these off; the project settings switch them on.
+        recordHeaders: false,
+        recordBody: false,
+        maskCapturedNetworkRequestFn: (request) => isWalletLinkUrl(request.name) ? null : request,
+      },
       loaded: (ph) => {
         ph.register({
           app: "pcc-dashboard",
@@ -51,9 +81,21 @@ export function initTelemetry(): void {
       dsn: SENTRY_DSN,
       environment: IS_PROD ? "production" : "development",
       integrations: [
-        Sentry.browserTracingIntegration(),
-        Sentry.replayIntegration(),
+        Sentry.browserTracingIntegration({
+          shouldCreateSpanForRequest: (url) => !isWalletLinkUrl(url),
+        }),
+        Sentry.replayIntegration({
+          beforeAddRecordingEvent: (event) => {
+            if (event.type === 5) {
+              const { tag, payload } = event.data;
+              if (tag === "performanceSpan" && isWalletLinkUrl(payload.description)) return null;
+              if (tag === "breadcrumb" && payload.data && "url" in payload.data && isWalletLinkUrl(payload.data.url)) return null;
+            }
+            return event;
+          },
+        }),
       ],
+      beforeBreadcrumb: (breadcrumb) => isWalletLinkUrl(breadcrumb.data?.url) ? null : breadcrumb,
       tracesSampleRate: 1.0, // 100% — event night, capture everything
       replaysSessionSampleRate: 1.0, // 100% — record every session
       replaysOnErrorSampleRate: 1.0,

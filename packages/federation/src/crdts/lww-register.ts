@@ -27,6 +27,7 @@
  * @see scope §7.2 — trust-tier authority ordered by Lamport timestamp
  */
 
+import { compareCodeUnits } from "@pcc/spec";
 import type { ReplicaId } from "./g-counter.js";
 
 export interface LWWTimestamp {
@@ -53,15 +54,16 @@ export function createLWWRegister<T>(): LWWRegisterState<T> {
  *   -  positive  if a > b
  *   -  zero      if equal
  *
- * Tiebreaking on equal ticks uses replica-id lexicographic order so all
- * replicas converge on the same winner without coordination.
+ * Tiebreaking on equal ticks uses replica-id UTF-16 code-unit order, never
+ * locale collation, so all replicas converge on the same winner without
+ * coordination.
  */
 export function compareTimestamps(
   a: LWWTimestamp,
   b: LWWTimestamp,
 ): number {
   if (a.tick !== b.tick) return a.tick - b.tick;
-  return a.replica.localeCompare(b.replica);
+  return compareCodeUnits(a.replica, b.replica);
 }
 
 /**

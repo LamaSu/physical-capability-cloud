@@ -288,48 +288,29 @@ def execute_tool(name, args):
         return json.dumps({"error": str(e)})
 
 
-# -- Relay polling (dual endpoint) -------------------------------------------
-
-# Track which endpoint works so we do not retry 404s every cycle
-_use_relay = True  # True = generic relay, False = ot2 relay
+# -- Relay polling ------------------------------------------------------------
+# The device relay is /api/relay/:kernelId and needs the kernel operator's key.
+# The legacy OT-2 relay is retired (N4b-gw) and answers 410, so there is no
+# fallback: a refused result must not be retried through another route.
 
 
 def poll_tool_calls():
-    """Poll PCC for pending tool calls. Tries generic relay first, falls back to ot2."""
-    global _use_relay
-
-    if _use_relay:
-        s, r = pcc("GET", f"/api/relay/{KERNEL_ID}/tool-call/pending")
-        if s == 200:
-            calls = r.get("calls", r) if isinstance(r, dict) else r
-            return calls if isinstance(calls, list) else []
-        if s == 404:
-            log.info("Generic relay returned 404, switching to ot2 relay")
-            _use_relay = False
-
-    # Fallback: ot2 relay
-    s, r = pcc("GET", f"/api/ot2/tool-call/pending?kernelId={KERNEL_ID}")
+    """Poll PCC for pending tool calls on this kernel."""
+    s, r = pcc("GET", f"/api/relay/{KERNEL_ID}/tool-call/pending")
     if s == 200:
         calls = r.get("calls", r) if isinstance(r, dict) else r
         return calls if isinstance(calls, list) else []
-
+    if s in (401, 403):
+        log.error(f"Relay refused the poll (HTTP {s}): PCC_API_KEY must be this kernel operator's key")
     return []
 
 
 def post_result(call_id, result, error=None):
-    """Post tool result back to PCC. Tries generic relay first, falls back to ot2."""
+    """Post a tool result back to PCC."""
     body = {"callId": call_id, "result": result}
     if error:
         body["error"] = error
-
-    if _use_relay:
-        s, r = pcc("POST", f"/api/relay/{KERNEL_ID}/tool-result", body)
-        if s in (200, 201):
-            return s, r
-
-    # Fallback
-    s, r = pcc("POST", "/api/ot2/tool-result", body)
-    return s, r
+    return pcc("POST", f"/api/relay/{KERNEL_ID}/tool-result", body)
 
 
 def send_heartbeat(status="online"):

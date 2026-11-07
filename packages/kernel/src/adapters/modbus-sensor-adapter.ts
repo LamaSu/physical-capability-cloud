@@ -14,6 +14,7 @@
 import type { EvidenceEvent, EvidenceSource, SensorReading, SensorChannelDescriptor } from "@pcc/spec";
 import type { SensorAdapter, MachineStatus } from "./types.js";
 import type { UniversalSensorAdapter } from "./universal-sensor-adapter.js";
+import { OutstandingWork } from "./outstanding-work.js";
 
 export interface ModbusConfig {
   /** Modbus device IP address */
@@ -65,6 +66,9 @@ export class ModbusSensorAdapter implements SensorAdapter, UniversalSensorAdapte
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private recording = false;
   private recordedValues: Map<string, number[]> = new Map();
+  /** The recording's poll timer and each register poll in flight. */
+  private readonly work = new OutstandingWork();
+  private endRecording: (() => void) | null = null;
 
   constructor(id: string, config: ModbusConfig) {
     this.id = id;
@@ -114,6 +118,8 @@ export class ModbusSensorAdapter implements SensorAdapter, UniversalSensorAdapte
       );
     }
 
+    // A recording already running is replaced: its timer used to be overwritten and left polling.
+    this.stopPolling();
     this.recording = true;
     this.recordedValues.clear();
 
@@ -124,8 +130,9 @@ export class ModbusSensorAdapter implements SensorAdapter, UniversalSensorAdapte
     // Start polling registers. The catch is defensive: a rejected poll must
     // never surface as an unhandled promise rejection inside the timer.
     const interval = this.config.pollIntervalMs ?? 1000;
+    this.endRecording = this.work.begin();
     this.pollTimer = setInterval(() => {
-      void this.pollRegisters(jobId).catch((err) => {
+      void this.work.track(this.pollRegisters(jobId)).catch((err) => {
         console.error("[modbus-adapter] register poll failed:", err);
       });
     }, interval);
@@ -133,10 +140,7 @@ export class ModbusSensorAdapter implements SensorAdapter, UniversalSensorAdapte
 
   async stopRecording(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
     this.recording = false;
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
+    this.stopPolling();
 
     if (!this.config.mockMode) {
       // FAIL LOUD (symmetry with startRecording): in real mode nothing was
@@ -184,11 +188,26 @@ export class ModbusSensorAdapter implements SensorAdapter, UniversalSensorAdapte
     this.listeners.push(callback);
   }
 
+  /**
+   * Resolves once the recording's poll timer is stopped and no register poll is in flight;
+   * at once when none is. (This adapter emits no evidence through onEvidence: polls feed
+   * SensorReadings, and stopRecording returns its summary without emitting it.)
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
+  }
+
   async dispose(): Promise<void> {
-    if (this.pollTimer) clearInterval(this.pollTimer);
-    this.pollTimer = null;
+    this.stopPolling();
     this.listeners = [];
     this.readingListeners = [];
+  }
+
+  private stopPolling(): void {
+    if (this.pollTimer) clearInterval(this.pollTimer);
+    this.pollTimer = null;
+    this.endRecording?.();
+    this.endRecording = null;
   }
 
   // ── Internal ───────────────────────────────────────────────────────

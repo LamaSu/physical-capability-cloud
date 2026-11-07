@@ -78,6 +78,8 @@ vi.mock("../services/settlement-crank.js", () => ({
 
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
+import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
+import { createHash } from "node:crypto";
 import { schema, eq } from "@pcc/store";
 import { verifyWithOracle } from "../services/oracle-client.js";
 
@@ -85,11 +87,17 @@ const KERNEL = "kernel-biolab-01";
 const CAP = "liquid-handler";
 const REAL_ESCROW = ("0x" + "ab".repeat(20)) as `0x${string}`;
 
-const ORIG = { v2: process.env.PCC_USE_EAS_V2, mock: process.env.MOCK_SETTLEMENT };
+const ORIG = { v2: process.env.PCC_USE_EAS_V2, mock: process.env.MOCK_SETTLEMENT, admin: process.env.PCC_ADMIN_KEY };
+
+// N133 (the steward's DECISIONS 01:01): a paid job's buyer is the caller's proven wallet, or the
+// gateway admin acts for it. This suite has no caller stand-in and its buyers are not wallets, so
+// the admin submits each fast-track job for its buyer.
+const ADMIN = "settlement-crank-wiring-admin";
 
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   process.env.MOCK_SETTLEMENT = "true";
+  process.env.PCC_ADMIN_KEY = ADMIN;
   delete process.env.PCC_USE_EAS_V2; // job creation stays on the mock/no-chain path
   initStore({ seed: true });
   const app = Fastify({ logger: false });
@@ -103,6 +111,7 @@ async function makeJobWithRealEscrow(agent: string): Promise<{ jobId: string }> 
   const ft = await app.inject({
     method: "POST",
     url: "/api/jobs/submit-from-discovery",
+    headers: { "x-admin-key": ADMIN },
     payload: { kernelId: KERNEL, capabilityType: CAP, userAgentId: agent },
   });
   expect(ft.statusCode).toBe(201);
@@ -135,16 +144,19 @@ async function makeJobWithRealEscrow(agent: string): Promise<{ jobId: string }> 
 function trap(jobId: string, agent: string): void {
   const repos = getRepos();
   const job = repos.jobs.findById(jobId)!;
-  repos.evidence.insert({
+  // A genuine gateway anchor: bundleHash = sha256 of its canonical envelope,
+  // which recovery re-verifies before driving the chain.
+  const meta = {
     id: `bundle-${agent}`,
     jobId,
     stepId: job.stepId,
     kernelId: job.kernelId,
     assuranceTier: 0,
-    bundleHash: ("0x" + "cd".repeat(32)),
-    kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "ed25519", value: "t" },
     createdAt: new Date().toISOString(),
-  } as any);
+    kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "ed25519", value: "gateway-auto-sign" },
+  };
+  const bundleHash = `sha256:${createHash("sha256").update(buildCanonicalEvidenceEnvelope(meta as any, [])).digest("hex")}`;
+  repos.evidence.insert({ ...meta, bundleHash } as any);
   repos.jobs.update(jobId, { evidenceBundleId: `bundle-${agent}`, status: "evidence_submitted" });
 }
 
@@ -163,6 +175,8 @@ afterEach(async () => {
   else process.env.PCC_USE_EAS_V2 = ORIG.v2;
   if (ORIG.mock === undefined) delete process.env.MOCK_SETTLEMENT;
   else process.env.MOCK_SETTLEMENT = ORIG.mock;
+  if (ORIG.admin === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = ORIG.admin;
 });
 
 describe("resume-settlement routes the chain re-drive through driveSettlement", () => {

@@ -16,8 +16,11 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { createHash, randomUUID } from "node:crypto";
 import { getRepos } from "../db.js";
+import { jobReadScopeOf, refuseJobRead, scopeAllows, type JobReadScope } from "../readmodels/job-read-gate.js";
+import { getCapabilityFacade, getKernelFacade } from "../facades/index.js";
 import { getIntentClassifier } from "../services/intent-classifier.js";
 import { getEventBus } from "../services/event-bus.js";
+import { capturePrincipal, intentActor } from "../services/unmet-capture.js";
 import type { DemandEnvelope } from "@pcc/spec";
 import { computeCompositionSignature, budgetToBand } from "@pcc/spec";
 
@@ -151,28 +154,42 @@ function generateAnswer(template: BuiltInTemplate, rows: Record<string, unknown>
 
 // ── Repository-based query execution ─────────────────────────────────────
 
+/** The intents that read jobs: they answer only the jobs the caller may read (F3 round 2). */
+const JOB_INTENTS: ReadonlySet<string> = new Set(["job_status", "job_history"]);
+
 /**
  * Execute a query against the repository layer based on the classified intent.
  * Uses typed repository methods — no raw SQL strings.
+ *
+ * `jobScope` is the caller's job read scope; a job intent answers only the jobs in it, and a
+ * job outside it is answered like a job that does not exist.
+ *
+ * Kernels and capabilities are answered through their read models, never as stored rows (board
+ * N68, astra r1): the read models show a site's location coarse unless its operator opted in,
+ * and no street address. Both the returned rows and the answer text come from those reads.
  */
-function executeIntentQuery(
+async function executeIntentQuery(
   intent: string,
   slots: Record<string, string | number | boolean>,
-): { rows: Record<string, unknown>[]; table: string } {
+  jobScope: Extract<JobReadScope, { ok: true }> | null,
+): Promise<{ rows: Record<string, unknown>[]; table: string }> {
   const repos = getRepos();
+  const readable = (jobId: unknown) => jobScope !== null && scopeAllows(jobScope, jobId);
+  const readableJobs = () =>
+    (repos.jobs.findAll() as unknown as Record<string, unknown>[]).filter((job) => readable(job["id"]));
 
   switch (intent) {
     case "job_status": {
       const jobId = String(slots["jobId"] ?? "");
       if (jobId) {
-        const job = repos.jobs.findById(jobId);
+        const job = readable(jobId) ? repos.jobs.findById(jobId) : undefined;
         return {
           rows: job ? [job as unknown as Record<string, unknown>] : [],
           table: "jobs",
         };
       }
       return {
-        rows: (repos.jobs.findAll() as unknown as Record<string, unknown>[]).slice(0, 5),
+        rows: readableJobs().slice(0, 5),
         table: "jobs",
       };
     }
@@ -180,16 +197,17 @@ function executeIntentQuery(
     case "job_history": {
       const limit = Math.min(Number(slots["limit"] ?? 10), 50);
       return {
-        rows: (repos.jobs.findAll() as unknown as Record<string, unknown>[]).slice(0, limit),
+        rows: readableJobs().slice(0, limit),
         table: "jobs",
       };
     }
 
     case "find_capability": {
       const capType = String(slots["capabilityType"] ?? "");
-      const capabilities = capType
-        ? repos.capabilities.findByType(capType)
-        : repos.capabilities.findAll();
+      const facade = getCapabilityFacade();
+      const read = capType ? await facade.listByType(capType) : await facade.list({}, { offset: 0, limit: 20 });
+      if (!read.success) throw new Error(read.error.message);
+      const capabilities = Array.isArray(read.data) ? read.data : read.data.items;
       return {
         rows: (capabilities as unknown as Record<string, unknown>[]).slice(0, 20),
         table: "capabilities",
@@ -199,16 +217,12 @@ function executeIntentQuery(
     case "network_status":
     case "operator_stats":
     case "kernel_health": {
+      const read = await getKernelFacade().list();
+      if (!read.success) throw new Error(read.error.message);
       const kernelId = String(slots["kernelId"] ?? "");
-      if (kernelId) {
-        const kernel = repos.kernels.findById(kernelId);
-        return {
-          rows: kernel ? [kernel as unknown as Record<string, unknown>] : [],
-          table: "shop_kernels",
-        };
-      }
+      const kernels = kernelId ? read.data.filter((k) => k.id === kernelId) : read.data.slice(0, 20);
       return {
-        rows: (repos.kernels.findAll() as unknown as Record<string, unknown>[]).slice(0, 20),
+        rows: kernels as unknown as Record<string, unknown>[],
         table: "shop_kernels",
       };
     }
@@ -277,6 +291,15 @@ export async function nlQueryRoutes(app: FastifyInstance) {
       const classification = classifier.classify(rawQuery);
       const { intent, confidence, slots } = classification;
 
+      // A job intent reads jobs, so the job read rule applies: no credential is 401, an
+      // unproven one 403, and only the jobs the caller may read are answered.
+      let jobScope: Extract<JobReadScope, { ok: true }> | null = null;
+      if (JOB_INTENTS.has(intent)) {
+        const scope = jobReadScopeOf(req);
+        if (!scope.ok) return refuseJobRead(reply, scope);
+        jobScope = scope;
+      }
+
       // 2. Look up template — DB first, then built-in defaults
       let template: BuiltInTemplate | null = null;
 
@@ -317,7 +340,13 @@ export async function nlQueryRoutes(app: FastifyInstance) {
               ["unknown_synthetic"],
               [],
             );
-            const actor = body.operatorId ?? "anonymous";
+            // R44 D2 (flag-gated, default OFF): record the authenticated
+            // principal instead of the body's operatorId. No unmet matching:
+            // the type is unknown_synthetic.
+            const actor = intentActor(capturePrincipal(req), {
+              actorId: body.operatorId ?? "anonymous",
+              actorType: "requestor",
+            });
             const envelope: DemandEnvelope = {
               id: `intent-syn-${randomUUID()}`,
               source: "query_api_synthetic",
@@ -335,8 +364,8 @@ export async function nlQueryRoutes(app: FastifyInstance) {
             getEventBus().publish({
               eventType: "intent.synthetic_query",
               category: "intent",
-              actorId: actor,
-              actorType: "requestor",
+              actorId: actor.actorId,
+              actorType: actor.actorType,
               resourceType: "intent",
               resourceId: envelope.id,
               payload: envelope as unknown as Record<string, unknown>,
@@ -365,7 +394,7 @@ export async function nlQueryRoutes(app: FastifyInstance) {
       const sources: QuerySource[] = [];
 
       try {
-        const result = executeIntentQuery(intent, slots);
+        const result = await executeIntentQuery(intent, slots, jobScope);
         rows = result.rows;
 
         sources.push({

@@ -237,4 +237,46 @@ describe("LWW-Register CRDT", () => {
       expect(usRepromote.ts?.tick).toBe(7);
     });
   });
+
+  // E1 finding 1: the equal-tick tiebreak must not depend on host ICU
+  // collation, or replicas (and non-JS mirrors) pick different winners.
+  describe("replica-id tiebreak is UTF-16 code-unit order, never locale collation", () => {
+    // What a Go / Python / Rust replica computes: plain code-unit order.
+    const mirror = (a: { tick: number; replica: string }, b: { tick: number; replica: string }) =>
+      a.tick !== b.tick ? a.tick - b.tick : a.replica < b.replica ? -1 : a.replica > b.replica ? 1 : 0;
+
+    it("r_a vs r-a: every merge order picks the code-unit winner", () => {
+      // "_" (0x5f) > "-" (0x2d) by code unit; ICU collation puts "_" first.
+      const a = { value: "trusted", ts: { tick: 5, replica: "r_a" } };
+      const b = { value: "quarantined", ts: { tick: 5, replica: "r-a" } };
+      expect(Math.sign(compareTimestamps(a.ts, b.ts))).toBe(Math.sign(mirror(a.ts, b.ts)));
+      expect(lwwRegisterMerge(a, b).value).toBe("trusted");
+      expect(lwwRegisterMerge(b, a).value).toBe("trusted");
+    });
+
+    it("distinct replica ids never tie, so merge order cannot choose the winner", () => {
+      // ICU collation calls each pair equal (canonical equivalence, ignorable code points).
+      const pairs: Array<[string, string]> = [
+        ["\u00e9", "e\u0301"],
+        ["r\u0000", "r"],
+        ["r\u200b", "r"],
+      ];
+      for (const [x, y] of pairs) {
+        const a = { value: "trusted", ts: { tick: 5, replica: x } };
+        const b = { value: "quarantined", ts: { tick: 5, replica: y } };
+        expect(Math.sign(compareTimestamps(a.ts, b.ts))).toBe(Math.sign(mirror(a.ts, b.ts)));
+        expect(lwwRegisterMerge(a, b).value).toBe(lwwRegisterMerge(b, a).value);
+        expect(lwwRegisterMergeAll([a, b]).value).toBe(lwwRegisterMergeAll([b, a]).value);
+      }
+    });
+
+    it("the kill sentinel still wins an equal-tick tiebreak against high code units", () => {
+      for (const replica of ["\ufffe", "\ufffd", "\u{10ffff}", "zzz"]) {
+        const normal = { value: "VERIFIED", ts: { tick: 5, replica } };
+        const kill = lwwRegisterKillWrite({ value: undefined, ts: { tick: 4, replica: "" } }, "QUARANTINED");
+        expect(lwwRegisterMerge(normal, kill).value).toBe("QUARANTINED");
+        expect(lwwRegisterMerge(kill, normal).value).toBe("QUARANTINED");
+      }
+    });
+  });
 });

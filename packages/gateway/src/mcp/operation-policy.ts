@@ -34,7 +34,7 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { getRepos } from "../db.js";
 import { getJobFacade } from "../facades/index.js";
 import { getCapabilityDescriptor } from "../services/ad-hoc-pricing.js";
-import { REGISTERED_OPERATION_IDS } from "./operation-ids.js";
+import { REGISTERED_OPERATION_IDS, APP_HOST_OPERATION_IDS } from "./operation-ids.js";
 
 /** The dedicated typed-operation tool-name prefix. These tools are SEPARATE from
  *  the raw agent-package proxy tools; the dispatcher routes any `pcc.op.*` name
@@ -398,6 +398,29 @@ register(requestQuotePolicy as unknown as DashboardOperationPolicy<never>);
       `operation-policy registry {${registered.join(", ")}} disagrees with ` +
         `REGISTERED_OPERATION_IDS {${canonical.join(", ")}} — keep operation-ids.ts in sync.`,
     );
+  }
+})();
+
+/** Why an id may NOT be offered to a hosted view (astra r2 on #342, F2): each must be a registered,
+ *  read-only (stateChanging:false), approval-"none" operation. Pure, so a test can pin the rule with a
+ *  synthetic registry; the guard below runs it against the live one at module load. */
+export function appHostOperationViolations(
+  ids: readonly string[],
+  lookup: (id: string) => DashboardOperationPolicy | null,
+): string[] {
+  const out: string[] = [];
+  for (const id of ids) {
+    const p = lookup(id);
+    if (!p) out.push(`${id}: not registered`);
+    else if (p.stateChanging !== false) out.push(`${id}: state-changing`);
+    else if (p.approval !== "none") out.push(`${id}: approval "${p.approval}"`);
+  }
+  return out;
+}
+(() => {
+  const bad = appHostOperationViolations(APP_HOST_OPERATION_IDS, (id) => REGISTRY.get(id) ?? null);
+  if (bad.length) {
+    throw new Error(`APP_HOST_OPERATION_IDS may hold only read-only, approval-"none" operations: ${bad.join("; ")}`);
   }
 })();
 

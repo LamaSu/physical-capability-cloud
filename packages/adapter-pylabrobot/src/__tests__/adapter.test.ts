@@ -138,13 +138,14 @@ describe("PyLabRobotAdapter — sidecar round-trip via InMemoryTransport", () =>
       ok: true,
       deviceId: "dev-ot2-test",
       plrBackend: "chatterbox",
+      generation: "gen-t",
     });
     await tick();
 
-    // Second outbound: evidence.startRecording
+    // Second outbound: evidence.startRecording, answered with the window's attestation
     last = transport.lastSent();
     expect((last as { method: string }).method).toBe("evidence.startRecording");
-    transport.respondSuccess((last as { id: string }).id, { ok: true });
+    transport.respondSuccess((last as { id: string }).id, { ok: true, jobId: "j-1", generation: "gen-t" });
     await tick();
 
     // Third outbound: backend.run
@@ -158,10 +159,10 @@ describe("PyLabRobotAdapter — sidecar round-trip via InMemoryTransport", () =>
     });
     await tick();
 
-    // Fourth outbound: evidence.stopRecording
+    // Fourth outbound: evidence.stopRecording, answered with the close's attestation
     last = transport.lastSent();
     expect((last as { method: string }).method).toBe("evidence.stopRecording");
-    transport.respondSuccess((last as { id: string }).id, { ok: true });
+    transport.respondSuccess((last as { id: string }).id, { ok: true, jobId: "j-1", generation: "gen-t" });
 
     const res = await startP;
     expect(res.success).toBe(true);
@@ -178,10 +179,10 @@ describe("PyLabRobotAdapter — sidecar round-trip via InMemoryTransport", () =>
     const startP = adapter.execute({ type: "start", payload: { jobId: "j-stream" } });
     await tick();
     // init
-    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, deviceId: "dev-ot2-test", plrBackend: "chatterbox" });
+    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, deviceId: "dev-ot2-test", plrBackend: "chatterbox", generation: "gen-t" });
     await tick();
     // startRecording
-    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true });
+    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-stream", generation: "gen-t" });
     await tick();
 
     // backend.run is now in-flight. Push a few evidence notifications.
@@ -202,7 +203,7 @@ describe("PyLabRobotAdapter — sidecar round-trip via InMemoryTransport", () =>
       durationMs: 1234,
     });
     await tick();
-    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true });
+    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-stream", generation: "gen-t" });
 
     await startP;
     const instrumentResults = events.filter((e) => e.type === "instrument_result");
@@ -219,9 +220,9 @@ describe("PyLabRobotAdapter — sidecar round-trip via InMemoryTransport", () =>
 
     const startP = adapter.execute({ type: "start", payload: { jobId: "j-fail" } });
     await tick();
-    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, deviceId: "dev-ot2-test", plrBackend: "chatterbox" });
+    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, deviceId: "dev-ot2-test", plrBackend: "chatterbox", generation: "gen-t" });
     await tick();
-    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true });
+    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-fail", generation: "gen-t" });
     await tick();
 
     // backend.run errors
@@ -234,7 +235,7 @@ describe("PyLabRobotAdapter — sidecar round-trip via InMemoryTransport", () =>
     await tick();
     // evidence.stopRecording still sent — respond
     if (transport.lastSent() && (transport.lastSent() as { method: string }).method === "evidence.stopRecording") {
-      transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true });
+      transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-fail", generation: "gen-t" });
     }
 
     const res = await startP;
@@ -250,7 +251,7 @@ describe("PyLabRobotAdapter — sidecar round-trip via InMemoryTransport", () =>
     const p = adapter.execute({ type: "status" });
     await tick();
     // init
-    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, deviceId: "dev-ot2-test", plrBackend: "chatterbox" });
+    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, deviceId: "dev-ot2-test", plrBackend: "chatterbox", generation: "gen-t" });
     await tick();
     // status
     transport.respondSuccess((transport.lastSent() as { id: string }).id, {
@@ -283,7 +284,7 @@ describe("PyLabRobotAdapter — sidecar round-trip via InMemoryTransport", () =>
     // initialize first
     const initP = adapter.execute({ type: "status" });
     await tick();
-    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, deviceId: "dev-ot2-test", plrBackend: "chatterbox" });
+    transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, deviceId: "dev-ot2-test", plrBackend: "chatterbox", generation: "gen-t" });
     await tick();
     transport.respondSuccess((transport.lastSent() as { id: string }).id, { status: "idle" });
     await initP;

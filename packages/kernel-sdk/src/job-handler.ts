@@ -24,7 +24,15 @@ import type {
   SessionKey,
   SHA256,
 } from "@pcc/spec";
-import { canonicalize, ids, sha256 } from "@pcc/spec";
+import {
+  canonicalize,
+  canonicalSnapshot,
+  ids,
+  parseEd25519SignatureHex,
+  sessionKeyDelegationPreimage,
+  sha256,
+  signingPreimage,
+} from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
 // Hex helpers (serialising bytes over JSON)
@@ -61,6 +69,15 @@ export interface KernelJobRequest {
   jobId: string;
   /** Payload forwarded to the builder's execute() */
   input: Record<string, unknown>;
+  /**
+   * The escrow settlement unit (milestone) this execution is for, and the
+   * gateway's challenge nonce for that unit: `0x` + 64 lowercase hex each.
+   * When present they are committed in the kernel-signed execution_started
+   * and execution_completed payloads, so the evidence binds that unit (LO-EV-9)
+   * and cannot settle another milestone of the same job.
+   */
+  settlementUnitId?: string;
+  challengeNonce?: string;
   /** Optional client-side session-signed event authorising the call */
   auth?: {
     /** Hex-encoded canonical event body the caller signed */
@@ -80,7 +97,11 @@ export interface KernelJobRequest {
 export interface KernelJobResponse {
   /** Signed + hashed evidence bundle */
   evidenceBundle: EvidenceBundle;
-  /** Output payload returned by the builder's execute() */
+  /**
+   * The output payload the builder's execute() returned, as the canonical-JSON snapshot the
+   * evidence commits to (not the builder's own object): -0 reads 0, an undefined member is
+   * omitted, and every object in it has no prototype (see `CanonicalSnapshot`).
+   */
   output: Record<string, unknown>;
   /** Session key used by the kernel to sign evidence (hex pubkey) */
   kernelSessionPublicKey: string;
@@ -102,7 +123,17 @@ export interface CreateKernelHandlerOptions {
    * Used to sign the session key struct and the evidence bundle hash.
    */
   principalPrivateKey: Uint8Array;
-  /** Builder-supplied execution function. Must return a JSON-serialisable value. */
+  /**
+   * Builder-supplied execution function. Must return a JSON-serialisable value.
+   *
+   * `input` is a snapshot of exactly the JSON the input commitment hashes. Every object in it, at
+   * every depth, has NO prototype: a key the caller did not send reads as undefined (a polluted
+   * Object.prototype supplies nothing), but Object.prototype methods are not there either, so
+   * do not call input.hasOwnProperty(k) or input.toString(): use Object.keys, `in`,
+   * Object.hasOwn or JSON.stringify. A value with no JSON form (NaN, a function, a Date,
+   * an accessor ...) is refused with a NonCanonicalValueError, for the returned output as for
+   * the input.
+   */
   execute: (input: Record<string, unknown>) => Promise<Record<string, unknown>>;
 }
 
@@ -142,6 +173,22 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
     if (!request.input || typeof request.input !== "object") {
       throw new KernelAuthError("input must be an object", 400);
     }
+    for (const field of ["settlementUnitId", "challengeNonce"] as const) {
+      const value: unknown = request[field];
+      if (value !== undefined && !(typeof value === "string" && /^0x[0-9a-f]{64}$/.test(value))) {
+        throw new KernelAuthError(`${field} must be 0x + 64 lowercase hex`, 400);
+      }
+    }
+    // A unit is bound with its challenge nonce: half a binding settles nothing
+    // (the oracle requires both on every event) and only hides the gap.
+    if ((request.settlementUnitId === undefined) !== (request.challengeNonce === undefined)) {
+      throw new KernelAuthError("settlementUnitId and challengeNonce come together", 400);
+    }
+    // Committed only when the caller names a unit, so unit-less jobs keep their bytes.
+    const unitFields = {
+      ...(request.settlementUnitId !== undefined ? { settlementUnitId: request.settlementUnitId } : {}),
+      ...(request.challengeNonce !== undefined ? { challengeNonce: request.challengeNonce } : {}),
+    };
 
     // ── Optional inbound auth check ─────────────────────────────────────
     // Kernels may be advertised as open (no auth required) or locked to
@@ -174,6 +221,16 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
       }
     }
 
+    // ── Snapshot the input ──────────────────────────────────────────────
+    // Canonicalize FIRST and parse the canonical text ONCE; from here on only
+    // that snapshot is used. The builder executes on it and the input commitment
+    // hashes the very same text, so the evidence covers exactly what ran. The
+    // request object is caller-controlled and mutable (a Proxy can answer the
+    // builder differently from what canonicalize read), so it is never handed
+    // to the builder. An input with no JSON form is refused here, before any
+    // builder code runs.
+    const inputSnapshot = canonicalSnapshot<Record<string, unknown>>(request.input);
+
     // ── Mint a session key for this job ─────────────────────────────────
     // The kernel signs the bundle with a fresh Ed25519 keypair; the session
     // key struct is authorised by the kernel's principal private key. This
@@ -199,21 +256,10 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
       },
     };
 
-    const sessionCanonical = new TextEncoder().encode(
-      JSON.stringify({
-        sessionId: sessionKeyBody.sessionId,
-        parentAgentId: sessionKeyBody.parentAgentId,
-        publicKey: toHex(sessionKeyBody.publicKey),
-        issuedAt: sessionKeyBody.issuedAt,
-        expiresAt: sessionKeyBody.expiresAt,
-        scope: {
-          allowedActions: [...sessionKeyBody.scope.allowedActions].sort(),
-          contractIds: [...sessionKeyBody.scope.contractIds].sort(),
-          maxSignatures: sessionKeyBody.scope.maxSignatures,
-        },
-      }),
+    const parentSig = nacl.sign.detached(
+      sessionKeyDelegationPreimage(sessionKeyBody),
+      principalPrivateKey,
     );
-    const parentSig = nacl.sign.detached(sessionCanonical, principalPrivateKey);
     const sessionKey: SessionKey = {
       ...sessionKeyBody,
       parentSignature: parentSig,
@@ -221,8 +267,16 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
 
     // ── Execute the builder's code ──────────────────────────────────────
     const executionStart = new Date().toISOString();
-    const output = await execute(request.input);
+    const returned = await execute(inputSnapshot.value);
     const executionEnd = new Date().toISOString();
+
+    // -- Snapshot the output --------------------------------------------
+    // The same discipline as the input: canonicalize FIRST and parse the canonical text ONCE,
+    // commit to that text, and hand the caller that parsed value. The builder's own object (a
+    // Proxy, or one the builder keeps and changes after returning) is never read again, so the
+    // output commitment covers exactly the output the caller receives. An output with no JSON
+    // form is refused here, with the same NonCanonicalValueError an input with none gets.
+    const outputSnapshot = canonicalSnapshot<Record<string, unknown>>(returned);
 
     // ── Assemble evidence events ────────────────────────────────────────
     const source: EvidenceSource = {
@@ -233,18 +287,21 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
 
     const events: EvidenceEvent[] = [];
 
-    // Input commitment
-    const inputHash = await sha256(canonicalize(request.input));
+    // Input commitment: the hash of the snapshot the builder received
+    const inputHash = await sha256(inputSnapshot.text);
     const inputEvent: EvidenceEvent = {
       id: ids.evidence(),
       type: "gcode_hash_verified",
       timestamp: executionStart,
       source,
       payload: {
+        // Every event names its job (and unit): the binding is per event.
+        jobId: request.jobId,
         description: "Input data committed",
         inputHash,
         kernelId: manifest.kernelId,
         capabilityType: manifest.capabilityType,
+        ...unitFields,
       },
       hash: "" as SHA256,
     };
@@ -268,6 +325,7 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
         jobId: request.jobId,
         kernelId: manifest.kernelId,
         stepCount: manifest.workflowSteps.length,
+        ...unitFields,
       },
       hash: "" as SHA256,
     };
@@ -289,9 +347,11 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
         timestamp: new Date().toISOString(),
         source,
         payload: {
+          jobId: request.jobId,
           stepId: step.stepId,
           stepType: step.stepType,
           description: step.description,
+          ...unitFields,
         },
         hash: "" as SHA256,
       };
@@ -306,8 +366,8 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
       events.push(stepEvent);
     }
 
-    // Output commitment
-    const outputHash = await sha256(canonicalize(output));
+    // Output commitment: the hash of the snapshot the caller receives
+    const outputHash = await sha256(outputSnapshot.text);
 
     // Execution completed
     const completedEvent: EvidenceEvent = {
@@ -319,6 +379,7 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
         jobId: request.jobId,
         kernelId: manifest.kernelId,
         outputHash,
+        ...unitFields,
       },
       hash: "" as SHA256,
     };
@@ -335,8 +396,7 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
     // ── Finalise bundle (hash + sign with sessionKey) ───────────────────
     const sortedHashes = events.map((e) => e.hash).sort();
     const bundleHash = await sha256(canonicalize(sortedHashes));
-    const bundleHashBytes = new TextEncoder().encode(bundleHash);
-    const bundleSig = nacl.sign.detached(bundleHashBytes, sessionKeypair.secretKey);
+    const bundleSig = nacl.sign.detached(signingPreimage(bundleHash), sessionKeypair.secretKey);
 
     const evidenceBundle: EvidenceBundle = {
       id: ids.bundle(),
@@ -365,21 +425,36 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
 
     return {
       evidenceBundle,
-      output,
+      output: outputSnapshot.value,
       kernelSessionPublicKey: toHex(sessionKey.publicKey),
     };
   };
 }
 
-/** Verify an EvidenceBundle signature against a known session public key. */
+/**
+ * Verify an EvidenceBundle signature against a known session public key.
+ *
+ * Transport form: the signature value is UNPREFIXED hex, which is what the SDK
+ * signs and what this verifier has always required. A "0x"/"0X"-prefixed
+ * value decoded to 65 bytes before LO-EV-1 and never verified, so it must not
+ * verify now (parseEd25519SignatureHex alone would strip the prefix).
+ *
+ * Deliberate narrowings vs the pre-LO-EV-1 decoder: a value with a trailing
+ * extra nibble (129 hex) used to be truncated to 64 bytes and could verify; it
+ * is now rejected, as is a bundleHash that is not a canonical tagged digest.
+ */
 export function verifyBundleSignature(
   bundle: EvidenceBundle,
   sessionPublicKey: Uint8Array,
 ): boolean {
+  const value: unknown = bundle.kernelSignature?.value;
+  if (typeof value !== "string" || /^0x/i.test(value)) return false;
   try {
-    const bundleHashBytes = new TextEncoder().encode(bundle.bundleHash);
-    const sig = fromHex(bundle.kernelSignature.value);
-    return nacl.sign.detached.verify(bundleHashBytes, sig, sessionPublicKey);
+    return nacl.sign.detached.verify(
+      signingPreimage(bundle.bundleHash),
+      parseEd25519SignatureHex(value),
+      sessionPublicKey,
+    );
   } catch {
     return false;
   }

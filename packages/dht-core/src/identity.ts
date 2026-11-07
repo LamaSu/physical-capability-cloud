@@ -12,6 +12,7 @@
  * compare endpoints. Extracting this avoids two copies drifting.
  */
 
+import { compareCodeUnits } from "@pcc/spec";
 import type { PeerIdentity, PeerEndpoint, TransportType } from "@pcc/spec";
 
 // Re-export for convenience so dependants only need @pcc/dht-core
@@ -71,14 +72,23 @@ export function endpointsEqual(
 }
 
 /**
- * Sort endpoints by priority (asc), with stable secondary sort on URL
- * so the result is fully deterministic regardless of input ordering.
- * Lower priority value = preferred.
+ * Sort endpoints by priority (asc), then URL, then transport, both in UTF-16
+ * code-unit order (never locale collation), so the result is deterministic
+ * regardless of input ordering or host ICU. Endpoints equal on all three
+ * serialize identically (see `canonicalIdentityJson`). Lower priority value =
+ * preferred. A priority that is not a finite number is refused (RangeError).
  */
 export function sortedEndpoints(endpoints: PeerEndpoint[]): PeerEndpoint[] {
+  // A non-finite priority has no place in a total order (NaN compares as "equal" and keeps its
+  // input order) or in a signed preimage (JSON writes it as null), so it is refused (review E1c).
+  for (const e of endpoints) {
+    if (typeof e.priority !== "number" || !Number.isFinite(e.priority)) {
+      throw new RangeError(`endpoint priority must be a finite number, got ${String(e.priority)}`);
+    }
+  }
   return [...endpoints].sort((a, b) => {
     if (a.priority !== b.priority) return a.priority - b.priority;
-    return a.url.localeCompare(b.url);
+    return compareCodeUnits(a.url, b.url) || compareCodeUnits(a.transport, b.transport);
   });
 }
 
@@ -98,7 +108,8 @@ export function preferredEndpoint(
 /**
  * Canonical JSON of a PeerIdentity for hashing / signing purposes.
  *
- * Fields ordered alphabetically; endpoints sorted with `sortedEndpoints`.
+ * Fields ordered alphabetically; endpoints sorted with `sortedEndpoints`, each as
+ * `{transport, url, priority}` in that order.
  * Mirrors @pcc/a2a's signAnnouncement canonicalisation pattern so the
  * shape stays stable when the federation runtime hashes peer identities
  * for the Kademlia routing-table key.
@@ -107,7 +118,9 @@ export function canonicalIdentityJson(identity: PeerIdentity): string {
   const canonical = {
     agentId: identity.agentId ?? null,
     did: identity.did,
-    endpoints: sortedEndpoints(identity.endpoints),
+    // Each endpoint is rebuilt with its declared fields in a fixed order, so neither an
+    // object's key order nor an undeclared field can change the preimage (review E1b).
+    endpoints: sortedEndpoints(identity.endpoints).map((e) => ({ transport: e.transport, url: e.url, priority: e.priority })),
     kernelId: identity.kernelId ?? null,
     publicKey: identity.publicKey,
   };

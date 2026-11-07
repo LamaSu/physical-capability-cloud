@@ -2,7 +2,7 @@ import React from "react";
 import { GlassPanel } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useQuery } from "@tanstack/react-query";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 
 // ---------------------------------------------------------------------------
 // Types — mirrors /api/telemetry/system response shape
@@ -102,9 +102,7 @@ interface SystemPayload {
 // ---------------------------------------------------------------------------
 
 async function fetchSystemTelemetry(): Promise<SystemPayload> {
-  const res = await fetch("/api/telemetry/system", {
-    headers: { ...getAuthHeaders() },
-  });
+  const res = await authorizedFetch("/api/telemetry/system");
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json() as Promise<SystemPayload>;
 }

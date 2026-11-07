@@ -21,6 +21,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { initStore, closeStore, getRepos } from "../db.js";
+import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
+import { createHash } from "node:crypto";
 
 vi.mock("@pcc/kernel/evidence-storage-factory", () => ({
   createEvidenceStorage: vi.fn().mockResolvedValue({
@@ -66,9 +68,18 @@ vi.mock("../contracts/batch-settlement.js", () => ({
 const KERNEL = "kernel-biolab-01";
 const CAP = "liquid-handler";
 
+// N133 (the steward's DECISIONS 01:01): a paid job's buyer is the caller's proven wallet, or the
+// gateway admin acts for it. This suite has no caller stand-in and its buyers are not wallets, so
+// the admin submits each fast-track job for its buyer.
+const ADMIN = "completion-resume-settlement-admin";
+const asAdmin = { "x-admin-key": ADMIN };
+let savedAdminKey: string | undefined;
+
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   process.env.MOCK_SETTLEMENT = "true";
+  savedAdminKey = process.env.PCC_ADMIN_KEY;
+  process.env.PCC_ADMIN_KEY = ADMIN;
   initStore({ seed: true });
   const app = Fastify({ logger: false });
   await app.register(paidJobFlowRoutes);
@@ -87,6 +98,8 @@ describe("resume-settlement recovers a trapped completion (finding #2 / A-2)", (
   afterEach(async () => {
     await app.close();
     closeStore();
+    if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = savedAdminKey;
   });
 
   /**
@@ -98,6 +111,7 @@ describe("resume-settlement recovers a trapped completion (finding #2 / A-2)", (
     const ft = await app.inject({
       method: "POST",
       url: "/api/jobs/submit-from-discovery",
+      headers: asAdmin,
       payload: { kernelId: KERNEL, capabilityType: CAP, userAgentId: agent },
     });
     expect(ft.statusCode).toBe(201);
@@ -107,16 +121,19 @@ describe("resume-settlement recovers a trapped completion (finding #2 / A-2)", (
     const repos = getRepos();
     const job = repos.jobs.findById(jobId)!;
     const bundleId = `bundle-trap-${agent}`;
-    repos.evidence.insert({
+    // A genuine gateway anchor, as /complete writes it: its bundleHash is the
+    // sha256 of its canonical envelope (recovery re-verifies exactly that).
+    const meta = {
       id: bundleId,
       jobId,
       stepId: job.stepId,
       kernelId: job.kernelId,
       assuranceTier: 0,
-      bundleHash: "sha256:trapped-evidence",
-      kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "ed25519", value: "test" },
       createdAt: new Date().toISOString(),
-    } as any);
+      kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "ed25519", value: "gateway-auto-sign" },
+    };
+    const bundleHash = `sha256:${createHash("sha256").update(buildCanonicalEvidenceEnvelope(meta as any, [])).digest("hex")}`;
+    repos.evidence.insert({ ...meta, bundleHash } as any);
     repos.jobs.update(jobId, { evidenceBundleId: bundleId, status: "evidence_submitted" });
     return { jobId, escrowId, bundleId };
   }
@@ -169,6 +186,7 @@ describe("resume-settlement recovers a trapped completion (finding #2 / A-2)", (
     const ft = await app.inject({
       method: "POST",
       url: "/api/jobs/submit-from-discovery",
+      headers: asAdmin,
       payload: { kernelId: KERNEL, capabilityType: CAP, userAgentId: "a2-notrap" },
     });
     const jobId = ft.json().jobId as string;

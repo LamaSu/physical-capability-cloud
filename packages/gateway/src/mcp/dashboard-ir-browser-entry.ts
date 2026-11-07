@@ -1,0 +1,483 @@
+/// <reference lib="dom" />
+/// <reference lib="dom.iterable" />
+/**
+ * Phase B — BROWSER composition root (item 8). esbuild bundles THIS + the audited
+ * modules (dashboard-ir / -renderer / -binder) into
+ *   apps/dashboard/public/ui-kit/v1/pcc-ir-kit.js   (committed, unminified, byte-checked)
+ *
+ * Imports the audited security core UNCHANGED; adds only browser glue:
+ *  - the read-only MCP Apps lifecycle (ui/initialize → ui/notifications/initialized →
+ *    ui/notifications/tool-result; answers ui/resource-teardown), render-once;
+ *  - a FIXED PCC API origin injected by the trusted server boot script
+ *    (window.__PCC_IR_ORIGIN__) — never the manifest/parent/document origin; no valid
+ *    origin ⇒ no live binding (static render);
+ *  - a bounded size preflight before adapt/validate (no unbounded serialize);
+ *  - GET-only fetch (credentials:"omit", redirect:"error", exact application/json,
+ *    non-clean bodies cancelled, incremental 512KB cap) — SSE is NOT used (run cards
+ *    bind via GET poll, so the audited SSE policy is unreachable here);
+ *  - a global 6-way concurrency gate with cancellation-aware, permit-reserving waiters;
+ *  - per-render bind GENERATION with an AbortController: visibility-hide / teardown /
+ *    pagehide abort in-flight GETs and drop queued waiters, so visibility churn cannot
+ *    grow work unbounded.
+ *
+ * Exposes NO host-call interface; contains NONE of tools/call, __PCC_HOST_BRIDGE__,
+ * __PCC_HOST_OPERATIONS__, capability registration, or a write transport.
+ */
+import { dashboardManifestToIr, listRowsOf, validateIr, provenanceOf } from "./dashboard-ir.js";
+import type { IrDoc, IrNode } from "./dashboard-ir.js";
+import { bootIrView, bindScalar, bindListRows, listRowsReadable, bindSchemaCard, schemaCardFailure, applyFreshness, applyUnavailable, applyUnknownTime, UNAVAILABLE } from "./dashboard-ir-renderer.js";
+import type { RDocument, RElement } from "./dashboard-ir-renderer.js";
+import { startBind, sourceAsOf, isStale, acceptsNewer } from "./dashboard-ir-binder.js";
+import type { BinderDeps, GetResult } from "./dashboard-ir-binder.js";
+
+const CAP = {
+  docChars: 256 * 1024,   // bounded manifest preflight: total string + key chars
+  maxNodes: 20_000,       // bounded manifest preflight: total DISTINCT nodes visited
+  maxFanout: 4096,        // bounded manifest preflight: per-container children
+  maxPending: 100_000,    // bounded manifest preflight: max enqueued (stack) references
+  respBytes: 512 * 1024,  // per-response byte cap (incremental)
+  concurrent: 6,          // global max in-flight binds
+  reqTimeoutMs: 30_000,
+  protocol: "2026-01-26",
+  initId: 1,
+} as const;
+const MOUNT_ID = "pcc-ir-root";
+
+/** Fixed PCC API origin — injected by the trusted (nonce) server boot script into
+ * window.__PCC_IR_ORIGIN__, matching MCP_APP_API_BASE_URL + the CSP connect-src. NEVER
+ * derived from the manifest / parent / runtime document origin (which may be the app
+ * domain, a host origin, or "null"). Returns null if absent/invalid ⇒ no binding. */
+function pccApiOrigin(): string | null {
+  const o = (window as unknown as { __PCC_IR_ORIGIN__?: unknown }).__PCC_IR_ORIGIN__;
+  return typeof o === "string" && /^https:\/\/[a-z0-9.-]+$/i.test(o) ? o : null;
+}
+
+// ── real DOM wrapped in the renderer's minimal RElement (fresh detached container per render) ──
+interface Wrapped extends RElement { _el: HTMLElement }
+function wrapEl(real: HTMLElement): Wrapped {
+  const children: RElement[] = [];
+  const w = {
+    _el: real, children,
+    get textContent() { return real.textContent ?? ""; },
+    set textContent(v: string) { real.textContent = v; },
+    get className() { return real.className; },
+    set className(v: string) { real.className = v; },
+    setAttr(n: string, v: string) { real.setAttribute(n, v); },
+    removeAttr(n: string) { real.removeAttribute(n); },
+    appendChild(c: Wrapped) { real.appendChild(c._el); children.push(c); return c; },
+  };
+  return w as unknown as Wrapped;
+}
+const rdoc: RDocument = { createElement: (tag: string) => wrapEl(document.createElement(tag)) as unknown as RElement };
+function inert(mount: HTMLElement, msg: string): void {
+  const p = document.createElement("p");
+  p.className = "pcc-invalid";
+  p.textContent = msg;
+  mount.replaceChildren(p);
+}
+
+/** Bounded preflight — reject an oversized/pathological manifest BEFORE any full
+ * serialize/traverse. Cycle- and shared-reference-safe (structured clone allows both):
+ * a WeakSet skips already-visited objects, `pending` caps enqueued work, per-container
+ * fanout is enforced WITHOUT materializing a key array (for-in + early break), and
+ * property-name characters count against the char budget. */
+function tooLarge(root: unknown): boolean {
+  const seen = new WeakSet<object>();
+  let nodes = 0, chars = 0, pending = 1;
+  const stack: unknown[] = [root];
+  while (stack.length) {
+    const v = stack.pop(); pending--;
+    if (++nodes > CAP.maxNodes) return true;
+    if (typeof v === "string") { chars += v.length; if (chars > CAP.docChars) return true; continue; }
+    if (!v || typeof v !== "object") continue;
+    if (seen.has(v)) continue; // cycle / shared reference already accounted
+    seen.add(v);
+    if (Array.isArray(v)) {
+      if (v.length > CAP.maxFanout || pending + v.length > CAP.maxPending) return true;
+      for (let i = 0; i < v.length; i++) { stack.push(v[i]); pending++; }
+    } else {
+      let kn = 0;
+      for (const k in v) {
+        if (!Object.prototype.hasOwnProperty.call(v, k)) continue;
+        if (++kn > CAP.maxFanout || pending + 1 > CAP.maxPending) return true;
+        chars += k.length; if (chars > CAP.docChars) return true;
+        stack.push((v as Record<string, unknown>)[k]); pending++;
+      }
+    }
+  }
+  return false;
+}
+
+// ── global concurrency gate: cancellation-aware; a woken waiter inherits the permit ──
+let inFlight = 0;
+interface Waiter { wake: () => void; onAbort: () => void }
+const waiters: Waiter[] = [];
+function acquire(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(new DOMException("aborted", "AbortError"));
+  if (inFlight < CAP.concurrent) { inFlight++; return Promise.resolve(); }
+  return new Promise<void>((resolve, reject) => {
+    const w: Waiter = { wake: () => {}, onAbort: () => {} };
+    w.onAbort = () => { const i = waiters.indexOf(w); if (i >= 0) waiters.splice(i, 1); reject(new DOMException("aborted", "AbortError")); };
+    w.wake = () => { signal.removeEventListener("abort", w.onAbort); resolve(); }; // permit transferred from releaser; inFlight unchanged
+    signal.addEventListener("abort", w.onAbort, { once: true });
+    waiters.push(w);
+  });
+}
+function release(): void { const n = waiters.shift(); if (n) n.wake(); else inFlight--; }
+
+function concat(chunks: Uint8Array[], total: number): Uint8Array {
+  const out = new Uint8Array(total); let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+/** GET-only, fixed-origin, redirect:"error", credentials:"omit". Consumes a body ONLY
+ * for a clean same-origin 200 with an EXACT application/json type; every non-clean
+ * response (non-200 / redirected / wrong type / oversize) is cancelled, not read. */
+async function realGetJson(url: string, signal: AbortSignal): Promise<GetResult> {
+  const resp = await fetch(url, { method: "GET", redirect: "error", credentials: "omit", cache: "no-store", headers: { accept: "application/json" }, signal });
+  const redirected = resp.redirected;
+  const ct = (resp.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+  if (resp.status !== 200 || redirected || ct !== "application/json") {
+    try { await resp.body?.cancel(); } catch { /* ignore */ }
+    const reason = resp.status !== 200 ? "HTTP " + resp.status : redirected ? "redirected" : "unexpected content type";
+    return { status: resp.status, redirected, bytesOver: false, json: null, ok: false, reason };
+  }
+  const reader = resp.body ? resp.body.getReader() : null;
+  const chunks: Uint8Array[] = []; let received = 0;
+  if (reader) {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        received += value.length;
+        if (received > CAP.respBytes) { try { await reader.cancel(); } catch { /* ignore */ } return { status: 200, redirected: false, bytesOver: true, json: null, ok: false, reason: "response too large" }; }
+        chunks.push(value);
+      }
+    }
+  }
+  let json: unknown = null;
+  try { json = JSON.parse(new TextDecoder().decode(concat(chunks, received))); } catch {
+    return { status: 200, redirected: false, bytesOver: false, json: null, ok: false, reason: "unreadable response" };
+  }
+  if (json === null || typeof json !== "object") return { status: 200, redirected: false, bytesOver: false, json: null, ok: false, reason: "empty response" };
+  return { status: 200, redirected: false, bytesOver: false, json, ok: true };
+}
+
+// ── render + bind ────────────────────────────────────────────────────────────────
+let rendered = false;
+let disposed = false; // TERMINAL: after ui/resource-teardown, no path renders/binds/reacts again
+let boundHandles: Array<{ stop: () => void }> = [];
+let genController: AbortController | null = null;
+let liveDoc: IrDoc | null = null;
+let liveRoot: HTMLElement | null = null;
+
+function collectBound(doc: IrDoc): { stats: IrNode[]; lists: IrNode[]; schemaCards: IrNode[] } {
+  // schemaCards = the data-bearing capability/run cards, in document order (aligned with the
+  // `.pcc-schema-card` query in startBinds). The settlement record is a STATIC pointer (no
+  // bind, no `.pcc-schema-card` class) → intentionally not collected here.
+  const stats: IrNode[] = [], lists: IrNode[] = [], schemaCards: IrNode[] = [];
+  const walk = (n: IrNode): void => {
+    if (n.bind) {
+      if (n.type === "stat") stats.push(n);
+      else if (n.type === "list") lists.push(n);
+      else if (n.type === "card") schemaCards.push(n);
+    }
+    if (n.children) for (const c of n.children) walk(c);
+  };
+  walk(doc.root);
+  return { stats, lists, schemaCards };
+}
+// ── Fingerprint helpers (M3: an equal-timestamp duplicate must compare payload, not just
+// arrival order) — pure, side-effect-free re-derivations of "the bound datum" each sink's
+// own paint callback already extracts, kept SEPARATE so acceptsNewer's equal-time rule can
+// be evaluated BEFORE painting (a rejected duplicate must never touch the real DOM). ──────
+const MISSING = Symbol("missing-field");
+/** Same own-property dotted-path walk the stat painter uses; MISSING (not undefined, which a
+ *  payload could legitimately carry as a value) marks an absent/unwalkable path. */
+function selectPath(data: unknown, select: string): unknown | typeof MISSING {
+  let cur: unknown = data;
+  for (const seg of select.split(".")) {
+    if (cur === null || typeof cur !== "object" || Array.isArray(cur) || !Object.prototype.hasOwnProperty.call(cur, seg)) return MISSING;
+    cur = (cur as Record<string, unknown>)[seg];
+  }
+  return cur;
+}
+/** A framed structural shape of a DOM subtree (astra 28e M3): a text node gives its text; an
+ *  element gives [tagName, its attributes as [name,value] pairs sorted by name, ...its child
+ *  nodes' shapes]; anything else (comment, etc.) is null. Row/cell boundaries, field labels
+ *  (classes), kinds and values are then all part of the shape, so two structurally different
+ *  lists can never share a fingerprint — unlike the old unframed textContent concatenation. */
+function shapeOf(n: Node): unknown {
+  if (n.nodeType === 3) return n.textContent;
+  if (n.nodeType === 1) {
+    const e = n as Element;
+    const attrs = Array.from(e.attributes).map((a) => [a.name, a.value] as [string, string]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    return [e.tagName, attrs, ...Array.from(e.childNodes).map(shapeOf)];
+  }
+  return null;
+}
+/** PX-4 provenance gate for one bound node (hardened per cross-family review #2524).
+ *  - Absence is not evidence: a failed, errored, timed-out, off-schema, partial or unreadable
+ *    read CLEARS what was shown and says "unavailable · <why>". Nothing last-known or default
+ *    is ever left on screen as if current.
+ *  - Freshness: a datum is "fresh" only when the SOURCE said when it read it (asOf), and only
+ *    until the route's budget runs out: a timer marks it stale on its own, and a resume
+ *    re-checks it. Data without a source time is shown with "source time not reported" and is
+ *    never presented as fresh (receipt time is kept separate).
+ *  - No regression: an update older than the ordering watermark, or untimed once a timed datum
+ *    was accepted, is dropped. This applies ONLY to VALID data; an invalid update is a failed
+ *    read that clears the view (astra 28f H1). The watermark is kept apart from whether a value
+ *    is currently shown, and it survives binding restarts.
+ *  - One state and one metadata line per bound node, kept across restarts (hide/show).
+ *  `prepare(data, sourceAsOf)` validates the complete route-specific payload WITHOUT writing to
+ *  the real DOM: if it fits, it returns a COMMIT function that paints the already-validated,
+ *  already-staged result into the real DOM; otherwise it returns a short fixed reason and
+ *  leaves the DOM untouched. Validation (prepare) always runs BEFORE the ordering gate, so an
+ *  off-contract, partial, mistyped or unreadable refresh is a failed read whatever its
+ *  timestamp — it can never be dropped silently behind a stale-but-valid watermark while an
+ *  older fresh value (or a fresh "none") stays on screen (astra 28f H1). Ordering applies only
+ *  to data `prepare` has already proven valid; only the commit (the actual DOM write) waits on it.
+ *  `clear()` removes shown values. */
+interface ProvState { meta: HTMLElement; watermark: string | null; fingerprint: string | null; shown: boolean; timeKnown: boolean; expiry: ReturnType<typeof setTimeout> | null }
+const provStates = new Map<string, ProvState>();
+function provenanced(node: IrNode, el: HTMLElement, prepare: (data: unknown, src: string | null) => string | (() => void), clear: () => void, fingerprint: (data: unknown) => string | null): { onData: (d: unknown) => void; onStale: (why: string) => void; onEnded: (why: string) => void } {
+  const prov = provenanceOf(node);
+  const host = wrapEl(el) as unknown as RElement;
+  let st = provStates.get(node.id);
+  if (!st) {
+    const metaReal = document.createElement("div");
+    if (el.parentNode) el.parentNode.insertBefore(metaReal, el.nextSibling);
+    st = { meta: metaReal, watermark: null, fingerprint: null, shown: false, timeKnown: false, expiry: null };
+    provStates.set(node.id, st);
+  }
+  const state = st;
+  const meta = wrapEl(state.meta) as unknown as RElement;
+  const disarm = (): void => { if (state.expiry !== null) { clearTimeout(state.expiry); state.expiry = null; } };
+  const markFresh = (): void => { // (re)evaluate freshness now and arm the expiry for later
+    disarm();
+    if (!state.shown || !state.timeKnown || state.watermark === null || !prov) return;
+    const now = Date.now();
+    const stale = isStale(state.watermark, prov.maxAgeMs, now);
+    applyFreshness(host, meta, state.watermark, stale);
+    if (!stale) {
+      const left = Date.parse(state.watermark) + prov.maxAgeMs - now;
+      state.expiry = setTimeout(() => { state.expiry = null; if (state.shown && state.watermark) applyFreshness(host, meta, state.watermark, true); }, Math.max(0, left) + 1);
+    }
+  };
+  const failed = (why: string): void => {
+    disarm();
+    clear();
+    state.shown = false;
+    applyUnavailable(host, meta, why);
+  };
+  markFresh(); // a restart (resume) re-checks what is already shown
+  return {
+    onData: (data) => {
+      const now = Date.now();
+      const src = sourceAsOf(data, now);
+      // astra 28f H1: VALIDATE FIRST. An off-contract, partial, mistyped or unreadable payload is a
+      // failed read whatever its timestamp: it CLEARS the view and says why. Ordering (no
+      // regression, untimed-after-timed, equal-time fingerprints) applies ONLY to valid data.
+      const prepared = prepare(data, src);
+      if (typeof prepared === "string") { failed(prepared); return; } // not data for this route
+      const incomingFingerprint = fingerprint(data);
+      // Never roll back; an equal-timestamp duplicate whose payload differs from what is
+      // shown is ALSO rejected — see acceptsNewer (M3: undecidable by time alone).
+      if (state.watermark !== null && (src === null || !acceptsNewer(state.watermark, src, state.fingerprint, incomingFingerprint))) return;
+      prepared();
+      state.shown = true;
+      state.fingerprint = incomingFingerprint;
+      if (src !== null) { state.watermark = src; state.timeKnown = true; markFresh(); }
+      else { disarm(); state.timeKnown = false; applyUnknownTime(host, meta, new Date(now).toISOString()); }
+    },
+    onStale: failed,
+    onEnded: failed,
+  };
+}
+function startBinds(doc: IrDoc, root: HTMLElement): void {
+  const origin = pccApiOrigin();
+  if (!origin) {
+    // No trusted PCC origin injected: nothing can be read, and the bound elements must say so
+    // rather than sit empty (absence is not evidence).
+    const { stats, lists, schemaCards } = collectBound(doc);
+    const els = (cls: string) => Array.from(root.querySelectorAll<HTMLElement>("." + cls));
+    const mark = (nodes: IrNode[], cls: string) => nodes.forEach((node, i) => { const el = els(cls)[i]; if (el) provenanced(node, el, () => "no live data source", () => {}, () => null).onStale("no live data source"); });
+    mark(stats, "pcc-stat"); mark(lists, "pcc-list"); mark(schemaCards, "pcc-schema-card");
+    return;
+  }
+  const gen = new AbortController();
+  genController = gen;
+  const deps: BinderDeps = {
+    origin,
+    // The signal is the GENERATION signal; per request we add a timeout + gen-link on a
+    // fresh controller and clean BOTH up when the request settles (no leaked timer/listener).
+    getJson: async (url: string, sig: unknown) => {
+      const s = sig as AbortSignal;
+      await acquire(s); // rejects if the generation already aborted / aborts while queued
+      const ctrl = new AbortController();
+      const onGen = () => ctrl.abort(new DOMException("generation aborted", "AbortError"));
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      try {
+        if (s.aborted) ctrl.abort();
+        else s.addEventListener("abort", onGen, { once: true });
+        timer = setTimeout(() => ctrl.abort(new DOMException("timeout", "TimeoutError")), CAP.reqTimeoutMs);
+        return await realGetJson(url, ctrl.signal);
+      } finally {
+        if (timer !== null) clearTimeout(timer);
+        s.removeEventListener("abort", onGen);
+        release();
+      }
+    },
+    // NO openSse: SSE transport intentionally absent — run cards bind via GET poll only.
+    setTimer: (fn, ms) => setTimeout(fn, ms),
+    clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+    makeSignal: () => gen.signal,
+  };
+  const { stats, lists, schemaCards } = collectBound(doc);
+  const byClass = (cls: string) => Array.from(root.querySelectorAll<HTMLElement>("." + cls));
+  const statEls = byClass("pcc-stat"), listEls = byClass("pcc-list"), schemaEls = byClass("pcc-schema-card");
+  const push = (h: { stop: () => void }) => boundHandles.push(h);
+  stats.forEach((node, i) => {
+    const el = statEls[i]; const slot = el?.querySelector<HTMLElement>(".pcc-value"); if (!el || !slot) return;
+    const select = String(node.bind?.select ?? "");
+    // #344's bindScalar is the single source of kind validation (metricKindForSource) AND
+    // text formatting (status qualification, attribution, percent/count/id/time/version
+    // grammars) — #348's provenanced() wrapper only decides WHEN to call it and how to
+    // report a failure. `selectPath` still distinguishes "missing" from "mistyped" for the
+    // reported reason text, which bindScalar's single UNAVAILABLE sentinel cannot.
+    const pv = provenanced(node, el, (data) => {
+      const cur = selectPath(data, select);
+      if (cur === MISSING) return "missing field";
+      const text = bindScalar(node, data);
+      if (text === UNAVAILABLE) return "mistyped field";
+      return () => { slot.textContent = text; }; // commit: write only after validation AND ordering accept it (astra 28f H1)
+    }, () => { slot.textContent = ""; }, (data) => {
+      // M3 fingerprint: the scalar itself — the one thing this sink shows.
+      const cur = selectPath(data, select);
+      if (cur === MISSING) return null;
+      return bindScalar(node, data) === UNAVAILABLE ? null : JSON.stringify(cur);
+    });
+    push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
+  });
+  // Fixed-schema cards (capability/run/settlement): PCC owns the labels; each value slot
+  // ← its ONE fixed key via bindSchemaCard. The manifest supplies NO selector here, so it
+  // can neither relabel a field nor surface an off-schema response field.
+  schemaCards.forEach((node, i) => {
+    const el = schemaEls[i]; if (!el) return;
+    const schema = node.bind?.schema; if (!schema) return;
+    const slots = Array.from(el.querySelectorAll<HTMLElement>(".pcc-value"));
+    const pv = provenanced(node, el, (data) => {
+      // Validate into THROWAWAY staging slots first (never the real DOM) — same pattern the
+      // fingerprint below already uses. Only a commit (after ordering also accepts) copies the
+      // validated text into the real slots (astra 28f H1).
+      const staging = slots.map(() => ({ textContent: "" }));
+      if (!bindSchemaCard(schema, data, staging)) return schemaCardFailure(schema, data) ?? "payload does not match schema";
+      return () => { staging.forEach((s, j) => { const sl = slots[j]; if (sl) sl.textContent = s.textContent; }); };
+    }, () => { for (const sl of slots) sl.textContent = ""; }, (data) => {
+      // M3 fingerprint: "the selected fields" — bindSchemaCard run into THROWAWAY slots
+      // (never the real DOM), so fingerprinting a to-be-rejected duplicate never paints.
+      const staging = slots.map(() => ({ textContent: "" }));
+      return bindSchemaCard(schema, data, staging) ? JSON.stringify(staging.map((s) => s.textContent)) : null;
+    });
+    push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
+  });
+  lists.forEach((node, i) => { const el = listEls[i]; if (!el) return; const pv = provenanced(node, el, (data, src) => {
+    // #344's listRowsOf reads the route's own rows key; null (no collection at all) is rejected below, before listRowsReadable (astra 28e H1).
+    const rows = listRowsOf(String(node.bind?.path ?? ""), data);
+    if (rows === null) return "unexpected response shape";
+    // A partial collection (any unreadable row) is not data.
+    if (!listRowsReadable(node, rows)) return "partial collection";
+    // Empty-read policy: "none" is shown only when the SOURCE vouches for when it read the
+    // empty set; an empty result without a source time is not evidence of absence.
+    if (rows.length === 0 && src === null) return "empty result without a source time";
+    const staging = document.createElement("div"); // stage off-DOM: committed only after ordering also accepts it (astra 28f H1)
+    bindListRows(rdoc, wrapEl(staging) as unknown as RElement, node, rows, data);
+    return () => el.replaceChildren(...Array.from(staging.childNodes));
+  }, () => { el.replaceChildren(); }, (data) => {
+    // M3 fingerprint: shapeOf(staging) — a framed structural shape of the same rows, staged
+    // off-DOM (never touching `el`), not raw concatenated text (astra 28e M3: row/cell
+    // boundaries, field labels, kinds and values are then all part of the fingerprint, so a
+    // structurally different payload can never collide with what is shown). N110: the window
+    // note is part of the staged content too, so it is committed with the rows and covered by
+    // this fingerprint — a poll that changes only the disclosed total (same rows, same asOf)
+    // must not silently replace what's shown without going through the ordering gate.
+    const rows = listRowsOf(String(node.bind?.path ?? ""), data);
+    if (rows === null) return null;
+    if (!listRowsReadable(node, rows)) return null;
+    const staging = document.createElement("div");
+    bindListRows(rdoc, wrapEl(staging) as unknown as RElement, node, rows, data);
+    return JSON.stringify(shapeOf(staging));
+  }); push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded)); });
+}
+function stopBinds(): void {
+  for (const h of boundHandles) h.stop();
+  boundHandles = [];
+  if (genController) { genController.abort(); genController = null; } // abort in-flight GETs + drop queued waiters
+}
+
+function renderManifest(manifest: unknown): void {
+  if (disposed || rendered) return; // render exactly once; never after teardown
+  const mount = document.getElementById(MOUNT_ID);
+  if (!mount) return;
+  if (tooLarge(manifest)) { rendered = true; inert(mount, "This dashboard is too large and was not rendered."); return; }
+  // Any exception while adapting or validating is the same inert failure, never a partial render.
+  let r: ReturnType<typeof dashboardManifestToIr>;
+  try { r = dashboardManifestToIr(manifest as never); } catch { r = { ok: false, reason: "adapter threw" }; }
+  if (!r.ok) { rendered = true; inert(mount, "This dashboard could not be verified and was not rendered."); return; }
+  rendered = true;
+  const container = wrapEl(document.createElement("div"));
+  let painted = false;
+  try { painted = bootIrView(rdoc, container as unknown as RElement, r.doc, validateIr); } // in-browser re-validate + paint
+  catch { inert(mount, "This dashboard could not be verified and was not rendered."); return; }
+  mount.replaceChildren(container._el);
+  if (painted) { liveDoc = r.doc; liveRoot = container._el; startBinds(r.doc, container._el); }
+}
+
+// ── read-only MCP Apps lifecycle (no bridge, no outbound calls) ──────────────────
+function boot(): void {
+  const parent = window.parent;
+  let state: "init" | "ready" = "init";
+  window.addEventListener("message", (ev: MessageEvent) => {
+    if (ev.source !== parent) return; // host parent only
+    const d = ev.data as Record<string, unknown> | null;
+    if (!d || typeof d !== "object" || (d as { jsonrpc?: unknown }).jsonrpc !== "2.0") return;
+    // graceful teardown (a request with an id) — LATCH terminal, then stop + ack.
+    if ((d as { method?: unknown }).method === "ui/resource-teardown" && "id" in d) {
+      if (!disposed) { disposed = true; stopBinds(); }
+      try { parent.postMessage({ jsonrpc: "2.0", id: (d as { id: unknown }).id, result: {} }, "*"); } catch { /* ignore */ }
+      return;
+    }
+    if (disposed) return; // terminal — ignore init results, tool-results, everything after teardown
+    if (state === "init" && (d as { id?: unknown }).id === CAP.initId && (d as { result?: unknown }).result && typeof (d as { result: unknown }).result === "object") {
+      if ((d as { result: { protocolVersion?: unknown } }).result.protocolVersion !== CAP.protocol) return;
+      state = "ready";
+      parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/initialized" }, "*");
+      return;
+    }
+    if (state === "ready" && (d as { method?: unknown }).method === "ui/notifications/tool-result") {
+      const params = (d as { params?: unknown }).params;
+      const structured = params && typeof params === "object" ? (params as { structuredContent?: unknown }).structuredContent : null;
+      const manifest = structured && typeof structured === "object" ? (structured as { manifest?: unknown }).manifest : null;
+      if (manifest != null) renderManifest(manifest);
+    }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (disposed) return; // terminal — a visible event after teardown must not restart binds
+    if (document.hidden) stopBinds();
+    else if (liveDoc && liveRoot) { stopBinds(); startBinds(liveDoc, liveRoot); }
+  });
+  window.addEventListener("pagehide", stopBinds);
+  window.addEventListener("pageshow", () => {
+    if (disposed) return; // terminal — a late pageshow after teardown must not restart binds
+    // Re-check every bound datum's freshness synchronously and restart exactly as the
+    // visibility restore does: provenanced() re-arms markFresh() as a side effect of being
+    // re-called for each existing node.id, so this already re-checks staleness before
+    // startBind's own (async) fetch resolves. stopBinds first so a pagehide-then-pageshow
+    // pair can never leave two live bindings running for the same node.
+    if (!document.hidden && liveDoc && liveRoot) { stopBinds(); startBinds(liveDoc, liveRoot); }
+  });
+  // Announce the app; the host replies with the ui/initialize result.
+  parent.postMessage({ jsonrpc: "2.0", id: CAP.initId, method: "ui/initialize", params: { protocolVersion: CAP.protocol, appInfo: { name: "pcc-dashboard-ir", version: "1" }, appCapabilities: {} } }, "*");
+}
+
+if (typeof window !== "undefined" && typeof document !== "undefined") boot();

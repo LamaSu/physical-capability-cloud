@@ -1,0 +1,74 @@
+// PCC Agent — hand this + agent-package.json to Claude
+// npm install @anthropic-ai/sdk && node pcc-agent.js
+
+const Anthropic = require("@anthropic-ai/sdk");
+const pkg = require("./agent-package.json");
+
+const PCC_BASE = pkg.api_base;
+let PCC_API_KEY = null; // Agent provisions this itself
+
+const client = new Anthropic();
+const tools = pkg.tools.map((t) => ({
+  name: t.name, description: t.description, input_schema: t.input_schema,
+}));
+
+async function callPCC(toolName, input) {
+  const tool = pkg.tools.find((t) => t.name === toolName);
+  if (!tool) throw new Error(`Unknown tool: ${toolName}`);
+
+  let path = tool.endpoint.path;
+  for (const [key, val] of Object.entries(input)) {
+    path = path.replace(`{${key}}`, String(val));
+  }
+
+  const headers = { "Content-Type": "application/json" };
+  if (PCC_API_KEY) headers["Authorization"] = `Bearer ${PCC_API_KEY}`;
+
+  const res = await fetch(`${PCC_BASE}${path}`, {
+    method: tool.endpoint.method,
+    headers,
+    body: tool.endpoint.method === "POST" ? JSON.stringify(input) : undefined,
+  });
+
+  const data = await res.json();
+
+  // Auto-capture the API key when provision_api_key is called
+  if (toolName === "provision_api_key" && data.api_key) {
+    PCC_API_KEY = data.api_key;
+    console.log("API key provisioned — all subsequent calls are authenticated.");
+  }
+
+  return data;
+}
+
+async function chat(userMessage) {
+  let messages = [{ role: "user", content: userMessage }];
+
+  while (true) {
+    const response = await client.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 4096,
+      system: pkg.system_prompt,
+      tools,
+      messages,
+    });
+
+    const toolCalls = response.content.filter((b) => b.type === "tool_use");
+    if (toolCalls.length === 0) {
+      const text = response.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+      console.log(text);
+      return text;
+    }
+
+    messages.push({ role: "assistant", content: response.content });
+    const results = [];
+    for (const call of toolCalls) {
+      const result = await callPCC(call.name, call.input);
+      results.push({ type: "tool_result", tool_use_id: call.id, content: JSON.stringify(result) });
+    }
+    messages.push({ role: "user", content: results });
+  }
+}
+
+// The agent will provision its own key, then do whatever you ask
+chat(__PCC_FIRST_MESSAGE__);

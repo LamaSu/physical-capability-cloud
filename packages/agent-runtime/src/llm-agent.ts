@@ -55,6 +55,16 @@ export interface ChatOptions {
   system?: string;
   /** Per-iteration callback — useful for streaming UIs / progress logs. */
   onStep?: (step: { iteration: number; stop_reason: string | null; toolCalls: Anthropic.ToolUseBlock[] }) => void;
+  /** Earlier turns of this conversation, oldest first: user and assistant
+   *  messages, tool_use / tool_result pairs included. The new input is
+   *  appended after them, so a chat service can continue a conversation. It
+   *  must start with a user message and end with an assistant message, and its
+   *  tool use must be well paired: every tool_use id is unique and is answered
+   *  by a tool_result in the IMMEDIATELY following user message (results first),
+   *  and no tool_result names an id that message did not request. An invalid
+   *  history is refused before any model call.
+   *  Omitted: the conversation starts at `input`. */
+  history?: ReadonlyArray<Anthropic.MessageParam>;
 }
 
 export interface ChatResult {
@@ -158,6 +168,74 @@ export class BudgetExceededError extends Error {
   }
 }
 
+/**
+ * Refuse a history whose tool use is not well paired, before it is sent. The
+ * Messages API rejects such a history (after the call is made, and billed), and
+ * a malformed one can also be misread, so the check is made here, once, up front:
+ *
+ *   - the history starts with a user message and ends with an assistant message;
+ *   - every assistant tool_use id is unique across the history;
+ *   - each tool_use is answered by a tool_result with that id in the IMMEDIATELY
+ *     following user message, and that message's tool_results come first;
+ *   - no tool_result names an id the previous message did not request, or one
+ *     that was already answered;
+ *   - the history does not end on an unanswered tool_use.
+ *
+ * Every error names "history", so a caller can treat them as one refusal.
+ */
+function validateChatHistory(history: ReadonlyArray<Anthropic.MessageParam>): void {
+  if (history.length === 0) return;
+  if (history[0]!.role !== "user" || history[history.length - 1]!.role !== "assistant") {
+    throw new Error("chat history must start with a user message and end with an assistant message");
+  }
+  const invalid = (index: number, why: string): Error =>
+    new Error(`chat history is not a valid tool-use sequence: ${why} (message ${index})`);
+
+  const seen = new Set<string>();
+  /** The tool_use ids of the previous assistant message that still need a tool_result. */
+  const awaiting = new Set<string>();
+  history.forEach((message, index) => {
+    const blocks = Array.isArray(message.content) ? message.content : [];
+    if (message.role === "user") {
+      let afterOtherContent = false;
+      for (const block of blocks) {
+        // Q5-1: tool_use belongs only to an assistant turn. Checking only for
+        // tool_result here (treating anything else as ordinary "other content")
+        // let a stray tool_use in a user message through uncaught, straight to
+        // the model — the mirror of the tool_result-in-assistant case below.
+        if (block.type === "tool_use") throw invalid(index, "a tool_use block appears in a USER message; tool_use belongs only in an assistant message");
+        if (block.type !== "tool_result") {
+          afterOtherContent = true;
+          continue;
+        }
+        if (afterOtherContent) throw invalid(index, "a tool_result comes after other content, but results must come first");
+        if (!awaiting.delete(block.tool_use_id)) {
+          throw invalid(index, `tool_result names "${String(block.tool_use_id)}", which the previous message did not request or which was already answered`);
+        }
+      }
+    }
+    if (awaiting.size > 0) {
+      throw invalid(index, `tool_use "${[...awaiting][0]}" is not answered by the next message`);
+    }
+    if (message.role === "assistant") {
+      for (const block of blocks) {
+        // Q5-1: tool_result belongs only to a user turn. The old loop only
+        // matched tool_use and silently `continue`d past anything else,
+        // including a stray tool_result — never billed, never caught.
+        if (block.type === "tool_result") throw invalid(index, "a tool_result block appears in an ASSISTANT message; tool_result belongs only in a user message");
+        if (block.type !== "tool_use") continue;
+        if (typeof block.id !== "string" || block.id === "") throw invalid(index, "a tool_use has no id");
+        if (seen.has(block.id)) throw invalid(index, `tool_use id "${block.id}" appears twice`);
+        seen.add(block.id);
+        awaiting.add(block.id);
+      }
+    }
+  });
+  if (awaiting.size > 0) {
+    throw invalid(history.length - 1, `the history ends on tool_use "${[...awaiting][0]}", which no tool_result answers`);
+  }
+}
+
 function isRetryableStatus(status: number | null | undefined): boolean {
   if (status == null) return false;
   return status === 429 || (status >= 500 && status < 600);
@@ -211,7 +289,9 @@ export class LLMAgent {
 
   /** Run a multi-turn tool-use loop. Returns the full transcript + final message. */
   async chat(input: string, opts: ChatOptions = {}): Promise<ChatResult> {
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: input }];
+    const history = opts.history ?? [];
+    validateChatHistory(history);
+    const messages: Anthropic.MessageParam[] = [...history, { role: "user", content: input }];
     const maxTurns = opts.maxTurns ?? DEFAULT_MAX_TURNS;
     let toolCalls = 0;
     let totalInputTokens = 0;

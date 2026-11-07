@@ -15,9 +15,13 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { randomBytes, randomUUID } from "node:crypto";
-import { verifyMessage } from "viem";
-import { getRepos } from "../db.js";
+import { verifyEvmMessageSignature } from "./evm-signature.js";
+import { eq, schema } from "@pcc/store";
+import { getRepos, getStore } from "../db.js";
+import { classifyProvisionError, provisionApiKey } from "./api-key-auth.js";
+import { SELF_SERVICE_KEY_SCOPES } from "../middleware/scope-checker.js";
 import { canSiweVerify } from "../middleware/security-hardening.js";
+import { auditService } from "../services/audit-service.js";
 
 // ---------------------------------------------------------------------------
 // In-memory nonce store (ephemeral, no DB persistence needed)
@@ -148,6 +152,26 @@ function parseSiweMessage(message: string): ParsedSiweMessage | null {
 // ---------------------------------------------------------------------------
 // Session helpers (exported for use by require-auth and other modules)
 // ---------------------------------------------------------------------------
+
+/** End a session and its own keys atomically, preserving keys from other sessions. */
+function deleteSessionAndRevokeKeys(token: string) {
+  const repos = getRepos();
+  getStore().db.transaction(() => {
+    const session = repos.sessions.findByToken(token);
+    if (!session) return;
+
+    // Minting preserves the stored session address, including its casing.
+    for (const key of repos.apiKeys.findByOperator(session.walletAddress)) {
+      if (key.revokedAt) continue;
+      let metadata;
+      try { metadata = JSON.parse(key.metadata ?? "{}"); } catch { continue; }
+      if (metadata?.source === "siwe-session" && metadata.sessionId === session.id) {
+        repos.apiKeys.revoke(key.id);
+      }
+    }
+    repos.sessions.deleteByToken(token);
+  });
+}
 
 /**
  * Resolve a session from the request.
@@ -298,6 +322,8 @@ export async function siweAuthPlugin(app: FastifyInstance) {
     if (!nonceExpiry || nonceExpiry < Date.now()) {
       return reply.status(401).send({ error: "Nonce expired or invalid" });
     }
+    // Claim synchronously before signature verification can yield to another request.
+    nonces.delete(parsed.nonce);
 
     // Validate expiration time if present
     if (parsed.expirationTime) {
@@ -307,15 +333,32 @@ export async function siweAuthPlugin(app: FastifyInstance) {
       }
     }
 
-    // Verify signature using viem
+    // Verify EOA, deployed smart-account and counterfactual smart-account signatures.
     try {
-      const valid = await verifyMessage({
-        address: parsed.address as `0x${string}`,
+      const check = await verifyEvmMessageSignature({
+        address: parsed.address,
         message: body.message,
-        signature: body.signature as `0x${string}`,
+        signature: body.signature,
+        chainId: parsed.chainId,
       });
 
-      if (!valid) {
+      if (!check.ok) {
+        switch (check.reason) {
+          case "malformed":
+            return reply.status(400).send({ error: "Invalid signature format" });
+          case "invalid":
+            return reply.status(401).send({ error: "Invalid signature" });
+          case "wrong_chain":
+            return reply.status(401).send({ error: "wrong_chain" });
+          case "unconfigured":
+            return reply.status(503).send({ error: "smart_account_signin_unavailable" });
+          case "unavailable":
+            return reply.header("Retry-After", "5").status(503).send({ error: "signature_verifier_unavailable" });
+          default: {
+            const _exhaustiveReason: never = check.reason;
+            break;
+          }
+        }
         return reply.status(401).send({ error: "Invalid signature" });
       }
     } catch {
@@ -323,9 +366,6 @@ export async function siweAuthPlugin(app: FastifyInstance) {
         .status(401)
         .send({ error: "Signature verification failed" });
     }
-
-    // Consume nonce (one-time use)
-    nonces.delete(parsed.nonce);
 
     // Create session
     const token = randomUUID();
@@ -358,6 +398,89 @@ export async function siweAuthPlugin(app: FastifyInstance) {
       });
   });
 
+  // Session keys hold self-service scopes, expire within twelve hours or at session expiry, and are revoked on logout.
+  app.post("/api/auth/session-key", async (req, reply) => {
+    if (req.apiKeyId != null) {
+      return reply.status(403).send({
+        error: "session_required", message: "A SIWE session is required to mint a session key",
+      });
+    }
+
+    try {
+      const repos = getRepos();
+      const session = resolveSession(req);
+      const sessionRow = session ? repos.sessions.findByToken(session.token) : undefined;
+      const now = new Date();
+      const sessionExpiry = sessionRow ? new Date(sessionRow.expiresAt).getTime() : NaN;
+      if (!session || !sessionRow || !(sessionExpiry > now.getTime())) {
+        return reply.status(401).send({
+          error: "session_required", message: "A valid SIWE session is required to mint a session key",
+        });
+      }
+      // Credential creation needs the resolved session's explicit bearer proof.
+      if (req.headers.authorization !== `Bearer ${session.token}`) {
+        return reply.status(401).send({
+          error: "session_required", message: "An explicitly carried SIWE session is required to mint a session key",
+        });
+      }
+
+      const expiresAt = new Date(Math.min(sessionExpiry, now.getTime() + 12 * 60 * 60 * 1000)).toISOString();
+      const { rawKey, record } = getStore().db.transaction((db) => {
+        // Replace this session's key and exclude expired session keys from the active-key cap.
+        for (const key of repos.apiKeys.findByOperator(session.address)) {
+          if (key.revokedAt) continue;
+          let metadata;
+          try { metadata = JSON.parse(key.metadata ?? "{}"); } catch { continue; }
+          if (metadata?.source === "siwe-session" && (
+            metadata.sessionId === sessionRow.id || (key.expiresAt && new Date(key.expiresAt).getTime() <= now.getTime())
+          )) {
+            repos.apiKeys.revoke(key.id);
+          }
+        }
+
+        const { rawKey, record } = provisionApiKey({
+          operatorId: session.address,
+          scopes: [...SELF_SERVICE_KEY_SCOPES],
+          expiresAt,
+          metadata: { source: "siwe-session", sessionId: sessionRow.id, provisionedAt: now.toISOString() },
+        });
+        if (!record) throw new Error("Failed to provision key");
+
+        // A session key has no custodial wallet and cannot enter the identity-write retry queue.
+        db.update(schema.apiKeys).set({
+          operatorWalletCustody: null,
+          onchainStatus: "disabled",
+          agentWalletOnchainStatus: null,
+        }).where(eq(schema.apiKeys.id, record.id)).run();
+        return { rawKey, record };
+      });
+
+      auditService.log({
+        eventType: "auth.session_key_minted",
+        actor: session.address,
+        resourceType: "api_key",
+        resourceId: record.id,
+        action: "create",
+        metadata: { expires_at: record.expiresAt },
+      });
+      return reply.status(201).send({
+        api_key: rawKey,
+        key_id: record.id,
+        operator_id: session.address,
+        scopes: JSON.parse(record.scopes),
+        expires_at: record.expiresAt,
+        created_at: record.createdAt,
+      });
+    } catch (err: unknown) {
+      if (classifyProvisionError(err) === "too_many_keys") {
+        return reply.status(429).send({
+          error: "too_many_keys", message: "Maximum 5 active API keys per operator",
+        });
+      }
+      return reply.status(500).send({ error: "provision_failed", message: "Failed to provision key" });
+    }
+  });
+
   // ----- GET /api/auth/me -----
   app.get("/api/auth/me", async (req, reply) => {
     const session = resolveSession(req);
@@ -369,8 +492,6 @@ export async function siweAuthPlugin(app: FastifyInstance) {
 
   // ----- POST /api/auth/logout -----
   app.post("/api/auth/logout", async (req, reply) => {
-    const repo = getRepos().sessions;
-
     // Clear cookie-based session — verify signature before deletion
     const rawCookie = req.cookies?.pcc_session;
     if (rawCookie) {
@@ -383,15 +504,15 @@ export async function siweAuthPlugin(app: FastifyInstance) {
           cookieToken = rawCookie;
         }
       } catch {
-        cookieToken = rawCookie;
+        cookieToken = null;
       }
-      if (cookieToken) repo.deleteByToken(cookieToken);
+      if (cookieToken) deleteSessionAndRevokeKeys(cookieToken);
     }
 
     // Clear bearer-based session
     const authHeader = req.headers.authorization;
     if (authHeader?.startsWith("Bearer ")) {
-      repo.deleteByToken(authHeader.slice(7));
+      deleteSessionAndRevokeKeys(authHeader.slice(7));
     }
 
     return reply.clearCookie("pcc_session", { path: "/" }).send({ ok: true });

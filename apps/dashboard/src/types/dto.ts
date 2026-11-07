@@ -11,6 +11,8 @@
  * in the API client (gateway.ts).
  */
 
+import type { ExecutionPhase } from "@pcc/spec";
+
 // ── Primitive aliases (mirrors @pcc/spec) ────────────────────────────────────
 
 export type Id = string;
@@ -60,6 +62,15 @@ export interface PaginatedResult<T> {
   hasMore: boolean;
 }
 
+// ── Location projection (board N68) ──────────────────────────────────────────
+
+/**
+ * How precisely the gateway shows a site's location: `exact` only when the operator opted in (a
+ * public storefront); `approximate` (the default) is the centre of the site's geohash-5 cell,
+ * about 5 km across; `none` when no location is known (`location` is null).
+ */
+export type LocationPrecision = "exact" | "approximate" | "none";
+
 // ── Capability DTOs ───────────────────────────────────────────────────────────
 
 export interface CapabilityDTO {
@@ -73,7 +84,11 @@ export interface CapabilityDTO {
   envelope?: Record<string, unknown>;
   assuranceTiers: AssuranceTier[];
   pricing: Record<string, unknown>;
-  location: GeoLocation;
+  /** The site as `locationPrecision` describes it; null when none is known. */
+  location: GeoLocation | null;
+  locationPrecision: LocationPrecision;
+  /** The site's geohash-5 cell (about 5 km across); null when no location is known. */
+  locationCell: string | null;
   tags?: string[];
   // ── Enrichment (not in raw model) ──
   /** Operator reputation score (0-1000) from ERC-8004 */
@@ -109,6 +124,11 @@ export interface JobDTO {
   evidenceCount?: number;
   escrowStatus?: EscrowStatus;
   estimatedCompletion?: Timestamp;
+  /**
+   * Execution phase the gateway read from `status` (exact @pcc/spec table). Says
+   * nothing about evidence, verification or payment. Absent from older gateways.
+   */
+  executionPhase?: ExecutionPhase;
 }
 
 export interface JobTimelineEvent {
@@ -119,6 +139,7 @@ export interface JobTimelineEvent {
     | "evidence_received"
     | "verification_started"
     | "verified"
+    | "completed"
     | "settled"
     | "failed"
     | "disputed";
@@ -138,8 +159,13 @@ export interface KernelDTO {
   id: Id;
   name: string;
   operatorAddress: string;
-  location: GeoLocation;
-  physicalAddress: string;
+  /** The site as `locationPrecision` describes it; null when none is known. */
+  location: GeoLocation | null;
+  locationPrecision: LocationPrecision;
+  /** The site's geohash-5 cell (about 5 km across); null when no location is known. */
+  locationCell: string | null;
+  /** The street address, only when the operator opted in to an exact location; otherwise null. */
+  physicalAddress: string | null;
   maxAssuranceTier: AssuranceTier;
   status: "online" | "offline" | "maintenance" | "suspended";
   lastHeartbeat: Timestamp;

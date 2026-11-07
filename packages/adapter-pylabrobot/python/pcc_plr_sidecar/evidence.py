@@ -9,6 +9,8 @@ job to attribute them to).
 from __future__ import annotations
 import asyncio
 import logging
+import threading
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
@@ -45,6 +47,18 @@ class EvidenceHandler(logging.Handler):
         self._writer = writer
         self._loop = loop
         self._windows: dict[str, RecordingWindow] = {}  # deviceId -> window
+        # This sidecar process. A recording window is attested with it, so the TS adapter can
+        # tell this process's answer from a restarted one's (astra pack 194).
+        self.generation = uuid.uuid4().hex
+        # Each notification is written by a task of its own, so it can be written after an
+        # RPC answer sent later. Every one gets a sequence number when it is scheduled and
+        # stays pending until written: evidence.stopRecording waits (drain_through) for all
+        # scheduled before it, so its answer follows them (astra pack 186). The lock also
+        # guards the windows, which logging can read from other threads.
+        self._lock = threading.Lock()
+        self._last_seq = 0
+        self._pending: set[int] = set()
+        self._drain_waiters: list[asyncio.Future[None]] = []
         self.setFormatter(logging.Formatter("%(message)s"))
 
     # ── recording window lifecycle ─────────────────────────────────────────
@@ -55,12 +69,39 @@ class EvidenceHandler(logging.Handler):
             job_id=job_id,
             started_at=datetime.now(timezone.utc),
         )
-        self._windows[device_id] = window
+        with self._lock:
+            self._windows[device_id] = window
         return window
 
     def stop_recording(self, device_id: str, job_id: str) -> Optional[RecordingWindow]:
-        window = self._windows.pop(device_id, None)
-        return window
+        """Close the device's window if it is this job's (another job's stays open). A
+        notification for it not yet scheduled is dropped."""
+        with self._lock:
+            window = self._windows.get(device_id)
+            if window is None or window.job_id != job_id:
+                return None
+            del self._windows[device_id]
+            return window
+
+    def watermark(self) -> int:
+        """The sequence number of the last notification scheduled so far."""
+        with self._lock:
+            return self._last_seq
+
+    async def drain_through(self, watermark: int) -> None:
+        """Wait until every notification scheduled up to ``watermark`` has been written.
+
+        Notifications scheduled after it are not waited for, so a busy logger cannot
+        hold a caller here.
+        """
+        loop = asyncio.get_running_loop()
+        while True:
+            with self._lock:
+                if not any(seq <= watermark for seq in self._pending):
+                    return
+                waiter: asyncio.Future[None] = loop.create_future()
+                self._drain_waiters.append(waiter)
+            await waiter
 
     def is_recording(self, device_id: str) -> bool:
         return device_id in self._windows
@@ -93,6 +134,7 @@ class EvidenceHandler(logging.Handler):
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "payload": dict(payload),
             },
+            window,
         )
 
     def emit_event(self, device_id: str, event_type: str, payload: dict[str, Any]) -> None:
@@ -108,6 +150,7 @@ class EvidenceHandler(logging.Handler):
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "payload": dict(payload),
             },
+            window,
         )
 
     # ── logging.Handler override ───────────────────────────────────────────
@@ -122,9 +165,11 @@ class EvidenceHandler(logging.Handler):
         # window — if multiple devices are recording, each log gets routed to
         # *one* of them. Operators running multi-device sidecars should scope
         # device records via emit_atomic_op() instead.
-        if not self._windows:
+        with self._lock:
+            first = next(iter(self._windows.items()), None)
+        if first is None:
             return
-        device_id, window = next(iter(self._windows.items()))
+        device_id, window = first
         try:
             msg = self.format(record)
         except Exception:
@@ -142,6 +187,7 @@ class EvidenceHandler(logging.Handler):
                     "line": msg,
                 },
             },
+            window,
         )
 
     # ── private ────────────────────────────────────────────────────────────
@@ -154,15 +200,38 @@ class EvidenceHandler(logging.Handler):
         """
         self._loop = loop
 
-    def _schedule_notify(self, method: str, params: dict[str, Any]) -> None:
-        if self._loop is None:
+    def _schedule_notify(
+        self, method: str, params: dict[str, Any], window: Optional[RecordingWindow] = None,
+    ) -> None:
+        loop = self._loop
+        if loop is None:
             return
+        with self._lock:
+            # The window closed after the caller read it (stop_recording on another thread):
+            # its job's notifications end at that barrier, so this one is dropped.
+            if window is not None and self._windows.get(window.device_id) is not window:
+                return
+            self._last_seq += 1
+            seq = self._last_seq
+            self._pending.add(seq)
         # logging may be called from threads; schedule the async write
         # threadsafely onto the running loop.
         try:
-            self._loop.call_soon_threadsafe(
-                lambda: self._loop.create_task(self._writer(method, params))
+            loop.call_soon_threadsafe(
+                lambda: loop.create_task(self._write_tracked(seq, method, params))
             )
         except RuntimeError:
-            # Loop is closed — drop silently.
-            pass
+            # Loop is closed — drop silently. No drain can be waiting on a closed loop.
+            with self._lock:
+                self._pending.discard(seq)
+
+    async def _write_tracked(self, seq: int, method: str, params: dict[str, Any]) -> None:
+        try:
+            await self._writer(method, params)
+        finally:
+            with self._lock:
+                self._pending.discard(seq)
+                waiters, self._drain_waiters = self._drain_waiters, []
+            for waiter in waiters:
+                if not waiter.done():
+                    waiter.set_result(None)
