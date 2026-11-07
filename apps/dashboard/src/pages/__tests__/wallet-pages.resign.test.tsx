@@ -414,6 +414,18 @@ describe("wallet pages re-sign through the existing SIWE flow", () => {
     expect(alerts("Couldn't load your wallets.")).toHaveLength(1);
   });
 
+  it.each([[401, 403, SIGN_IN_REFUSED, false], [403, 401, SIGN_IN_EXPIRED, true]] as const)("L1b: an unlink %s, then a reload %s, takes the newer read's remedy", async (unlinkStatus, readStatus, message, signIn) => {
+    let reads = 0;
+    requestReply = (call) => call.path === "/api/wallets"
+      ? (++reads === 1 ? reply(200, { links: [row("unlink-wallet")] }) : reply(readStatus, {}))
+      : reply(unlinkStatus, {});
+    await renderPage("wallets");
+    await click("Unlink");
+    await click("Unlink");
+    expectRemedy(message, signIn);
+    expect(container.querySelectorAll('[role="alert"]')).toHaveLength(2);
+  });
+
   it.each(["wallets", "link"] as const)("K11: /%s says why a re-sign left no key when the session-key mint is refused", async (page) => {
     // The reload's restore path leaves its own notice; only this page's attempt may surface one.
     await act(async () => { await useAuthStore.getState().mintSessionKey(); });
@@ -430,6 +442,21 @@ describe("wallet pages re-sign through the existing SIWE flow", () => {
     expect(notice).toEqual(expect.any(String));
     expect(notice).not.toBe(restoreNotice);
     expect(container.textContent).toContain(notice);
+  });
+
+  it("K11: /link still says why after a later lookup remounts the control", async () => {
+    await act(async () => { await useAuthStore.getState().mintSessionKey(); });
+    mintReply = () => reply(429, { error: "too_many_keys" });
+    await showFailure("link");
+    await click("Sign in again");
+    const notice = useAuthStore.getState().authNotice;
+    expect(notice).toEqual(expect.any(String));
+    const first = button("Sign in again");
+    // The code is still typed: Continue clears the alert, the lookup answers 401 and the control remounts.
+    await click("Continue");
+    expectRemedy();
+    expect(button("Sign in again")).not.toBe(first);
+    expect([...container.querySelectorAll('[role="status"]')].map((status) => status.textContent)).toContain(notice);
   });
 
   it("K3: /link drops a lookup failure that was sent before the re-sign's key", async () => {
@@ -451,5 +478,21 @@ describe("wallet pages re-sign through the existing SIWE flow", () => {
     await act(async () => finishLookup?.(reply(401, {})));
     expect(alerts(SIGN_IN_EXPIRED)).toHaveLength(0);
     expect(buttons("Sign in again")).toHaveLength(0);
+  });
+
+  it("K3: /link returns to an empty code step when a renewal during the lookup moves the key and the retry fails", async () => {
+    await act(async () => {
+      useAuthStore.getState().setSession("session-token");
+      await useAuthStore.getState().mintSessionKey();
+    });
+    const keyEpoch = useAuthStore.getState().keyEpoch;
+    let lookups = 0;
+    requestReply = (call) => call.path === LOOKUP && ++lookups === 1 ? reply(401, {}) : reply(404, {});
+    await renderPage("link");
+    await lookup();
+    expect(count("/api/auth/session-key")).toBe(2);
+    expect(useAuthStore.getState().keyEpoch).toBeGreaterThan(keyEpoch);
+    expect(alerts("Your sign-in changed; enter the code again.")).toHaveLength(1);
+    expect(container.querySelector<HTMLInputElement>("input")?.value).toBe("");
   });
 });
