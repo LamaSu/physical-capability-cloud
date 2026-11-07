@@ -165,7 +165,7 @@ async function fixture() {
 async function dryRunFixture(reclaimSecondsShort = 0n) {
   const current = await fixture();
   const p = DRY_RUN_UNIT_TESTNET_V1;
-  const creation = BigInt(Math.floor(Date.now() / 1000));
+  const creation = BigInt(Math.floor(Date.now() / 1000)) - 5n;
   Object.assign(current.terms, {
     chainId: p.chainId, reclaimMinSeconds: 6_000, reclaimMaxSeconds: 7_800,
     maxAcceptanceSeconds: Number(p.maxAcceptanceSeconds), settlementToken: p.usdc,
