@@ -24,6 +24,15 @@ jobs:
       name: production
       url: https://capability.network
     steps:
+      - name: Check the sha input
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Pass the full 40-hex lower-case SHA."
+            exit 1
+          fi
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -93,16 +102,37 @@ jobs:
           done
           echo "::error::prod deployment did not reach SUCCESS in time"; exit 1
 
-      - name: Smoke test prod health endpoint
+      - name: Wait until prod serves the promoted commit
+        env:
+          SHA: ${{ inputs.sha }}
         run: |
+          set -eu
+          started=$SECONDS
+          served_commit=none
+          served_build_arg=none
           for i in $(seq 1 18); do
-            sleep 10
-            code=$(curl -s -o /dev/null -w "%{http_code}" "https://capability.network/api/health" || echo 000)
-            echo "attempt $i: HTTP $code"
-            if [ "$code" = "200" ]; then
-              echo "prod healthy"
-              exit 0
+            # Start attempts 10 seconds apart; reserve the last 10 seconds for curl.
+            delay=$((started + (i - 1) * 10 - SECONDS))
+            if [ "$delay" -gt 0 ]; then sleep "$delay"; fi
+            if [ "$((SECONDS - started))" -gt 170 ]; then break; fi
+            served_commit=none
+            served_build_arg=none
+            result="curl failed (miss)"
+            if body=$(curl -sS -m 10 -H 'cache-control: no-cache' https://capability.network/api/health); then
+              result="non-JSON or non-object body (miss)"
+              if printf '%s\n' "$body" | jq -e 'type == "object"' >/dev/null 2>&1; then
+                served_commit=$(printf '%s\n' "$body" | jq -r '(.commit | select(type == "string" and length > 0)) // "none" | .[0:12]')
+                served_build_arg=$(printf '%s\n' "$body" | jq -r '(.buildArg | select(type == "string" and length > 0)) // "none"')
+                result=miss
+                if printf '%s\n' "$body" | jq -e --arg sha "$SHA" '.commit == $sha and .buildArg == "PCC_BUILD_SHA"' >/dev/null; then
+                  result=match
+                fi
+              fi
             fi
+            echo "attempt $i: commit=$served_commit buildArg=$served_build_arg ($result)"
+            if [ "$result" = "match" ]; then exit 0; fi
           done
-          echo "prod health check did not pass within 3 minutes"
+          remaining=$((started + 180 - SECONDS))
+          if [ "$remaining" -gt 0 ]; then sleep "$remaining"; fi
+          echo "::error::prod did not serve ${SHA:0:12} within 3 minutes (last served: $served_commit, buildArg $served_build_arg)"
           exit 1
