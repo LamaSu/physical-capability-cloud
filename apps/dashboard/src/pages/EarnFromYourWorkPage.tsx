@@ -400,12 +400,9 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
       <div style={pageWrap}>
         <div style={card}>
           <h1 style={{ ...h1, color: GREEN }}>You're set up.</h1>
-          <p style={sub}>
-            Your rate is live. Every job that uses your work pays you {response.ratePercent}% of the
-            job value, automatically, on-chain.
-          </p>
+          <p style={sub}>Your rate is published.</p>
 
-          <div style={label}>Your wallet (this is where you'll get paid)</div>
+          <div style={label}>Your wallet</div>
           <div style={codeBlock}>{response.walletAddress}</div>
 
           <div style={label}>Your API key (save it — we won't show it again)</div>
@@ -442,10 +439,7 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
               lineHeight: 1.6,
             }}
           >
-            <strong style={{ color: TEXT_PRIMARY }}>What happens next:</strong> Operators run jobs that
-            reference your work in their <code style={{ color: BLUE, fontFamily: mono }}>CompositionManifest</code>.
-            When the job settles, the smart contract sends your cut directly to the wallet above.
-            No invoices, no waiting on payouts.
+            <strong style={{ color: TEXT_PRIMARY }}>What happens next:</strong> Paying published rates isn't live yet. No job settlement reads a published rate today, so nothing is sent to the wallet above.
           </div>
         </div>
       </div>
@@ -457,10 +451,9 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
   return (
     <div style={pageWrap}>
       <div style={card}>
-        <h1 style={h1}>Get paid every time your work is used.</h1>
+        <h1 style={h1}>Publish a rate for your work.</h1>
         <p style={sub}>
-          Pick what you do. Set your rate. We publish it on-chain. Every job that uses your work
-          pays you, automatically.
+          Pick what you do. Set your rate. PCC keeps it on record. Paying published rates isn't live yet.
         </p>
 
         <form onSubmit={handleSubmit}>
@@ -531,7 +524,7 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
           />
 
           <label style={label} htmlFor="rate">
-            Your cut: <strong style={{ color: BLUE }}>{ratePercent}%</strong> of every job
+            Your rate: <strong style={{ color: BLUE }}>{ratePercent}%</strong>
           </label>
           <input
             id="rate"
