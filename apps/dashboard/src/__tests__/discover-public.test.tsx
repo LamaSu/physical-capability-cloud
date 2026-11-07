@@ -129,12 +129,12 @@ describe("public Discover", () => {
     expect(useUIStore.getState().interfaceMode).toBe(mode);
   });
 
-  it("V2: a visitor can discover with a trailing slash", async () => {
-    await renderAt("/discover/", "spatial");
+  it.each(["/discover/", "/discover//"])("V2: a visitor can discover with a trailing slash at %s", async (path) => {
+    await renderAt(path, "spatial");
     await expectDiscover();
   });
 
-  it.each(["/discover/x", "/discoverx", "/Discover", "/kernels/k1"])("V3: a visitor still needs access at %s", async (path) => {
+  it.each(["/discover/x", "/discoverx", "/Discover", "/x/discover", "/app/discover", "/kernels/k1"])("V3: a visitor still needs access at %s", async (path) => {
     await renderAt(path, "spatial");
     expect(marker("login-page")).not.toBeNull();
     expect(requests.filter(({ pathname }) => pathname === "/api/capabilities" || pathname === "/api/kernels")).toEqual([]);
@@ -147,7 +147,6 @@ describe("public Discover", () => {
       "GET /api/capabilities?offset=0&limit=200", "GET /api/kernels", "GET /api/auth/me",
     ]));
     expect(requests.every(({ authorization }) => !authorization)).toBe(true);
-    console.info("V4 requests:", JSON.stringify(requests));
   });
 
   it("V5: a visitor following a capability card reaches the login gate", async () => {
@@ -175,13 +174,23 @@ describe("public Discover", () => {
     expect(container.textContent).toContain("Welcome to PCCP Command Center");
   });
 
+  it("V7: a restored wallet session is not a visitor", async () => {
+    useUIStore.getState().setMode("spatial");
+    useAuthStore.setState({ isAuthenticated: false, sessionToken: "cookie" });
+    window.history.replaceState({}, "", "/discover");
+    await act(async () => root.render(<App />));
+    await expectDiscover();
+    expect(button("Disconnect")).toBeDefined();
+    expect(button("? Tour")).toBeDefined();
+  });
+
   it.each(modes)("S1: signed-in callers discover in %s mode without changing it", async (mode) => {
     await renderAt("/discover", mode, true);
     await expectDiscover();
     expect(useUIStore.getState().interfaceMode).toBe(mode);
   });
 
-  it.each(["/discover/x", "/kernels/k1"])("S2: signed-in callers keep spatial routing at %s", async (path) => {
+  it.each(["/discover/x", "/x/discover", "/kernels/k1"])("S2: signed-in callers keep spatial routing at %s", async (path) => {
     await renderAt(path, "spatial", true);
     expect(marker("spatial-app")).not.toBeNull();
     expect(container.querySelector("main")).toBeNull();
@@ -192,6 +201,7 @@ describe("public Discover", () => {
     await expectDiscover();
     for (const value of ["12.3456", "65.4321", "tdr1w", "1 Sample Street", KERNEL.operatorAddress]) {
       expect(container.textContent).not.toContain(value);
+      expect(container.innerHTML).not.toContain(value);
     }
   });
 });

@@ -338,6 +338,21 @@ describe("B. data kept after a failed refresh is labelled", () => {
     expect(container.textContent).not.toContain(new Date(capsUpdated).toLocaleTimeString());
   });
 
+  it("Kernel leaderboard: a failed refresh names the capability read's time when it is the older one", async () => {
+    stubFetch({ ...EMPTY, "/api/capabilities": { status: 200, body: page([capability()]) }, "/api/kernels": { status: 200, body: { kernels: [{ id: "k1", name: "Kernel One", status: "online", isStale: false }] } } });
+    const client = newClient();
+    await renderPage(<KernelLeaderboardPage />, client);
+    const kernelsUpdated = client.getQueryState(["kernels", undefined])!.dataUpdatedAt;
+    const capsUpdated = kernelsUpdated - 120_000;
+    client.setQueryData(["capabilities", "all"], client.getQueryData(["capabilities", "all"]), { updatedAt: capsUpdated });
+    stubFetch({});
+    await act(async () => { await client.refetchQueries(); });
+    await settle(client);
+    expect(container.textContent).toContain("Couldn't refresh the leaderboard");
+    expect(container.textContent).toContain(new Date(capsUpdated).toLocaleTimeString());
+    expect(container.textContent).not.toContain(new Date(kernelsUpdated).toLocaleTimeString());
+  });
+
   it("Kernels: a failed refresh keeps the kernels and labels the earlier read", async () => {
     stubFetch({ ...EMPTY, "/api/kernels": { status: 200, body: { kernels: [{ id: "k1", name: "Kernel One", status: "online", isStale: false }] } } });
     const client = newClient();
