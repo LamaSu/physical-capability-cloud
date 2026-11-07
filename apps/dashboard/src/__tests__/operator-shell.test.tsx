@@ -136,6 +136,17 @@ describe("operator routes in the shell", () => {
     }
   });
 
+  it.each(modes)("T4b: /operator/revenue/ follows %s mode", async (mode) => {
+    await renderAt("/operator/revenue/", mode);
+    if (mode === "dashboard") {
+      await expectPage("revenue-dashboard", true);
+    } else {
+      await vi.waitFor(() => expect(marker(mode === "spatial" ? "spatial-app" : "agent-chat")).not.toBeNull());
+      expect(marker("dashboard-shell")).toBeNull();
+      expect(marker("revenue-dashboard")).toBeNull();
+    }
+  });
+
   it.each(modes)("T5: /operator without access renders login in %s mode", async (mode) => {
     useAuthStore.setState({ isAuthenticated: false, sessionToken: null });
     await renderAt("/operator", mode);
