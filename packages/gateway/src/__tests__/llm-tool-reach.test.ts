@@ -21,9 +21,9 @@ const object = (value: unknown): value is JsonObject => typeof value === "object
 const normalize = (name: string) => name.toLowerCase().replace(/[_-]/g, "");
 const FORBIDDEN = new Set(["calldata", "bytecode", "initcode", "deploydata", "rawtx", "rawtransaction", "signedtx", "signedtransaction", "serializedtx", "serializedtransaction", "txdata", "transactiondata"]);
 const FORBIDDEN_DESCRIPTION = /\b(call ?data|bytecode|init ?code|raw transaction|signed transaction|serialized transaction)\b/i;
-const ADDRESS_DESCRIPTION = /\bEVM address\b|\baddress \(0x|\(0x\.\.\.\)|\b20-byte\b|\b(?:token|contract) address\b/i;
+const ADDRESS_DESCRIPTION = /\bEVM address\b|\baddress \(0x|\(0x\.\.\.\)|\b20-byte\b|\b(?:token|contract) address\b|\bwallet address\b/i;
 function addressLike(parameter: Parameter): boolean {
-  return ["address", "recipient", "payto", "payee", "payer", "beneficiary", "receiver", "arbiter"].some(suffix => normalize(parameter.name).endsWith(suffix)) || ADDRESS_DESCRIPTION.test(parameter.description);
+  return ["address", "recipient", "payto", "payee", "payer", "beneficiary", "receiver", "arbiter", "wallet"].some(suffix => normalize(parameter.name).endsWith(suffix)) || ADDRESS_DESCRIPTION.test(parameter.description);
 }
 function finding(rule: string, parameter: Parameter, detail: string): Finding {
   return { rule, file: parameter.file, enclosing: parameter.enclosing, expression: parameter.expression, detail: `${parameter.source}:${parameter.tool}:${parameter.path}: ${detail}` };
@@ -368,5 +368,20 @@ describe("E4b: LLM tool parameter boundary", () => {
     const hits = compareAddressReview(realScan(), fixtureCopy(review));
     expect(hits.some(hit => hit.rule === "E4b-R2" && hit.detail?.includes("stale or changed") && hit.expression.includes("planted_fake_tool")), formatFindings(hits)).toBe(true);
     console.info("self-mutant add fake tool: rejected E4b-R2");
+  }, TIMEOUT);
+
+  it("E4b-R2 positive control: wallet-named parameters and \"wallet address\" descriptions are address-like", () => {
+    const { root, files } = synthetic([{ name: "wallet_controls", input_schema: { properties: { payoutWallet: {}, operatorRef: { description: "Operator kernel ID or wallet address" }, owners: { items: { properties: { ownerWallet: { type: "string" } } } } } } }], `server.tool("wallet_mcp", "", { assignee: z.string().describe("Assignee wallet address") }, h);`);
+    const scan = scanToolReach(root, files), hits = compareAddressReview(scan, fixtureCopy({ schema: "pcc-llm-money-address-tools/1", entries: [] }));
+    expect(scan.addresses).toEqual([{ source: "agent-package", tool: "wallet_controls", params: ["operatorRef", "owners[].ownerWallet", "payoutWallet"] }, { source: "mcp", tool: "wallet_mcp", params: ["assignee"] }]);
+    expect(hits).toHaveLength(2); expect(hits.every(hit => hit.rule === "E4b-R2")).toBe(true);
+  }, TIMEOUT);
+
+  it("E4b-R2 near misses: names that only contain \"wallet\", and descriptions without \"wallet address\", stay clean", () => {
+    const { root, files } = synthetic([{ name: "wallet_near", input_schema: { properties: { walletId: {}, walletCount: { type: "number" }, provider: { description: "Wallet provider name" }, label: { description: "Shown in the wallet app" } } } }], `server.tool("wallet_near_mcp", "", { walletless: z.boolean(), note: z.string().describe("Free-text wallet note") }, h);`);
+    const scan = scanToolReach(root, files);
+    expect(scan.addresses).toEqual([]);
+    expect(scan.findings, formatFindings(scan.findings)).toEqual([]);
+    expect(compareAddressReview(scan, fixtureCopy({ schema: "pcc-llm-money-address-tools/1", entries: [] }))).toEqual([]);
   }, TIMEOUT);
 });

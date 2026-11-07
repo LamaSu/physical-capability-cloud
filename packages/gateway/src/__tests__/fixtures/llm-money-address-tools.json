@@ -75,6 +75,15 @@
     },
     {
       "source": "agent-package",
+      "tool": "get_operator_status",
+      "params": [
+        "slug"
+      ],
+      "class": "other",
+      "why": "Operator slug, typically the operator's wallet address, selects a read-only operator status lookup."
+    },
+    {
+      "source": "agent-package",
       "tool": "get_token_allowance",
       "params": [
         "owner",
@@ -159,6 +168,15 @@
     },
     {
       "source": "agent-package",
+      "tool": "pcc_assign_node_operator",
+      "params": [
+        "operatorId"
+      ],
+      "class": "other",
+      "why": "Operator kernel ID or wallet address records which operator is assigned to the request node: a work assignment, not a payment destination."
+    },
+    {
+      "source": "agent-package",
       "tool": "pcc_contributor_list",
       "params": [
         "address"
@@ -172,8 +190,8 @@
       "params": [
         "address"
       ],
-      "class": "other",
-      "why": "Address binds a contributor identity to a persisted profile and schedule hash."
+      "class": "money",
+      "why": "Address binds the contributor wallet to a role and a published RateSchedule, which sets that wallet's future royalty entitlement."
     },
     {
       "source": "agent-package",
@@ -183,6 +201,24 @@
       ],
       "class": "money",
       "why": "Escrow target binds the requested evidence attestation to a settlement contract."
+    },
+    {
+      "source": "agent-package",
+      "tool": "pcc_submit_request",
+      "params": [
+        "requesterWallet"
+      ],
+      "class": "other",
+      "why": "Requester wallet identifies the requester (its hashed requester id, audit actor and job-offer poster); no transfer reads it."
+    },
+    {
+      "source": "agent-package",
+      "tool": "pcc_update_request",
+      "params": [
+        "requesterWallet"
+      ],
+      "class": "other",
+      "why": "Requester wallet updates the stored requester identity; no transfer reads it."
     },
     {
       "source": "agent-package",
@@ -253,8 +289,8 @@
       "params": [
         "address"
       ],
-      "class": "other",
-      "why": "Address binds a contributor identity to a persisted profile and schedule hash."
+      "class": "money",
+      "why": "Address binds the contributor wallet to a role and a published RateSchedule, which sets that wallet's future royalty entitlement."
     },
     {
       "source": "mcp",
@@ -337,7 +373,7 @@
         "gatewayPrivateKey"
       ],
       "class": "money",
-      "why": "Escrow address configures the settlement target; gatewayPrivateKey matches the address-description heuristic and controls the configured signing authority."
+      "why": "Escrow address configures the settlement target; gatewayPrivateKey matches the address-description heuristic and controls the configured signing authority (a private key, not an address; board row N226 tracks it)."
     },
     {
       "source": "mcp",
