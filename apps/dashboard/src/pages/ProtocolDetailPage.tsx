@@ -16,6 +16,8 @@ import { GlassPanel, GlowBadge, DataCell } from "@pcc/ui";
 import type { ProtocolTemplate, ProtocolStep, ProtocolTransfer, ProtocolFork, ProtocolRun } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { isNotAvailable, readGatewayJson } from "../lib/not-available.js";
+import { NotAvailablePanel } from "../components/NotAvailablePanel.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -94,21 +96,21 @@ export function ProtocolDetailPage() {
   // Fetch template
   const { data: templateData } = useQuery({
     queryKey: ["protocol-template", templateId],
-    queryFn: () => authorizedFetch(`/api/protocols/${templateId}`).then((r) => r.json()),
+    queryFn: () => authorizedFetch(`/api/protocols/${templateId}`).then(readGatewayJson),
     enabled: !!templateId,
   });
 
   // Fetch forks
   const { data: forksData } = useQuery({
     queryKey: ["protocol-forks", templateId],
-    queryFn: () => authorizedFetch(`/api/protocols/${templateId}/forks`).then((r) => r.json()),
+    queryFn: () => authorizedFetch(`/api/protocols/${templateId}/forks`).then(readGatewayJson),
     enabled: !!templateId,
   });
 
   // Fetch runs for this template
   const { data: runsData } = useQuery({
     queryKey: ["protocol-runs-for-template", templateId],
-    queryFn: () => authorizedFetch(`/api/protocol-runs?templateId=${templateId}`).then((r) => r.json()),
+    queryFn: () => authorizedFetch(`/api/protocol-runs?templateId=${templateId}`).then(readGatewayJson),
     enabled: !!templateId,
   });
 
@@ -147,7 +149,9 @@ export function ProtocolDetailPage() {
     }));
   }, [template]);
 
-  if (!template) {
+  const notAvailable = [templateData, forksData, runsData].find(isNotAvailable);
+
+  if (notAvailable || !template) {
     return (
       <div className="space-y-6">
         <Link
@@ -156,9 +160,11 @@ export function ProtocolDetailPage() {
         >
           &larr; Back to Protocol Library
         </Link>
+        {notAvailable ? <NotAvailablePanel reply={notAvailable} /> : (
         <GlassPanel padding="lg">
           <div className="text-center py-16 text-white/30 text-sm">Loading protocol...</div>
         </GlassPanel>
+        )}
       </div>
     );
   }

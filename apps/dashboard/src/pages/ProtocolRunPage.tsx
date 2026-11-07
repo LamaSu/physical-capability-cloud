@@ -25,6 +25,8 @@ import type {
 import { useUIStore } from "../stores/ui-store.js";
 import { useProtocolLibraryStore } from "../stores/protocol-library-store.js";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { isNotAvailable, readGatewayJson } from "../lib/not-available.js";
+import { NotAvailablePanel } from "../components/NotAvailablePanel.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -145,15 +147,15 @@ export function ProtocolRunPage() {
   // Fetch run
   const { data: runData } = useQuery({
     queryKey: ["protocol-run", runId],
-    queryFn: () => authorizedFetch(`/api/protocol-runs/${runId}`).then((r) => r.json()),
+    queryFn: () => authorizedFetch(`/api/protocol-runs/${runId}`).then(readGatewayJson),
     enabled: !!runId,
-    refetchInterval: 5000, // Poll for live updates
+    refetchInterval: (q) => (isNotAvailable(q.state.data) ? false : 5000), // Poll for live updates
   });
 
   // Fetch all runs (for list view when no runId)
   const { data: allRunsData } = useQuery({
     queryKey: ["protocol-runs-all"],
-    queryFn: () => authorizedFetch("/api/protocol-runs").then((r) => r.json()),
+    queryFn: () => authorizedFetch("/api/protocol-runs").then(readGatewayJson),
     enabled: !runId,
   });
 
@@ -163,7 +165,7 @@ export function ProtocolRunPage() {
 
   const { data: templateData } = useQuery({
     queryKey: ["protocol-template", run?.templateId],
-    queryFn: () => authorizedFetch(`/api/protocols/${run?.templateId}`).then((r) => r.json()),
+    queryFn: () => authorizedFetch(`/api/protocols/${run?.templateId}`).then(readGatewayJson),
     enabled: !!run?.templateId,
   });
 
@@ -251,6 +253,8 @@ export function ProtocolRunPage() {
     setSelectedStepId(null);
   }, []);
 
+  const notAvailable = [runData, allRunsData, templateData].find(isNotAvailable);
+
   const selectedRunStep = run?.steps.find((s) => s.id === selectedStepId);
   const selectedRunTransfer = run?.transfers.find((t) => t.id === selectedTransferId);
 
@@ -262,6 +266,8 @@ export function ProtocolRunPage() {
   // ---------------------------------------------------------------------------
   // List view (no runId)
   // ---------------------------------------------------------------------------
+
+  if (!runId && notAvailable) return <NotAvailablePanel reply={notAvailable} />;
 
   if (!runId) {
     return (
@@ -351,7 +357,7 @@ export function ProtocolRunPage() {
   // Detail view (with runId)
   // ---------------------------------------------------------------------------
 
-  if (!run) {
+  if (notAvailable || !run) {
     return (
       <div className="space-y-6">
         <Link
@@ -360,9 +366,11 @@ export function ProtocolRunPage() {
         >
           &larr; Back to Protocol Runs
         </Link>
+        {notAvailable ? <NotAvailablePanel reply={notAvailable} /> : (
         <GlassPanel padding="lg">
           <div className="text-center py-16 text-white/30 text-sm">Loading run...</div>
         </GlassPanel>
+        )}
       </div>
     );
   }
