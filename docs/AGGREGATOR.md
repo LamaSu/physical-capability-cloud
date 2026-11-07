@@ -36,6 +36,18 @@ opt-in per-tool (via `pricing.perCallUsdc`) AND globally via env.
 | GET | `/api/aggregator/receipts/by-tool/:id` | public | Recent receipts for a tool |
 | GET | `/api/aggregator/receipts/by-caller/:agentId` | public | Recent receipts for a caller |
 
+**Outbound calls.** A tool's `upstreamUrl` is copied from the ingested catalog
+(OpenAPI `servers[]` / path keys, AGNTCY locators, the MCP server URL), so it is
+not trusted. Ingest refuses to register a tool whose upstream is not a public
+`https` destination (reported per tool under the `publish` stage's `errors` as
+`upstream_url_not_allowed:<rule>`). Invoke re-checks the URL (`403
+tool_upstream_blocked`, before any payment is challenged) and makes the call
+through the gateway's outbound guard: DNS is resolved once and the validated
+address is pinned, a private answer vetoes the call, redirects are not followed
+(`502 upstream_redirect_not_followed`), and the call has a 30 s deadline and a
+2 MiB response cap (`502 upstream_response_truncated`). Network failures are
+reported generically as `502 upstream_unreachable`.
+
 ---
 
 ## 3. x402 payment gate
