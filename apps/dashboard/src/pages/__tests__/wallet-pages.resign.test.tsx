@@ -332,6 +332,26 @@ describe("wallet pages re-sign through the existing SIWE flow", () => {
     expect(count("/api/auth/session-key")).toBe(0);
   });
 
+  it.each(["wallets", "link"] as const)("F7: /%s hides an earlier auth error until this page attempts to sign in again", async (page) => {
+    const earlierError = "Earlier wallet sign-in failed";
+    const refusal = "Signature refused by wallet";
+    useAuthStore.getState().setError(earlierError);
+    wallet.isConnected = false;
+    wallet.signMessageAsync.mockRejectedValueOnce(new Error(refusal));
+    await showFailure(page);
+    expectRemedy(SIGN_IN_EXPIRED, false);
+    expect(container.textContent).toContain(L1);
+    expect(buttons("Connect Wallet")).toHaveLength(1);
+    expect(container.textContent).not.toContain(earlierError);
+    wallet.isConnected = true;
+    await renderPage(page);
+    await click("Sign in again");
+    expect(alerts(refusal)).toHaveLength(1);
+    expect(button("Sign in again").disabled).toBe(false);
+    expect(count("/api/auth/nonce")).toBe(1);
+    expect(count("/api/auth/verify")).toBe(0);
+  });
+
   it.each(["wallets", "link"] as const)("K8: /%s offers only Sign out for a pasted key's 401", async (page) => {
     useAuthStore.getState().setSession(null);
     adoptApiKey(PASTED);
@@ -380,5 +400,56 @@ describe("wallet pages re-sign through the existing SIWE flow", () => {
     await click("Unlink");
     expectRemedy();
     expect(calls.filter((call) => call.path === "/api/wallets/unlink-wallet/revoke")).toHaveLength(1);
+  });
+
+  it.each([[401, "unauthorized", true], [403, "insufficient_scope", false]] as const)("L1: an unlink %s, then a reload that fails for another reason, keeps the unlink's remedy", async (status, code, signIn) => {
+    let reads = 0;
+    requestReply = (call) => call.path === "/api/wallets"
+      ? (++reads === 1 ? reply(200, { links: [row("unlink-wallet")] }) : reply(500, {}))
+      : reply(status, { error: code });
+    await renderPage("wallets");
+    await click("Unlink");
+    await click("Unlink");
+    expectRemedy(status === 401 ? SIGN_IN_EXPIRED : SIGN_IN_REFUSED, signIn);
+    expect(alerts("Couldn't load your wallets.")).toHaveLength(1);
+  });
+
+  it.each(["wallets", "link"] as const)("K11: /%s says why a re-sign left no key when the session-key mint is refused", async (page) => {
+    // The reload's restore path leaves its own notice; only this page's attempt may surface one.
+    await act(async () => { await useAuthStore.getState().mintSessionKey(); });
+    const restoreNotice = useAuthStore.getState().authNotice;
+    expect(restoreNotice).toEqual(expect.any(String));
+    mintReply = () => reply(429, { error: "too_many_keys", message: "Maximum 5 active API keys per operator" });
+    await showFailure(page);
+    expect(container.textContent).not.toContain(restoreNotice);
+    await click("Sign in again");
+    expect(count("/api/auth/verify")).toBe(1);
+    expect(count("/api/auth/session-key")).toBe(1);
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    const notice = useAuthStore.getState().authNotice;
+    expect(notice).toEqual(expect.any(String));
+    expect(notice).not.toBe(restoreNotice);
+    expect(container.textContent).toContain(notice);
+  });
+
+  it("K3: /link drops a lookup failure that was sent before the re-sign's key", async () => {
+    const signatures: ((signature: string) => void)[] = [];
+    wallet.signMessageAsync.mockImplementation(() => new Promise((resolve) => { signatures.push(resolve); }));
+    let lookups = 0;
+    let finishLookup: ((response: Response) => void) | undefined;
+    requestReply = (call) => {
+      if (call.path !== LOOKUP) return reply(404, {});
+      if (++lookups === 2) return new Promise((resolve) => { finishLookup = resolve; });
+      return lookups === 1 ? reply(401, {}) : request();
+    };
+    await showFailure("link");
+    await click("Sign in again");
+    // While the wallet prompt is open, the typed code goes out again with no key.
+    await click("Continue");
+    await act(async () => { for (const finish of signatures) finish("signed"); });
+    expect(useAuthStore.getState().sessionKeyId).toBe("session-key-1");
+    await act(async () => finishLookup?.(reply(401, {})));
+    expect(alerts(SIGN_IN_EXPIRED)).toHaveLength(0);
+    expect(buttons("Sign in again")).toHaveLength(0);
   });
 });
