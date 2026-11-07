@@ -28,7 +28,7 @@ Three structural goals, conventionally treated as a two-of-three trade-off in ec
 
 - **Perfect competition** — many sellers, identical typed products (via Capability StructureDefinitions), perfect price information (via published pricing rules and on-chain evidence), zero entry barrier (via one-command operator onboarding through a user's own agent).
 - **Full verticalization** — composition gives every node the coordination benefits of vertical integration without the integration step. An agent stitches a multi-step value chain at runtime; no merger, no procurement department, no master service agreement.
-- **Distributed ownership** — every node owns its primitive. No central coordinator extracts the integration rent. The network treasury accrues from a flat, transparent protocol fee, not from positioning.
+- **Distributed ownership** — every node owns its primitive. No central coordinator extracts the integration rent.
 
 The implications follow directly. SaaS coordination layers (LIMS, ERP, MES, scheduling, dispatch, marketplace) collapse when their function becomes a substrate primitive any agent can compose against. Most middle-management and admin coordination cost becomes a protocol function rather than a job description. Settlement and evidence become enforcement mechanisms — load-bearing, but not the headline. The headline is what they enable: the world's first programmable, composable substrate for agent-mediated economic coordination.
 
@@ -106,7 +106,7 @@ Every capability advertises the assurance level it can provide, from 0 to 3:
 - **Tier 2**: Quality verification. Sensor readings, QC photographs, dimensional measurements, or chromatography results. Evidence is encrypted via Lit Protocol and content-addressed. Bittensor subnet scores quality.
 - **Tier 3**: Third-party attestation. Independent EvaluatorAgent reviews evidence. ZK Merkle proof anchors the commitment on Starknet. Disputes go to UMA arbitration.
 
-Higher tiers require larger bonds from the operator. A Tier-2 job requires the operator to post a slashable bond before the job begins. If evidence is rejected during the challenge window, the bond is slashed and redistributed to the challenger and the network treasury.
+Higher tiers require larger bonds from the operator. A Tier-2 job requires the operator to post a slashable bond before the job begins. If evidence is rejected during the challenge window, the bond is slashed.
 
 ### 2.4 Milestone Escrow with Slashable Bonds
 
@@ -363,9 +363,8 @@ Every IP Asset's Royalty Vault holds 100 Royalty Tokens. PCC distributes these t
 | Role | Default Tokens | Revenue Share | Who |
 |------|----------------|---------------|-----|
 | CSD Designer | 10 | 10% | Person who authored the capability definition |
-| Machine Operator | 70 | 70% | Person whose equipment ran the job |
+| Machine Operator | 80 | 80% | Person whose equipment ran the job |
 | Verifier | 10 | 10% | Subnet/agent that verified evidence quality |
-| Network Treasury | 10 | 10% | PCC protocol fee, non-transferable |
 
 These are defaults. During the contract negotiation phase, the BrokerAgent can propose custom splits — operators can require a minimum revenue floor, designers can negotiate higher royalty rates for novel processes, and multi-party collaborations can encode arbitrary splits as on-chain license terms before the job begins. Once the job starts, the split is immutable.
 
@@ -379,11 +378,10 @@ A 4-step workflow — CNC milling → anodizing → quality inspection → shipp
 Customer pays $100 for the full workflow
 ├── Step 1: CNC Milling  ($40) → IP Asset 0xA1
 │   ├── CNC CSD Designer (10%): $4.00
-│   ├── CNC Operator (70%):     $28.00
-│   ├── Verifier (10%):          $4.00
-│   └── Network (10%):           $4.00
+│   ├── CNC Operator (80%):     $32.00
+│   └── Verifier (10%):          $4.00
 ├── Step 2: Anodizing    ($25) → IP Asset 0xB1
-│   └── [same distribution pattern — $2.50 / $17.50 / $2.50 / $2.50]
+│   └── [same distribution pattern — $2.50 / $20.00 / $2.50]
 ├── Step 3: Inspection   ($15) → IP Asset 0xC1
 │   └── [same distribution pattern]
 └── Step 4: Shipping     ($20) → IP Asset 0xD1
@@ -456,7 +454,7 @@ This structure means the economic risk is symmetric and clearly allocated before
 
 ### 7.3 DePIN Reward Epochs (*Roadmap*)
 
-Operators who consistently execute verified work earn additional rewards from the network treasury through DePIN epoch scoring. The `RewardEngine` evaluates operators on three axes:
+Operators who consistently execute verified work earn additional rewards through DePIN epoch scoring. The `RewardEngine` evaluates operators on three axes:
 
 - **Uptime**: What fraction of scheduled hours was the device available and accepting jobs?
 - **Quality**: What is the mean evidence quality score from the Bittensor subnet?
@@ -475,18 +473,6 @@ This creates a secondary market for manufacturing process IP. A researcher who d
 Operators need raw materials to run jobs. The PCC supplies marketplace (`/api/marketplace/*`) connects operators to material suppliers within the same protocol. 9 REST endpoints cover listing, searching, ordering, and fulfillment tracking across 12 categories: `raw-metals`, `plastics-polymers`, `lab-reagents`, `lab-consumables`, `electronics`, `chemicals`, `biologicals`, `tooling`, `packaging`, `calibration`, `safety`, and `other`.
 
 This closes the loop for a PCC operator: discover jobs via DHT, source materials via the marketplace, execute using registered capabilities, receive payment via escrow. The entire supply chain is protocol-native.
-
-### 7.6 Network Treasury and Protocol Fees
-
-PCC's network treasury receives 10% of every job's royalty payment. These funds finance:
-
-- Bittensor subnet incentives (paying miners to evaluate evidence)
-- ZK proof anchoring costs (Starknet transaction fees)
-- Story Protocol transaction fees (IP registration and royalty distribution)
-- Protocol development grants
-- Dispute resolution bond pool
-
-Treasury flows are on-chain and auditable.
 
 ---
 
@@ -727,38 +713,7 @@ Operators and agents holding a scope on the kernel can communicate in real-time 
 
 ---
 
-## 12. Protocol Fee and Business Model
-
-### 12.1 Open Protocol, On-Chain Monetization
-
-PCC is an open protocol, not a SaaS platform. All code is open source. All specifications are public. Any operator can run a node, and any agent can interact with the network. The protocol monetizes through a transparent, on-chain fee applied at the settlement layer.
-
-### 12.2 PCCProtocol Root Contract
-
-The `PCCProtocol` root contract is the clearinghouse for all settlements. Design invariants:
-
-- **Automatic**: Protocol fee deducted at escrow release, not invoiced separately
-- **Transparent**: Fee rate visible on-chain, queryable by anyone
-- **Bounded**: Governance can adjust the rate within defined bounds — but can never set it to zero
-- **Factory-gated**: Only escrows deployed through the protocol factory can settle through the root — preventing fee bypass via direct escrow deployment
-- **Immutable recipient**: The fee recipient address is set at deployment and cannot be changed
-
-The root contract adds network-level accounting: total fees collected per token, per-escrow fee attribution, and a live factory registry.
-
-### 12.3 Fee Distribution
-
-Protocol fees fund the infrastructure that makes the network trustworthy:
-
-| Allocation | Purpose |
-|------------|---------|
-| Bittensor subnet incentives | Paying miners to evaluate evidence quality |
-| ZK proof anchoring | Starknet transaction fees for Merkle root commits |
-| Story Protocol transactions | IP registration and royalty distribution gas |
-| Gateway infrastructure | Bootstrap nodes, DHT relays, dashboard hosting |
-| Protocol development | Open-source development grants |
-| Dispute resolution pool | Bond pool for challenger incentives |
-
-### 12.4 Fiat On-Ramp
+## 12. Fiat On-Ramp
 
 To lower the barrier to entry, PCC integrates fiat-to-crypto on-ramps:
 
@@ -906,7 +861,7 @@ The test suite has 3,600+ passing tests across 100+ test files (TypeScript + Pyt
 
 PCC operates across four chains with distinct roles:
 
-**Base Sepolia (chain 84532)**: Primary escrow and settlement. The `MilestoneEscrow` contract holds customer funds, manages bonds, and releases payment when evidence is verified. The `PCCProtocol` root contract clears all Base Sepolia settlements, collecting the protocol fee on every job.
+**Base Sepolia (chain 84532)**: Primary escrow and settlement. The `MilestoneEscrow` contract holds customer funds, manages bonds, and releases payment when evidence is verified.
 
 **Flow EVM Testnet (chain 545)**: Secondary settlement chain with sub-cent transaction costs. The same `MilestoneEscrow` and `MockUSDC` contracts are deployed to Flow EVM via `scripts/deploy-flow-evm.ts`. Set `PCC_NETWORK=flow-evm-testnet` to route the gateway to Flow. Explorer: https://evm-testnet.flowscan.io
 
@@ -999,7 +954,7 @@ In March 2026, PCC's distributed pieces ran end to end in testing. Operators can
 
 The result is a network where a machinist in Detroit and a biologist in Boston can form a trustless workflow without a broker, a marketplace, or a negotiated contract. Where the intellectual property embedded in a manufacturing process earns royalties for its designer forever. Where verified physical work builds permanent on-chain credentials. Where any AI agent can discover, book, and settle a physical capability through a typed API, the same way it calls any other microservice.
 
-The Story Protocol integration is not an afterthought — it is the mechanism that makes the network self-sustaining. When designers earn from every use of their CSDs, they are incentivized to publish better definitions. When operators earn not just from execution but from the IP equity in their device profiles, they are incentivized to maintain and improve their capabilities. When the network treasury accumulates from protocol fees, it can fund the verification infrastructure that makes evidence credible. The economic flywheel is fully specified in the protocol.
+The Story Protocol integration is not an afterthought — it is the mechanism that makes the network self-sustaining. When designers earn from every use of their CSDs, they are incentivized to publish better definitions. When operators earn not just from execution but from the IP equity in their device profiles, they are incentivized to maintain and improve their capabilities. The economic flywheel is fully specified in the protocol.
 
 This is not a marketplace. It is a protocol — and protocols are how the internet got built.
 
@@ -1011,7 +966,7 @@ The implications extend far beyond manufacturing efficiency.
 
 **AI agents as economic actors in the physical world.** We are building toward a world where AI agents don't just write code and answer questions — they commission physical work. An agent managing a supply chain doesn't email a vendor and wait three days for a quote. It discovers capabilities on the network, negotiates autonomously, locks escrow, monitors execution via evidence streams, and settles payment — all in the time it takes a human to open their inbox. PCC is the API that connects artificial intelligence to physical reality.
 
-**The operator-owned economy.** Every platform economy follows the same arc: aggregate supply, subsidize demand, extract rent. PCC inverts this. The protocol fee is minimal and transparent. There is no algorithm deciding which operators get surfaced. There is no platform that can deactivate your account because you also work for a competitor. Operators own their identity (W3C DIDs), their reputation (on-chain, portable), their evidence history (content-addressed on IPFS, encrypted under their control), and their intellectual property (Story Protocol, with royalties flowing forever). The network works for its participants, not the other way around.
+**The operator-owned economy.** Every platform economy follows the same arc: aggregate supply, subsidize demand, extract rent. PCC inverts this. There is no algorithm deciding which operators get surfaced. There is no platform that can deactivate your account because you also work for a competitor. Operators own their identity (W3C DIDs), their reputation (on-chain, portable), their evidence history (content-addressed on IPFS, encrypted under their control), and their intellectual property (Story Protocol, with royalties flowing forever). The network works for its participants, not the other way around.
 
 **Physical work as programmable IP.** When a machinist develops a novel fixturing technique that produces better tolerances, that technique — encoded as a Capability StructureDefinition — becomes an IP Asset. Every time another operator uses that CSD, royalties flow back to the original designer. Physical expertise stops being tacit knowledge trapped in one person's head and becomes composable, tradeable, and perpetually compensated intellectual property.
 
@@ -1042,9 +997,8 @@ Both Story mainnet (chain 1514) and Aeneid testnet (chain 1513) share the same a
 |-----------|---------|-------------|-------------|
 | `commercialRevShare` | 5% | 1–50% | Percent of derivative revenue flowing to parent CSD IP |
 | Designer Royalty Tokens | 10 / 100 | Yes | Share of all revenue earned by CSD author |
-| Operator Royalty Tokens | 70 / 100 | Yes | Share of revenue earned by executing operator |
+| Operator Royalty Tokens | 80 / 100 | Yes | Share of revenue earned by executing operator |
 | Verifier Royalty Tokens | 10 / 100 | Yes | Share earned by evidence verifier |
-| Network Treasury Tokens | 10 / 100 | No | Protocol fee, non-transferable |
 
 ## Appendix C: Key Environment Variables
 
