@@ -16,17 +16,23 @@ import {
   isIdentityWriteEnabled,
 } from "./erc8004-identity-write.js";
 import { getRepos } from "../db.js";
+import { classifyChainError, type ChainErrorCode } from "./chain-error-code.js";
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const DEFAULT_BATCH_SIZE = 5;
 
 let _timer: NodeJS.Timeout | undefined;
 
+interface SweeperLogger {
+  info: (message: string) => void;
+  warn: (fields: { keyId?: string; code: ChainErrorCode }, message: string) => void;
+}
+
 interface StartOptions {
   intervalMs?: number;
   batchSize?: number;
   gatewayUrl?: string;
-  logger?: { info: (m: string) => void; warn: (m: string) => void };
+  logger?: SweeperLogger;
 }
 
 /** Start the sweeper. Safe to call once per process; no-op on re-entry. */
@@ -42,13 +48,13 @@ export function startIdentitySweeper(opts: StartOptions = {}): void {
     opts.gatewayUrl ?? process.env.PCC_GATEWAY_URL ?? "https://capability.network";
   const logger = opts.logger ?? {
     info: (m) => console.log(`[erc8004-sweeper] ${m}`),
-    warn: (m) => console.warn(`[erc8004-sweeper] ${m}`),
+    warn: (fields, message) => console.warn(`[erc8004-sweeper] ${message}`, fields),
   };
 
   logger.info(`starting (every ${intervalMs}ms, batch ${batchSize})`);
   _timer = setInterval(() => {
     runSweep({ batchSize, gatewayUrl, logger }).catch((err) => {
-      logger.warn(`sweep error: ${err instanceof Error ? err.message : String(err)}`);
+      logger.warn({ code: classifyChainError(err) }, "sweep error");
     });
   }, intervalMs);
   // Don't block process exit on this timer.
@@ -70,7 +76,7 @@ export function stopIdentitySweeper(): void {
 export async function runSweep(opts: {
   batchSize: number;
   gatewayUrl: string;
-  logger: { info: (m: string) => void; warn: (m: string) => void };
+  logger: SweeperLogger;
 }): Promise<{ attempted: number; succeeded: number; failed: number }> {
   const { batchSize, gatewayUrl, logger } = opts;
   const repo = getRepos().apiKeys;
@@ -98,14 +104,14 @@ export async function runSweep(opts: {
         `wrote agent ${result.agentId} for key ${key.id} (tx ${result.txHash})`,
       );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const code = classifyChainError(err);
       try {
-        repo.recordOnchainFailure(key.id, msg);
+        repo.recordOnchainFailure(key.id, code);
       } catch {
         // non-fatal
       }
       failed++;
-      logger.warn(`retry failed for key ${key.id}: ${msg.slice(0, 160)}`);
+      logger.warn({ keyId: key.id, code }, "retry failed");
     }
   }
   return { attempted: pending.length, succeeded, failed };

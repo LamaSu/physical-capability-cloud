@@ -272,3 +272,21 @@ describe("NEGATIVE (r3): a refusal on the latest read replaces cached data", () 
     expect(jobPageState(true, null, false)).toEqual({ show: "data", refreshFailed: false });
   });
 });
+
+describe("NEGATIVE (r4): payout badges fail closed for non-own payout keys", () => {
+  it.each([
+    ["toString", false],
+    ["toString", true],
+    ["__proto__", false],
+    ["__proto__", true],
+    ["constructor", false],
+    ["constructor", true],
+    ["unexpected_payout", false],
+    ["unexpected_payout", true],
+  ] as const)("shows gray unknown for payout %s, stale=%s", (payout, stale) => {
+    expect(payoutBadge(payout as PayoutState, stale)).toEqual({
+      label: stale ? "Payment status unknown (as of the last read)" : "Payment status unknown",
+      color: "gray",
+    });
+  });
+});

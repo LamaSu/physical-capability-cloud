@@ -1,7 +1,7 @@
 import React, { Suspense, lazy } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { AppShell, Sidebar, TopBar, StatusBar, ParticleBackground } from "@pcc/ui";
+import { AppShell, Sidebar, TopBar, ParticleBackground } from "@pcc/ui";
 import { navGroups } from "./components/nav-config.js";
 import { useUIStore } from "./stores/ui-store.js";
 import { useAuthStore, onIdentityChange } from "./stores/auth-store.js";
@@ -33,6 +33,7 @@ const BuilderPage = lazy(() => import("./pages/BuilderPage.js").then(m => ({ def
 const WorkflowPage = lazy(() => import("./pages/WorkflowPage.js").then(m => ({ default: m.WorkflowPage })));
 const JobsPage = lazy(() => import("./pages/JobsPage.js").then(m => ({ default: m.JobsPage })));
 const JobDetailPage = lazy(() => import("./pages/JobDetailPage.js").then(m => ({ default: m.JobDetailPage })));
+const JobFlowPage = lazy(() => import("./pages/JobFlowPage.js").then(m => ({ default: m.JobFlowPage })));
 const KernelsPage = lazy(() => import("./pages/KernelsPage.js").then(m => ({ default: m.KernelsPage })));
 const KernelDetailPage = lazy(() => import("./pages/KernelDetailPage.js").then(m => ({ default: m.KernelDetailPage })));
 const EscrowPage = lazy(() => import("./pages/EscrowPage.js").then(m => ({ default: m.EscrowPage })));
@@ -75,6 +76,7 @@ const NegotiationPage = lazy(() => import("./pages/NegotiationPage.js").then(m =
 const OperatorMobilePage = lazy(() => import("./pages/OperatorMobilePage.js").then(m => ({ default: m.OperatorMobilePage })));
 const EconomicAgreementsPage = lazy(() => import("./pages/EconomicAgreementsPage.js").then(m => ({ default: m.EconomicAgreementsPage })));
 const WalletPage = lazy(() => import("./pages/WalletPage.js").then(m => ({ default: m.WalletPage })));
+const WalletLinkPage = lazy(() => import("./pages/WalletLinkPage.js").then(m => ({ default: m.WalletLinkPage })));
 const WhitepaperPage = lazy(() => import("./pages/WhitepaperPage.js").then(m => ({ default: m.WhitepaperPage })));
 const BatchBoardPage = lazy(() => import("./pages/BatchBoardPage.js").then(m => ({ default: m.BatchBoardPage })));
 const NegotiationSessionPage = lazy(() => import("./pages/NegotiationSessionPage.js").then(m => ({ default: m.NegotiationSessionPage })));
@@ -154,10 +156,10 @@ function AgentShell() {
 // ---------------------------------------------------------------------------
 
 function LogoutButton() {
-  const logout = useAuthStore((s) => s.logout);
+  const logout = useAuthStore((s) => s.signOutWallet);
   return (
     <button
-      onClick={logout}
+      onClick={() => void logout()}
       className="w-full px-3 py-2 text-[10px] text-white/25 hover:text-red-400/70 hover:bg-white/[0.03] rounded-lg transition-all text-left tracking-wide uppercase"
     >
       Disconnect
@@ -165,7 +167,7 @@ function LogoutButton() {
   );
 }
 
-function DashboardShell() {
+function DashboardShell({ visitor = false }: { visitor?: boolean }) {
   const navigate = useNavigate();
   const location = useLocation();
   const { sidebarCollapsed, toggleSidebar, currentPageTitle, currentPageSubtitle } = useUIStore();
@@ -186,19 +188,19 @@ function DashboardShell() {
                 onToggle={toggleSidebar}
               />
             </div>
-            <div className="border-t border-white/[0.06] p-2">
+            {!visitor && <div className="border-t border-white/[0.06] p-2">
               <LogoutButton />
-            </div>
+            </div>}
           </div>
         }
         topBar={
           <TopBar
             title={currentPageTitle}
             subtitle={currentPageSubtitle}
-            actions={<><ModeToggle /><ConnectWallet /><TourRestartButton /></>}
+            actions={<><ModeToggle /><ConnectWallet />{!visitor && <TourRestartButton />}</>}
           />
         }
-        statusBar={<StatusBar kernelsOnline={2} activeJobs={3} networkStatus="connected" />}
+        statusBar={null}
       >
         <PageTransition>
           <Suspense fallback={<PageLoader />}>
@@ -279,7 +281,7 @@ function DashboardShell() {
         </PageTransition>
       </AppShell>
       <NotificationToasts />
-      <OnboardingTour />
+      {!visitor && <OnboardingTour />}
     </>
   );
 }
@@ -292,14 +294,18 @@ function Shell() {
   const interfaceMode = useUIStore((s) => s.interfaceMode);
   const location = useLocation();
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const sessionToken = useAuthStore((s) => s.sessionToken);
+  // A restored wallet session can still make cookie-authorized reads and stops.
+  const hasAccess = isAuthenticated || sessionToken !== null;
+  const isDiscover = location.pathname.replace(/\/+$/, "") === "/discover";
 
   // Public pages that don't require auth
   const publicPaths = ["/", "/start", "/whitepaper", "/go", "/earn", "/onboard/chat"];
-  const isPublicPage = publicPaths.includes(location.pathname);
+  const isPublicPage = isDiscover || publicPaths.includes(location.pathname);
 
   // Login page at /login
   if (location.pathname === "/login") {
-    return isAuthenticated ? (
+    return hasAccess ? (
       <Suspense fallback={<PageLoader />}><LandingPage /></Suspense>
     ) : (
       <LoginPage />
@@ -307,8 +313,19 @@ function Shell() {
   }
 
   // Auth gate — redirect to login for non-public pages
-  if (!isAuthenticated && !isPublicPage) {
+  if (!hasAccess && !isPublicPage) {
     return <LoginPage />;
+  }
+
+  if (location.pathname === "/link") {
+    return (
+      <Suspense fallback={<PageLoader />}>
+        <WalletLinkPage />
+      </Suspense>
+    );
+  }
+  if (location.pathname === "/jobs/flow") {
+    return <Suspense fallback={<PageLoader />}><JobFlowPage /></Suspense>;
   }
 
   // Landing page — agent-first (root)
@@ -375,6 +392,12 @@ function Shell() {
       </Suspense>
     );
   }
+
+  if (location.pathname === "/operator" ||
+      (location.pathname.startsWith("/operator/") && location.pathname.replace(/\/+$/, "") !== "/operator/revenue")) {
+    return <DashboardShell />;
+  }
+  if (isDiscover) return <DashboardShell visitor={!hasAccess} />;
 
   // /app and /app/* — Spatial fallback web dashboard (with agent prompt banner)
   if (location.pathname === "/app" || location.pathname.startsWith("/app/")) {

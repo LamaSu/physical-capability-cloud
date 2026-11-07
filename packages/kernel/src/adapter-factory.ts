@@ -401,6 +401,12 @@ function buildIpp(
     name: cfg.name as string | undefined,
     kernelId,
     pollIntervalMs: cfg.pollIntervalMs as number | undefined,
+    cancelConfirmMs: cfg.cancelConfirmMs as number | undefined,
+    requestDeadlineMs: cfg.requestDeadlineMs as number | undefined,
+    printJobDeadlineMs: cfg.printJobDeadlineMs as number | undefined,
+    maxResponseBytes: cfg.maxResponseBytes as number | undefined,
+    maxDocumentBytes: cfg.maxDocumentBytes as number | undefined,
+    documentFormat: cfg.documentFormat as string | undefined,
     mockMode: (cfg.mockMode as boolean | undefined) ?? true,
   });
 }

@@ -19,7 +19,7 @@ import click
 
 from . import __version__
 from .config import ConfigFileError, NodeConfig, generate_config, save_config, load_config, load_config_data
-from .crypto import KeyFileError, load_or_create_keys
+from .crypto import CompromisedKeyError, CryptoUnavailableError, KeyFileError, load_or_create_keys
 from .daemon import run_daemon, is_running, read_state
 from .detect import detect_all
 from .discovery import (
@@ -63,7 +63,7 @@ def _setup_logging(verbose):
 DIAG_ACK_PATH = os.path.expanduser("~/.pcc-node/diagnostics-acknowledged")
 
 
-def _maybe_prompt_diagnostics(config):
+def _maybe_prompt_diagnostics(config, config_file="./pcc-node.json"):
     """First-run banner: explain auto-diagnostics and let operator opt in/out.
 
     Shown once per machine (sentinel at ~/.pcc-node/diagnostics-acknowledged).
@@ -71,7 +71,25 @@ def _maybe_prompt_diagnostics(config):
     operators can say no here or run `pcc-node feedback off` later.
     """
     if os.path.exists(DIAG_ACK_PATH):
+        try:
+            with open(DIAG_ACK_PATH) as f:
+                recorded = "".join(f).strip()
+        except (OSError, UnicodeError):
+            recorded = ""
+        if recorded not in ("mode=errors", "mode=periodic"):
+            config.diagnostics_mode = "off"
         return  # already acknowledged, don't nag
+
+    if not _interactive():
+        config.diagnostics_mode = "off"
+        path = os.path.abspath(config_file)
+        if not all(c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./-" for c in path):
+            path = "'" + path.replace("'", "'\"'\"'") + "'"
+        click.echo(
+            "  No terminal to ask about auto-diagnostics, so they are off for this run. "
+            f"To turn them on: pcc-node feedback on --config-file {path}"
+        )
+        return
 
     click.echo("")
     click.echo("─" * 64)
@@ -154,7 +172,7 @@ def _load_node_keys():
     """The node's key pair, or a plain message and exit 1 if its key file is unusable."""
     try:
         return load_or_create_keys()
-    except KeyFileError as exc:
+    except (KeyFileError, CompromisedKeyError, CryptoUnavailableError) as exc:
         click.echo(f"Cannot use this node's key file: {exc}", err=True)
         sys.exit(1)
 
@@ -485,7 +503,7 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
     # No capability announcement: this node takes no jobs (verdict 68d, finding 3).
 
     # First-run diagnostics banner (no-op if already acknowledged)
-    _maybe_prompt_diagnostics(config)
+    _maybe_prompt_diagnostics(config, config_file)
 
     # Save config
     saved_path = save_config(config, config_file)
@@ -919,6 +937,13 @@ def feedback_cmd(config_file, mode, interval):
 
     from .config import save_config as _sc
     _sc(cfg, config_path)
+
+    try:
+        os.makedirs(os.path.dirname(DIAG_ACK_PATH), exist_ok=True)
+        with open(DIAG_ACK_PATH, "w") as f:
+            f.write(f"mode={cfg.diagnostics_mode}\n")
+    except OSError:
+        pass
 
     if mode == "off":
         click.echo("Diagnostic feedback: DISABLED")

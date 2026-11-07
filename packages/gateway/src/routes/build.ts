@@ -17,8 +17,8 @@ const validator = new ContractValidator();
  * Routes used to throw on this path → Fastify default error handler →
  * 500 to the buyer. Now we surface a clear 404 with the reason.
  */
-function sendMissing(reply: FastifyReply, reason: string): void {
-  reply.status(404).send({
+function sendMissing(reply: FastifyReply, reason: string): FastifyReply {
+  return reply.status(404).send({
     error: "capability_not_buildable",
     message: reason,
   });

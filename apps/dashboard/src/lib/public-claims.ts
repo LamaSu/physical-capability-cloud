@@ -41,6 +41,13 @@ export const ALONGSIDE_WINDOW = 400;
 
 export const GUARDED_CLAIMS: readonly GuardedClaim[] = [
   {
+    id: "bounty-rewards",
+    pattern: /\bclaim (a |the )?bount(y|ies)\b/i,
+    status: "roadmap",
+    requires: "Funded bounties that a claimant can be paid (R45)",
+    example: "Claim a bounty, earn rewards.",
+  },
+  {
     id: "proof-on-every-job",
     pattern: /(cryptographic )?proof on every job|every job returns signed/i,
     status: "roadmap",
@@ -166,10 +173,20 @@ export const GUARDED_CLAIMS: readonly GuardedClaim[] = [
     requires: "Never: the operator's thesis replaces these one-line definitions (PX-17, #2574)",
     example: "PCC is AWS for the physical world.",
   },
+  {
+    id: "automatic-contributor-payout",
+    pattern:
+      /\bsends your cut\b|\bpays you,? automatically\b|\bget paid every time your work is used\b|\bevery job that uses your work pays you\b/i,
+    status: "roadmap",
+    requires:
+      "A job settlement that pays published contributor rates to contributors' wallets. No settlement reads a published rate today.",
+    example: "Every job that uses your work pays you, automatically.",
+  },
 ];
 
 /** Repo-relative files that are served publicly or read by external agents. */
 export const PUBLISHED_SURFACES: readonly string[] = [
+  "apps/dashboard/src/pages/AgentChatPage.tsx",
   "README.md",
   "apps/dashboard/index.html",
   "apps/dashboard/public/landing.html",
@@ -195,6 +212,11 @@ export const PUBLISHED_SURFACES: readonly string[] = [
   "apps/dashboard/src/pages/OnboardLandingPage.tsx",
   "apps/dashboard/src/pages/OnboardKitPage.tsx",
   "apps/dashboard/src/pages/StartPage.tsx",
+  "apps/dashboard/src/components/JobFlowCard.tsx",
+  "apps/dashboard/src/lib/job-execution-view.ts",
+  "apps/dashboard/src/pages/JobDetailPage.tsx",
+  "apps/dashboard/src/pages/JobFlowPage.tsx",
+  "apps/dashboard/src/pages/EarnFromYourWorkPage.tsx",
   "packages/gateway/src/routes/start.ts",
   "packages/gateway/src/routes/docs.ts",
   "packages/gateway/src/routes/context-pack.ts",

@@ -72,7 +72,7 @@ describe("checkEventTimes", () => {
   });
 });
 
-describe("LO-EV-9 carries the time window (step 10)", () => {
+describe("LO-EV-9 carries the time window (step 11)", () => {
   const JOB = "job-1";
   const KERNEL = "kernel-a";
   const source = { deviceId: "dev-1", deviceType: "machine", kernelId: KERNEL } as EvidenceEvent["source"];

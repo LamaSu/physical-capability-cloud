@@ -382,7 +382,7 @@ export interface DriftAlertDTO {
 
 export interface EscrowSummaryDTO {
   id: Id;
-  jobId: Id;
+  jobId?: Id;
   status: EscrowStatus;
   totalAmount: Amount;
   currency: Currency;

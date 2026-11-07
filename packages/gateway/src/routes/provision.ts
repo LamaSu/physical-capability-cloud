@@ -6,19 +6,37 @@
  * DELETE /api/auth/keys/:id — revoke a key (requires auth)
  */
 
-import type { FastifyInstance } from "fastify";
-import { provisionApiKey } from "../auth/api-key-auth.js";
-import { getRepos } from "../db.js";
+import type { FastifyInstance, FastifyRequest } from "fastify";
+import { eq, or, schema, sql } from "@pcc/store";
+import { classifyProvisionError, provisionApiKey, resolveApiKey, siweSessionKeyAddress } from "../auth/api-key-auth.js";
+import { authorityOf } from "../auth/kernel-authority.js";
+import { resolveSession } from "../auth/siwe-auth.js";
+import { SELF_SERVICE_KEY_SCOPES } from "../middleware/scope-checker.js";
+import { getRepos, getStore } from "../db.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { canProvision } from "../middleware/security-hardening.js";
+import { classifyChainError } from "../services/chain-error-code.js";
 import {
   registerAgentOnChain,
   isIdentityWriteEnabled,
   getIdentityRegistryAddress,
-  generateOperatorWallet,
-  setAgentWalletOnChain,
 } from "../services/erc8004-identity-write.js";
+
+/**
+ * Only a proven owner or the admin may list or revoke another key of an address.
+ * Owner proof comes from exactly: a verified SIWE cookie or bearer session
+ * resolved by resolveSession; or an unexpired, unrevoked
+ * API key whose metadata.source is "siwe-session", using its stored operatorId.
+ * A request-level proven wallet set by any other proof is not owner proof for managing other keys.
+ */
+export function provenOwnerAddress(req: FastifyRequest): string | null {
+  const session = resolveSession(req);
+  if (session) return session.address.toLowerCase();
+
+  const key = req.apiKeyId ? getRepos().apiKeys.findById(req.apiKeyId) : undefined;
+  return siweSessionKeyAddress(key ?? null);
+}
 
 export async function provisionRoutes(app: FastifyInstance) {
   // ── POST /api/auth/provision ──────────────────────────────────────
@@ -41,8 +59,8 @@ export async function provisionRoutes(app: FastifyInstance) {
       capability?: string;
       /**
        * Optional Ed25519 public key (BYOK). 64 hex chars, optional 0x prefix.
-       * Omitted → gateway mints a fresh keypair and returns the private
-       * key in this response ONCE.
+       * Omitted means no signing key on file. The gateway never returns
+       * a private key.
        */
       publicKey?: string;
     };
@@ -98,13 +116,13 @@ export async function provisionRoutes(app: FastifyInstance) {
     }
 
     try {
-      const { rawKey, record, ed25519 } = provisionApiKey({
+      const { rawKey, record } = provisionApiKey({
         operatorId,
         name: body.name,
         description: body.capability
           ? `Operator capability: ${body.capability}`
           : undefined,
-        scopes: ["*"],
+        scopes: [...SELF_SERVICE_KEY_SCOPES],
         metadata: {
           capability: body.capability,
           provisionedAt: new Date().toISOString(),
@@ -123,7 +141,7 @@ export async function provisionRoutes(app: FastifyInstance) {
         metadata: {
           name: body.name,
           capability: body.capability,
-          ed25519_keypair_source: ed25519 ? "server-minted" : "byok",
+          ed25519_keypair_source: record.publicKey ? "byok" : "none",
         },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
@@ -131,7 +149,7 @@ export async function provisionRoutes(app: FastifyInstance) {
       trackServerEvent("api_key_provisioned", {
         email: body.email,
         capability: body.capability,
-        ed25519_keypair_source: ed25519 ? "server-minted" : "byok",
+        ed25519_keypair_source: record.publicKey ? "byok" : "none",
       });
       // Surface the trace_id (stamped by `middleware/trace-id.ts`) so the
       // agent can echo it on every subsequent call via `x-pcc-trace-id`.
@@ -140,21 +158,11 @@ export async function provisionRoutes(app: FastifyInstance) {
       // than headers.
       // See docs/AGENT_ONBOARDING_OBSERVABILITY.md.
       const trace_id = (req as unknown as { traceId?: string }).traceId;
-      // Ed25519 surfacing: ALWAYS return the public key; return the private
-      // key ONLY when the gateway minted it. BYOK keys never round-trip.
-      const ed25519Response = ed25519
-        ? {
-            public_key: ed25519.publicKeyHex,
-            private_key: ed25519.privateKeyHex,
-            private_key_pkcs8_base64: ed25519.privateKeyPkcs8B64,
-            source: "server-minted",
-            warning:
-              "Store the private_key now — it will not be shown again. Anyone holding it can sign as this agent.",
-          }
-        : {
-            public_key: record.publicKey ?? null,
-            source: "byok",
-          };
+      // Provisioning returns only the caller-supplied public key, or null.
+      const ed25519Response = {
+        public_key: record.publicKey ?? null,
+        source: record.publicKey ? "byok" : "none",
+      };
 
       // ── ERC-8004 on-chain identity write (best-effort) ────────────
       // The off-chain DB row is the source of truth at this moment; the
@@ -164,19 +172,6 @@ export async function provisionRoutes(app: FastifyInstance) {
       let onchainAttempted = false;
       let onchainResult:
         | { agentId: string; txHash: string; registryAddress: string; chainId: number }
-        | undefined;
-      // Option A operator wallet response (populated inside the mint branch).
-      let operatorWalletResponse:
-        | {
-            address: string;
-            private_key: string;
-            source: "server-minted";
-            custody: "gateway";
-            warning: string;
-            onchain_status?: "written" | "failed" | "pending";
-            onchain_tx_hash?: string;
-            onchain_error?: string;
-          }
         | undefined;
       if (isIdentityWriteEnabled()) {
         onchainAttempted = true;
@@ -213,95 +208,15 @@ export async function provisionRoutes(app: FastifyInstance) {
             ip: req.ip,
             userAgent: req.headers["user-agent"],
           });
-
-          // ── Option A: per-operator operational wallet + setAgentWallet ──
-          // Generate a fresh EOA for THIS operator (gateway-custodied at
-          // bootstrap), then best-effort assign it as the on-chain
-          // agentWallet. Entire block is defensively wrapped so any failure
-          // (viem import, EIP-712 domain mismatch vs deployed Daydreams
-          // contract, RPC blip) NEVER leaks into the outer catch and reverts
-          // the sponsored-mint success record.
-          try {
-            const opWallet = await generateOperatorWallet();
-            operatorWalletResponse = {
-              address: opWallet.address,
-              private_key: opWallet.privateKey,
-              source: "server-minted",
-              custody: "gateway",
-              warning:
-                "Store the private_key now — it will not be shown again. This wallet " +
-                "controls your ERC-8004 agentWallet; anyone holding it can sign as this agent.",
-            };
-            try {
-              const walletResult = await setAgentWalletOnChain({
-                agentId: onchain.agentId,
-                newWallet: opWallet.address,
-                newWalletPrivateKey: opWallet.privateKey,
-              });
-              getRepos().apiKeys.recordOperatorWallet(record.id, {
-                address: opWallet.address,
-                privateKey: opWallet.privateKey,
-                onchainStatus: "written",
-                onchainTxHash: walletResult.txHash,
-                onchainError: null,
-              });
-              operatorWalletResponse.onchain_status = "written";
-              operatorWalletResponse.onchain_tx_hash = walletResult.txHash;
-              auditService.log({
-                eventType: "auth.agent_wallet_written",
-                actor: operatorId,
-                resourceType: "api_key",
-                resourceId: record.id,
-                action: "update",
-                metadata: {
-                  agent_wallet: opWallet.address,
-                  tx_hash: walletResult.txHash,
-                  agent_id: String(onchain.agentId),
-                },
-                ip: req.ip,
-                userAgent: req.headers["user-agent"],
-              });
-            } catch (walletErr) {
-              const walletErrMsg =
-                walletErr instanceof Error ? walletErr.message : String(walletErr);
-              try {
-                getRepos().apiKeys.recordOperatorWallet(record.id, {
-                  address: opWallet.address,
-                  privateKey: opWallet.privateKey,
-                  onchainStatus: "failed",
-                  onchainTxHash: null,
-                  onchainError: walletErrMsg.slice(0, 1024),
-                });
-              } catch {
-                // Non-fatal.
-              }
-              operatorWalletResponse.onchain_status = "failed";
-              operatorWalletResponse.onchain_error = walletErrMsg.slice(0, 256);
-              req.log?.warn(
-                { keyId: record.id, error: walletErrMsg },
-                "setAgentWallet best-effort failed — off-chain wallet preserved",
-              );
-            }
-          } catch (opWalletErr) {
-            // generateOperatorWallet failed (e.g. viem import glitch in a
-            // test env). Do NOT let this leak into the outer catch and
-            // revert the sponsored-mint success record. Off-chain identity
-            // continues to work; operator wallet is a future retry.
-            req.log?.warn(
-              { keyId: record.id, err: opWalletErr instanceof Error ? opWalletErr.message : String(opWalletErr) },
-              "operator wallet generation failed — sponsored mint still succeeded",
-            );
-          }
         } catch (onchainErr) {
-          const errMsg =
-            onchainErr instanceof Error ? onchainErr.message : String(onchainErr);
+          const code = classifyChainError(onchainErr);
           try {
-            getRepos().apiKeys.recordOnchainFailure(record.id, errMsg);
+            getRepos().apiKeys.recordOnchainFailure(record.id, code);
           } catch {
             // Non-fatal: DB write failure doesn't block HTTP response
           }
           req.log?.warn(
-            { keyId: record.id, error: errMsg },
+            { keyId: record.id, code },
             "ERC-8004 on-chain identity write failed — will retry",
           );
           auditService.log({
@@ -310,7 +225,7 @@ export async function provisionRoutes(app: FastifyInstance) {
             resourceType: "api_key",
             resourceId: record.id,
             action: "create",
-            metadata: { error: errMsg.slice(0, 256) },
+            metadata: { code },
             ip: req.ip,
             userAgent: req.headers["user-agent"],
           });
@@ -328,13 +243,8 @@ export async function provisionRoutes(app: FastifyInstance) {
         warning: "Save this API key now — it will not be shown again.",
         trace_id,
         ed25519: ed25519Response,
-        // Option A ownership stopgap: operator's operational wallet address
-        // (independently claimable EOA that will be set as the ERC-8004
-        // `agentWallet` on-chain via best-effort setAgentWallet). If the
-        // on-chain assignment fails, the off-chain wallet is still yours.
-        // See coord bulletin 235 for the migration path to full smart-wallet
-        // ownership (B).
-        operator_wallet: operatorWalletResponse ?? { source: "none" },
+        // Provisioning never generates or assigns an operator wallet.
+        operator_wallet: { source: "none" },
         usage: {
           header: `Authorization: Bearer ${rawKey}`,
           trace_header: `x-pcc-trace-id: ${trace_id ?? "<trace_id>"}`,
@@ -349,17 +259,24 @@ export async function provisionRoutes(app: FastifyInstance) {
           : { status: "disabled" },
       });
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Failed to provision key";
-      if (message.includes("Maximum 5")) {
-        return reply.status(429).send({ error: "too_many_keys", message });
+      const code = classifyProvisionError(err);
+      if (code === "too_many_keys") {
+        return reply.status(429).send({
+          error: "too_many_keys", message: "Maximum 5 active API keys per operator",
+        });
       }
-      if (
-        err instanceof Error &&
-        (err as Error & { code?: string }).code === "invalid_public_key"
-      ) {
-        return reply.status(400).send({ error: "invalid_public_key", message });
+      if (code === "invalid_public_key") {
+        return reply.status(400).send({
+          error: "invalid_public_key",
+          message: "publicKey must be a 32-byte Ed25519 public key (64 hex chars, optional 0x prefix)",
+        });
       }
-      return reply.status(500).send({ error: "provision_failed", message });
+      if (code === "provision_in_progress") {
+        return reply.status(500).send({
+          error: "provision_failed", message: "Key provisioning in progress — try again in a moment",
+        });
+      }
+      return reply.status(500).send({ error: "provision_failed", message: "Failed to provision key" });
     }
   });
 
@@ -378,8 +295,8 @@ export async function provisionRoutes(app: FastifyInstance) {
   // ── POST /api/agents/:id/verify ────────────────────────────────────
   //
   // Verify that a signature was produced by the agent identified by `:id`.
-  // The agent's public key was set at provision time (server-minted OR
-  // BYOK). Body: { message: string, signature: string }. Returns
+  // The agent's public key is set only from the caller's publicKey.
+  // Body: { message: string, signature: string }. Returns
   // { valid: bool, keyId, operatorId } on success. Returns 404 when the
   // key doesn't exist or has no public_key on file (e.g. legacy rows).
   //
@@ -437,7 +354,7 @@ export async function provisionRoutes(app: FastifyInstance) {
       return reply.status(404).send({
         error: "key_not_found",
         message:
-          "No verifiable public key on file for this agent. Re-provision with publicKey or as server-minted.",
+          "No verifiable public key on file for this agent. Re-provision with publicKey.",
       });
     }
 
@@ -452,19 +369,23 @@ export async function provisionRoutes(app: FastifyInstance) {
   });
 
   // ── GET /api/auth/keys ────────────────────────────────────────────
-  // List active keys for the authenticated operator.
-  // Requires existing API key or SIWE session.
+  // Only a proven owner or the admin may list another key of an address.
   app.get("/api/auth/keys", async (req, reply) => {
-    // Try resolveApiKey directly since this route is before the gate
-    const { resolveApiKey } = await import("../auth/api-key-auth.js");
-    const keyRecord = resolveApiKey(req);
-    const operatorId = keyRecord?.operatorId ?? (req as any).operatorId ?? (req as any).userId;
-    if (!operatorId) {
+    const apiKeyId = req.apiKeyId ?? resolveApiKey(req)?.id;
+    const authority = authorityOf(req);
+    const owner = provenOwnerAddress(req) ?? (authority.admin ? authority.claimed?.toLowerCase() : null);
+    if (!apiKeyId && !owner) {
       return reply.status(401).send({ error: "Authentication required" });
     }
 
     const repo = getRepos().apiKeys;
-    const keys = repo.findByOperator(operatorId);
+    const ownKey = apiKeyId ? repo.findById(apiKeyId) : undefined;
+    const keys = owner
+      ? getStore().db.select().from(schema.apiKeys).where(or(
+        sql`lower(${schema.apiKeys.operatorId}) = ${owner}`,
+        apiKeyId ? eq(schema.apiKeys.id, apiKeyId) : undefined,
+      )).all()
+      : ownKey ? [ownKey] : [];
 
     return reply.send({
       keys: keys.map((k) => ({
@@ -485,10 +406,11 @@ export async function provisionRoutes(app: FastifyInstance) {
   });
 
   // ── DELETE /api/auth/keys/:keyId ──────────────────────────────────
-  // Revoke an API key. Requires auth + must own the key.
+  // Only a proven owner or the admin may revoke another key of an address.
   app.delete("/api/auth/keys/:keyId", async (req, reply) => {
-    const operatorId = (req as any).operatorId ?? (req as any).userId;
-    if (!operatorId) {
+    const owner = provenOwnerAddress(req);
+    const admin = authorityOf(req).admin;
+    if (!req.apiKeyId && !owner && !admin) {
       return reply.status(401).send({ error: "Authentication required" });
     }
 
@@ -496,9 +418,7 @@ export async function provisionRoutes(app: FastifyInstance) {
     const repo = getRepos().apiKeys;
     const key = repo.findById(keyId);
 
-    // Unify 404 and 403 into a single "not found" to prevent key ID enumeration
-    // (red team #11/#54: different status codes leak resource existence).
-    if (!key || key.operatorId !== operatorId) {
+    if (!key || !(key.id === req.apiKeyId || admin || (owner && key.operatorId.toLowerCase() === owner))) {
       return reply.status(404).send({ error: "Key not found" });
     }
 

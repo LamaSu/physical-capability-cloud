@@ -184,7 +184,7 @@ export class CapabilityFacade extends BaseFacade {
    */
   async search(
     criteria: CapabilitySearchCriteria,
-    ctx?: Partial<PopulationContext>,
+    ctx?: Partial<PopulationContext> & { includeExpired?: boolean },
     pagination?: PaginationParams,
   ): Promise<Result<PaginatedResult<CapabilityDTO>>> {
     return this.execute("search", async () => {
@@ -193,7 +193,9 @@ export class CapabilityFacade extends BaseFacade {
       const limit = pagination?.limit ?? 20;
 
       // Start with full set, apply filters
-      let candidates = this.repos.capabilities.findAll();
+      let candidates = ctx?.includeExpired
+        ? this.repos.capabilities.findAll()
+        : filterCapabilitiesByTtl(this.repos.capabilities.findAll());
 
       if (criteria.type) {
         candidates = candidates.filter((c) => c.type === criteria.type);

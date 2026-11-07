@@ -43,4 +43,55 @@ describe("accepted-policy: runtime without util.types.isProxy", () => {
       } as Parameters<typeof mod.computeSubjectBlockHash>[0]),
     ).toThrowError(/util\.types\.isProxy/);
   });
+
+  it.each([
+    "computeMilestonesRoot([])",
+    "computeMilestonesRoot([valid milestone])",
+    "computeTermsHash(Thursday-shape golden v2 terms)",
+    "computeAuthorizedTuplesRoot([])",
+    "computeAuthorizedTuplesRoot([valid tuple])",
+    "canonicalAuthorizedTuples([])",
+    "canonicalAuthorizedTuples([valid tuple])",
+  ] as const)("%s throws AcceptedPolicyDigestInputError with field runtime", async (scenario) => {
+    const realProcess = globalThis.process;
+    vi.resetModules();
+    vi.stubGlobal("process", { ...realProcess, getBuiltinModule: undefined });
+
+    const mod = await import("../evidence/accepted-policy.js");
+    const milestone = {
+      milestoneIndex: 0,
+      stepId: `0x${"51".repeat(32)}` as const,
+      amount: 750000,
+      deadline: 1793836800,
+    };
+    // Same operator/kernel/device tuple shape as the round-1 public producer tests.
+    const tuple = [
+      "0x2fa2ca73700c6990c982177315e83b6d119eecab8c1e222d821bbca2ec02caec",
+      "0x12e00cf7161d9ede970f48c1ca026eb93a84c6a2a75d278d8940dde362cc4d6c",
+      "0x000df964c6ff31189689e8b2526a06f587c77479e1313fea366f8cd1137cec2f",
+    ] as const;
+    const producers = {
+      "computeMilestonesRoot([])": () => mod.computeMilestonesRoot([]),
+      "computeMilestonesRoot([valid milestone])": () => mod.computeMilestonesRoot([milestone]),
+      // Oracle-published terms inputs, bus #8239.
+      "computeTermsHash(Thursday-shape golden v2 terms)": () => mod.computeTermsHash({
+        token: "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+        assuranceTier: 1,
+        milestones: [milestone],
+      }),
+      "computeAuthorizedTuplesRoot([])": () => mod.computeAuthorizedTuplesRoot([]),
+      "computeAuthorizedTuplesRoot([valid tuple])": () => mod.computeAuthorizedTuplesRoot([tuple]),
+      "canonicalAuthorizedTuples([])": () => mod.canonicalAuthorizedTuples([]),
+      "canonicalAuthorizedTuples([valid tuple])": () => mod.canonicalAuthorizedTuples([tuple]),
+    };
+
+    let error: unknown;
+    try {
+      producers[scenario]();
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(mod.AcceptedPolicyDigestInputError);
+    expect(error).toHaveProperty("field", "runtime");
+  });
 });

@@ -12,7 +12,7 @@
 # pcc.source-digest/v1:
 #   scope     packages/ apps/ docs/ and the root build files package.json pnpm-lock.yaml
 #             pnpm-workspace.yaml turbo.json tsconfig.base.json Dockerfile .dockerignore
-#   excluded  any node_modules, dist or .git entry, and packages/contracts/{out,cache,lib}
+#   excluded  any node_modules, dist or .git entry, and packages/contracts/{out,cache,out-testnet,cache-testnet,lib,tmp}
 #             (the same exclusions .dockerignore applies inside that scope)
 #   files     regular files only (symlinks are not followed); content only (no modes, times)
 #   digest    "sha256:" + sha256 of the `sha256sum` lines ("<hex>  <relative path>") of every
@@ -26,7 +26,10 @@ done
 digest="$(
   find packages apps docs package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json Dockerfile .dockerignore \
     \( -name node_modules -o -name dist -o -name .git \
-       -o -path packages/contracts/out -o -path packages/contracts/cache -o -path packages/contracts/lib \) -prune \
+       -o -path packages/contracts/out -o -path packages/contracts/cache \
+       -o -path packages/contracts/out-testnet -o -path packages/contracts/cache-testnet \
+       -o -path packages/contracts/tmp \
+       -o -path packages/contracts/lib \) -prune \
     -o -type f -print0 \
   | LC_ALL=C sort -z \
   | xargs -0 -r sha256sum \

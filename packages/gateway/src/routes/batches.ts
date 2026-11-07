@@ -16,6 +16,7 @@ interface BatchSlotClaim {
   amount: string; escrowAddress?: string; claimedAt: string;
 }
 import { batchTracker } from "../services.js";
+import { authorityOf, EXPLICIT_CREDENTIAL_REQUIRED, provenByCookieOnly } from "../auth/kernel-authority.js";
 
 import {
   gateJobRead,
@@ -73,6 +74,8 @@ const refuseIdentity = (reply: FastifyReply, reason: keyof typeof JOB_READ_REFUS
 };
 
 const SAMPLE_TYPES: ReadonlySet<string> = new Set(["unknown", "standard", "blank", "system_suitability", "sample", "spike", "duplicate"]);
+// Mirror auth/kernel-authority.ts UNOWNED placeholders.
+const UNOWNED = new Set(["", "0x0000000000000000000000000000000000000000"]);
 
 /**
  * A new slot's typed fields (SampleSlot without id and status), or undefined when one is missing
@@ -174,6 +177,7 @@ export async function batchRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const pre = callerOf(req);
       if (!pre.proceed) return refuseIdentity(reply, pre.reason);
+      if (provenByCookieOnly(authorityOf(req))) return reply.code(403).send(EXPLICIT_CREDENTIAL_REQUIRED);
       const missingBatch = () => reply.code(400).send({ error: `Batch ${req.params.batchId} not found` });
       const gate = gateKernelRead(req, () => batchTracker.getBatch(req.params.batchId)?.kernelId);
       if (!gate.ok) return gate.kind === "not_found" ? missingBatch() : refuseJobRead(reply, gate);
@@ -208,6 +212,7 @@ export async function batchRoutes(app: FastifyInstance) {
   app.post("/api/batches/shared", async (req, reply) => {
     const pre = callerOf(req);
     if (!pre.proceed) return refuseIdentity(reply, pre.reason);
+    if (provenByCookieOnly(authorityOf(req))) return reply.code(403).send(EXPLICIT_CREDENTIAL_REQUIRED);
     const body = (req.body ?? {}) as {
       kernelId: string;
       capabilityType: string;
@@ -397,9 +402,10 @@ export async function batchRoutes(app: FastifyInstance) {
 
       const claimIdx = batch.claimedSlots.findIndex((c) => c.id === req.params.claimId);
       const claimant = claimIdx === -1 ? undefined : batch.claimedSlots[claimIdx]!.agentId;
+      const rc = typeof claimant === "string" ? claimant.trim().toLowerCase() : "";
       const mayRelease =
         sharedClaimsReaderOf(req)(batch.kernelId) ||
-        (pre.as === "proven" && typeof claimant === "string" && claimant.trim().toLowerCase() === pre.wallet);
+        (pre.as === "proven" && !UNOWNED.has(rc) && !UNOWNED.has(pre.wallet) && rc === pre.wallet);
       if (claimIdx === -1 || !mayRelease) return reply.status(404).send({ error: "Claim not found" });
 
       if (batch.status === "running" || batch.status === "completed") {

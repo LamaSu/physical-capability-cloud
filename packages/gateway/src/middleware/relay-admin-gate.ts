@@ -21,13 +21,18 @@ export function isRelayRequest(req: { url: string; routeOptions?: { url?: string
   return isRelayPath(req.url.split("?")[0].replace(/\/+/g, "/"));
 }
 
-function countAdminKeyFields(req: FastifyRequest): number {
+export function countAdminKeyFields(req: FastifyRequest): number {
   let count = 0;
   const { rawHeaders } = req.raw;
   for (let i = 0; i < rawHeaders.length; i += 2) {
     if (rawHeaders[i].toLowerCase() === "x-admin-key") count++;
   }
   return count;
+}
+
+/** Accept exactly one admin-secret header, using the shared constant-time comparison. */
+export function hasSingleValidAdminKey(req: FastifyRequest): boolean {
+  return countAdminKeyFields(req) === 1 && hasValidAdminKey(req.headers["x-admin-key"]);
 }
 
 /**
@@ -57,6 +62,6 @@ function countAdminKeyFields(req: FastifyRequest): number {
 export async function rejectRelayWithoutAdminKey(req: FastifyRequest, reply: FastifyReply) {
   if (isRelayGateOpen()) return;
   if (!isRelayRequest(req)) return;
-  if (countAdminKeyFields(req) === 1 && hasValidAdminKey(req.headers["x-admin-key"])) return;
+  if (hasSingleValidAdminKey(req)) return;
   return reply.code(403).send(RELAY_DISABLED_REFUSAL);
 }

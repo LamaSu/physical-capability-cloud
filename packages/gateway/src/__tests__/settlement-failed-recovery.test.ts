@@ -76,10 +76,19 @@ const CAP = "liquid-handler";
 const ORIG = {
   mock: process.env.MOCK_SETTLEMENT,
   pk: process.env.PCC_GATEWAY_PRIVATE_KEY,
+  admin: process.env.PCC_ADMIN_KEY,
 };
+
+// N133 (the steward's DECISIONS 01:01): a session's buyer is the caller's proven wallet, or the
+// gateway admin acts for it, and only the buyer or the admin commits it or retries its
+// settlement. This suite has no caller stand-in and its buyers are not wallets, so the admin
+// creates, commits and retries each session for its buyer.
+const ADMIN = "settlement-failed-recovery-admin";
+const asAdmin = { "x-admin-key": ADMIN };
 
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
+  process.env.PCC_ADMIN_KEY = ADMIN;
   initStore({ seed: true });
   const app = Fastify({ logger: false });
   await app.register(paidJobFlowRoutes);
@@ -92,6 +101,7 @@ async function createSession(app: FastifyInstance, userAgentId: string): Promise
   const res = await app.inject({
     method: "POST",
     url: "/api/negotiate/session",
+    headers: asAdmin,
     payload: { userAgentId, kernelId: KERNEL, capabilityType: CAP },
   });
   expect(res.statusCode).toBe(200);
@@ -102,9 +112,9 @@ const quote = (app: FastifyInstance, id: string) =>
 const review = (app: FastifyInstance, id: string) =>
   app.inject({ method: "POST", url: `/api/negotiate/session/${id}/review` });
 const commit = (app: FastifyInstance, id: string) =>
-  app.inject({ method: "POST", url: `/api/negotiate/session/${id}/commit` });
+  app.inject({ method: "POST", url: `/api/negotiate/session/${id}/commit`, headers: asAdmin });
 const retry = (app: FastifyInstance, id: string) =>
-  app.inject({ method: "POST", url: `/api/negotiate/session/${id}/retry-settlement` });
+  app.inject({ method: "POST", url: `/api/negotiate/session/${id}/retry-settlement`, headers: asAdmin });
 const cancel = (app: FastifyInstance, id: string) =>
   app.inject({ method: "DELETE", url: `/api/negotiate/session/${id}` });
 
@@ -147,6 +157,8 @@ describe("settlement_failed session — status transition + safe recovery", () =
     else process.env.MOCK_SETTLEMENT = ORIG.mock;
     if (ORIG.pk === undefined) delete process.env.PCC_GATEWAY_PRIVATE_KEY;
     else process.env.PCC_GATEWAY_PRIVATE_KEY = ORIG.pk;
+    if (ORIG.admin === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = ORIG.admin;
   });
 
   // ── 1. failure transition ────────────────────────────────────────────────

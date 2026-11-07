@@ -1,12 +1,9 @@
 /**
- * What the operator relay (`POST /api/operator/evidence`) commits for a pushed evidence body
- * (board N80; rehearsal R0 finding G3; cross-family review E4).
+ * What the operator relay (`POST /api/operator/evidence`) commits for a pushed evidence body.
  *
  * The stored `bundleHash` is always a hash the stored content reproduces, or the digest a
- * device signed. It is never made from the bundle's own id (before N80 the relay stored
- * `sha256-<bundleId>` for any body that was not a device-signed bundle), and never a hash of
- * content the gateway does not keep (review E4: a hash of a document it then drops cannot be
- * reproduced by anyone reading the store).
+ * device signed. It is never made from the bundle's own id, and never a hash of content
+ * the gateway does not keep.
  *
  * ONE envelope: the body itself, or its `bundle` wrapper, never both. A `bundle` that is
  * present must be an object, and then no commitment field (`events`, `bundleHash`,
@@ -14,25 +11,27 @@
  *
  *   event_bundle_hash     `events` is present: it must be a non-empty list of LO-EV events
  *                         (each with a string `type` and `timestamp` and a `source` and
- *                         `payload` object), or the body is refused. Every event is hashed
- *                         from ONE canonical snapshot (the `hashEvent` bytes), and the bundle
- *                         hash over them (`hashBundle`). A supplied event `hash`, or a
- *                         supplied or device-signed `bundleHash`, must equal the
- *                         recomputation, or the body is refused. Every event must commit THIS
- *                         job and its kernel in the hashed content, checked on that snapshot
- *                         (LO-EV-9 rules 5 and 6: `payload.jobId` is the job, `source.kernelId`
- *                         and any `payload.kernelId` are the job's kernel), or the body is
- *                         refused (409): a bundle signed for job A cannot be filed under job B
- *                         (cross-family review E4b). The snapshots are stored.
+ *                         `payload` object), or the body is refused. Each event is hashed
+ *                         at the version its source declares: v1 (`hashEvent`) when
+ *                         `source` has no own `writer`, v2 (`hashKernelWrittenEvent`) when
+ *                         its own `source.writer` is "kernel". Any other writer is refused.
+ *                         Hashing, binding checks, and storage use ONE canonical snapshot
+ *                         per event. The bundle hash is `hashBundle` over the selected
+ *                         event hashes. A supplied event `hash`, or a supplied or
+ *                         device-signed `bundleHash`, must equal the recomputation, or
+ *                         the body is refused. Every event must commit THIS job and its
+ *                         kernel in the hashed content, checked on that snapshot
+ *                         (`payload.jobId` is the job, `source.kernelId` and any
+ *                         `payload.kernelId` are the job's kernel), or the body is
+ *                         refused (409). The snapshots are stored.
  *   device_signed_document  no `events`, but a device-signed DOCUMENT was captured
- *                         (`extractNodeSignedBundle`), in the form pcc-node's job port signs
- *                         (#471): the digest is `sha256(canonicalize(the envelope minus
+ *                         (`extractNodeSignedBundle`), in the form pcc-node's job port signs:
+ *                         the digest is `sha256(canonicalize(the envelope minus
  *                         bundleHash and kernelSignature))`. The gateway recomputes it and
  *                         requires it to equal the signed digest (canonical tagged form,
  *                         `sha256:` + 64 lowercase hex). The document must name THIS job
  *                         (`jobId`) and the job's kernel (`kernelId`): a document signed for
- *                         another job or kernel is refused (adk #4322, review 117 on #471).
- *                         Nothing verifies the signature here.
+ *                         another job or kernel is refused. Nothing verifies the signature here.
  *
  * Anything else is refused:
  *   - a device-signed digest with no document and no events: it names no job, so job A's
@@ -41,7 +40,14 @@
  *     without a `source`: the gateway has nowhere to keep such a document, so it stores
  *     nothing rather than a hash nobody can reproduce.
  */
-import { canonicalize, hashBundle, sha256, type EvidenceEvent } from "@pcc/spec";
+import {
+  canonicalize,
+  hashBundle,
+  hashEvent,
+  hashKernelWrittenEvent,
+  sha256,
+  type EvidenceEvent,
+} from "@pcc/spec";
 import type { CapturedDeviceBundle } from "./device-evidence-settlement.js";
 
 export type RelayHashModel = "event_bundle_hash" | "device_signed_document";
@@ -51,7 +57,7 @@ export interface RelayStoredEvent {
   timestamp: string;
   source: Record<string, unknown>;
   payload: Record<string, unknown>;
-  /** Recomputed by the gateway (`hashEvent`), never taken from the body. */
+  /** Recomputed by the gateway with `hashEvent` (v1) or `hashKernelWrittenEvent` (v2), never taken from the body. */
   hash: string;
 }
 
@@ -67,6 +73,7 @@ export type RelayEvidenceRefusal =
   | { error: "malformed_envelope" }
   | { error: "ambiguous_envelope" }
   | { error: "events_malformed"; eventIndex: number | null }
+  | { error: "event_writer_invalid"; eventIndex: number }
   | { error: "event_hash_mismatch"; eventIndex: number }
   | { error: "bundle_hash_mismatch" }
   | { error: "bundle_hash_malformed" }
@@ -133,18 +140,34 @@ export async function commitRelayEvidence(
     const events: RelayStoredEvent[] = [];
     for (let i = 0; i < raw.length; i++) {
       const e = raw[i] as Record<string, unknown>;
-      // ONE canonical snapshot per event: the bytes hashEvent hashes, parsed back. The hash, the
-      // job and kernel checks and the stored row all come from it, never from the caller's object.
+      // ONE canonical snapshot per event: version selection, hashing, job/kernel
+      // checks, and the stored row all use the parsed canonical content.
       let snap: unknown;
-      let hash: string;
       try {
         const canonical = canonicalize({ type: e.type, timestamp: e.timestamp, source: e.source, payload: e.payload });
         snap = JSON.parse(canonical);
-        hash = await sha256(canonical);
       } catch {
         return { ok: false, refusal: { error: "evidence_not_canonical" } };
       }
       if (!isLoEvEvent(snap)) return { ok: false, refusal: { error: "events_malformed", eventIndex: i } };
+
+      // Each event is hashed at the version its source declares; other writers
+      // are refused. Presence is an OWN-property check, not a truthiness test.
+      const hasWriter = Object.prototype.hasOwnProperty.call(snap.source, "writer");
+      if (hasWriter && own(snap.source, "writer") !== "kernel") {
+        return { ok: false, refusal: { error: "event_writer_invalid", eventIndex: i } };
+      }
+
+      let hash: string;
+      try {
+        const event = snap as unknown as Omit<EvidenceEvent, "hash" | "id">;
+        hash = hasWriter
+          ? await hashKernelWrittenEvent(event)
+          : await hashEvent(event);
+      } catch {
+        return { ok: false, refusal: { error: "evidence_not_canonical" } };
+      }
+
       const supplied = e.hash;
       if (supplied !== undefined && supplied !== hash) return { ok: false, refusal: { error: "event_hash_mismatch", eventIndex: i } };
       if (own(snap.payload, "jobId") !== job.jobId) return { ok: false, refusal: { error: "job_mismatch", eventIndex: i } };
@@ -169,7 +192,7 @@ export async function commitRelayEvidence(
       return { ok: false, refusal: { error: "kernel_mismatch" } };
     }
     if (!TAGGED_DIGEST.test(captured.bundleHash)) return { ok: false, refusal: { error: "bundle_hash_malformed" } };
-    // pcc-node's job port (#471): sha256 over the canonical document without bundleHash and kernelSignature.
+    // pcc-node's job port: sha256 over the canonical document without bundleHash and kernelSignature.
     const { bundleHash: _signed, kernelSignature: _signature, ...document } = b;
     let recomputed: string;
     try {

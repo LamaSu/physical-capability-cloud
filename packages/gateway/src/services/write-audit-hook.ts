@@ -10,11 +10,27 @@
  */
 
 import type { FastifyReply, FastifyRequest } from "fastify";
-import { auditableUrl, isTelemetrySinkRequest } from "./telemetry-privacy.js";
+import { auditableUrl, isTelemetrySinkRequest, isWalletRequest } from "./telemetry-privacy.js";
 
 export async function writeAuditHook(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   const method = request.method;
   if (method !== "POST" && method !== "PUT" && method !== "DELETE" && method !== "PATCH") return;
+
+  if (isWalletRequest(request.url)) {
+    try {
+      const { auditService: audit } = await import("./audit-service.js");
+      audit.log({
+        eventType: "http.write",
+        action: "wallet_ceremony",
+        metadata: {
+          route: request.routeOptions?.url || "/api/wallets",
+          outcome: reply.statusCode < 400 ? "success" : reply.statusCode < 500 ? "refused" : "error",
+          count: 1,
+        },
+      });
+    } catch { /* Audit failures must never affect request handling. */ }
+    return;
+  }
 
   const actor = (request as any).operatorId ?? (request as any).apiKeyId ?? (
     request.headers.authorization ? "authenticated" : "anonymous"

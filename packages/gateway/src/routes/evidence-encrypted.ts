@@ -7,6 +7,7 @@ import { trackServerEvent } from "../services/posthog-service.js";
 import type { LitAuthSig } from "@pcc/kernel";
 import { kernelKeyStore, generateDecryptAction, executeDecryptAction, isRealLitEnabled } from "@pcc/kernel";
 import { getRepos } from "../db.js";
+import { refuseCookieCredentialWrite } from "../auth/explicit-session.js";
 
 /**
  * Helper: fetch an encrypted bundle row from DB and attach its capsules,
@@ -56,6 +57,8 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
   app.post<{ Params: { bundleId: string }; Body: { recipientAddress: string; accessLevel?: string } }>(
     "/api/evidence/encrypted/:bundleId/grant",
     async (req, reply) => {
+      const refusal = refuseCookieCredentialWrite(req);
+      if (refusal) return reply.code(401).send(refusal);
       const repos = getRepos();
       const encBundle = repos.encryption.findEncryptedByBundleId(req.params.bundleId);
       if (!encBundle) return reply.code(404).send({ error: "not_found" });

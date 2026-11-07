@@ -164,7 +164,7 @@ describe("POST /api/auth/provision — ERC-8004 wire-up", () => {
     // DB row should reflect the failure but stay 'pending' for retry
     const stored = getRepos().apiKeys.findById(body.key_id);
     expect(stored?.onchainStatus).toBe("pending");
-    expect(stored?.onchainError).toContain("RPC unreachable");
+    expect(stored?.onchainError).toBe("unknown");
     expect(stored?.onchainAgentId).toBeNull();
   });
 });
@@ -245,7 +245,7 @@ describe("ERC-8004 identity retry sweeper", () => {
 
     const stored = getRepos().apiKeys.findById(keyId);
     expect(stored?.onchainStatus).toBe("pending");
-    expect(stored?.onchainError).toContain("nonce too low");
+    expect(stored?.onchainError).toBe("unknown");
   });
 
   it("empty sweep is a no-op", async () => {

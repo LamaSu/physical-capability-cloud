@@ -1,3 +1,5 @@
+import { readText } from "../mcp/dashboard-ir.js";
+import { physicalTextElement } from "../mcp/dashboard-ir-physical-text.type-test.js";
 /**
  * #562 r1 (astra) F1, CRITICAL: the CORS wildcard released the RAW response of anonymous IR
  * routes to any web origin. GET /api/kernels carries the DLP-designated operatorAddress, precise
@@ -84,7 +86,7 @@ describe("the fix (#562 r2): the projection is the only cross-origin body; every
     const { listRowsOf, LIST_PROFILES } = await import("../mcp/dashboard-ir.js");
     const { bindListRows, listRowsReadable, UNAVAILABLE } = await import("../mcp/dashboard-ir-renderer.js");
     type El = { textContent: string; className: string; children: El[]; setAttr: (n: string, v: string) => void; appendChild: (c: El) => El };
-    const doc = { createElement(): El { const e: El = { textContent: "", className: "", children: [], setAttr() {}, appendChild(c) { e.children.push(c); return c; } }; return e; } };
+    const doc = { createElement(): El { const e: El = physicalTextElement({ textContent: "", className: "", children: [], setAttr() {}, appendChild(c) { e.children.push(c); return c; } }); return e; } };
     const leaves = (e: El): string[] => [e.textContent, ...e.children.flatMap(leaves)].filter((t) => t !== "");
     for (const path of ["/api/capabilities", "/api/kernels"]) {
       const body = (await app.inject({ method: "GET", url: path, headers: { origin: UNKNOWN } })).json();
@@ -96,7 +98,7 @@ describe("the fix (#562 r2): the projection is the only cross-origin body; every
       const el = doc.createElement();
       bindListRows(doc as any, el as any, node, rows!, body);
       expect(el.children.filter((c) => c.className === "pcc-row").length, path).toBe(rows!.length);
-      expect(leaves(el), path).not.toContain(UNAVAILABLE);
+      expect(leaves(el), path).not.toContain(readText(UNAVAILABLE).t);
     }
   });
 });
@@ -164,7 +166,7 @@ describe("N110 x #562 (the merge-up): a cross-origin list keeps the ONE page fie
     expect(res.headers["access-control-allow-origin"]).toBe("*");
     const body = res.json();
     expect(body.items).toHaveLength(5);
-    expect(listWindow(listNode("/api/capabilities", { limit: 5 }), body, 5).note).toBe(`5 of ${raw.total} returned`);
+    expect(listWindow(listNode("/api/capabilities", { limit: 5 }), body, 5).note?.t).toBe(`5 of ${raw.total} returned`);
   });
 
   it("GET /api/capabilities from an unknown origin: a window holding the whole collection needs no note (the total vouches for it)", async () => {
@@ -181,10 +183,16 @@ describe("N110 x #562 (the merge-up): a cross-origin list keeps the ONE page fie
     const { projectIrRead } = await import("../mcp/dashboard-ir-read-projection.js");
     const { LIST_PROFILES } = await import("../mcp/dashboard-ir.js");
     expect(LIST_PROFILES["/api/capabilities"]!.paged?.total).toBe("total");
-    expect(LIST_PROFILES["/api/jobs"]!.paged?.total).toBeUndefined();
+    // The N110 follow-up declares the jobs total too (the route counts the caller's readable jobs,
+    // dashboard-ir-list-producers.test.ts). /api/jobs refuses a credential-less read (401), and a
+    // caller who can read it can already count its jobs by paging, so the projection adds no new fact.
+    expect(LIST_PROFILES["/api/jobs"]!.paged?.total).toBe("total");
+    expect((await app.inject({ method: "GET", url: "/api/jobs", headers: { origin: UNKNOWN } })).statusCode).toBe(401);
+    expect(LIST_PROFILES["/api/kernels"]!.paged).toBeUndefined();
     const page = { total: 3, offset: 0, limit: 50, hasMore: false };
     expect(projectIrRead("/api/capabilities", { items: [], ...page })).toEqual({ items: [], total: 3 });
-    expect(projectIrRead("/api/jobs", { jobs: [], ...page })).toEqual({ jobs: [] });
+    expect(projectIrRead("/api/jobs", { jobs: [], ...page })).toEqual({ jobs: [], total: 3 });
+    expect(projectIrRead("/api/kernels", { kernels: [], ...page })).toEqual({ kernels: [] });
     // A declared total that is not a primitive is dropped whole, like any other projected leaf.
     expect(projectIrRead("/api/capabilities", { items: [], total: { n: 3, secret: "x" } })).toEqual({ items: [] });
   });

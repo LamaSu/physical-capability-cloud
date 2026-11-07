@@ -72,9 +72,19 @@ vi.mock("../contracts/batch-settlement.js", () => ({
 // Harness
 // ---------------------------------------------------------------------------
 
+// N133 (the steward's DECISIONS 01:01): a paid job's or session's buyer is the caller's proven
+// wallet, or the gateway admin acts for it, and only the buyer or the admin commits a session.
+// This suite has no caller stand-in and its buyers are not wallets, so the admin creates and
+// commits each session and submits each fast-track job for its buyer.
+const ADMIN = "negotiation-settlement-correctness-admin";
+const asAdmin = { "x-admin-key": ADMIN };
+let savedAdminKey: string | undefined;
+
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   process.env.MOCK_SETTLEMENT = "true";
+  savedAdminKey = process.env.PCC_ADMIN_KEY;
+  process.env.PCC_ADMIN_KEY = ADMIN;
   initStore({ seed: true });
 
   const app = Fastify({ logger: false });
@@ -94,6 +104,7 @@ async function createSession(app: FastifyInstance, userAgentId: string): Promise
   const res = await app.inject({
     method: "POST",
     url: "/api/negotiate/session",
+    headers: asAdmin,
     payload: { userAgentId, kernelId: KERNEL, capabilityType: CAP },
   });
   expect(res.statusCode).toBe(200);
@@ -110,7 +121,7 @@ async function review(app: FastifyInstance, id: string) {
   return app.inject({ method: "POST", url: `/api/negotiate/session/${id}/review` });
 }
 async function commit(app: FastifyInstance, id: string) {
-  return app.inject({ method: "POST", url: `/api/negotiate/session/${id}/commit` });
+  return app.inject({ method: "POST", url: `/api/negotiate/session/${id}/commit`, headers: asAdmin });
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +139,8 @@ describe("negotiation + settlement correctness", () => {
   afterEach(async () => {
     await app.close();
     closeStore();
+    if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = savedAdminKey;
   });
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -295,6 +308,7 @@ describe("negotiation + settlement correctness", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/jobs/submit-from-discovery",
+      headers: asAdmin,
       payload: { kernelId: KERNEL, capabilityType: CAP, userAgentId },
     });
     expect(res.statusCode).toBe(201);
