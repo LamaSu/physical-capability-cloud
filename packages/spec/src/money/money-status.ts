@@ -499,6 +499,10 @@ export const PLAIN_TRACE_RE = immutableMatcher(/^[A-Za-z0-9_-]{8,64}$/);
 
 /** Identifiers can spell prose: withhold claims and attribute all remaining values, as in the IR. */
 export function idText(raw: unknown): string {
+  if (typeof raw !== "string") {
+    const t = String(raw);
+    if (isProseClaim(t) || isIdentifierClaim(t)) return WITHHELD_FIELD;
+  }
   return typeof raw === "string" && isIdentifierClaim(raw) ? WITHHELD_FIELD : reportedText(raw, false, false);
 }
 
@@ -553,7 +557,11 @@ export function traceText(raw: unknown): string {
 
 /** Operator-chosen names are visibly framed; claims use PCC's withheld notice. */
 export function nameText(raw: unknown): string {
-  if (typeof raw !== "string") return reportedText(raw, false, false);
+  if (typeof raw !== "string") {
+    const t = String(raw);
+    return isProseClaim(t) || isIdentifierClaim(t)
+      ? "name withheld: stated money or verification" : reportedText(raw, false, false);
+  }
   if (hasBidiControl(raw)) return WITHHELD_FIELD;
   return isProseClaim(raw) ? "name withheld: stated money or verification" : "name: " + raw;
 }
