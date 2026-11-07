@@ -15,19 +15,19 @@ Implications:
 
 ## Rollout Progress (as of 2026-04-15)
 
-The pipeline is **wired but not yet running end-to-end**. Remaining steps, in order:
+The pipeline is **running end-to-end**. Remaining steps, in order:
 
 - [x] PR #1 merged (2026-04-15) — workflow files + release-please config + docs + CLAUDE.md rules on master.
 - [x] GitHub environments `staging` + `production` created (no protection rules; manual workflow_dispatch is the prod gate).
-- [x] Railway `staging` environment duplicated from `production` (still Dockerfile source; secrets cloned from prod).
+- [x] Railway `staging` environment duplicated from `production` (runs the GHCR `:staging` image, checked 2026-11-06 by /api/health's buildArg PCC_BUILD_SHA; secrets cloned from prod).
 - [x] Lockfile sync (`fix(deps):` commit `e8c664a`) — unblocked `pnpm install --frozen-lockfile`.
 - [x] Dockerfile: COPY kernel-sdk/package.json (commit `2d9b4b6`) — unblocked `turbo build` of kernel-sdk inside the image.
 - [x] GHCR lowercase image refs in retag steps (commit `97c489f`) — Docker image names must be lowercase; `${{ github.repository }}` returns `LamaSu/...`.
 - [x] Full-SHA tag format via `format=long` (commit `0e59f16`) — aligned `docker/metadata-action` (was short SHA) with `${{ github.sha }}` (full SHA) so the retag source is findable.
 - [x] **First green CI run** on master (`0e59f16`, run `24445868832`) — all 4 jobs success. `ghcr.io/lamasu/physical-capability-cloud:<full-sha>`, `:latest`, and `:staging` tags now exist on GHCR.
-- [ ] **Swap Railway `staging` source** from Dockerfile → Docker Image. **CLI does NOT work on existing envs** — `railway environment edit --service-config pcc-gateway source.image ...` silently no-ops when `source.repo`/`source.branch` are already set (tried dot-path, JSON-object, empty-string-then-set — all ignored). Do it in the Railway UI: project `diplomatic-compassion` → environment `staging` → service `pcc-gateway` → Settings → Source → switch to "Docker Image" → `ghcr.io/lamasu/physical-capability-cloud:staging` → enable "Redeploy on image change" → Save. Confirm staging boots via its `*.up.railway.app` URL.
-- [ ] Run the **Deploy to Prod** workflow manually (GitHub → Actions → Deploy to Prod → Run workflow → paste master SHA — **full 40-char SHA**, not short). Confirms `:prod` tag is produced and `capability.network/api/health` still returns 200.
-- [ ] Swap Railway `production` service source Dockerfile → Docker Image `ghcr.io/lamasu/physical-capability-cloud:prod` via the Railway UI (same path as staging — CLI doesn't work here either). This is the "live" cutover; verify `capability.network` stays green.
+- [x] **Swap Railway `staging` source** from Dockerfile → Docker Image. **CLI does NOT work on existing envs** — `railway environment edit --service-config pcc-gateway source.image ...` silently no-ops when `source.repo`/`source.branch` are already set (tried dot-path, JSON-object, empty-string-then-set — all ignored). Do it in the Railway UI: project `diplomatic-compassion` → environment `staging` → service `pcc-gateway` → Settings → Source → switch to "Docker Image" → `ghcr.io/lamasu/physical-capability-cloud:staging` → enable "Redeploy on image change" → Save. Confirm staging boots via its `*.up.railway.app` URL. (done; checked 2026-11-06: /api/health reports buildArg PCC_BUILD_SHA)
+- [x] Run the **Deploy to Prod** workflow manually (GitHub → Actions → Deploy to Prod → Run workflow → paste master SHA — **full 40-char SHA**, not short). Confirms `:prod` tag is produced and `capability.network/api/health` still returns 200. (done; checked 2026-11-06: Deploy to Prod runs by workflow_dispatch)
+- [x] Swap Railway `production` service source Dockerfile → Docker Image `ghcr.io/lamasu/physical-capability-cloud:prod` via the Railway UI (same path as staging — CLI doesn't work here either). This is the "live" cutover; verify `capability.network` stays green. (done; checked 2026-11-06: /api/health reports buildArg PCC_BUILD_SHA)
 - [ ] Delete stale Dockerfile builder config from Railway once GHCR-pull is proven stable (leave `railway.toml` as-is — Railway ignores it when service source is Image).
 
 ### Nice-to-haves (not blocking)
@@ -134,7 +134,7 @@ Your commits should follow Conventional Commits (`feat:`, `fix:`, `feat(scope)!:
 To promote a build to prod:
 1. Find the SHA you want to promote in the staging deploy run (it's the commit SHA of the master push).
 2. GitHub → Actions → **Deploy to Prod** → **Run workflow** → paste the SHA → **Run**.
-3. The workflow verifies the image exists, retags it as `:prod`, and smoke-tests `https://capability.network/api/health`.
+3. The workflow checks the sha input, verifies the image exists, retags it as `:prod`, forces a Railway redeploy and waits for the new deployment's SUCCESS, then polls https://capability.network/api/health until it serves the promoted commit with buildArg PCC_BUILD_SHA, failing after 3 minutes otherwise.
 
 If you upgrade to GitHub Pro ($4/mo) later, you can add a required-reviewer rule to the `production` environment and move the deploy-prod job back into `ci.yml` as an automatic push-to-master job — the Dockerfile/YAML is ready for that switch.
 
