@@ -156,10 +156,19 @@ export function WorkflowPage() {
               >
                 Clear
               </button>
-              <button
-                className="px-3 py-1.5 rounded-lg bg-green-500/20 border border-green-500/30 text-xs text-green-400 hover:bg-green-500/30 transition-colors"
+              <span
+                className="self-center text-[10px] text-white/30"
+                title="This workflow lives only in this browser tab. It is not saved or sent anywhere."
               >
-                Submit Workflow
+                Local draft, not saved
+              </span>
+              <button
+                type="button"
+                disabled
+                title="Submitting is not available yet: workflows built here are not sent to PCC."
+                className="px-3 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-xs text-white/30 cursor-not-allowed"
+              >
+                Submit (not available yet)
               </button>
             </div>
           </Panel>
