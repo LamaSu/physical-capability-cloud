@@ -41,6 +41,13 @@ export const ALONGSIDE_WINDOW = 400;
 
 export const GUARDED_CLAIMS: readonly GuardedClaim[] = [
   {
+    id: "bounty-rewards",
+    pattern: /\bclaim (a |the )?bount(y|ies)\b/i,
+    status: "roadmap",
+    requires: "Funded bounties that a claimant can be paid (R45)",
+    example: "Claim a bounty, earn rewards.",
+  },
+  {
     id: "proof-on-every-job",
     pattern: /(cryptographic )?proof on every job|every job returns signed/i,
     status: "roadmap",
@@ -179,6 +186,7 @@ export const GUARDED_CLAIMS: readonly GuardedClaim[] = [
 
 /** Repo-relative files that are served publicly or read by external agents. */
 export const PUBLISHED_SURFACES: readonly string[] = [
+  "apps/dashboard/src/pages/AgentChatPage.tsx",
   "README.md",
   "apps/dashboard/index.html",
   "apps/dashboard/public/landing.html",
