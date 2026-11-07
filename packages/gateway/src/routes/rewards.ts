@@ -36,7 +36,7 @@ const REWARDS_UNAVAILABLE = notAvailable(
 
 const TREASURY_UNAVAILABLE = notAvailable(
   "No treasury balance is read.",
-  "Protocol fees are paid per settlement unit to the fee recipient named in each funded escrow.",
+  "Real payment state is per settlement unit, in the escrow.",
   ["/api/escrow"],
 );
 

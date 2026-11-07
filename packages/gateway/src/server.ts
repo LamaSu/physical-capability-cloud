@@ -974,7 +974,6 @@ export async function createGateway(port = 3200) {
             documentation: "https://capability.network/docs",
             agentPackage: {
               url: "https://capability.network/agent-package.json",
-              toolCount: 254,
             },
             a2aAgentCard:
               "https://capability.network/.well-known/agent-card.json",
@@ -982,7 +981,6 @@ export async function createGateway(port = 3200) {
               "https://capability.network/.well-known/agent-skills/index.json",
             mcp: {
               transport: "stdio",
-              toolCount: 77,
               discovery: "https://capability.network/.well-known/mcp",
               serverCard:
                 "https://capability.network/.well-known/mcp/server-card.json",
