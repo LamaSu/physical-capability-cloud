@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 
 export function demoRoutesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.PCC_DEMO_ROUTES === "1" && env.NODE_ENV !== "production";
+  return env.PCC_DEMO_ROUTES === "1" && (env.NODE_ENV === "test" || env.NODE_ENV === "development");
 }
 
 export interface NotAvailableBody {
@@ -18,8 +18,10 @@ export function notAvailable(what: string, why: string, see: string[]): NotAvail
  * Board N34, #2498: keep fixture routes registered while refusing their data by
  * default. One plugin-scoped onRequest hook checks the flag per request, before
  * parsing a body or calling a handler. GET's HEAD twin follows the GET template.
- * No route is added, removed, renamed or prefixed. Production ignores the flag
- * (NODE_ENV=production), even when PCC_DEMO_ROUTES=1.
+ * No route is added, removed, renamed or prefixed. Only test and development
+ * honor the flag: PCC_DEMO_ROUTES=1 counts only when NODE_ENV is exactly "test"
+ * or "development" (isCarrierProductionEnv's rule). Production, an unset or
+ * empty NODE_ENV and any other value ignore it.
  */
 export function gateDemoRoutes(
   app: FastifyInstance,

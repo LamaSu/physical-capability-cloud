@@ -420,7 +420,7 @@ Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
 | GET/POST | `/api/zk/*` | ZK proof creation and verification. |
 | GET/POST | `/api/batches/*` | Batch manifests (HPLC, multi-sample). |
 
-Demo-only route families: `/api/marketplace/*` (except its four listing and order writes), `/api/spaces/*`, `/api/logistics/*`, the `/api/orchestrator/` graphs, samples, claims and workflows routes, `/api/protocols*`, `/api/protocol-runs/*`, `/api/automation-status*`, `/api/transfer-agents`, `/api/agents/conversations*`, `/api/discover/*` and `/api/registry/attestations*` serve built-in example data only when `PCC_DEMO_ROUTES=1`. Otherwise each answers 501 `not_available`. Production ignores the flag (NODE_ENV=production). The ratchet test n34-routes-fabrication-ratchet.test.ts refuses new module-scope rows and value-producing `Math.random` in `packages/gateway/src/routes/`.
+Demo-only route families: `/api/marketplace/*` (except its four listing and order writes), `/api/spaces/*`, `/api/logistics/*`, the `/api/orchestrator/` graphs, samples, claims and workflows routes, `/api/protocols*`, `/api/protocol-runs/*`, `/api/automation-status*`, `/api/transfer-agents`, `/api/agents/conversations*`, `/api/discover/*` and `/api/registry/attestations*` serve built-in example data only when `PCC_DEMO_ROUTES=1`. Otherwise each answers 501 `not_available`. Only NODE_ENV=test or NODE_ENV=development honors the flag; production, an unset NODE_ENV and any other value ignore it. Local `pnpm dev` and `start` set no NODE_ENV, so they need NODE_ENV=development for the flag to work. The ratchet test n34-routes-fabrication-ratchet.test.ts refuses new module-scope rows and value-producing `Math.random` in `packages/gateway/src/routes/`.
 
 ---
 

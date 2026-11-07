@@ -238,6 +238,7 @@ describe("B10 real gateway registration", () => {
     const res = await app.inject({ method: "GET", url: "/api/spaces", headers: { authorization: `Bearer ${key}` } });
     expect(res.statusCode).toBe(501);
     expect(res.json()).toMatchObject(families.find((family) => family.name === "spaces")!.body);
+    expect(Object.keys(res.json()).sort()).toEqual(["error", "message", "report_hint", "see"]);
   });
   it("B10 ungated capabilities retains its base response", async () => {
     const off = await app.inject({ method: "GET", url: "/api/capabilities" });

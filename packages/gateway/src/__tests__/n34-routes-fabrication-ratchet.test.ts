@@ -5,9 +5,10 @@
  * in review with its reason.
  *
  * Known gaps: rows inline in handlers or module-scope function declarations;
- * numeric/string series; formulas (marketplace.ts:244-247, :252-260 and
- * logistics.ts:367-382); and fixtures imported from outside routes/. The demo
- * flag covers these gaps for the seven gated families.
+ * keyed object maps (`Record<string, Row>` literals); numeric/string series;
+ * formulas (marketplace.ts's priceHistory and demand-supply series,
+ * logistics.ts's quote price formula); and fixtures imported from outside
+ * routes/. The demo flag covers these gaps for the seven gated families.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";

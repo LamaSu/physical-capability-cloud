@@ -18,8 +18,12 @@ import { gateDemoRoutes, notAvailable } from "../config/demo-routes.js";
  * agentIds we have a reliable list of without an indexer).
  *
  * Attestation / Validation reads remain mocked (the validation-registry
- * surface needs a per-requestHash key path, not a flat list) — they're
- * tagged `source: "mock"` until the indexer or a typed reader lands.
+ * surface needs a per-requestHash key path, not a flat list). Both attestation
+ * routes answer 501 not_available unless the demo flag is on (N34,
+ * demoRoutesEnabled); with it, they serve the mock, tagged `source: "mock"`.
+ * Until the indexer or a typed reader lands, the summary reports
+ * `attestations: "not_read"` with null counts, and an entity's
+ * `attestations` is a not_available state.
  *
  * Env vars (resolved lazily):
  *   IDENTITY_REGISTRY_CHAIN_ID — default 84532 (Base Sepolia)

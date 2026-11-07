@@ -35,15 +35,27 @@ async function build(scope?: { except: readonly string[] } | { only: readonly st
 
 describe("N34 demo route helper", () => {
   it("A1 enables only the exact string 1", () => {
-    expect(demoRoutesEnabled({ PCC_DEMO_ROUTES: "1" })).toBe(true);
-    expect(demoRoutesEnabled({})).toBe(false);
+    expect(demoRoutesEnabled({ PCC_DEMO_ROUTES: "1", NODE_ENV: "test" })).toBe(true);
+    expect(demoRoutesEnabled({ NODE_ENV: "test" })).toBe(false);
     for (const value of ["", "0", "true", "TRUE", "yes", " 1", "1 ", "01"]) {
-      expect(demoRoutesEnabled({ PCC_DEMO_ROUTES: value }), value).toBe(false);
+      expect(demoRoutesEnabled({ PCC_DEMO_ROUTES: value, NODE_ENV: "test" }), value).toBe(false);
     }
   });
   it("A1b ignores the demo flag in production", () => {
     expect(demoRoutesEnabled({ PCC_DEMO_ROUTES: "1", NODE_ENV: "production" })).toBe(false);
   });
+  it("A1b honors the demo flag under NODE_ENV test and development", () => {
+    expect(demoRoutesEnabled({ PCC_DEMO_ROUTES: "1", NODE_ENV: "test" })).toBe(true);
+    expect(demoRoutesEnabled({ PCC_DEMO_ROUTES: "1", NODE_ENV: "development" })).toBe(true);
+  });
+  it.each([null, "Production", "PRODUCTION", "prod", "staging", "", "Test", "DEVELOPMENT", " test", "test "])(
+    "A1b ignores the demo flag under NODE_ENV %j",
+    (nodeEnv) => {
+      const env: NodeJS.ProcessEnv = { PCC_DEMO_ROUTES: "1" };
+      if (nodeEnv !== null) env.NODE_ENV = nodeEnv;
+      expect(demoRoutesEnabled(env)).toBe(false);
+    },
+  );
   it("A2 returns exactly the ruled three-key body", () => {
     expect(notAvailable("A.", "B.", ["/x"])).toEqual(BODY);
     expect(Object.keys(notAvailable("A.", "B.", ["/x"])).sort()).toEqual(["error", "message", "see"]);
@@ -92,5 +104,14 @@ describe("N34 demo route helper", () => {
       expect((await app.inject({ method, url: "/t" })).statusCode).toBe(501);
     }
     expect(calls()).toBe(0);
+  });
+  it("A7 the gate applies the NODE_ENV rule on every request", async () => {
+    const { app } = await build();
+    process.env.PCC_DEMO_ROUTES = "1";
+    for (const [nodeEnv, status] of [["production", 501], ["staging", 501], [null, 501], ["development", 200], ["test", 200]] as const) {
+      if (nodeEnv === null) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = nodeEnv;
+      expect((await app.inject({ method: "GET", url: "/t" })).statusCode, String(nodeEnv)).toBe(status);
+    }
   });
 });
