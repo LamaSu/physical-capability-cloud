@@ -18,7 +18,7 @@ import { AgentChatPage } from "../AgentChatPage.js";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const PAGE_PATH = "apps/dashboard/src/pages/AgentChatPage.tsx";
-const source = readFileSync(resolve(process.cwd(), "src/pages/AgentChatPage.tsx"), "utf8");
+const source = readFileSync(resolve(__dirname, "../AgentChatPage.tsx"), "utf8");
 
 describe("agent home published content", () => {
   it("gives every button a click handler or a disabled explanation", () => {
@@ -78,7 +78,7 @@ describe("agent home published content", () => {
         <MemoryRouter initialEntries={["/"]}>
           <Routes>
             <Route path="/" element={<AgentChatPage />} />
-            <Route path="/discover" element={<div data-testid="catalog" />} />
+            <Route path="/discover" caseSensitive element={<div data-testid="catalog" />} />
           </Routes>
         </MemoryRouter>,
       ));
@@ -106,6 +106,42 @@ describe("agent home published content", () => {
       expect(findClaimViolations(text).map((violation) => violation.id)).toContain("bounty-rewards");
     }
     expect(findClaimViolations("Help them onboard equipment, configure kernels, manage jobs, earn rewards")).toEqual([]);
+  });
+
+  it("renders none of the removed content, in any letter case", async () => {
+    // Reads what the page renders, so copy that returns in another case or
+    // through an imported component is caught as well.
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(
+        <MemoryRouter initialEntries={["/"]}>
+          <AgentChatPage />
+        </MemoryRouter>,
+      ));
+      const rendered = (host.textContent ?? "").toLowerCase();
+      expect(findClaimViolations(rendered)).toEqual([]);
+      for (const removed of [
+        "claim bounty",
+        "claim a bounty",
+        "earn rewards",
+        "use this",
+        "already live",
+        "ready to use",
+        "top operators",
+        "aws for the physical world",
+        "jobs completed",
+        "847",
+        "163",
+        "12,438",
+      ]) {
+        expect(rendered).not.toContain(removed);
+      }
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
   });
 
   it("omits the retired hero tagline from published text", () => {
