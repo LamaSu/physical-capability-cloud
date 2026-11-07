@@ -7,17 +7,17 @@
  * could execute or that any run had produced real evidence, so an operator
  * with only a mock device and a self-attested setup test read as ready.
  *
- * These helpers answer two questions from rows the server already holds:
+ * These helpers gate readiness on one question from rows the server already holds:
  *
- *   1. Can a registered device execute real work? It must be a machine whose
- *      adapter the kernel can build, and not the simulator or the generic-http
- *      refusal.
- *   2. Has a real run happened? A completed job on one of the operator's
- *      kernels must carry evidence whose device signature verifies against
- *      that kernel's REGISTERED signer (#47), checked with the SEAM-2 verifier
- *      in device-evidence-settlement.ts. That proves the node's pipeline and
- *      key, not the hardware: hardware assurance stays with the evidence tiers
- *      and the oracle, and nothing here touches the settlement gate.
+ * Has a real run happened? A completed job on one of the operator's kernels
+ * must carry evidence whose device signature verifies against that kernel's
+ * REGISTERED signer (#47), checked with the SEAM-2 verifier in
+ * device-evidence-settlement.ts. That proves the node's pipeline and key, not
+ * the hardware: hardware assurance stays with the evidence tiers and the
+ * oracle, and nothing here touches the settlement gate.
+ *
+ * Registered devices are reported for information only: their labels are
+ * self-declared, and the documented registration paths do not pass the device test.
  *
  * The setup test job (POST /api/setup/test-job) cannot satisfy (2) today: a
  * kernel with no registered device gets a self-attested bundle, and a kernel
@@ -136,6 +136,10 @@ export async function assessBundle(
     ...(verifyEd25519 ? { verifyEd25519 } : {}),
   });
   if (result.ok) return "verified";
+  // The verifier refuses these forms before checking any signature.
+  if (result.reason === "session-evidence-needs-trusted-context" || result.reason === "malformed-bundle-hash") {
+    return "unverifiable";
+  }
   return result.reason === "unregistered-signer" ? "unregistered-signer" : "invalid";
 }
 
@@ -166,9 +170,9 @@ export interface RunObservation {
 }
 
 export interface OnboardingReadiness {
-  /** Registered devices on the operator's kernels, and how many can execute real work. */
+  /** Information only: registered devices on the operator's kernels, and how many can execute real work. */
   devices: { registered: number; executable: number };
-  /** At least one registered machine has an adapter the kernel can build that is not the simulator or the refusal. */
+  /** Information only: at least one registered machine has an adapter the kernel can build that is not the simulator or the refusal. */
   adapterReady: boolean;
   /** A completed job on one of the operator's kernels has evidence that verifies against the kernel's registered signer. */
   verifiedRun: boolean;
@@ -210,7 +214,7 @@ const RUN_EVIDENCE_HINT: Record<EvidenceClass, string> = {
   verified: "",
   invalid: "device-signed evidence was found, but its signature does not verify against the kernel's registered key",
   "unregistered-signer": "device-signed evidence was found, but no signing key is registered for the kernel (pcc-node registers one at start)",
-  unverifiable: "the evidence found is signed with a key this check cannot verify",
+  unverifiable: "the evidence found is signed in a form this check cannot verify (for example a signing key that is not ed25519, a session key, or a bundle hash without the sha256: prefix)",
   "test-key": "the evidence found is signed with a test key",
   "gateway-placeholder": "the evidence found carries a gateway placeholder, not a device signature",
   "self-attest": "the evidence found is self-attested",
@@ -220,11 +224,6 @@ const RUN_EVIDENCE_HINT: Record<EvidenceClass, string> = {
 /** Human-readable gaps, in the same voice as the route's existing `missing` list. */
 export function readinessGaps(readiness: OnboardingReadiness): string[] {
   const gaps: string[] = [];
-  if (readiness.devices.registered > 0 && readiness.devices.executable === 0) {
-    gaps.push(
-      `device adapter — none of the ${readiness.devices.registered} registered devices can execute real work (mock, generic-http, sensors, cameras and adapters the kernel cannot build do not count); register the machine with its real adapter`,
-    );
-  }
   if (!readiness.verifiedRun) {
     const setupNote =
       readiness.setupTestEvidence === "none"

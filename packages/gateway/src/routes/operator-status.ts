@@ -41,9 +41,9 @@
  *                     PCC-side, not operator-side)
  *
  * "ready" also needs readiness (ADK D4(a), agreed with gateway in bus #2622):
- * no gap from the registered devices, and a VERIFIED run — a completed job on
- * one of the operator's kernels whose evidence verifies against the kernel's
- * registered signing key. A self-attested or test-key setup run never counts.
+ * a VERIFIED run — a completed job on one of the operator's kernels whose
+ * evidence verifies against the kernel's registered signing key. Registered
+ * devices are information only. A self-attested or test-key setup run never counts.
  *
  * The endpoint needs an API key (any key); it is not on the api-gate public
  * allowlist. The response carries no credential: channel credentialRef values
@@ -350,7 +350,7 @@ export async function operatorStatusRoutes(app: FastifyInstance): Promise<void> 
         missing.push(`availability (slot 4) — ${capsWithoutAvailability.length}/${caps.length} capabilities lack availability; recommend setting mode=always for 24/7 or windows[] for explicit hours`);
       }
 
-      // Readiness (D4(a)): can a device execute, and has a verified run happened?
+      // Readiness (D4(a)): only a verified run gates readiness; devices are information only.
       const readiness = await loadReadiness(
         kernels.map((k) => k.id),
         signerByKernel,

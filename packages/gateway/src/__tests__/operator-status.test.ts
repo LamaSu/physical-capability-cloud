@@ -11,8 +11,8 @@
  *   - agentCardUrls populated per kernel
  *   - readiness (D4(a)): only a completed run whose evidence verifies against
  *     the kernel's registered key makes an operator ready; self-attested,
- *     wrongly signed, unregistered-signer and failed runs do not, and neither
- *     do mock-only devices; nothing secret is served
+ *     wrongly signed, unregistered-signer and failed runs do not; registered
+ *     devices are information only; nothing secret is served
  */
 
 import { describe, it, expect, beforeEach, beforeAll, afterAll } from "vitest";
@@ -124,7 +124,7 @@ function seedRun(
   kernelId: string,
   capabilityId: string,
   signature: object,
-  opts: { status?: string; bundleId?: string; at?: string } = {},
+  opts: { status?: string; bundleId?: string; bundleHash?: string; at?: string } = {},
 ): void {
   const { db } = getStore();
   const now = opts.at ?? new Date().toISOString();
@@ -146,7 +146,7 @@ function seedRun(
     stepId: `${jobId}-step`,
     kernelId,
     assuranceTier: 0,
-    bundleHash: BUNDLE_HASH,
+    bundleHash: opts.bundleHash ?? BUNDLE_HASH,
     kernelSignature: signature,
     createdAt: now,
   } as any).run();
@@ -165,6 +165,13 @@ function seedAllSlots(kernelId: string, capabilityId: string): void {
     // addresses are refused at attach time (see n84-channel-ssrf.test.ts).
     endpoint: { url: "https://printer.example.com:9100" },
   });
+}
+
+/** Fill the kernel, capability and channel slots without registering a device. */
+function seedSlotsWithoutDevice(kernelId: string, capabilityId: string): void {
+  seedKernel(kernelId, "Test Kernel");
+  seedCapability(capabilityId, kernelId, "fdm", { availability: { mode: "always" } });
+  attachChannel(TEST_OP, { label: "x", transport: "manual", describe: "dashboard only" });
 }
 
 describe("GET /api/operators/:slug/status", () => {
@@ -341,7 +348,7 @@ describe("GET /api/operators/:slug/status", () => {
     expect(body.status).toBe("ready");
   });
 
-  it("flags mock-only devices even with a verified run", async () => {
+  it("reads ready with mock-only devices once a run verifies: devices are information only", async () => {
     seedKernel("kernel-test-1", "Test Kernel");
     seedDevice("dev-mock", "kernel-test-1", "machine", "mock");
     seedDevice("dev-refusal", "kernel-test-1", "machine", "generic-http");
@@ -351,10 +358,74 @@ describe("GET /api/operators/:slug/status", () => {
     key.register("kernel-test-1");
     seedRun("job-test-1", "kernel-test-1", "cap-test-1", key.sign());
     const body = (await status()).json();
-    expect(body.status).toBe("partial");
+    expect(body.status).toBe("ready");
     expect(body.readiness.devices).toEqual({ registered: 2, executable: 0 });
     expect(body.readiness.adapterReady).toBe(false);
-    expect(body.missing).toEqual([expect.stringContaining("device adapter — none of the 2 registered devices")]);
+    expect(body.missing).toEqual([]);
+  });
+
+  it("reads ready for the runbook's generic-http machine once a run verifies", async () => {
+    seedSlotsWithoutDevice("kernel-test-1", "cap-test-1");
+    seedDevice("sim-pr1-0001", "kernel-test-1", "machine", "generic-http");
+    const key = deviceKey();
+    key.register("kernel-test-1");
+    seedRun("job-test-1", "kernel-test-1", "cap-test-1", key.sign());
+    const body = (await status()).json();
+    expect(body.status).toBe("ready");
+    expect(body.missing).toEqual([]);
+    expect(body.readiness).toMatchObject({
+      devices: { registered: 1, executable: 0 },
+      adapterReady: false,
+      verifiedRun: true,
+    });
+  });
+
+  it("reads ready for pcc-node's detected octoprint device once a run verifies", async () => {
+    seedSlotsWithoutDevice("kernel-test-1", "cap-test-1");
+    seedDevice("kernel-test-1-octoprint-0", "kernel-test-1", "octoprint", "octoprint");
+    const key = deviceKey();
+    key.register("kernel-test-1");
+    seedRun("job-test-1", "kernel-test-1", "cap-test-1", key.sign());
+    const body = (await status()).json();
+    expect(body.status).toBe("ready");
+    expect(body.missing).toEqual([]);
+    expect(body.readiness).toMatchObject({
+      devices: { registered: 1, executable: 0 },
+      adapterReady: false,
+      verifiedRun: true,
+    });
+  });
+
+  it("changes neither status nor missing when someone else adds a device row to the kernel", async () => {
+    seedSlotsWithoutDevice("kernel-test-1", "cap-test-1");
+    const key = deviceKey();
+    key.register("kernel-test-1");
+    seedRun("job-test-1", "kernel-test-1", "cap-test-1", key.sign());
+    const before = (await status()).json();
+    expect(before.status).toBe("ready");
+    expect(before.missing).toEqual([]);
+    seedDevice("stranger-sensor", "kernel-test-1", "sensor", "mock");
+    const after = (await status()).json();
+    expect(after.status).toBe(before.status);
+    expect(after.missing).toEqual(before.missing);
+    expect(after.readiness.verifiedRun).toBe(true);
+    expect(after.readiness.devices).toEqual({ registered: 1, executable: 0 });
+  });
+
+  it("reads an untagged digest as unverifiable, without saying the kernel's key is wrong", async () => {
+    seedAllSlots("kernel-test-1", "cap-test-1");
+    const key = deviceKey();
+    key.register("kernel-test-1");
+    const bundleHash = "ab".repeat(32);
+    seedRun("job-test-1", "kernel-test-1", "cap-test-1", key.sign(bundleHash), { bundleHash });
+    const body = (await status()).json();
+    expect(body.status).toBe("partial");
+    expect(body.readiness.runEvidence).toBe("unverifiable");
+    expect(body.missing).toHaveLength(1);
+    expect(body.missing[0]).toContain(
+      "the evidence found is signed in a form this check cannot verify (for example a signing key that is not ed25519, a session key, or a bundle hash without the sha256: prefix)",
+    );
+    expect(body.missing.some((gap: string) => gap.includes("does not verify against the kernel's registered key"))).toBe(false);
   });
 
   it("serves no key, signature or job and bundle id", async () => {

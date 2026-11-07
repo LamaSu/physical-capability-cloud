@@ -8,6 +8,11 @@
 import { describe, it, expect, vi } from "vitest";
 import nacl from "tweetnacl";
 import { listRegisteredMachineAdapters } from "@pcc/kernel";
+import { sessionKeyDelegationPreimage, signingPreimage, type SessionKeyAuthorization } from "@pcc/spec";
+import {
+  registeredSignerInputFromColumns,
+  verifyDeviceSignedEvidence,
+} from "../services/device-evidence-settlement.js";
 import {
   NON_EXECUTING_ADAPTERS,
   assessBundle,
@@ -179,14 +184,56 @@ describe("assessBundle", () => {
     expect(await assessBundle(bundle, JOB_ID, secpKernel)).toBe("unverifiable");
   });
 
-  it("fails closed on a malformed session-key delegation", async () => {
-    const key = deviceKey();
+  it("calls a valid session-key bundle unverifiable, not invalid: it fails closed without the trusted context", async () => {
+    const parent = nacl.sign.keyPair();
+    const session = nacl.sign.keyPair();
+    const now = Math.floor(Date.now() / 1000);
+    const columns = {
+      signingKeyAlgorithm: "ed25519",
+      signingKeyPublicKey: `0x${hex(parent.publicKey)}`,
+      signingAddress: null,
+    };
+    const body = {
+      sessionId: "session-readiness-1",
+      parentAgentId: "eip155:1:0x0000000000000000000000000000000000000001",
+      publicKey: session.publicKey,
+      issuedAt: now,
+      expiresAt: now + 300,
+      scope: { contractIds: [JOB_ID], allowedActions: ["evidence_submit"], maxSignatures: 10 },
+    };
+    const authorization: SessionKeyAuthorization = {
+      ...body,
+      publicKey: hex(session.publicKey),
+      parentSignature: hex(nacl.sign.detached(sessionKeyDelegationPreimage(body), parent.secretKey)),
+    };
     const bundle = {
       bundleHash: BUNDLE_HASH,
-      kernelSignature: key.sign(BUNDLE_HASH),
-      sessionKeyAuthorization: { sessionId: "s1" },
+      kernelSignature: {
+        signer: `0x${hex(session.publicKey).slice(0, 40)}`,
+        algorithm: "ed25519",
+        value: hex(nacl.sign.detached(signingPreimage(BUNDLE_HASH), session.secretKey)),
+      },
+      sessionKeyAuthorization: authorization,
     };
-    expect(await assessBundle(bundle, JOB_ID, key.columns)).toBe("invalid");
+    expect(
+      await verifyDeviceSignedEvidence({
+        signature: bundle.kernelSignature,
+        bundleHash: bundle.bundleHash,
+        registeredSigner: registeredSignerInputFromColumns(columns),
+        sessionKeyAuthorization: authorization,
+        contractId: JOB_ID,
+        operatorPrincipalId: authorization.parentAgentId,
+        receivedAt: now,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(await assessBundle(bundle, JOB_ID, columns)).toBe("unverifiable");
+  });
+
+  it("calls an untagged digest unverifiable, even when the registered key signed it", async () => {
+    const key = deviceKey();
+    const bundleHash = "ab".repeat(32);
+    const bundle = { bundleHash, kernelSignature: key.sign(bundleHash) };
+    expect(await assessBundle(bundle, JOB_ID, key.columns)).toBe("unverifiable");
   });
 
   it("never runs the verifier on placeholders, self-attested or test-key evidence", async () => {
@@ -293,12 +340,24 @@ describe("readinessGaps", () => {
     expect(readinessGaps(ready)).toEqual([]);
   });
 
-  it("flags the device adapter only when every registered device is non-executing", () => {
+  it("never reports a device gap: registered devices are information only", () => {
     const allMock = { ...ready, devices: { registered: 2, executable: 0 }, adapterReady: false };
-    expect(readinessGaps(allMock)).toEqual([expect.stringContaining("device adapter — none of the 2 registered devices")]);
-    // A node that registers no device rows (pcc-node) is judged by its runs alone.
+    expect(readinessGaps(allMock)).toEqual([]);
     const noRows = { ...ready, devices: { registered: 0, executable: 0 }, adapterReady: false };
     expect(readinessGaps(noRows)).toEqual([]);
+    const gaps = readinessGaps({ ...allMock, verifiedRun: false, runEvidence: "none" });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain("verified run —");
+    expect(gaps.some((gap) => /device adapter|real adapter/.test(gap))).toBe(false);
+  });
+
+  it("explains unverifiable evidence without saying the kernel's key is wrong", () => {
+    const gaps = readinessGaps({ ...ready, verifiedRun: false, runEvidence: "unverifiable" });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain(
+      "the evidence found is signed in a form this check cannot verify (for example a signing key that is not ed25519, a session key, or a bundle hash without the sha256: prefix)",
+    );
+    expect(gaps[0]).not.toContain("does not verify against the kernel's registered key");
   });
 
   it("explains a missing verified run and why a setup test does not count", () => {
