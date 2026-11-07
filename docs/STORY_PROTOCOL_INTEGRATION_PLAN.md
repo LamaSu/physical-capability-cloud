@@ -1,9 +1,9 @@
 # Story Protocol Integration Plan for PCC
 
 > **Date**: 2026-03-21
-> **Status**: Plan — ready for implementation
+> **Status**: Superseded. Story Protocol became The DATA Foundation on 2026-06-25 ($IP became $DATA); its protocol contracts have been deprecated since 2026-09-19, and its chain is due to retire. PCC makes no on-chain Story call.
 > **Dependency**: `@story-protocol/core-sdk` (~1.3.0, peer dep `viem` already present)
-> **Chain**: Story Network L1 (chain 1514) / Aeneid testnet (chain 1513)
+> **Chain**: DATA Network L1 (chain 1514) / Aeneid testnet (chain 1315)
 > **Research**: `ai/research/story-protocol-integration.md` (1133 lines)
 
 ---
@@ -65,7 +65,7 @@ Story Protocol solves all of this with one primitive: **IP Assets with programma
                           ▼
 ┌──────────────────────────────────────────────────────────────┐
 │                    Story Network L1                           │
-│                    (Chain 1514 / Aeneid 1513)                │
+│                    (Chain 1514 / Aeneid 1315)                │
 │                                                              │
 │  ┌──────────────┐  ┌──────────────┐  ┌───────────────────┐  │
 │  │ IPAssetReg   │  │ RoyaltyMod   │  │ PILicenseTemplate │  │
@@ -546,7 +546,7 @@ STORY_MOCK=true
 STORY_MOCK=false
 STORY_NETWORK=story-aeneid
 STORY_PRIVATE_KEY=0x...  # Generate via: npx tsx scripts/generate-wallet.ts
-# Get testnet IP tokens from Story faucet: https://faucet.story.foundation
+# Get testnet DATA tokens from the official faucet: https://aeneid.faucet.datafdn.org/
 ```
 
 ---

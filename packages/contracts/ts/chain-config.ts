@@ -3,7 +3,7 @@
  *
  * In development/testing: use localhost addresses (from forge script deploy).
  * On base-sepolia/base: fill in after deployment.
- * Story Protocol chains (1514 mainnet / 1513 Aeneid testnet) are also defined here.
+ * DATA Network chains (formerly Story Protocol; 1514 mainnet / 1315 Aeneid testnet) are also defined here.
  */
 import type { Address, Chain } from "viem";
 import { defineChain } from "viem";
@@ -27,33 +27,33 @@ export const EAS_ADDRESS = "0x4200000000000000000000000000000000000021" as const
  */
 export const EAS_SCHEMA_REGISTRY = "0x4200000000000000000000000000000000000020" as const;
 
-// ── Story Protocol chains ─────────────────────────────────────────────────────
+// ── DATA Network chains (formerly Story Protocol) ─────────────────────────────
 
-/** Story Network Mainnet (chain 1514) */
+/** DATA Network Mainnet (chain 1514; formerly Story Network) */
 export const storyMainnet = defineChain({
   id: 1514,
-  name: "Story",
-  nativeCurrency: { name: "IP", symbol: "IP", decimals: 18 },
+  name: "DATA Network",
+  nativeCurrency: { name: "DATA", symbol: "DATA", decimals: 18 },
   rpcUrls: {
-    default: { http: ["https://mainnet.storyrpc.io"] },
-    public: { http: ["https://mainnet.storyrpc.io"] },
+    default: { http: ["https://mainnet.datarpc.io"] },
+    public: { http: ["https://mainnet.datarpc.io"] },
   },
   blockExplorers: {
-    default: { name: "Story Explorer", url: "https://explorer.story.foundation" },
+    default: { name: "DATA Network Explorer", url: "https://datanetscan.io" },
   },
 });
 
-/** Story Aeneid Testnet (chain 1513) */
+/** DATA Network Aeneid Testnet (chain 1315; formerly Story Aeneid) */
 export const storyAeneid = defineChain({
-  id: 1513,
-  name: "Story Aeneid",
-  nativeCurrency: { name: "IP", symbol: "IP", decimals: 18 },
+  id: 1315,
+  name: "DATA Network Aeneid",
+  nativeCurrency: { name: "DATA", symbol: "DATA", decimals: 18 },
   rpcUrls: {
-    default: { http: ["https://aeneid.storyrpc.io"] },
-    public: { http: ["https://aeneid.storyrpc.io"] },
+    default: { http: ["https://aeneid.datarpc.io"] },
+    public: { http: ["https://aeneid.datarpc.io"] },
   },
   blockExplorers: {
-    default: { name: "Story Aeneid Explorer", url: "https://aeneid.explorer.story.foundation" },
+    default: { name: "DATA Network Aeneid Explorer", url: "https://aeneid.datanetscan.io" },
   },
   testnet: true,
 });
@@ -122,6 +122,7 @@ export interface ChainDeployment {
     reputationRegistry?: Address;
     validationRegistry?: Address;
     // ── Story Protocol contracts (same addresses on mainnet + Aeneid testnet) ──
+    // Deprecated by The DATA Foundation since 2026-09-19 (no patches); still deployed. PCC sends them no transaction.
     /** Story Protocol IPAssetRegistry — registers NFTs as IP Assets */
     ipAssetRegistry?: Address;
     /** Story Protocol LicenseRegistry — tracks license terms and tokens */
@@ -199,15 +200,15 @@ export const deployments: Record<string, ChainDeployment> = {
     blockExplorer: "https://basescan.org",
   },
 
-  // ── Story Protocol Networks ───────────────────────────────────────────────
+  // ── DATA Network networks (formerly Story Protocol) ─────────────────────────
 
   /**
-   * Story Network Mainnet (chain 1514).
+   * DATA Network Mainnet (chain 1514; formerly Story Network).
    * Contract addresses are the same as on Aeneid testnet.
    */
   story: {
     chain: storyMainnet,
-    rpcUrl: "https://mainnet.storyrpc.io",
+    rpcUrl: "https://mainnet.datarpc.io",
     contracts: {
       ipAssetRegistry: "0x77319B4031e6eF1250907aa00018B8B1c67a244b",
       licenseRegistry: "0x529a750E02d8E2f15649c13D69a465286a780e24",
@@ -215,16 +216,16 @@ export const deployments: Record<string, ChainDeployment> = {
       disputeModule: "0x9b7A9c70AFF961C799110954fc06F3093aeb94C5",
       pilLicenseTemplate: "0x2E896b0b2Fdb7457499B56AAaA4AE55BCB4Cd316",
     },
-    blockExplorer: "https://explorer.story.foundation",
+    blockExplorer: "https://datanetscan.io",
   },
 
   /**
-   * Story Aeneid Testnet (chain 1513).
+   * DATA Network Aeneid Testnet (chain 1315; formerly Story Aeneid).
    * Use STORY_NETWORK=story-aeneid (default for development).
    */
   "story-aeneid": {
     chain: storyAeneid,
-    rpcUrl: "https://aeneid.storyrpc.io",
+    rpcUrl: "https://aeneid.datarpc.io",
     contracts: {
       ipAssetRegistry: "0x77319B4031e6eF1250907aa00018B8B1c67a244b",
       licenseRegistry: "0x529a750E02d8E2f15649c13D69a465286a780e24",
@@ -232,7 +233,7 @@ export const deployments: Record<string, ChainDeployment> = {
       disputeModule: "0x9b7A9c70AFF961C799110954fc06F3093aeb94C5",
       pilLicenseTemplate: "0x2E896b0b2Fdb7457499B56AAaA4AE55BCB4Cd316",
     },
-    blockExplorer: "https://aeneid.explorer.story.foundation",
+    blockExplorer: "https://aeneid.datanetscan.io",
   },
 
   // ── Flow EVM Networks ─────────────────────────────────────────────────────

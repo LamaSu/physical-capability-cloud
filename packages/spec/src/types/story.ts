@@ -1,12 +1,13 @@
 /**
  * Story Protocol integration types for Physical Capability Cloud.
+ * Story Protocol is now The DATA Foundation, and Story Network is DATA Network.
  *
  * These types bridge PCC's capability/job/evidence model with
  * Story Protocol's IP Asset / License / Royalty primitives.
  *
  * Chain IDs:
- *   Story Mainnet  — 1514
- *   Story Aeneid (testnet) — 1513
+ *   DATA Network mainnet — 1514
+ *   DATA Network Aeneid (testnet) — 1315
  */
 
 /** A PCC capability registered as an IP Asset on Story Protocol. */

@@ -80,7 +80,7 @@ async function main() {
   console.log(DIVIDER);
   console.log();
   info("Running in mock mode (STORY_MOCK=true) — no real chain transactions");
-  info("Story Network L1 (chain 1514) / Aeneid testnet (chain 1513)");
+  info("DATA Network L1 (chain 1514) / Aeneid testnet (chain 1315)");
   console.log();
 
   const svc = new StoryIPService({ mock: true });
