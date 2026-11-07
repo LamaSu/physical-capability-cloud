@@ -459,6 +459,22 @@ describe("wallet pages re-sign through the existing SIWE flow", () => {
     expect([...container.querySelectorAll('[role="status"]')].map((status) => status.textContent)).toContain(notice);
   });
 
+  it.each(["wallets", "link"] as const)("K12: /%s keeps the reload's restore notice hidden while a re-sign is pending and after it fails before the mint", async (page) => {
+    await act(async () => { await useAuthStore.getState().mintSessionKey(); });
+    const restoreNotice = useAuthStore.getState().authNotice!;
+    expect(restoreNotice).toEqual(expect.any(String));
+    const refusal = "Signature refused by wallet";
+    let refuse!: (error: Error) => void;
+    wallet.signMessageAsync.mockImplementationOnce(() => new Promise((_, reject) => { refuse = reject; }));
+    await showFailure(page);
+    await click("Sign in again");
+    expect(container.textContent).not.toContain(restoreNotice);
+    await act(async () => refuse(new Error(refusal)));
+    expect(alerts(refusal)).toHaveLength(1);
+    expect(container.textContent).not.toContain(restoreNotice);
+    expectRemedy();
+  });
+
   it("K3: /link drops a lookup failure that was sent before the re-sign's key", async () => {
     const signatures: ((signature: string) => void)[] = [];
     wallet.signMessageAsync.mockImplementation(() => new Promise((resolve) => { signatures.push(resolve); }));

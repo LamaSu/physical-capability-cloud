@@ -31,7 +31,7 @@ export function WalletPageSignInAgain({ attempted, pagePending, signIn }: {
         </>
       ) : <SignInAgainButton login={guardedLogin} isVerifying={pagePending || isVerifying} />}
       {attempted && error !== null && <p role="alert">{error}</p>}
-      {attempted && authNotice !== null && !useAuthStore.getState().isAuthenticated && <p role="status">{authNotice}</p>}
+      {attempted && !pagePending && error === null && authNotice !== null && !useAuthStore.getState().isAuthenticated && <p role="status">{authNotice}</p>}
     </div>
   );
 }
