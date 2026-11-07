@@ -16,6 +16,7 @@
  * "quiescing" refusals, which a rejected hook earns by design), so no lease, session or printer
  * is left held.
  */
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 
@@ -23,6 +24,19 @@ import type { MachineAdapter, MachineCommand, MachineCommandResult } from "../ad
 import { EvidenceEmitter } from "../evidence-emitter.js";
 import { runPrintJob } from "../printer-job.js";
 import type { PrintJobOptions, PrintJobResult } from "../printer-job.js";
+
+// Keep hash bytes real while removing libuv threadpool timing from the fault census.
+const realDigest = globalThis.crypto.subtle.digest;
+function installMicrotaskSha256(): void {
+  vi.spyOn(globalThis.crypto.subtle, "digest").mockImplementation(async (algorithm, data) => {
+    const name = typeof algorithm === "string" ? algorithm : algorithm.name;
+    if (name.toUpperCase() !== "SHA-256") return realDigest.call(globalThis.crypto.subtle, algorithm, data);
+    const bytes = ArrayBuffer.isView(data)
+      ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+      : new Uint8Array(data);
+    return Uint8Array.from(createHash("sha256").update(bytes).digest()).buffer;
+  });
+}
 
 type Emitted = Omit<EvidenceEvent, "id" | "hash">;
 
@@ -56,10 +70,9 @@ function noText(): unknown {
 
 /** Records `site`, and throws (or returns a rejection) if it is the next planned fault. */
 function reach(inj: Injector, site: string): { reject: boolean } | null {
-  if (inj.recording) {
-    inj.seen.push(site);
-    if (inj.fired > 0) inj.afterFirst.push(site);
-  }
+  if (!inj.recording) return null;
+  inj.seen.push(site);
+  if (inj.fired > 0) inj.afterFirst.push(site);
   const fault = inj.plan[inj.fired];
   if (fault === undefined || fault.site !== site) return null;
   inj.fired += 1;
@@ -163,7 +176,7 @@ type CancelResponse = "device-failure" | "breaches-quiesce-contract-silent" | "n
  * named silent variant breaches that contract, solely to census the kernel-failure defence
  * in depth. The no-cancel variant also reaches the adapter-id read in that refusal.
  */
-function cancelRig(caseId: string, inj: Injector, response: CancelResponse) {
+function cancelRig(caseId: string, inj: Injector, response: CancelResponse, stallMs = 0, stalls: number[] = []) {
   const source: EvidenceSource = { deviceId: `p-${caseId}`, deviceType: "controller", kernelId: KERNEL_ID };
   const listeners: Array<(e: Emitted) => void> = [];
   const observed: Emitted[] = [];
@@ -204,6 +217,11 @@ function cancelRig(caseId: string, inj: Injector, response: CancelResponse) {
     },
     ...(response === "no-cancel" ? {} : {
       async cancelJob(job: string | number) {
+        if (stallMs > 0) {
+          const start = performance.now();
+          while (performance.now() - start < stallMs) {}
+          stalls.push(performance.now() - start);
+        }
         if (response === "device-failure") {
           emit("execution_failed", { ippJobId: job, state: "canceled", origin: "device" });
           finish();
@@ -302,6 +320,7 @@ async function catchingUnhandled<T>(body: () => Promise<T>): Promise<{ value?: T
 }
 
 beforeEach(() => {
+  installMicrotaskSha256();
   vi.spyOn(console, "error").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
@@ -317,9 +336,9 @@ describe("runPrintJob: whatever one collaborator throws, wherever, the print res
   };
 
   /** Runs one plan; returns what went wrong (empty when nothing did), and the sites touched after its first fault. */
-  async function check(plan: Fault[], caseId: string, cancelResponse?: CancelResponse): Promise<{ failures: string[]; afterFirst: string[] }> {
+  async function check(plan: Fault[], caseId: string, cancelResponse?: CancelResponse, stallMs = 0, stalls: number[] = []): Promise<{ failures: string[]; afterFirst: string[] }> {
     const inj = injector(plan);
-    const testRig = cancelResponse === undefined ? rig(caseId, inj) : cancelRig(caseId, inj, cancelResponse);
+    const testRig = cancelResponse === undefined ? rig(caseId, inj) : cancelRig(caseId, inj, cancelResponse, stallMs, stalls);
     const { opts, observed } = testRig;
     const label = plan.map((f) => `${f.how} at ${f.site}`).join(", then ");
     const failures: string[] = [];
@@ -343,7 +362,7 @@ describe("runPrintJob: whatever one collaborator throws, wherever, the print res
     }
     if (out.unhandled > 0) failures.push(`${label}: ${out.unhandled} unhandled rejection(s)`);
     if ("prepareReprint" in testRig && typeof testRig.prepareReprint === "function") testRig.prepareReprint();
-    // Every fault has fired once; the same step prints again on the same collaborators.
+    // Fault injection has ended; the same step prints again on the same collaborators.
     let again: { value?: PrintJobResult; rejected: boolean; unhandled: number } | undefined;
     for (let attempt = 0; attempt < 3; attempt++) {
       again = await catchingUnhandled(() => runPrintJob(opts));
@@ -417,4 +436,63 @@ describe("runPrintJob: whatever one collaborator throws, wherever, the print res
       expect(failures, `${singles.length} cancellation single and ${doubles.length} double faults`).toEqual([]);
     });
   }
+
+  it("the six quiesce-then-write plans survive a 10 ms cancellation stall", async () => {
+    // Let pending work from the censuses drain before forcing the worker past cancel's bound.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const plans: Fault[][] = [
+      [{ site: "read adapter.quiesceEvidence#2", how: "throw" }, { site: "call emitter.addEvent#2", how: "throw" }],
+      [{ site: "read adapter.quiesceEvidence#2", how: "throw" }, { site: "call emitter.addEvent#2", how: "reject" }],
+      [{ site: "call adapter.quiesceEvidence#1", how: "throw" }, { site: "call emitter.addEvent#2", how: "throw" }],
+      [{ site: "call adapter.quiesceEvidence#1", how: "throw" }, { site: "call emitter.addEvent#2", how: "reject" }],
+      [{ site: "call adapter.quiesceEvidence#1", how: "reject" }, { site: "call emitter.addEvent#2", how: "throw" }],
+      [{ site: "call adapter.quiesceEvidence#1", how: "reject" }, { site: "call emitter.addEvent#2", how: "reject" }],
+    ];
+    const stalls: number[] = [];
+    const failures: string[] = [];
+    for (const [index, plan] of plans.entries()) {
+      failures.push(...(await check(plan, `stall-${index}`, "breaches-quiesce-contract-silent", 10, stalls)).failures);
+    }
+    expect(stalls, "one cancellation stall per plan").toHaveLength(6);
+    for (const elapsed of stalls) expect(elapsed, "worker blocked for at least 10 ms").toBeGreaterThanOrEqual(10);
+    expect(failures).toEqual([]);
+  });
+
+  it("SHA-256 alone settles in microtasks, hashes exact source bytes, and restores WebCrypto", async () => {
+    const backing = new Uint8Array([91, 12, 34, 56, 78, 92]);
+    const view = backing.subarray(1, 5);
+    const buffer = new Uint8Array([9, 8, 7, 6]).buffer;
+    const expectedView = await realDigest.call(globalThis.crypto.subtle, "SHA-256", view);
+    const expectedBuffer = await realDigest.call(globalThis.crypto.subtle, { name: "sha-256" }, buffer);
+    const expected512 = await realDigest.call(globalThis.crypto.subtle, "SHA-512", view);
+    let viewHash: ArrayBuffer | undefined;
+    let bufferHash: ArrayBuffer | undefined;
+    let hash512: ArrayBuffer | undefined;
+    const viewDone = globalThis.crypto.subtle.digest("SHA-256", view).then((hash) => { viewHash = hash; });
+    const bufferDone = globalThis.crypto.subtle.digest({ name: "sha-256" }, buffer).then((hash) => { bufferHash = hash; });
+    const done512 = globalThis.crypto.subtle.digest("SHA-512", view).then((hash) => { hash512 = hash; });
+    for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+    expect(viewHash, "view SHA-256 settles before a macrotask").toBeDefined();
+    expect(new Uint8Array(viewHash!)).toEqual(new Uint8Array(expectedView));
+    expect(bufferHash, "ArrayBuffer SHA-256 settles before a macrotask").toBeDefined();
+    expect(new Uint8Array(bufferHash!)).toEqual(new Uint8Array(expectedBuffer));
+    expect(viewHash).not.toBe(bufferHash);
+    expect(hash512, "SHA-512 still waits for WebCrypto").toBeUndefined();
+    await Promise.all([viewDone, bufferDone, done512]);
+    expect(new Uint8Array(hash512!)).toEqual(new Uint8Array(expected512));
+
+    vi.restoreAllMocks();
+    expect(globalThis.crypto.subtle.digest, "restoreAllMocks restores WebCrypto").toBe(realDigest);
+    let restoredHash: ArrayBuffer | undefined;
+    const restored = globalThis.crypto.subtle.digest("SHA-256", view).then((hash) => { restoredHash = hash; });
+    for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+    expect(restoredHash, "real SHA-256 waits for WebCrypto again").toBeUndefined();
+    await restored;
+    expect(new Uint8Array(restoredHash!)).toEqual(new Uint8Array(expectedView));
+  });
+
+  it("an unreached fault is reported once and cannot fire in the reprint", async () => {
+    const { failures } = await check([{ site: "call emitter.addEvent#3", how: "throw" }], "unreached");
+    expect(failures).toEqual(["throw at call emitter.addEvent#3: only 0 of 1 faults were reached"]);
+  });
 });

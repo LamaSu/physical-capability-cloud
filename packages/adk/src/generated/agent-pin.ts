@@ -6,9 +6,9 @@ import { deepFreeze } from "../deep-freeze.js";
 
 export const AGENT_PACKAGE_PIN = deepFreeze({
   schema: "pcc-agent-package/2.0",
-  version: "2.19.4",
-  toolCount: 244,
-  sha256: "sha256:1e72134652a5d8b6e409d840203b4f477bcdb173503bde51b8bd2cae5bb534b3",
+  version: "2.19.5",
+  toolCount: 243,
+  sha256: "sha256:1f21719ef67e91c267e28526ea3b9203a1161afe7550ad001d1cfd4ae4f02a9e",
 } as const);
 
 export const AGENT_TOOLS = deepFreeze({
@@ -163,7 +163,6 @@ export const AGENT_TOOLS = deepFreeze({
   "pcc_contributor_register": { method: "POST", path: "/api/contributors", required: ["address","role","scheduleHash"] },
   "pcc_create_scope": { method: "POST", path: "/api/ot2/scope", required: ["allowedTools","kernelId"] },
   "pcc_decompose_request": { method: "POST", path: "/api/requests/{requestId}/decompose", required: ["requestId"] },
-  "pcc_dht_announce": { method: "POST", path: "/api/dht/announce", required: ["capabilities","kernelId"] },
   "pcc_dht_metrics": { method: "GET", path: "/api/dht/metrics", required: [] },
   "pcc_dht_peers": { method: "GET", path: "/api/dht/peers", required: [] },
   "pcc_dht_query": { method: "POST", path: "/api/dht/query", required: [] },

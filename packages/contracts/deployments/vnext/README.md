@@ -21,6 +21,13 @@ fails closed. Missing or malformed records, chain mismatches, provisional record
 also fail closed, with no default or fallback. The canonical writer's authority fields are
 `mode: "CANONICAL"`, `label: ""`, `canonical: true`, `doNotPin: false`, and `broadcast: true`.
 
+A testnet-only record (`scheduleTestnetOnly: true`; the committed `base-sepolia` record is one) also needs
+`PCC_VNEXT_ALLOW_TESTNET_RECORD` set to exactly `1`, or the reader refuses it (rule R-c). With such a record, a
+paid scope activates only for a buyer named in `PCC_VNEXT_TESTNET_BUYERS`: a comma-separated list of `0x`
+addresses, each all lowercase or EIP-55 checksummed, with no whitespace and no empty entries. An unset or empty
+list, or a list with any invalid entry, refuses every buyer (`testnet_buyer_not_allowed`). Both rules are in the
+gateway: `src/services/paid-scope-activation-terms.ts` (R-c) and `src/services/funding-binding.ts` (the list).
+
 Readers must check `chainId` against the record's directory slug: `base` is 8453, `base-sepolia` is 84532,
 `anvil` is 31337, and other chains use `chain-<chainId>`. JSON Schema cannot perform this check because it
 needs the file path. A missing record or a `chainId` mismatch fails closed.

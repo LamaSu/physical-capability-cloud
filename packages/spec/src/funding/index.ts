@@ -55,9 +55,15 @@ export { FUNDING_PREPARE_SCHEMA } from "./payload.js";
 export { FundingRefusal } from "./errors.js";
 export type { FundingRefusalCode } from "./errors.js";
 export { CIRCLE_USDC } from "./pins.js";
+export { RECLAIM_WINDOWS, reclaimWindowFor } from "./pins.js";
+export type { ReclaimWindow } from "./pins.js";
 export type { FundingPins } from "./pins.js";
 export type { JobPolicyMessage, JobPolicyTypedData, PayoutEntry, UnitConfig } from "./vnext.js";
 
 /** A Thursday PRINT-unit buyer calls printUnitThursdayExpectation and never passes allowUnchecked. */
 export { PRINT_UNIT_THURSDAY_V1, RECLAIM_SKEW_SECONDS, printUnitPrincipalWord, printUnitThursdayExpectation } from "./print-unit.js";
 export type { PrintUnitThursdayExpectationInput } from "./print-unit.js";
+
+/** An N145 NS-6 dry-run buyer calls dryRunUnitTestnetExpectation on Base Sepolia only. */
+export { DRY_RUN_UNIT_TESTNET_V1, dryRunUnitPrincipalWord, dryRunUnitTestnetExpectation } from "./dry-run-unit.js";
+export type { DryRunUnitTestnetExpectationInput } from "./dry-run-unit.js";

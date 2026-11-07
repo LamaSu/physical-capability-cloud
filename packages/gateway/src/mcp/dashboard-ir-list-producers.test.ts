@@ -1,3 +1,5 @@
+import { readText } from "./dashboard-ir.js";
+import { physicalTextElement } from "./dashboard-ir-physical-text.type-test.js";
 import Fastify, { type FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -15,7 +17,7 @@ import type { RDocument, RElement } from "./dashboard-ir-renderer.js";
 // come from the live routes over the seeded store (route inject), never hand-written shapes.
 type FakeEl = RElement & { attrs: Record<string, string> };
 const fdoc: RDocument = { createElement(): RElement {
-  const e: FakeEl = { textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } };
+  const e: FakeEl = physicalTextElement({ textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } });
   return e;
 } };
 const leaves = (e: RElement): string[] => [e.textContent, ...(e.children as RElement[]).flatMap(leaves)].filter((t) => t !== "");
@@ -76,7 +78,7 @@ describe("#344 r5 typed list fields accept the REAL producers' rows (seeded stor
         if (prof.status.length) props.statusFrom = prof.status[0];
         bindListRows(fdoc, listEl, { type: "list", id: "n1", props, bind: { path } } as unknown as IrNode, rows!);
         expect((listEl.children as RElement[]).length, `${path} title=${title}: no rows rendered`).toBeGreaterThan(0);
-        expect(leaves(listEl), `${path} title=${title}: a real row failed closed`).not.toContain(UNAVAILABLE);
+        expect(leaves(listEl), `${path} title=${title}: a real row failed closed`).not.toContain(readText(UNAVAILABLE).t);
       }
     });
 
@@ -141,7 +143,7 @@ describe("N110 follow-up: the jobs list's declared total is the route's own cros
     const one = await page("/api/jobs?limit=1", ADMIN_H);
     expect(one.jobs).toHaveLength(1);
     expect(one.total).toBe(all.total);
-    expect(listWindow(listNode({ limit: 1 }), one, one.jobs.length).note).toBe(`1 of ${all.jobs.length} returned`);
+    expect(listWindow(listNode({ limit: 1 }), one, one.jobs.length).note?.t).toBe(`1 of ${all.jobs.length} returned`);
   });
 
   it("a status filter's `total` counts only the jobs with that status", async () => {
@@ -163,6 +165,7 @@ describe("N110 follow-up: the jobs list's declared total is the route's own cros
     expect(stranger.jobs).toEqual([]);
     expect(stranger.total).toBe(0);
     // So "none" is honest for the stranger: its readable collection really is empty.
-    expect(listWindow(listNode(), stranger, 0)).toEqual({ empty: "none", note: null });
+    const window = listWindow(listNode(), stranger, 0);
+    expect({ empty: window.empty.t, note: window.note }).toEqual({ empty: "none", note: null });
   });
 });

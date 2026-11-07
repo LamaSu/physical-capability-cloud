@@ -48,6 +48,7 @@ import { operatorStatusRoutes } from "./routes/operator-status.js";
 import { capabilityAvailabilityRoutes } from "./routes/capability-availability.js";
 import { captureRoutes } from "./routes/capture.js";
 import { toolCatalogRoutes } from "./routes/tool-catalog.js";
+import { kitRoutes } from "./routes/kits.js";
 import { composeRoutes } from "./routes/compose.js";
 import { agentPlanRoutes } from "./routes/agent-plans.js";
 import { registrySnapshotRoutes } from "./routes/registry-snapshot.js";
@@ -172,6 +173,8 @@ import { traceIdPlugin } from "./middleware/trace-id.js";
 import { agentFeedbackRoutes } from "./routes/agent-feedback.js";
 import { funnelTrackerPlugin } from "./services/funnel-tracker.js";
 import { adminObservabilityRoutes } from "./routes/admin-observability.js";
+import { adminPostureRoutes } from "./routes/admin-posture.js";
+import { logBootPosture } from "./services/posture.js";
 import { setSessionStore } from "@pcc/orchestrator-sdk";
 import { OrchestratorSessionStore } from "./services/orchestrator-session-store.js";
 import { startEventBusOtelBridge } from "./services/event-bus-otel-bridge.js";
@@ -207,6 +210,7 @@ export async function createGateway(port = 3200) {
   const dispatch = localJobDispatchDecision(kernelService.kernelId, kernelService.kernelId, kernelService.hasExplicitConfig);
   app.log.info({ queueOnly: jobSubmitQueueOnly(), localDispatch: dispatch.ok, reason: dispatch.ok ? undefined : dispatch.reason },
     "[jobs] Effective local dispatch policy");
+  logBootPosture(app.log);
 
   // Sentry error handler — captures Fastify errors and attaches request context
   // Must be registered before other error handlers
@@ -659,6 +663,7 @@ export async function createGateway(port = 3200) {
   // apiGate (caller is authenticated) + admin-allowlisted. 404 unless
   // PCC_FUNNEL_ENABLED=true.
   await app.register(adminObservabilityRoutes);
+  await app.register(adminPostureRoutes);
 
   // REST routes
   await app.register(capabilityRoutes);
@@ -692,6 +697,8 @@ export async function createGateway(port = 3200) {
   await app.register(startRoutes);
   await app.register(marketplaceRoutes);
   await app.register(toolCatalogRoutes);
+  // Capability Kit registry (kits K1 slice 1): write-once, verified, durable-volume backed.
+  await app.register(kitRoutes);
   await app.register(composeRoutes);
   // R9: externally authored plans. Validate is a live read; accept is money-path (the scope checker
   // default-denies it) and answers 503 until the R13 store, #349, the evidence map, the fee policy and
@@ -974,7 +981,6 @@ export async function createGateway(port = 3200) {
             documentation: "https://capability.network/docs",
             agentPackage: {
               url: "https://capability.network/agent-package.json",
-              toolCount: 254,
             },
             a2aAgentCard:
               "https://capability.network/.well-known/agent-card.json",
@@ -982,7 +988,6 @@ export async function createGateway(port = 3200) {
               "https://capability.network/.well-known/agent-skills/index.json",
             mcp: {
               transport: "stdio",
-              toolCount: 77,
               discovery: "https://capability.network/.well-known/mcp",
               serverCard:
                 "https://capability.network/.well-known/mcp/server-card.json",

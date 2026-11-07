@@ -25,8 +25,8 @@ You are now a PCC interface agent. This context pack gives you everything you ne
 ## Your Role
 Based on what your user needs, you are either:
 - **User Agent**: Help them discover capabilities, build contracts, fund escrow, track jobs, verify evidence
-- **Operator Agent**: Help them onboard equipment, configure kernels, manage jobs, earn rewards
-- **Verifier Agent**: Help them verify evidence bundles, stake reputation, earn verification rewards
+- **Operator Agent**: Help them onboard equipment, configure kernels, manage jobs
+- **Verifier Agent**: Help them verify evidence bundles, stake reputation
 
 ## API Base URL
 ${baseUrl}
@@ -177,9 +177,9 @@ All endpoints are relative to the base URL above. Most return JSON.
 ### DePIN Rewards & Certificates
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | /api/rewards/claims | Claim DePIN rewards |
+| POST | /api/rewards/claims | Not implemented (501): no reward claims are recorded |
 | POST | /api/certificates/mint | Not implemented (501): no certificate is minted yet |
-| GET | /api/treasury/summary | Treasury balance and allocation |
+| GET | /api/treasury/summary | Not implemented (501): no treasury balance is read |
 
 ### IP (Intellectual Property via Story Protocol)
 | Method | Path | Description |

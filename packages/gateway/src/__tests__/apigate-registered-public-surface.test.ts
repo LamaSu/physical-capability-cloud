@@ -506,9 +506,11 @@ const EXPECTED_PUBLIC_API_SURFACE: string[] = [
 const EXPECTED_ADMIN_KEY_DECLARATIONS = [
   [["POST", "GET", "HEAD"], "regex", null, "^\\/api\\/operator\\/jobs\\/[^/]+\\/receipt$", "", "N149 gateway receipts: the receipt route also accepts the gateway admin secret itself"],
   [["POST"], "exact", "/api/admin/settlement-challenges", null, null, "N149 one-use settlement challenge issuance: also accepts the gateway admin secret itself"],
+  [["GET"], "exact", "/api/admin/posture", null, null, "N237 posture read: also accepts the gateway admin secret itself"],
 ];
 
 const EXPECTED_ADMIN_KEY_SURFACE = [
+  "GET /api/admin/posture",
   "GET /api/operator/jobs/:jobId/receipt",
   "HEAD /api/operator/jobs/:jobId/receipt",
   "POST /api/admin/settlement-challenges",

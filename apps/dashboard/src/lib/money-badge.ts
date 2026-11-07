@@ -27,6 +27,10 @@ export function moneyBadgeColor(status: unknown): MoneyBadgeColor {
   return TONE_COLOR[classifyMoneyStatus(status).tone];
 }
 
+export function moneyToneColor(tone: MoneyTone): MoneyBadgeColor {
+  return TONE_COLOR[tone];
+}
+
 // Compile-time: every value of the dashboard's EscrowStatus type is listed here
 // (tsc fails if the type gains one), and the test asserts each is a KNOWN money
 // state in the canonical map, so no real escrow status ever renders "unknown".

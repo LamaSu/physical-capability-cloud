@@ -167,7 +167,7 @@ function LogoutButton() {
   );
 }
 
-function DashboardShell() {
+function DashboardShell({ visitor = false }: { visitor?: boolean }) {
   const navigate = useNavigate();
   const location = useLocation();
   const { sidebarCollapsed, toggleSidebar, currentPageTitle, currentPageSubtitle } = useUIStore();
@@ -188,16 +188,16 @@ function DashboardShell() {
                 onToggle={toggleSidebar}
               />
             </div>
-            <div className="border-t border-white/[0.06] p-2">
+            {!visitor && <div className="border-t border-white/[0.06] p-2">
               <LogoutButton />
-            </div>
+            </div>}
           </div>
         }
         topBar={
           <TopBar
             title={currentPageTitle}
             subtitle={currentPageSubtitle}
-            actions={<><ModeToggle /><ConnectWallet /><TourRestartButton /></>}
+            actions={<><ModeToggle /><ConnectWallet />{!visitor && <TourRestartButton />}</>}
           />
         }
         statusBar={null}
@@ -281,7 +281,7 @@ function DashboardShell() {
         </PageTransition>
       </AppShell>
       <NotificationToasts />
-      <OnboardingTour />
+      {!visitor && <OnboardingTour />}
     </>
   );
 }
@@ -297,10 +297,11 @@ function Shell() {
   const sessionToken = useAuthStore((s) => s.sessionToken);
   // A restored wallet session can still make cookie-authorized reads and stops.
   const hasAccess = isAuthenticated || sessionToken !== null;
+  const isDiscover = location.pathname.replace(/\/+$/, "") === "/discover";
 
   // Public pages that don't require auth
   const publicPaths = ["/", "/start", "/whitepaper", "/go", "/earn", "/onboard/chat"];
-  const isPublicPage = publicPaths.includes(location.pathname);
+  const isPublicPage = isDiscover || publicPaths.includes(location.pathname);
 
   // Login page at /login
   if (location.pathname === "/login") {
@@ -393,9 +394,10 @@ function Shell() {
   }
 
   if (location.pathname === "/operator" ||
-      (location.pathname.startsWith("/operator/") && location.pathname !== "/operator/revenue")) {
+      (location.pathname.startsWith("/operator/") && location.pathname.replace(/\/+$/, "") !== "/operator/revenue")) {
     return <DashboardShell />;
   }
+  if (isDiscover) return <DashboardShell visitor={!hasAccess} />;
 
   // /app and /app/* — Spatial fallback web dashboard (with agent prompt banner)
   if (location.pathname === "/app" || location.pathname.startsWith("/app/")) {

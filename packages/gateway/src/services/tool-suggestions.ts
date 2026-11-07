@@ -132,11 +132,11 @@ const OPENTRONS_TOOLS: SuggestedTool[] = [
   },
   {
     name: "ot_list_protocols",
-    description: "List available protocol templates for this OT-2",
+    description: "List protocol templates. NOTE: the gateway currently serves only a fixed set of built-in example templates; templates sent to create_protocol are not stored, so they do not appear here",
     category: "device",
     recommended: true,
     endpoint: { method: "GET", path: "/api/protocols" },
-    inputSchema: { type: "object", properties: { capabilityType: { type: "string", description: "Filter by capability" } } },
+    inputSchema: { type: "object", properties: { capabilityType: { type: "string", description: "Optional and not used: the gateway returns its built-in example list whatever you send." } } },
   },
   {
     name: "ot_queue_status",

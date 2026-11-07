@@ -26,7 +26,7 @@ export async function agentChatRoutes(app: FastifyInstance) {
 
 const PCC_TOOLS = [
   { name: "list_capability_types", description: "List all capability types on the PCC network.", input_schema: { type: "object", properties: {}, required: [] } },
-  { name: "search_capabilities", description: "Search capability templates by type or keyword.", input_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
+  { name: "search_capabilities", description: "List the built-in capability type templates: each type's name, version, description, parameter count, parameter group names and a base price hint. NOTE: these describe types, not operators' offerings, and carry no assurance tiers or availability. The gateway does not read the query, so it never narrows the list. Registered capabilities of a type are listed by GET /api/capabilities?type=<type>.", input_schema: { type: "object", properties: { query: { type: "string", description: "Optional and not used: the gateway returns the full list whatever you send." } }, required: [] } },
   { name: "get_build_options", description: "Get configuration options for a capability type.", input_schema: { type: "object", properties: { type: { type: "string" }, selections: { type: "object" }, profileId: { type: "string" } }, required: ["type"] } },
   { name: "calculate_price", description: "Calculate price for a capability configuration.", input_schema: { type: "object", properties: { type: { type: "string" }, selections: { type: "object" } }, required: ["type", "selections"] } },
   { name: "build_contract", description: "Build and submit a capability contract with escrow.", input_schema: { type: "object", properties: { type: { type: "string" }, selections: { type: "object" }, assuranceTier: { type: "number" } }, required: ["type", "selections", "assuranceTier"] } },
@@ -36,13 +36,9 @@ const PCC_TOOLS = [
   { name: "get_kernel", description: "Get kernel details.", input_schema: { type: "object", properties: { kernelId: { type: "string" } }, required: ["kernelId"] } },
   { name: "list_escrows", description: "List escrow contracts.", input_schema: { type: "object", properties: {}, required: [] } },
   { name: "get_escrow", description: "Get escrow details.", input_schema: { type: "object", properties: { escrowId: { type: "string" } }, required: ["escrowId"] } },
-  { name: "get_marketplace_overview", description: "Equipment marketplace overview.", input_schema: { type: "object", properties: {}, required: [] } },
   { name: "get_operator_dashboard", description: "Operator dashboard data.", input_schema: { type: "object", properties: {}, required: [] } },
   { name: "list_batches", description: "List batches.", input_schema: { type: "object", properties: {}, required: [] } },
   { name: "list_evidence", description: "List evidence bundles.", input_schema: { type: "object", properties: {}, required: [] } },
-  { name: "get_logistics_overview", description: "Logistics hub overview.", input_schema: { type: "object", properties: {}, required: [] } },
-  { name: "list_protocols", description: "List protocol templates.", input_schema: { type: "object", properties: {}, required: [] } },
-  { name: "get_depin_stats", description: "DePIN statistics.", input_schema: { type: "object", properties: {}, required: [] } },
   { name: "get_subnet_status", description: "Bittensor subnet status.", input_schema: { type: "object", properties: {}, required: [] } },
   { name: "get_wallet_balance", description: "Check agent wallet USDC balance, pending deposits, and API credits.", input_schema: { type: "object", properties: {}, required: [] } },
   { name: "get_funding_options", description: "Show funding options — Stripe (US/EU) and Yellowcard (34 countries).", input_schema: { type: "object", properties: {}, required: [] } },

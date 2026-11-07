@@ -11,6 +11,7 @@ import type {
   DriftAlertDTO,
   EvidenceSummaryDTO,
   PaginatedResult,
+  AgentMeDTO,
 } from "../types/dto.js";
 
 const BASE_URL = "/api";
@@ -70,6 +71,10 @@ export interface JobListResponse {
 export const api = {
   // Health
   health: () => fetchAPI<{ status: string }>("/health"),
+
+  getProductHome: () => fetchAPI<unknown>("/product/home"),
+
+  getAgentMe: () => fetchAPI<AgentMeDTO>("/agent/me"),
 
   // ── Capabilities ─────────────────────────────────────────────────────────
 

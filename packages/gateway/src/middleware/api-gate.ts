@@ -198,6 +198,7 @@ export const PUBLIC_ROUTES: readonly PublicRoute[] = Object.freeze([
 export const ADMIN_KEY_ROUTES = Object.freeze([
   Object.freeze({ methods: Object.freeze(["POST", "GET", "HEAD"] as const), match: "regex" as const, path: /^\/api\/operator\/jobs\/[^/]+\/receipt$/, why: "N149 gateway receipts: the receipt route also accepts the gateway admin secret itself" }),
   Object.freeze({ methods: POST, match: "exact" as const, path: "/api/admin/settlement-challenges", why: "N149 one-use settlement challenge issuance: also accepts the gateway admin secret itself" }),
+  Object.freeze({ methods: Object.freeze(["GET"] as const), match: "exact" as const, path: "/api/admin/posture", why: "N237 posture read: also accepts the gateway admin secret itself" }),
 ]);
 
 function pathMatches(entry: PublicRoute, path: string): boolean {
