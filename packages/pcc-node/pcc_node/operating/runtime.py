@@ -447,6 +447,9 @@ def _request(method: str, url: str, body: Any = None, *, deadline: float, clock:
         resp = conn.getresponse()
         status = resp.status
         raw = _read_bounded(resp, max_bytes, watch)
+        watch.check()  # a socket shut by the watch can look like an ordinary EOF
+        if resp.length is not None and resp.length > 0:
+            return _Answer(status, None, sent)
     except _Abort as halt:
         raise _Abort(halt.reason, sent)
     except (OSError, http.client.HTTPException) as e:
