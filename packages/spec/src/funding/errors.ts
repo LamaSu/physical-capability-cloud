@@ -60,7 +60,7 @@ export type FundingRefusalCode =
   | "NOT_PREPARED"
   /** The wallet produced a signature the contract would not accept (length, v or high s). */
   | "SIGNATURE_NOT_CANONICAL"
-  /** The escrow clone does not exist yet (the gateway creates it before prepare returns). */
+  /** The escrow clone does not exist yet: ensureEscrow creates it, and approveAndFund never does. */
   | "ESCROW_NOT_CREATED"
   /**
    * The escrow or the job is already funded under some other acceptance, or the escrow reports this policy's hash
