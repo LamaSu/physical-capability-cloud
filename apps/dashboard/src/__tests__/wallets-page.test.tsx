@@ -405,6 +405,74 @@ describe("/wallets", () => {
     expect(rows()[0]!.querySelector("h2")?.textContent).toBe("New owner wallet");
   });
 
+  it("T15: a late identity-change read never overwrites the read that follows an in-flight unlink", async () => {
+    await startUnlink();
+    const post = deferred<Response>();
+    authorizedFetch.mockReturnValueOnce(post.promise);
+    await click("Unlink", rows()[0]);
+    const identityRead = deferred<Response>();
+    authorizedFetch.mockReturnValueOnce(identityRead.promise);
+    await act(async () => changedIdentity());
+    expect(gets()).toHaveLength(2);
+    authorizedFetch.mockResolvedValueOnce(json({ links: [{ ...WALLETS[0], status: "revoked", revokedAt: REVOKED_AT }] }));
+    await act(async () => post.resolve(json({ status: "revoked", revokedAt: REVOKED_AT })));
+    expect(gets()).toHaveLength(3);
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(K3);
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]!.textContent).toContain(`Unlinked at ${REVOKED_AT}`);
+    await act(async () => identityRead.resolve(json({ links: [WALLETS[0]] })));
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]!.textContent).toContain(`Unlinked at ${REVOKED_AT}`);
+    expect(buttons("Unlink")).toHaveLength(0);
+  });
+
+  it.each([
+    { name: "K5", reply: () => Promise.resolve(json({ status: "revoked", revokedAt: REVOKED_AT })), text: `Unlinked ${WALLETS[0]!.label}.` },
+    { name: "K4a", reply: () => Promise.resolve(json({ error: "not_found" }, 404)), text: K4a },
+    { name: "K4b", reply: () => Promise.resolve(json({ error: "invalid_request" }, 400)), text: K4b },
+  ])("T16: a settled $name does not stay beside the next sign-in's list", async ({ reply, text }) => {
+    await startUnlink();
+    authorizedFetch.mockImplementationOnce(reply);
+    await click("Unlink", rows()[0]);
+    expect(container.textContent).toContain(text);
+    authorizedFetch.mockResolvedValueOnce(json({ links: [{ ...WALLETS[1], label: "New sign-in wallet" }] }));
+    await act(async () => changedIdentity());
+    expect(container.textContent).not.toContain(text);
+    expect(container.textContent).not.toContain(K8);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(rows().map((row) => row.querySelector("h2")?.textContent)).toEqual(["New sign-in wallet"]);
+  });
+
+  it("T17: an Unlink click that lands before the re-render after a sign-in change sends nothing and shows K8", async () => {
+    await startUnlink();
+    const confirmButton = button("Unlink", rows()[0]);
+    authorizedFetch.mockReturnValueOnce(deferred<Response>().promise);
+    await act(async () => { changedIdentity(); confirmButton.click(); });
+    expect(posts()).toHaveLength(0);
+    expect(gets()).toHaveLength(3);
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(K8);
+    expect(buttons("Keep linked")).toHaveLength(0);
+  });
+
+  it("T18: an unlink that settles after the page unmounts sends no further request", async () => {
+    await startUnlink();
+    const post = deferred<Response>();
+    authorizedFetch.mockReturnValueOnce(post.promise);
+    await click("Unlink", rows()[0]);
+    await act(async () => {
+      window.history.pushState({}, "", "/link");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      await import("../pages/WalletLinkPage.js");
+    });
+    await vi.waitFor(async () => {
+      await act(async () => {});
+      expect(container.querySelector("h1")?.textContent).toBe("Link a wallet to your PCC account");
+    });
+    const calls = authorizedFetch.mock.calls.length;
+    await act(async () => post.resolve(json({ status: "revoked", revokedAt: REVOKED_AT })));
+    expect(authorizedFetch.mock.calls.length).toBe(calls);
+  });
+
   it("returns only validated list fields", async () => {
     authorizedFetch.mockResolvedValueOnce(json({ links: [{ ...WALLETS[0], balance: "private", publicKey: "irrelevant", ownerId: "private" }] }));
     expect(await listWallets()).toEqual([WALLETS[0]]);
