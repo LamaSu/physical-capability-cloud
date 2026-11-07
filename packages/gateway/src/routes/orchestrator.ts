@@ -9,6 +9,7 @@ import type {
   InstrumentStep,
   ResourceClaim,
 } from "@pcc/spec";
+import { gateDemoRoutes, notAvailable } from "../config/demo-routes.js";
 
 // ---------------------------------------------------------------------------
 // Mock Data — Biotech lab kernel topology
@@ -95,7 +96,14 @@ const mockClaims: ResourceClaim[] = [
 // Routes
 // ---------------------------------------------------------------------------
 
+const ORCHESTRATOR_NOT_AVAILABLE = notAvailable(
+  "Transfer graphs, samples, resource claims and instrument workflows under /api/orchestrator are not recorded on this gateway.",
+  "Only built-in examples exist, and they are not served.",
+  [],
+);
+
 export async function orchestratorRoutes(app: FastifyInstance) {
+  gateDemoRoutes(app, ORCHESTRATOR_NOT_AVAILABLE);
   // --- Transfer Graphs ---
 
   app.get("/api/orchestrator/graphs", async () => {

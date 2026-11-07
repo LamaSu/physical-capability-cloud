@@ -258,7 +258,7 @@ The event stream replaces `ProtocolRunner.eventListeners`: consumers subscribe v
 
 ### 3.3 New endpoint — CWL export
 
-This is Phase 3. New route, no migration risk:
+This is Phase 3, which is none for now (section 4). The sketch is kept for reference:
 
 ```ts
 import { cwlExport } from '@pcc/workflow/cwl';
@@ -273,7 +273,7 @@ fastify.get('/api/protocols/:id/cwl', async (req, reply) => {
 });
 ```
 
-External labs running cwltool / Toil / StreamFlow / Galaxy can now consume PCC protocols without source access.
+With it, external labs running cwltool / Toil / StreamFlow / Galaxy could consume PCC protocols without source access.
 
 ---
 
@@ -301,15 +301,9 @@ These are lifted verbatim from §11 of [`ai/research/pcc-workflow-runtime-design
 - Who calls this: `packages/gateway/src/routes/orchestrator.ts` via the facade layer. Also `packages/gateway/src/routes/protocols.ts` for template-driven runs. Both keep calling the same facade interface; routing through the workflow engine is internal.
 - Concrete change: see §3.2 above.
 
-### Phase 3 — CWL export endpoint at `/api/protocols/:id/cwl`
+### Phase 3 — none for now
 
-**Goal**: expose protocol templates as CWL v1.2 YAML for external labs and compliance auditors.
-
-- LOC estimate: ~80 LOC for the route + ~50 LOC for the `ProtocolTemplate → WorkflowDef` adapter.
-- Test impact: snapshot test on one representative template. Add contract test that emitted YAML parses with `cwl-ts-auto.loadDocument` (dev-dep only).
-- Breaking change risk: **ZERO** — new endpoint.
-- Who calls this: external research infrastructure; PCC's own export UI (future); compliance auditors.
-- Optional companion: `POST /api/protocols/import/cwl` for the round-trip. Adds `cwl-ts-auto` as a gateway dev-dep.
+`/api/protocols/*` serves only built-in example templates, and it answers 501 unless `PCC_DEMO_ROUTES=1`.
 
 ### Phase 4 — Optional Merkle audit log
 

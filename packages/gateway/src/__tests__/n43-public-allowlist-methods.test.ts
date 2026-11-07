@@ -133,6 +133,16 @@ function marketplaceWrites(listingId: string): InjectOptions[] {
 }
 
 describe("N43 (a): the retired marketplace writes are 410 for every caller, and the mock never changes", () => {
+  let savedDemoRoutes: string | undefined;
+  beforeAll(() => {
+    savedDemoRoutes = process.env.PCC_DEMO_ROUTES;
+    process.env.PCC_DEMO_ROUTES = "1";
+  });
+  afterAll(() => {
+    if (savedDemoRoutes === undefined) delete process.env.PCC_DEMO_ROUTES;
+    else process.env.PCC_DEMO_ROUTES = savedDemoRoutes;
+  });
+
   it.each(CALLERS)("%s gets 410 on POST/PUT/DELETE /api/marketplace/listings(/:id) and POST /api/marketplace/orders", async (caller) => {
     const before = await marketplaceState();
     const target = (before.listings.listings as Listing[]).find((l) => l.inStock);
@@ -371,6 +381,19 @@ describe("N43 F1: artifact-detail HEAD preserves SIWE ownership", () => {
     const res = await send("a SIWE session", { method: "GET", url: `/api/artifacts/${privateId}` });
     expect({ status: res.statusCode, error: body(res).error }).toEqual({ status: 403, error: "forbidden" });
   });
+});
+
+it("N34: flag off, an anonymous marketplace read answers 501 not_available", async () => {
+  const savedDemoRoutes = process.env.PCC_DEMO_ROUTES;
+  delete process.env.PCC_DEMO_ROUTES;
+  try {
+    const res = await send("anonymous", { method: "GET", url: "/api/marketplace/classes" });
+    expect(res.statusCode).toBe(501);
+    expect(body(res).error).toBe("not_available");
+  } finally {
+    if (savedDemoRoutes === undefined) delete process.env.PCC_DEMO_ROUTES;
+    else process.env.PCC_DEMO_ROUTES = savedDemoRoutes;
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
