@@ -163,4 +163,11 @@ describe("CLI subprocess", () => {
       expect(result.stderr).not.toContain(dir);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+  it("CLI5: the built gateway dist lists PCC_POSTURE_POLICY, which posture reads from its env snapshot", () => {
+    const result = spawnSync(process.execPath, [join(root, "packages/gateway/dist/env-reads-cli.js"), join(root, "packages/gateway/dist")], { encoding: "utf8" });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    const names: string[] = JSON.parse(result.stdout).names;
+    for (const name of ["PCC_POSTURE_POLICY", "PCC_ADMIN_KEY"]) expect(names.includes(name), name).toBe(true);
+  });
 });
