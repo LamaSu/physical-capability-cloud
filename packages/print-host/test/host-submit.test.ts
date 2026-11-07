@@ -1392,3 +1392,134 @@ describe("rehearsal envelope and restart promises (r5d F3)", () => {
     expect(setup.operatorKey.signD1).not.toHaveBeenCalled();
   });
 });
+
+describe("REVIEW A3 liveness under run() (repro)", () => {
+  it("four recovered units on a retried refusal still let run() poll, and each unit gets attempts", async () => {
+    const setup = await fixture();
+    setup.gateway.postReceipt.mockResolvedValue({ ok: false, code: "receipt_refused", status: 422, sub: "package_challenge_refused" });
+    expect(await finish(setup)).toMatchObject({ state: "package_built" });
+    const pkg = await setup.diskPackage();
+    const stuck = ["a1:package-built", "a2:package-built", "a3:package-built", jobId];
+    for (const other of stuck.slice(0, 3)) {
+      await setup.journal.append(other, "evidence_stored");
+      await setup.journal.savePackage(other, pkg);
+      await setup.journal.append(other, "package_built", undefined, { packageDigest: pkg.packageDigest, evidenceBlockHash: pkg.evidenceBlockHash });
+    }
+    // Each gateway call takes simulated time; run()'s waits advance the frozen clock.
+    setup.gateway.postReceipt.mockImplementation(async () => {
+      setup.advance(200);
+      return { ok: false as const, code: "receipt_refused" as const, status: 422, sub: "package_challenge_refused" as const };
+    });
+    setup.gateway.heartbeat.mockImplementation(async () => { setup.advance(50); return { ok: true as const, value: null }; });
+    const start = setup.deps.clock!();
+    const pollTimes: number[] = [];
+    setup.gateway.pollJobs.mockImplementation(async () => {
+      pollTimes.push(setup.deps.clock!() - start);
+      setup.advance(100);
+      return { ok: true, value: { stop: { proceed: true }, jobs: [{ jobId, status: "queued" }], foreignJobsDropped: 0, truncated: false } };
+    });
+    const stop = new AbortController();
+    const timers: HostTimers = {
+      setTimeout(callback, ms) {
+        setup.advance(ms + 1);
+        if (setup.deps.clock!() - start >= 30 * 60_000) stop.abort();
+        return setTimeout(callback, 0);
+      },
+      clearTimeout(handle) { if (handle !== undefined) clearTimeout(handle as ReturnType<typeof setTimeout>); },
+    };
+    const recovered = await restart(setup, { timers });
+    const before = setup.gateway.postReceipt.mock.calls.length;
+    await recovered.host.run(stop.signal);
+    const attempted = setup.gateway.postReceipt.mock.calls.slice(before).map(([id]) => id);
+    expect(pollTimes.filter((t) => t >= 20 * 60_000).length).toBeGreaterThan(0);
+    for (const id of stuck) expect(attempted.filter((x) => x === id).length).toBeGreaterThan(0);
+  });
+
+  it.each([2, 3, 5, 6])("round 3: run() keeps polling and shares retries across %i stuck units", async (count) => {
+    const setup = await fixture();
+    setup.gateway.postReceipt.mockResolvedValue({ ok: false, code: "receipt_refused", status: 422, sub: "package_challenge_refused" });
+    expect(await finish(setup)).toMatchObject({ state: "package_built" });
+    const pkg = await setup.diskPackage();
+    const stuck = [...Array.from({ length: count - 1 }, (_, index) => `a${index}:package-built`), jobId];
+    for (const other of stuck.slice(0, -1)) {
+      await setup.journal.append(other, "evidence_stored");
+      await setup.journal.savePackage(other, pkg);
+      await setup.journal.append(other, "package_built", undefined, { packageDigest: pkg.packageDigest, evidenceBlockHash: pkg.evidenceBlockHash });
+    }
+    const start = setup.deps.clock!();
+    const attempts: Array<{ id: string; at: number }> = [];
+    setup.gateway.postReceipt.mockImplementation(async (id) => {
+      attempts.push({ id, at: setup.deps.clock!() - start });
+      setup.advance(200);
+      return { ok: false, code: "receipt_refused", status: 422, sub: "package_challenge_refused" };
+    });
+    setup.gateway.heartbeat.mockImplementation(async () => { setup.advance(50); return { ok: true, value: null }; });
+    const pollTimes: number[] = [];
+    setup.gateway.pollJobs.mockImplementation(async () => {
+      pollTimes.push(setup.deps.clock!() - start);
+      setup.advance(100);
+      return { ok: true, value: { stop: { proceed: true }, jobs: [{ jobId, status: "queued" }], foreignJobsDropped: 0, truncated: false } };
+    });
+    const stop = new AbortController();
+    const timers: HostTimers = {
+      setTimeout(callback, ms) {
+        setup.advance(ms + 1);
+        if (setup.deps.clock!() - start >= 30 * 60_000) stop.abort();
+        return setTimeout(callback, 0);
+      },
+      clearTimeout(handle) { if (handle !== undefined) clearTimeout(handle as ReturnType<typeof setTimeout>); },
+    };
+    const recovered = await restart(setup, { timers });
+    await recovered.host.run(stop.signal);
+    expect(pollTimes.filter((at) => at >= 20 * 60_000).length).toBeGreaterThan(0);
+    const counts = stuck.map((id) => attempts.filter((attempt) => attempt.id === id && attempt.at >= 20 * 60_000).length);
+    for (const attempts of counts) expect(attempts).toBeGreaterThan(0);
+    expect(Math.max(...counts) - Math.min(...counts)).toBeLessThanOrEqual(1);
+    expect(setup.sentData).toEqual([]);
+  });
+
+  it("round 3: ready recovery prefers the oldest retry time, with never-attempted units first", async () => {
+    const setup = await fixture();
+    setup.gateway.postReceipt.mockResolvedValue({ ok: false, code: "receipt_refused", status: 422, sub: "package_challenge_refused" });
+    expect(await finish(setup)).toMatchObject({ state: "package_built" });
+    const pkg = await setup.diskPackage();
+    async function addRecovery(id: string) {
+      await setup.journal.append(id, "evidence_stored");
+      await setup.journal.savePackage(id, pkg);
+      await setup.journal.append(id, "package_built", undefined, { packageDigest: pkg.packageDigest, evidenceBlockHash: pkg.evidenceBlockHash });
+    }
+    await addRecovery("a:package-built");
+    setup.advance(1_000);
+    expect(await setup.host.runOnce()).toMatchObject({ jobId: "a:package-built", state: "package_built" });
+    setup.advance(5_000);
+    expect(await setup.host.runOnce()).toMatchObject({ kind: "idle" });
+    // Both are ready: jobId's retry was due at +5 s, the earlier journal's at +6 s.
+    expect(await setup.host.runOnce()).toMatchObject({ jobId, state: "package_built" });
+    await addRecovery("z:package-built");
+    expect(await setup.host.runOnce()).toMatchObject({ kind: "idle" });
+    expect(await setup.host.runOnce()).toMatchObject({ jobId: "z:package-built", state: "package_built" });
+  });
+
+  it("round 3: recovery continues during poll backoff and yields when the poll becomes due", async () => {
+    const setup = await fixture();
+    setup.gateway.postReceipt.mockResolvedValue({ ok: false, code: "receipt_refused", status: 422, sub: "package_challenge_refused" });
+    expect(await finish(setup)).toMatchObject({ state: "package_built" });
+    const other = "a:package-built";
+    const pkg = await setup.diskPackage();
+    await setup.journal.append(other, "evidence_stored");
+    await setup.journal.savePackage(other, pkg);
+    await setup.journal.append(other, "package_built", undefined, { packageDigest: pkg.packageDigest, evidenceBlockHash: pkg.evidenceBlockHash });
+    setup.advance(1_000);
+    expect(await setup.host.runOnce()).toMatchObject({ jobId: other, state: "package_built" });
+    setup.gateway.pollJobs.mockResolvedValueOnce({ ok: false, code: "rate_limited", status: 429, retryAfterS: 60 });
+    expect(await setup.host.runOnce()).toEqual({ kind: "backoff", waitMs: 60_000 });
+    const polls = setup.gateway.pollJobs.mock.calls.length;
+    setup.advance(5_000);
+    expect(await setup.host.runOnce()).toMatchObject({ jobId, state: "package_built" });
+    expect(await setup.host.runOnce()).toMatchObject({ jobId: other, state: "package_built" });
+    expect(setup.gateway.pollJobs).toHaveBeenCalledTimes(polls);
+    setup.advance(55_000);
+    expect(await setup.host.runOnce()).toEqual({ kind: "idle", waitMs: 5_000 });
+    expect(setup.gateway.pollJobs).toHaveBeenCalledTimes(polls + 1);
+  });
+});

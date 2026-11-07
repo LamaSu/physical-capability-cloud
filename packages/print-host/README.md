@@ -379,8 +379,9 @@ unit or job that a rehearsal directory already printed.
 Before a sending run, check:
 - the data directory follows the rule above: never used by a `--no-submit`
   run, and the same one for every later sending run and restart;
-- the run is supervised and covers one unit, unless r5d's chain change
-  (the collapse review's F1) has also merged. That change narrows which
+- the run is supervised and covers one unit, unless CODE #38's r5d chain
+  change (the collapse review's F1) has also merged. This host includes the
+  recovery polling and fairness fix; the separate chain change narrows which
   decoded send-time escrow errors release the operator's nonce; see
   "Evidence transaction caps".
 
@@ -549,10 +550,11 @@ cannot pass these checks, so the unit is never paid; the payer reclaims at
 `reclaimAt`. These gateway-fixable refusals retry under their own log codes:
 `404 job_not_found`, `422 package_challenge_refused`,
 `422 package_registry_refused`, `422 package_operator_refused` and
-`503 receipt_storage_unavailable`; such a unit no longer holds up the host while
-backing off (see recovery below). A `409 kernel_emergency_stopped` and other
-409 errors retry without submission; a receipt for a different package is
-terminal `receipt_mismatch`.
+`503 receipt_storage_unavailable`; the recovery scheduler shares attempts
+between these units and preserves polling opportunities while they retry
+(see recovery below). A `409 kernel_emergency_stopped` and other 409 errors
+retry without submission; a receipt for a different package is terminal
+`receipt_mismatch`.
 A source failure on restart logs its closed input code and retries from
 `evidence_stored`; only a returned incomplete manifest writes `package_inputs_missing`.
 
@@ -578,12 +580,15 @@ POST a receipt. Missing or altered package artifacts likewise halt.
 Unresolved attempts take priority over every new send on the operator's nonce
 stream. Repeated unchanged read-back outcomes log their code without growing
 the durable journal.
-While a recovered code-less `evidence_stored`, `package_built` or
-`receipt_stored` unit backs off after a failed attempt, it no longer holds up
-the host: the next tick attempts the next ready recovered unit, or polls,
-checks e-stop and may claim new work. Once its backoff ends, a tick makes one
-attempt for it; after an attempt the run loop waits until the backoff ends or
-the next heartbeat is due, whichever is sooner. The exception is the
+Recovered code-less `evidence_stored`, `package_built` and `receipt_stored`
+units are skipped while their retries back off. After each non-blocking
+recovery attempt, the next tick polls, checks e-stop and may claim new work,
+instead of selecting another non-blocking recovery. Recovery may still run
+while the poll itself is backing off. Among ready recovered units, those not
+yet attempted in this process go first; otherwise the oldest retry time
+(`until`) goes first. Each attempt tick returns its result before polling.
+After an attempt the run loop waits until the backoff ends or the next
+heartbeat is due, whichever is sooner. The exception is the
 operator's spend caps: while any stored receipt backs off on
 `submit_caps_exceeded`, the host polls and claims nothing because new units
 would face the same caps. `submit_attempted` and `submit_indeterminate` still

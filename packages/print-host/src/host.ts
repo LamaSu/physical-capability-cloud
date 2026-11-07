@@ -148,6 +148,7 @@ export function createHost(deps: HostDeps): {
   let lastHeartbeat = -Infinity;
   let pollFailures = 0;
   let nextPollAt = -Infinity;
+  let pollAfterRecovery = false;
   let activeTick: Promise<HostTickResult> | undefined;
   let activePrint: AbortController | undefined;
   let activeHold: AbortController | undefined;
@@ -428,7 +429,7 @@ export function createHost(deps: HostDeps): {
       const records = await journal.list();
       // A possibly pending transaction owns the operator's nonce stream.
       const recoverable = records.find((entry) => entry.state === "submit_attempted" || entry.state === "submit_indeterminate")
-        ?? records.find((entry) => {
+        ?? records.filter((entry) => {
           if (entry.state !== "package_built" && entry.state !== "receipt_stored" && entry.state !== "evidence_stored") return false;
           if (!sendEnabled || !deps.broadcaster) {
             if (entry.state === "package_built" || entry.state === "receipt_stored") log("submit_disabled");
@@ -436,12 +437,18 @@ export function createHost(deps: HostDeps): {
           }
           const pendingUntil = retries.get(entry.jobId)?.until;
           if (pendingUntil !== undefined && now() < pendingUntil) return false;
+          // Yield to a due poll after recovery, except for the operator's caps.
+          // A poll backoff leaves time for other ready recovery attempts.
+          if (pollAfterRecovery && now() >= nextPollAt
+            && retries.get(entry.jobId)?.code !== "submit_caps_exceeded") return false;
           return entry.state !== "evidence_stored" || entry.code === undefined;
-        });
+        }).sort((a, b) => (retries.get(a.jobId)?.until ?? -Infinity)
+          - (retries.get(b.jobId)?.until ?? -Infinity))[0];
       if (recoverable) {
         const until = retries.get(recoverable.jobId)?.until;
         if (until !== undefined && now() < until) return { kind: "backoff", jobId: recoverable.jobId, waitMs: until - now() };
         const state = await submitStored(recoverable.jobId);
+        if (recoverable.state !== "submit_attempted" && recoverable.state !== "submit_indeterminate") pollAfterRecovery = true;
         return { kind: "job", jobId: recoverable.jobId, state, waitMs: jobWait(recoverable.jobId) };
       }
       for (const [cappedJobId, capped] of retries) {
@@ -451,6 +458,7 @@ export function createHost(deps: HostDeps): {
       }
     }
     if (now() < nextPollAt) return { kind: "backoff", waitMs: nextPollAt - now() };
+    pollAfterRecovery = false;
     const initial = await poll();
     if (!initial.ok) {
       log(safeGwCode(initial.code));
