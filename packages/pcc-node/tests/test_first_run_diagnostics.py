@@ -57,6 +57,14 @@ def _no_terminal_line(path):
     )
 
 
+def _shell_word(path):
+    """B4's rule: the path as it is if every character is safe, else single-quoted with each ' as '"'"'."""
+    safe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./-"
+    if all(c in safe for c in path):
+        return path
+    return "'" + path.replace("'", "'\"'\"'") + "'"
+
+
 def _separate_streams_runner():
     try:
         return CliRunner(mix_stderr=False)
@@ -78,7 +86,7 @@ def test_no_terminal_at_eof_defers_the_question(tmp_path, monkeypatch, capsys):
     assert config.diagnostics_mode == "off"
     assert not sentinel.exists()
     shown = capsys.readouterr()
-    assert shown.out == _no_terminal_line(os.path.join(os.getcwd(), "pcc-node.json"))
+    assert shown.out == _no_terminal_line(_shell_word(os.path.join(os.getcwd(), "pcc-node.json")))
     assert shown.err == ""
 
     monkeypatch.setattr(cli, "_interactive", lambda: True)
@@ -103,7 +111,7 @@ def test_no_terminal_leaves_a_waiting_answer_unread(tmp_path, monkeypatch, capsy
     assert config.diagnostics_mode == "off"
     assert not sentinel.exists()
     shown = capsys.readouterr()
-    assert shown.out == _no_terminal_line(os.path.join(os.getcwd(), "pcc-node.json"))
+    assert shown.out == _no_terminal_line(_shell_word(os.path.join(os.getcwd(), "pcc-node.json")))
     assert shown.err == ""
     assert stdin.read() == "y\n"
 
@@ -134,13 +142,47 @@ def test_start_without_a_terminal_runs_with_diagnostics_off(tmp_path, monkeypatc
     assert run_daemon.call_args[0][0].diagnostics_mode == "off"
     assert json.loads(config_path.read_text())["diagnostics_mode"] == "off"
     assert not sentinel.exists()
-    path_word = str(config_path)
+    path_word = _shell_word(str(config_path))
     if config_name == "my dir/it's.json":
         path_word = "'" + str(tmp_path) + "/my dir/it'\"'\"'s.json'"
     assert result.stdout.count(_no_terminal_line(path_word)) == 1
     assert "Auto-diagnostics (first-run setup)" not in result.stdout
     assert f"  Config saved to {config_path}\n" in result.stdout
     assert result.stderr == ""
+
+
+@pytest.mark.parametrize(
+    "name,word",
+    [
+        ("node-1_v2.json", "/srv/pcc/node-1_v2.json"),
+        ("a b.json", "'/srv/pcc/a b.json'"),
+        ("it's.json", "'/srv/pcc/it'\"'\"'s.json'"),
+        ('a"b.json', "'/srv/pcc/a\"b.json'"),
+        ("$HOME.json", "'/srv/pcc/$HOME.json'"),
+        ("$(id).json", "'/srv/pcc/$(id).json'"),
+        ("`id`.json", "'/srv/pcc/`id`.json'"),
+        ("a\\b.json", "'/srv/pcc/a\\b.json'"),
+        ("*?[a].json", "'/srv/pcc/*?[a].json'"),
+        ("x{a,b}.json", "'/srv/pcc/x{a,b}.json'"),
+        ("a;b&c|d<e>f.json", "'/srv/pcc/a;b&c|d<e>f.json'"),
+        ("~a!b#c.json", "'/srv/pcc/~a!b#c.json'"),
+        ("a+b@c=d:e%f^g.json", "'/srv/pcc/a+b@c=d:e%f^g.json'"),
+        ("caf\u00e9.json", "'/srv/pcc/caf\u00e9.json'"),
+        ("a\tb\nc.json", "'/srv/pcc/a\tb\nc.json'"),
+    ],
+    ids=["B4-safe", "B4-space", "B4-quote", "B4-dquote", "B4-variable", "B4-substitution", "B4-backtick",
+         "B4-backslash", "B4-glob", "B4-brace", "B4-operators", "B4-tilde-bang-hash", "B4-punctuation",
+         "B4-non-ascii", "B4-tab-newline"],
+)
+def test_the_printed_path_is_one_shell_word(tmp_path, monkeypatch, capsys, name, word):
+    monkeypatch.setattr(cli, "DIAG_ACK_PATH", str(tmp_path / "diagnostics-acknowledged"))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+
+    cli._maybe_prompt_diagnostics(NodeConfig(), "/srv/pcc/" + name)
+
+    shown = capsys.readouterr()
+    assert shown.out == _no_terminal_line(word)
+    assert shown.err == ""
 
 
 @pytest.mark.parametrize(
@@ -168,6 +210,35 @@ def test_feedback_records_the_saved_choice(tmp_path, monkeypatch, capsys, arg, s
     capsys.readouterr()
     cli._maybe_prompt_diagnostics(config)
     assert config.diagnostics_mode == saved_mode
+    shown = capsys.readouterr()
+    assert shown.out == shown.err == ""
+
+
+@pytest.mark.parametrize(
+    "earlier,arg,saved_mode",
+    [(b"mode=off\n", "on", "errors"), (b"mode=errors\n", "off", "off")],
+    ids=["T6-replaces-no", "T6-replaces-yes"],
+)
+def test_feedback_replaces_an_earlier_record(tmp_path, monkeypatch, capsys, earlier, arg, saved_mode):
+    sentinel = tmp_path / "home" / ".pcc-node" / "diagnostics-acknowledged"
+    monkeypatch.setattr(cli, "DIAG_ACK_PATH", str(sentinel))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    sentinel.parent.mkdir(parents=True)
+    sentinel.write_bytes(earlier)
+    config_path = tmp_path / "node.json"
+    save_config(NodeConfig(diagnostics_mode="off"), str(config_path))
+
+    result = _separate_streams_runner().invoke(
+        cli.main, ["feedback", arg, "-c", str(config_path)],
+        env={"PCC_BASE": "http://127.0.0.1:9"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert sentinel.read_text() == f"mode={saved_mode}\n"
+    fresh = NodeConfig()
+    capsys.readouterr()
+    cli._maybe_prompt_diagnostics(fresh)
+    assert fresh.diagnostics_mode == saved_mode
     shown = capsys.readouterr()
     assert shown.out == shown.err == ""
 
@@ -209,6 +280,23 @@ def test_recorded_answer_binds_a_fresh_config(tmp_path, monkeypatch, capsys, rec
     cli._maybe_prompt_diagnostics(config)
 
     assert config.diagnostics_mode == expected_mode
+    assert sentinel.read_bytes() == record
+    shown = capsys.readouterr()
+    assert shown.out == shown.err == ""
+
+
+@pytest.mark.parametrize(
+    "record", [b"mode=off\n", b"garbage\n"], ids=["T7-periodic-config-off", "T7-periodic-config-garbage"],
+)
+def test_a_recorded_no_binds_a_periodic_config_too(tmp_path, monkeypatch, capsys, record):
+    sentinel = tmp_path / "diagnostics-acknowledged"
+    monkeypatch.setattr(cli, "DIAG_ACK_PATH", str(sentinel))
+    sentinel.write_bytes(record)
+    config = NodeConfig(diagnostics_mode="periodic")
+
+    cli._maybe_prompt_diagnostics(config)
+
+    assert config.diagnostics_mode == "off"
     assert sentinel.read_bytes() == record
     shown = capsys.readouterr()
     assert shown.out == shown.err == ""
