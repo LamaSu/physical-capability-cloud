@@ -108,7 +108,8 @@ describe("issued SIWE messages", () => {
 
   it("T2 ignores request host and forwarded origin and supports configured localhost", async () => {
     const app = await buildApp();
-    const headers = { host: "relay.invalid", "x-forwarded-host": "relay.invalid", "x-forwarded-proto": "http" };
+    const headers = { host: "relay.invalid", "x-forwarded-host": "relay.invalid", "x-forwarded-proto": "http",
+      origin: "https://relay.invalid", referer: "https://relay.invalid/" };
     const result = await issueSignInMessage(app, account.address, { remoteAddress, headers });
     expect(result.message.split("\n")[0].split(" ")[0]).toBe("capability.network");
     expect(result.message.split("\n")[5]).toBe("URI: https://capability.network");
@@ -116,6 +117,28 @@ describe("issued SIWE messages", () => {
     const local = await issueSignInMessage(app, account.address, { remoteAddress, headers });
     expect(local.message.split("\n")[0].split(" ")[0]).toBe("localhost:5173");
     expect(local.message.split("\n")[5]).toBe("URI: http://localhost:5173");
+  });
+
+  it("T2 ignores every query parameter except address and purpose", async () => {
+    fakeDate();
+    const app = await buildApp();
+    const plain = await issue(app);
+    const response = await requestIssue(app, `address=${account.address}&domain=relay.invalid&uri=${encodeURIComponent("https://relay.invalid")}` +
+      "&chainId=1&statement=x&nonce=0&issuedAt=2020-01-01T00:00:00.000Z&version=2");
+    expect(response.statusCode).toBe(200);
+    const extra = response.json();
+    expect(extra.chainId).toBe(84532);
+    expect(extra.message.replace(extra.nonce, "N")).toBe(plain.message.replace(plain.nonce, "N"));
+  });
+
+  it("T3 verifies an issued text on the chain it names", async () => {
+    vi.stubEnv("PCC_SIGVERIFY_CHAIN_ID", "8453");
+    const app = await buildApp();
+    const { message } = await issue(app);
+    const check = vi.spyOn(signatures, "verifyEvmMessageSignature");
+    expectSignedIn(await verify(app, message));
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(check.mock.calls[0]![0]).toEqual({ address: account.address, message, signature: expect.any(String), chainId: 8453 });
   });
 
   it("T3 uses the configured chain and refuses invalid chain configuration without storing", async () => {
@@ -185,6 +208,7 @@ describe("issued SIWE messages", () => {
     ["issued at", (text: string) => text.replace("Issued At: 2026-11-06T18:00:00.000Z", "Issued At: 2026-11-06T18:00:01.000Z")],
     ["trailing newline", (text: string) => `${text}\n`],
     ["CRLF", (text: string) => text.replaceAll("\n", "\r\n")],
+    ["address case", (text: string) => text.replace(account.address, account.address.toLowerCase())],
   ] as const)("T9 refuses a changed %s while preserving the exact issued message", async (_name, change) => {
     fakeDate();
     const app = await buildApp();
@@ -225,6 +249,7 @@ describe("issued SIWE messages", () => {
       await Promise.race([ready, new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error("Signature verification not reached")), 1500);
       })]);
+      expect(siwe.__issuedSignInCountForTests()).toBe(0);
       const second = await post();
       expect(second.statusCode).toBe(401);
       expect(second.json()).toEqual({ error: "Nonce expired or invalid" });
@@ -290,6 +315,18 @@ describe("issued SIWE messages", () => {
     await issue(app);
   });
 
+  it("T14 frees live-cap space when entries expire", async () => {
+    fakeDate();
+    siwe.__resetSignInIssueForTests({ liveCap: 2 });
+    const app = await buildApp();
+    await issue(app);
+    await issue(app);
+    expect((await requestIssue(app, `address=${account.address}`)).statusCode).toBe(503);
+    vi.setSystemTime(instant + 300_000);
+    await issue(app);
+    expect(siwe.__issuedSignInCountForTests()).toBe(1);
+  });
+
   it("T15 HEAD returns no body and stores or counts nothing", async () => {
     const app = await buildApp();
     const response = await app.inject({ method: "HEAD", url: `/api/auth/nonce?address=${account.address}`, remoteAddress });
@@ -318,5 +355,37 @@ describe("issued SIWE messages", () => {
     expect(response.json()).toEqual({ error: "Nonce expired or invalid" });
     expectNoSession(response);
     expectSignedIn(await verify(app, issued.message));
+  });
+
+  it("T16 claims a legacy nonce before signature verification can yield", async () => {
+    const app = await buildApp();
+    const legacyNonce = (await app.inject({ method: "GET", url: "/api/auth/nonce", remoteAddress })).json().nonce;
+    const issued = await issue(app);
+    const message = issued.message.replace(issued.nonce, legacyNonce);
+    const signature = await account.signMessage({ message });
+    let announce!: () => void;
+    const ready = new Promise<void>(resolve => { announce = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const check = vi.spyOn(signatures, "verifyEvmMessageSignature").mockImplementationOnce(async () => {
+      announce();
+      await gate;
+      return { ok: true, kind: "eoa" };
+    });
+    const post = () => app.inject({ method: "POST", url: "/api/auth/verify", payload: { message, signature }, remoteAddress });
+    const first = post();
+    try {
+      await ready;
+      const second = await post();
+      expect(second.statusCode).toBe(401);
+      expect(second.json()).toEqual({ error: "Nonce expired or invalid" });
+      expect(check).toHaveBeenCalledTimes(1);
+      release();
+      expectSignedIn(await first);
+      expect(getRepos().sessions.countActive()).toBe(1);
+    } finally {
+      release();
+      await first;
+    }
   });
 });

@@ -11,7 +11,7 @@
  */
 
 import * as Sentry from "@sentry/node";
-import { isWalletRequest } from "./services/telemetry-privacy.js";
+import { isSignInIssueRequest, isWalletRequest } from "./services/telemetry-privacy.js";
 import { isOutboundSecretSentryEvent, isOutboundSecretUrl } from "./services/outbound-secrets.js";
 
 /** Remove only the wallet header and its Sentry HTTP span attribute. */
@@ -48,7 +48,7 @@ export function walletSafeSentryEvent<T extends {
 }>(event: T): T | null {
   if (isOutboundSecretSentryEvent(event)) return null;
   const urls = [event.request?.url, event.extra?.url, event.transaction];
-  return urls.some((url) => typeof url === "string" && isWalletRequest(url)) ? null : withoutWalletHeader(event);
+  return urls.some((url) => typeof url === "string" && (isWalletRequest(url) || isSignInIssueRequest(url))) ? null : withoutWalletHeader(event);
 }
 
 // OTel and Sentry integrations use different request-target attribute names.
@@ -92,11 +92,14 @@ export function initSentry(): void {
     beforeBreadcrumb(breadcrumb) {
       if ([breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message].some(isOutboundSecretUrl)) return null;
       const urls = [breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message];
-      return urls.some((url) => typeof url === "string" && isWalletRequest(url)) ? null : withoutWalletHeader(breadcrumb);
+      return urls.some((url) => typeof url === "string" && (isWalletRequest(url) || isSignInIssueRequest(url))) ? null : withoutWalletHeader(breadcrumb);
     },
     beforeSendSpan(span) {
       if ([span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])].some(isOutboundSecretUrl)) return { ...span, description: "outbound/<redacted>", data: {} };
       const urls = [span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])];
+      if (urls.some(url => typeof url === "string" && isSignInIssueRequest(url))) {
+        return { ...span, description: "/api/auth/nonce", data: {} };
+      }
       const route = span.data["http.route"];
       return urls.some((url) => typeof url === "string" && isWalletRequest(url))
         ? { ...span, description: typeof route === "string" && WALLET_ROUTE_TEMPLATES.has(route)
