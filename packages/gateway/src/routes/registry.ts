@@ -107,8 +107,6 @@ interface DbKnownAgent {
   agentId: bigint;
   apiKeyId: string;
   operatorId: string;
-  name: string | null;
-  registeredAt: string | null;
 }
 
 function dbKnownAgents(): DbKnownAgent[] {
@@ -124,8 +122,6 @@ function dbKnownAgents(): DbKnownAgent[] {
         agentId: BigInt(row.onchainAgentId),
         apiKeyId: row.id,
         operatorId: row.operatorId,
-        name: row.name ?? null,
-        registeredAt: row.onchainAttemptedAt ?? row.createdAt,
       });
     }
   }
@@ -137,7 +133,7 @@ const REGISTRY_NOT_CONFIGURED = {
   message: "No ERC-8004 identity registry is known for this gateway's chain, so no entity was read.",
 } as const;
 
-async function readEntity(client: IdentityRegistryClient, agentId: bigint, dbHint?: DbKnownAgent) {
+async function readEntity(client: IdentityRegistryClient, agentId: bigint) {
   try {
     const [owner, agentURI] = await Promise.all([
       client.ownerOf(agentId),
@@ -152,8 +148,6 @@ async function readEntity(client: IdentityRegistryClient, agentId: bigint, dbHin
       metadataHash: null as string | null,
       status: 0,
       statusName: "Active",
-      registeredAt: dbHint?.registeredAt ?? null,
-      name: dbHint?.name ?? null,
       role: "agent",
       source: "onchain" as const,
     };
@@ -214,7 +208,7 @@ export async function registryRoutes(app: FastifyInstance) {
       }
       const entities = (
         await Promise.all(
-          known.map((k) => readEntity(client, k.agentId, k)),
+          known.map((k) => readEntity(client, k.agentId)),
         )
       ).filter((e): e is NonNullable<typeof e> => e !== null);
 
@@ -248,9 +242,7 @@ export async function registryRoutes(app: FastifyInstance) {
       } catch {
         return reply.code(503).send(REGISTRY_NOT_CONFIGURED);
       }
-      // DB hint provides off-chain context (name, operator, registeredAt).
-      const dbHint = dbKnownAgents().find((k) => k.agentId === agentId);
-      const entity = await readEntity(client, agentId, dbHint);
+      const entity = await readEntity(client, agentId);
       if (!entity) {
         return reply.status(404).send({ error: "Entity not found on-chain" });
       }
@@ -338,7 +330,6 @@ export async function registryRoutes(app: FastifyInstance) {
           const summary = await rep.getSummary(k.agentId, clients);
           return {
             entityId: Number(k.agentId),
-            name: k.name,
             count: Number(summary.count),
             summaryValue: summary.summaryValue.toString(),
             summaryValueDecimals: summary.summaryValueDecimals,
