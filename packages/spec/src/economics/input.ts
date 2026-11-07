@@ -28,12 +28,19 @@ export interface SnapshotOptions {
   canonical?: boolean;
 }
 
+// Recognize only this module's refusals by membership, never by inspecting an arbitrary thrown
+// value: instanceof invokes a hostile Proxy's getPrototypeOf trap, and reading a property invokes
+// its get trap; either could throw past the catch (N183). Bind the WeakSet methods at module load
+// so a later replacement cannot reach the constructor or the catch.
+const call = Function.prototype.call;
+const weakSetAdd = call.bind(WeakSet.prototype.add) as unknown as (set: WeakSet<object>, value: object) => void;
+const weakSetHas = call.bind(WeakSet.prototype.has) as unknown as (set: WeakSet<object>, value: unknown) => boolean;
 const ownRefusals = new WeakSet<object>();
 
 class NotPlainData extends Error {
   constructor(message: string) {
     super(message);
-    ownRefusals.add(this);
+    weakSetAdd(ownRefusals, this);
   }
 }
 
@@ -102,7 +109,7 @@ export function snapshotJson(value: unknown, options: SnapshotOptions = {}): Sna
     return {
       ok: false,
       reason:
-        typeof e === "object" && e !== null && ownRefusals.has(e)
+        typeof e === "object" && e !== null && weakSetHas(ownRefusals, e)
           ? (e as NotPlainData).message
           : "the input could not be read as JSON data",
     };

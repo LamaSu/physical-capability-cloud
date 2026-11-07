@@ -308,13 +308,38 @@ describe("FundingStatusDTO projection", () => {
       scope: { sourceStatus: "active", createdAt: MINTED, expiresAt: "2026-10-08T13:20:00.000Z" },
       verification: {
         escrowAddress: r.escrowAddress,
+        operator: r.operator,
         chainId: 84532,
         blockNumber: "31337000",
         blockHash: r.blockHash,
+        fundingBlockNumber: r.fundingBlockNumber,
+        fundingBlockHash: r.fundingBlockHash,
+        fundedAt: r.fundedAt,
         verifierVersion: "verifier-test/1",
         verifiedAt: "2026-10-08T12:20:00.000Z",
       },
     });
+  });
+
+  it("(neg-dto-all-unbound) T2: every binding except bound keeps verification null", () => {
+    const unbound: Array<[string, FundingVerificationRecord | null, FundingEscrowRow, number | null, { testnetOnly: boolean; buyers: string | undefined }?]> = [
+      ["no_record", null, null, null],
+      ["expected_chain_unavailable", record(), ROW, null],
+      ["record_malformed", record({ finality: "latest" as never }), ROW, CHAIN],
+      ["record_chain_mismatch", record({ chainId: 545 }), ROW, CHAIN],
+      ["record_scope_mismatch", record({ scopeId: "scope_other" }), ROW, CHAIN],
+      ["testnet_buyer_not_allowed", record(), ROW, CHAIN, { testnetOnly: true, buyers: undefined }],
+      ["record_buyer_not_scope_buyer", record({ buyer: OTHER }), ROW, CHAIN],
+      ["escrow_missing", record(), null, CHAIN],
+      ["escrow_payer_not_buyer", record(), row({ payer: OTHER }), CHAIN],
+      ["record_escrow_not_scope_escrow", record(), row({ contractAddress: OTHER_ESCROW }), CHAIN],
+    ];
+    expect(unbound.map(([binding]) => binding)).toEqual(FUNDING_BINDINGS.filter((binding) => binding !== "bound"));
+    for (const [binding, r, escrow, expectedChain, allowance] of unbound) {
+      const dto = projectFundingStatus(scope(), r, escrow, expectedChain, BEFORE_END, allowance ?? NO_TESTNET);
+      expect(dto.binding, binding).toBe(binding);
+      expect(dto.verification, binding).toBeNull();
+    }
   });
 
   it("(neg-dto-verification) a record that does not fund this scope is not shown", () => {

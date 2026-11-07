@@ -24,11 +24,20 @@ const request = {
 describe("wallet-link consent", () => {
   it("pins the exact UTF-8 template hash and all three plain-text variants", () => {
     expect(CONSENT_VERSION).toBe("wallet-link-v1");
-    expect(CONSENT_SHA256).toBe("24480b7fd41e13804038619c248b398cd247d009729a8ff69d98b486c8b0dc19");
+    expect(CONSENT_SHA256).toBe("759f2d8945c1ca8dde417829792dc63ec3b3d43be8718d682e0b815897b86f9b");
     expect(createHash("sha256").update(CONSENT_TEMPLATE, "utf8").digest("hex")).toBe(CONSENT_SHA256);
     expect(CONSENT_TEMPLATE).toBe(Object.values(CONSENT_TEMPLATES).join("\n\n"));
     expect(CONSENT_TEMPLATES.hosted).toContain("operates the machine that holds the key");
     expect(CONSENT_TEMPLATE).not.toContain("**");
+  });
+
+  it("states the approved What jobs cost line exactly once in every variant", () => {
+    const approvedLine = "What jobs cost: every job is priced all-in before anything is funded. Some jobs include pass-through costs that PCC pays vendors for you (postage, printing services, carriers). A pass-through amount goes to PCC only when the vendor's work is evidenced (for postage, the carrier's acceptance scan); unused amounts are refunded.";
+    for (const template of [CONSENT_TEMPLATES.agent, CONSENT_TEMPLATES.device, CONSENT_TEMPLATES.hosted]) {
+      const lines = template.split("\n").filter((line) => line.startsWith("What jobs cost:"));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toBe(approvedLine);
+    }
   });
 
   it("renders the agent terms with the literal W2 funding amounts", () => {

@@ -350,7 +350,7 @@ describe("kernel payout record", () => {
     expect(PAYOUT_CONSENT_VERSION).toBe("kernel-payout-v1");
     expect(PAYOUT_CONSENT_TEMPLATE.endsWith("\n")).toBe(false);
     expect(PAYOUT_CONSENT_SHA256).toBe(createHash("sha256").update(PAYOUT_CONSENT_TEMPLATE, "utf8").digest("hex"));
-    expect(CONSENT_SHA256).toBe("24480b7fd41e13804038619c248b398cd247d009729a8ff69d98b486c8b0dc19");
+    expect(CONSENT_SHA256).toBe("759f2d8945c1ca8dde417829792dc63ec3b3d43be8718d682e0b815897b86f9b");
   });
 
   it("T13: GET payout requires authentication", async () => {
