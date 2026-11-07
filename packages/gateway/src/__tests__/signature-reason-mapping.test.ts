@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
-import { createSiweMessage } from "viem/siwe";
+import { issueSignInMessage } from "./helpers/siwe-sign-in.js";
 import { verifyEvmMessageSignature, type SignatureCheck } from "../auth/evm-signature.js";
 import { siweAuthPlugin } from "../auth/siwe-auth.js";
 import { closeStore, getRepos, initStore } from "../db.js";
@@ -89,12 +89,9 @@ describe("non-ok signature reason mappings", () => {
   it.each(mappings)("SIWE maps $reason without a session and burns its nonce", async ({ reason, siweStatus, siweError }) => {
     verifier.mockResolvedValue({ ok: false, reason });
     const app = await buildSiweApp();
-    const nonceResponse = await app.inject({ method: "GET", url: "/api/auth/nonce", remoteAddress });
-    expect(nonceResponse.statusCode).toBe(200);
-    const message = createSiweMessage({ address, domain: "localhost", uri: "http://localhost", version: "1",
-      chainId: 84532, nonce: nonceResponse.json().nonce, issuedAt: new Date(), statement: "Sign in to PCC" });
+    const { message } = await issueSignInMessage(app, address, { remoteAddress });
     const sessionsBefore = getRepos().sessions.countActive();
-    const request = { method: "POST" as const, url: "/api/auth/verify", headers: { host: "localhost" },
+    const request = { method: "POST" as const, url: "/api/auth/verify", headers: { host: "capability.network" },
       payload: { message, signature }, remoteAddress };
     const response = await app.inject(request);
     expect(response.statusCode).toBe(siweStatus);

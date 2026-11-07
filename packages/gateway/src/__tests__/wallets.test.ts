@@ -1,3 +1,4 @@
+import { signInWithIssuedMessage } from "./helpers/siwe-sign-in.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
@@ -111,10 +112,7 @@ function sessionHeaders(token: string, accountId = privateKeyToAccount(generateP
 }
 
 async function signIn(account = privateKeyToAccount(generatePrivateKey())) {
-  const { nonce } = (await app.inject({ url: "/api/auth/nonce", headers: { host: "capability.network" } })).json();
-  const message = `capability.network wants you to sign in with your Ethereum account:\n${account.address}\n\nSign in to PCC.\n\nURI: https://capability.network\nVersion: 1\nChain ID: 84532\nNonce: ${nonce}\nIssued At: ${new Date(clockNow).toISOString()}`;
-  const response = await app.inject({ method: "POST", url: "/api/auth/verify", headers: { host: "capability.network" },
-    payload: { message, signature: await account.signMessage({ message }) } });
+  const response = await signInWithIssuedMessage(app, account, account.address, { headers: { host: "capability.network" } });
   expect(response.statusCode).toBe(200);
   const headers = { cookie: `pcc_session=${app.signCookie(response.json().token)}`, origin: "https://capability.network" };
   return { account, headers, token: response.json().token as string };

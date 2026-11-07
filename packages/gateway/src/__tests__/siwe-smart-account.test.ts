@@ -12,6 +12,7 @@ import { toCoinbaseSmartAccount } from "viem/account-abstraction";
 import { baseSepolia } from "viem/chains";
 import { createSiweMessage } from "viem/siwe";
 import { __resetSignatureVerifierForTests, setSignatureVerifierTransportForTests } from "../auth/evm-signature.js";
+import { issueSignInMessage } from "./helpers/siwe-sign-in.js";
 import { siweAuthPlugin } from "../auth/siwe-auth.js";
 import { closeStore, getRepos, initStore } from "../db.js";
 import { apiGate } from "../middleware/api-gate.js";
@@ -28,6 +29,7 @@ let requests: Array<{ method: string; params?: unknown }>;
 
 beforeEach(() => {
   vi.stubEnv("PCC_DB_PATH", ":memory:");
+  vi.stubEnv("PCC_PUBLIC_URL", "https://capability.network");
   for (const name of ["DATABASE_URL", "RAILWAY_VOLUME_MOUNT_PATH", "PCC_GATEWAY_PRIVATE_KEY", "DEPLOYER_PRIVATE_KEY", "POSTHOG_API_KEY", "VITE_POSTHOG_KEY"]) {
     vi.stubEnv(name, "");
     delete process.env[name];
@@ -65,18 +67,13 @@ async function buildApp() {
   return app;
 }
 
-async function makeMessage(app: FastifyInstance, address: Hex, chainId = 84532) {
-  const nonceResponse = await app.inject({ method: "GET", url: "/api/auth/nonce", remoteAddress });
-  expect(nonceResponse.statusCode).toBe(200);
-  return createSiweMessage({
-    address, domain: "localhost", uri: "http://localhost", version: "1", chainId,
-    nonce: nonceResponse.json().nonce, issuedAt: new Date(), statement: "Sign in to PCC",
-  });
+async function makeMessage(app: FastifyInstance, address: Hex) {
+  return (await issueSignInMessage(app, address, { remoteAddress })).message;
 }
 
 function verify(app: FastifyInstance, message: string, signature: Hex) {
   return app.inject({
-    method: "POST", url: "/api/auth/verify", headers: { host: "localhost" },
+    method: "POST", url: "/api/auth/verify", headers: { host: "capability.network" },
     payload: { message, signature }, remoteAddress,
   });
 }
@@ -130,6 +127,33 @@ describe("SIWE smart-account signatures", () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers["set-cookie"]).toContain("pcc_session=");
     expect(response.json().address).toBe(owner.address);
+    expect(requests).toEqual([]);
+  });
+
+  it("T17 accepts a deployed-style contract signature over the issued text", async () => {
+    const app = await buildApp();
+    const owner = privateKeyToAccount(generatePrivateKey());
+    const message = await makeMessage(app, SMART_ADDRESS);
+    const signature = await owner.signMessage({ message });
+    expect(signature.length).toBe(132);
+    acceptOnly(validatorData(SMART_ADDRESS, message, signature));
+    const response = await verify(app, message, signature);
+    expect(response.statusCode).toBe(200);
+    expect(response.json().address).toBe(SMART_ADDRESS);
+    expect(getRepos().sessions.findByToken(response.json().token)?.walletAddress).toBe(SMART_ADDRESS);
+    expect(requests.map(({ method }) => method)).toEqual(["eth_chainId", "eth_call"]);
+  });
+
+  it("T17 refuses a 6492 signature on changed text without an eth_call", async () => {
+    const app = await buildApp();
+    const account = await smartAccount();
+    const message = await makeMessage(app, account.address);
+    const signature = await account.signMessage({ message });
+    acceptOnly(validatorData(account.address, message, signature));
+    const response = await verify(app, `${message}\n`, signature);
+    expect([400, 401]).toContain(response.statusCode);
+    expect(response.headers["set-cookie"]).toBeUndefined();
+    expect(getRepos().sessions.countActive()).toBe(0);
     expect(requests).toEqual([]);
   });
 
@@ -251,7 +275,12 @@ describe("SIWE smart-account signatures", () => {
   it("rejects a contract signature naming chain 8453 without RPC", async () => {
     const app = await buildApp();
     const account = await smartAccount();
-    const message = await makeMessage(app, account.address, 8453);
+    const nonceResponse = await app.inject({ method: "GET", url: "/api/auth/nonce", remoteAddress });
+    expect(nonceResponse.statusCode).toBe(200);
+    const message = createSiweMessage({
+      address: account.address, domain: "capability.network", uri: "https://capability.network", version: "1", chainId: 8453,
+      nonce: nonceResponse.json().nonce, issuedAt: new Date(), statement: "Sign in to PCC",
+    });
     const signature = await account.signMessage({ message });
     installTransport(() => "0x01");
     const rejected = await verify(app, message, signature);

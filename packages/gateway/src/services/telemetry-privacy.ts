@@ -46,6 +46,15 @@ export function isTelemetrySinkRequest(rawUrl: string): boolean {
   return canonicalRequestPath(rawUrl).startsWith(TELEMETRY_SINK_PATH);
 }
 
+/** Sign-in issue targets are sensitive only at log and telemetry sinks. */
+export function isSignInIssueRequest(rawUrl: string): boolean {
+  let path = rawUrl.replace(/^[A-Z]+\s+/, "");
+  if (/^https?:\/\//i.test(path)) {
+    try { path = new URL(path).pathname; } catch { return false; }
+  }
+  return canonicalRequestPath(path) === "/api/auth/nonce";
+}
+
 /** Wallet ceremony requests and lookalikes never expose URL parameters to sinks. */
 export function isWalletRequest(rawUrl: string): boolean {
   let path = rawUrl.replace(/^[A-Z]+\s+/, "");
@@ -77,6 +86,7 @@ interface LoggedRequest {
  */
 export function requestLogSerializer(req: LoggedRequest): Record<string, unknown> {
   const rawUrl = req.url ?? "";
+  if (isSignInIssueRequest(rawUrl)) return { method: req.method, url: "/api/auth/nonce" };
   if (isTelemetrySinkRequest(rawUrl) || isWalletRequest(rawUrl)) {
     return { method: req.method, url: auditableUrl(rawUrl, req.routeOptions?.url) };
   }

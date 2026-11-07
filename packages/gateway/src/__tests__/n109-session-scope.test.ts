@@ -1,3 +1,4 @@
+import { signInWithIssuedMessage } from "./helpers/siwe-sign-in.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
@@ -20,6 +21,7 @@ let apps: FastifyInstance[];
 
 beforeEach(() => {
   vi.stubEnv("PCC_DB_PATH", ":memory:");
+  vi.stubEnv("PCC_PUBLIC_URL", "https://capability.network");
   for (const name of ["DATABASE_URL", "RAILWAY_VOLUME_MOUNT_PATH", "CDP_API_KEY_ID", "YELLOWCARD_API_KEY", "PCC_LEGACY_FIAT_WEBHOOKS"]) {
     vi.stubEnv(name, "");
     delete process.env[name];
@@ -196,21 +198,9 @@ describe("a wallet session holds no scopes", () => {
 
   it("SIWE authentication routes remain open through the real login and session flow", async () => {
     const app = await buildApp("siwe");
-    const hostname = "localhost";
-    const nonceResponse = await app.inject({
-      method: "GET", url: "/api/auth/nonce", headers: { host: hostname },
-    });
-    expect(nonceResponse.statusCode).toBe(200);
+    const hostname = "capability.network";
     const account = privateKeyToAccount(generatePrivateKey());
-    const message = [
-      `${hostname} wants you to sign in with your Ethereum account:`, account.address,
-      "", "Sign in to PCC.", "", `URI: http://${hostname}`, "Version: 1", "Chain ID: 8453",
-      `Nonce: ${nonceResponse.json().nonce}`, `Issued At: ${new Date().toISOString()}`,
-    ].join("\n");
-    const signature = await account.signMessage({ message });
-    const verifyResponse = await app.inject({
-      method: "POST", url: "/api/auth/verify", headers: { host: hostname }, payload: { message, signature },
-    });
+    const verifyResponse = await signInWithIssuedMessage(app, account, account.address, { headers: { host: hostname } });
     expect(verifyResponse.statusCode).toBe(200);
     const token = verifyResponse.json().token;
     expect(typeof token).toBe("string");

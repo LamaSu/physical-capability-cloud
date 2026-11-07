@@ -1,3 +1,4 @@
+import { signInWithIssuedMessage } from "./helpers/siwe-sign-in.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance, type InjectOptions } from "fastify";
 import cookie from "@fastify/cookie";
@@ -7,7 +8,7 @@ import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { schema, sql } from "@pcc/store";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { authorityOf } from "../auth/kernel-authority.js";
-import { siweAuthPlugin } from "../auth/siwe-auth.js";
+import { __resetSignInIssueForTests, siweAuthPlugin } from "../auth/siwe-auth.js";
 import { closeStore, getRepos, getStore, initStore } from "../db.js";
 import { apiGate } from "../middleware/api-gate.js";
 import { __resetScopeCacheForTests, scopeChecker } from "../middleware/scope-checker.js";
@@ -105,18 +106,8 @@ async function buildApp(routesBeforeGate = false, carrierlessProof = false) {
 
 // Use the real EIP-4361 nonce/signature flow and real session-key endpoint, as N173 does.
 async function signIn(app: FastifyInstance, account = OWNER) {
-  const host = "localhost";
-  const nonce = await app.inject({ url: "/api/auth/nonce", headers: { host } });
-  expect(nonce.statusCode, nonce.body).toBe(200);
-  const message = [
-    `${host} wants you to sign in with your Ethereum account:`, account.address.toLowerCase(),
-    "", "Sign in to PCC.", "", `URI: http://${host}`, "Version: 1", "Chain ID: 8453",
-    `Nonce: ${nonce.json().nonce}`, `Issued At: ${new Date().toISOString()}`,
-  ].join("\n");
-  const response = await app.inject({
-    method: "POST", url: "/api/auth/verify", headers: { host },
-    payload: { message, signature: await account.signMessage({ message }) },
-  });
+  __resetSignInIssueForTests();
+  const response = await signInWithIssuedMessage(app, account, account.address.toLowerCase(), { headers: { host: "capability.network" } });
   expect(response.statusCode, response.body).toBe(200);
   return response.json<{ token: string }>();
 }

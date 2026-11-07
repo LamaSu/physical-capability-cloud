@@ -1,3 +1,4 @@
+import { signInWithIssuedMessage } from "./helpers/siwe-sign-in.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
@@ -100,18 +101,7 @@ async function buildApp(opts: {
 }
 
 async function signIn(app: FastifyInstance, account = OWNER) {
-  const host = "localhost";
-  const nonce = await app.inject({ method: "GET", url: "/api/auth/nonce", headers: { host } });
-  expect(nonce.statusCode, nonce.body).toBe(200);
-  const message = [
-    `${host} wants you to sign in with your Ethereum account:`, account.address,
-    "", "Sign in to PCC.", "", `URI: http://${host}`, "Version: 1", "Chain ID: 8453",
-    `Nonce: ${nonce.json().nonce}`, `Issued At: ${new Date().toISOString()}`,
-  ].join("\n");
-  const response = await app.inject({
-    method: "POST", url: "/api/auth/verify", headers: { host },
-    payload: { message, signature: await account.signMessage({ message }) },
-  });
+  const response = await signInWithIssuedMessage(app, account, account.address, { headers: { host: "capability.network" } });
   expect(response.statusCode, response.body).toBe(200);
   return response.json<{ token: string }>();
 }
