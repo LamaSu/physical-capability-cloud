@@ -11,6 +11,7 @@
  *   - the pinned agent package: AGENT_PACKAGE_PIN, AGENT_TOOLS,
  *     resolveToolRequest (tool call -> gateway request, pure),
  *     checkAgentPackage (live package vs the pin).
+ *   - operator-session SIWE sign-in, session key minting and renewal.
  *
  * Not re-exported: @pcc/kernel-sdk's registration client and job handler.
  * The kit offers neither until it has versions bound to a trusted gateway
@@ -38,3 +39,20 @@ export type {
   AgentToolName,
   ToolRequest,
 } from "./agent-package.js";
+
+export {
+  OperatorSessionError,
+  buildOperatorSignInMessage,
+  createOperatorSessionKeeper,
+  mintOperatorSessionKey,
+} from "./operator-session.js";
+export type {
+  OperatorMessageSigner,
+  OperatorSessionErrorCode,
+  OperatorSessionEvent,
+  OperatorSessionKey,
+  OperatorSessionKeeper,
+  OperatorSessionKeeperOptions,
+  OperatorSessionOptions,
+  OperatorSignInFields,
+} from "./operator-session.js";
