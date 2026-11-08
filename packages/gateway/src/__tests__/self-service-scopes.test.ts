@@ -88,7 +88,7 @@ describe("self-service keys hold only the basic operator scope", () => {
     const operatorPairs = SCOPE_COVERED_ROUTES.filter((route) => (
       route.class === "other-write" && route.requirement !== "money-default-deny" && route.requirement.includes("operator")
     ));
-    expect(operatorPairs).toHaveLength(13);
+    expect(operatorPairs).toHaveLength(15);
     expect(UNSCOPED_ROUTES).toHaveLength(6);
     for (const route of [...operatorPairs, ...UNSCOPED_ROUTES]) {
       const response = await app.inject({ method: route.method, url: route.url, headers: { authorization: `Bearer ${rawKey}` } });

@@ -154,6 +154,20 @@ function payout(app: FastifyInstance, headers: Headers, kernelId = KERNEL) {
 }
 
 describe("kernel payout record", () => {
+  it("B13: foreign-owner PUT names the payout record; revoke keeps the shared refusal", async () => {
+    const app = await buildApp();
+    const foreign = await ownerCredentials(app, FOREIGN);
+    const response = await bind(app, foreign.headers);
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: "forbidden", reason: "operator_proof_required",
+      message: "Recording a payout wallet needs a wallet sign-in proof that you control the kernel's operator wallet. The admin secret and wallet-link proofs don't record one." });
+    const revoked = await revoke(app, foreign.headers);
+    expect(revoked.statusCode).toBe(403);
+    expect(revoked.json()).toEqual({ error: "forbidden", reason: "operator_proof_required",
+      message: "This needs the gateway admin secret, or proof that you control the kernel's operator wallet (wallet sign-in proof, WP-A). An API key's claimed identity is not proof." });
+    expect(bindings()).toEqual([]);
+  });
+
   it("T1: the owner's session key binds the proven wallet and exact consent", async () => {
     const app = await buildApp();
     const owner = await ownerCredentials(app);
