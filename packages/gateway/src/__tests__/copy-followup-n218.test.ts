@@ -70,16 +70,18 @@ describe("gateway copy follow-up", () => {
     expect(tools.map((tool: { name: string }) => tool.name)).not.toContain("get_depin_stats");
   });
 
-  it("T2: describes ot_list_protocols as fixed example templates with an unused filter", () => {
+  it("T2: describes ot_list_protocols as a 501 tool, not recommended, with an unused filter", () => {
     const tool = suggestTools(["opentrons"], [], false).tools.find((tool) => tool.name === "ot_list_protocols");
     expect(tool).toBeDefined();
     expect(tool!.description).toBe(PROTOCOL_TEXT);
     expect(tool!.inputSchema.properties.capabilityType.description).toBe(CAPABILITY_TEXT);
+    expect(tool!.recommended).toBe(false);
   });
 
   it("T3: serves the 2 kept complete cells, none of the 22 old cells, and the two role lines without reward promises", async () => {
     const response = await app.inject({ method: "GET", url: "/agent-context-pack" });
     expect(response.statusCode).toBe(200);
+    expect(CONTEXT_CELLS.filter(([, p]) => !N34_GATED_PATH.test(p)).map(([, p]) => p)).toEqual(["/api/treasury/summary", "/api/rewards/claims"]);
     for (const [method, path, oldText, newText] of CONTEXT_CELLS) {
       const served = !N34_GATED_PATH.test(path);
       if (served) expect(response.body, `${method} ${path}`).toContain(`| ${newText} |`);
@@ -239,9 +241,9 @@ const SEARCH_TEXT = "List the built-in capability type templates: each type's na
 
 const QUERY_TEXT = "Optional and not used: the gateway returns the full list whatever you send.";
 
-const PROTOCOL_TEXT = "List protocol templates. NOTE: the gateway currently serves only a fixed set of built-in example templates; templates sent to create_protocol are not stored, so they do not appear here";
+const PROTOCOL_TEXT = "List protocol templates. Not available (501): protocol templates are not recorded on this gateway. Only built-in examples exist, and they are not served.";
 
-const CAPABILITY_TEXT = "Optional and not used: the gateway returns its built-in example list whatever you send.";
+const CAPABILITY_TEXT = "Optional and not used: the route ignores it.";
 
 // N34 gates every protocol and orchestrator route and deletes their 20 rows from the
 // pack, so T3 checks only that their old cells are gone.

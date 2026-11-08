@@ -109,8 +109,6 @@ export function resetRegistryClientsForTest(): void {
 
 interface DbKnownAgent {
   agentId: bigint;
-  apiKeyId: string;
-  operatorId: string;
 }
 
 function dbKnownAgents(): DbKnownAgent[] {
@@ -124,8 +122,6 @@ function dbKnownAgents(): DbKnownAgent[] {
     ) {
       out.push({
         agentId: BigInt(row.onchainAgentId),
-        apiKeyId: row.id,
-        operatorId: row.operatorId,
       });
     }
   }

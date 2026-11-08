@@ -147,4 +147,20 @@ describe("N221 registry entity replies", () => {
       { entityId: 8, count: 1, summaryValue: "90", summaryValueDecimals: 2 },
     ]);
   });
+
+  it("C5 each reply carries exactly its on-chain keys", async () => {
+    const entityKeys = ["agentURI", "entityType", "entityTypeName", "id", "metadataHash", "owner", "role", "source", "status", "statusName"];
+    const list = (await app.inject({ method: "GET", url: "/api/registry/entities" })).json();
+    expect(Object.keys(list).sort()).toEqual(["entities", "total"]);
+    for (const entity of list.entities) expect(Object.keys(entity).sort()).toEqual(entityKeys);
+    for (const id of [7, 8]) {
+      const read = (await app.inject({ method: "GET", url: `/api/registry/entities/${id}` })).json();
+      expect(Object.keys(read).sort()).toEqual(["attestations", "entity", "reputation"]);
+      expect(Object.keys(read.entity).sort()).toEqual(entityKeys);
+      expect(Object.keys(read.reputation).sort()).toEqual(["count", "entityId", "source", "summaryValue", "summaryValueDecimals"]);
+    }
+    const board = (await app.inject({ method: "GET", url: "/api/registry/reputation/leaderboard" })).json();
+    expect(Object.keys(board).sort()).toEqual(["leaderboard", "source"]);
+    for (const row of board.leaderboard) expect(Object.keys(row).sort()).toEqual(["count", "entityId", "summaryValue", "summaryValueDecimals"]);
+  });
 });
