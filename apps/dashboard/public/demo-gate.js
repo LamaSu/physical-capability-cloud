@@ -6,7 +6,7 @@
     const query = new URLSearchParams(location.search);
     const base = (param !== null && param !== undefined && query.has(param)
       ? query.get(param)
-      : location.origin).replace(/\/$/, "");
+      : location.origin).trim().replace(/\/$/, "");
     const controller = new AbortController();
     let timer;
     const timeout = new Promise((resolve) => {

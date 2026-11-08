@@ -199,6 +199,7 @@ describe.each(PAGES)("$file", (page) => {
     const inlineIndex = html.search(/<script\b(?![^>]*\bsrc\s*=)[^>]*>/i);
     expect(gateIndex).toBeGreaterThanOrEqual(0);
     if (inlineIndex !== -1) expect(gateIndex).toBeLessThan(inlineIndex);
+    expect(html).toMatch(/<script src="\/demo-gate\.js"(?: data-base-param="\w+")?><\/script>/);
   });
 });
 describe("deep links", () => {
@@ -242,9 +243,20 @@ describe("demo labels", () => {
   });
 });
 describe("wizard API override", () => {
-  it.each(["pizza-onboard-driver.html", "pizza-onboard-shop.html", "pizza-onboard-user.html"])("checks the API the wizard writes to: %s", (file) => {
+  it.each(["pizza-onboard-driver.html", "pizza-onboard-shop.html", "pizza-onboard-user.html"])("checks the API the wizard writes to: %s", async (file) => {
     answer = "pending";
     load(file, "?api=http://other.test/");
+    expect(requests[0]).toEqual(["GET", "http://other.test/sse/demo/firehose"]);
+    reply?.(stream());
+    await settle();
+    drive();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(requests[1]).toEqual(["POST", "http://other.test/api/auth/provision"]);
+    vi.clearAllTimers();
+    delete (window as unknown as { pccDemoGate?: Promise<string> }).pccDemoGate;
+    requests = [];
+    answer = "pending";
+    load(file, "?api=http://other.test/%20");
     expect(requests[0]).toEqual(["GET", "http://other.test/sse/demo/firehose"]);
   });
 });
