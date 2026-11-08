@@ -28,9 +28,9 @@ export interface DeviceEndpoint {
 
 /** Describes a device adapter to be generated */
 export interface AdapterManifest {
-  /** Unique adapter ID within this kernel */
+  /** Unique adapter ID: a letter, then letters or digits with single "-" or "_" between them, at most 64 characters. */
   adapterId: string;
-  /** Adapter class name (PascalCase) */
+  /** Adapter class name: A-Z, then at most 63 ASCII letters or digits (PascalCase). */
   className: string;
   /** Which adapter interface to implement */
   adapterType: "machine" | "sensor" | "camera";
@@ -63,7 +63,7 @@ export interface AdapterManifest {
     scale?: number;
     offset?: number;
   }>;
-  /** Polling interval in ms */
+  /** Polling interval in ms: a finite number; absent or null uses the default. */
   pollIntervalMs?: number;
   /** Whether to generate mock mode */
   generateMockMode?: boolean;
