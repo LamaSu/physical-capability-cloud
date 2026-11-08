@@ -1,9 +1,15 @@
 """Tests for PCC registration."""
 
+import json
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 import pytest
+from click.testing import CliRunner
 
+from pcc_node.cli import main
 from pcc_node.register import (
     provision_api_key,
     register_kernel,
@@ -68,16 +74,180 @@ class TestRegisterKernel:
             result = register_kernel("http://pcc", "key", cfg)
         assert result["status"] == "registered"
 
-    def test_failure_raises(self):
-        # item 133: a non-2xx must RAISE (not return a dict a caller could mistake for success), so
-        # `start` and the daemon fail closed and never claim the node is registered after a 401.
-        cfg = NodeConfig(kernel_id="k1", kernel_name="test")
-        with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
-            mock_pcc.return_value = (400, {"error": "bad request"})
-            with pytest.raises(RegistrationError) as ei:
-                register_kernel("http://pcc", "key", cfg)
-        assert ei.value.status == 400
-        assert ei.value.data == {"error": "bad request"}
+
+
+class Gateway:
+    """A loopback PCC gateway: every request gets one scripted answer, or, with ``hang_up``, the
+    connection closes with no answer at all. Requests are recorded as (method, path, Authorization,
+    JSON body)."""
+
+    def __init__(self, status=200, body=None, headers=(), hang_up=False):
+        self.requests = []
+        gw = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _serve(self):
+                raw_in = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                gw.requests.append((self.command, self.path, self.headers.get("Authorization"),
+                                    json.loads(raw_in) if raw_in else None))
+                if hang_up:
+                    self.close_connection = True
+                    return
+                raw = json.dumps({} if body is None else body).encode()
+                self.send_response(status)
+                for name, value in headers:
+                    self.send_header(name, value)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            do_GET = do_POST = _serve
+
+            def log_message(self, *args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def _refusing_url():
+    """A loopback URL nothing listens on, so the connection is refused."""
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return f"http://127.0.0.1:{port}"
+
+
+REFUSAL = {"error": "Unauthorized", "message": "Invalid or missing API key"}
+
+
+def _register(base):
+    return register_kernel(base, "k-test", NodeConfig(kernel_id="k1", kernel_name="test"))
+
+
+class TestRegisterKernelOverTheRealTransport:
+    """ChatGPT r3 F2: register_kernel() fails closed on what a gateway actually sends.
+
+    Only the gateway's answer is scripted (a loopback gateway); register_kernel(), pcc_request() and
+    the gateway transport (no redirects followed) are the real ones. Item 133: anything but a 200 or
+    201 must RAISE, so `start` and the daemon never claim the node is registered. At e7e6f821 the only
+    direct failure test drove a 400, and the CLI and daemon tests injected a ready-made
+    RegistrationError(401), so a register_kernel() that accepted a 401 survived the suite (pack M2).
+    """
+
+    @pytest.mark.parametrize("status", [401, 400, 403, 404, 409, 422, 429, 500, 502, 503])
+    def test_an_error_status_raises_with_its_status_and_body(self, status):
+        gateway = Gateway(status=status, body=REFUSAL)
+        try:
+            with pytest.raises(RegistrationError) as refused:
+                _register(gateway.url)
+        finally:
+            gateway.close()
+        assert refused.value.status == status
+        assert refused.value.data == REFUSAL
+        assert [(m, p, a) for m, p, a, _ in gateway.requests] == [("POST", "/api/kernels", "Bearer k-test")]
+
+    @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+    def test_a_redirect_raises_and_is_never_followed(self, status):
+        catcher = Gateway(status=201, body={"id": "k1"})
+        gateway = Gateway(status=status, headers=[("Location", catcher.url + "/api/kernels")])
+        try:
+            with pytest.raises(RegistrationError) as refused:
+                _register(gateway.url)
+        finally:
+            gateway.close()
+            catcher.close()
+        assert refused.value.status == status
+        assert catcher.requests == []  # neither the key nor the registration reached the new target
+
+    def test_a_refused_connection_raises(self):
+        with pytest.raises(RegistrationError) as refused:
+            _register(_refusing_url())
+        assert refused.value.status == 0
+
+    def test_a_connection_closed_without_an_answer_raises(self):
+        gateway = Gateway(hang_up=True)
+        try:
+            with pytest.raises(RegistrationError) as refused:
+                _register(gateway.url)
+        finally:
+            gateway.close()
+        assert refused.value.status == 0
+        assert len(gateway.requests) == 1
+
+    def test_a_gateway_the_transport_refuses_raises_without_connecting(self, monkeypatch):
+        attempts = []
+
+        def no_network(address, *args, **kwargs):
+            attempts.append(address)
+            raise OSError("network disabled in this test")
+
+        monkeypatch.setattr(socket, "create_connection", no_network)
+        with pytest.raises(RegistrationError) as refused:
+            _register("http://gw.example.test")  # plain http to another host
+        assert refused.value.status == 0
+        assert refused.value.data["error"] == "insecure_gateway_url"
+        assert attempts == []
+
+    @pytest.mark.parametrize("status", [200, 201])
+    def test_a_200_or_201_registers(self, status):
+        gateway = Gateway(status=status, body={"id": "k1", "status": "registered"})
+        try:
+            result = _register(gateway.url)
+        finally:
+            gateway.close()
+        assert result == {"id": "k1", "status": "registered"}
+        (method, path, auth, body), = gateway.requests
+        assert (method, path, auth) == ("POST", "/api/kernels", "Bearer k-test")
+        assert body["id"] == "k1" and body["name"] == "test"
+
+
+class TestStartKeepsTheRealRegistration:
+    """ChatGPT r3 F2: `pcc-node start` with the real register_kernel(); only the gateway's answer is
+    scripted. A registration that fails stops start before any later step: no device or signing-key
+    registration, no saved config, no daemon, and no success output."""
+
+    @pytest.mark.parametrize("answer", [401, 403, 302, 503, "connection-refused"])
+    def test_a_failed_registration_stops_start_before_anything_else(self, answer, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        gateway = None
+        if answer == "connection-refused":
+            url, status = _refusing_url(), 0
+        else:
+            moved = [("Location", "http://127.0.0.1:9/elsewhere")] if 300 <= answer < 400 else ()
+            gateway = Gateway(status=answer, body=REFUSAL, headers=moved)
+            url, status = gateway.url, answer
+        config_path = tmp_path / "node-config.json"
+        try:
+            with mock.patch("pcc_node.cli.is_running", return_value=(False, None)), \
+                 mock.patch("pcc_node.cli.detect_all", return_value=[{"id": "cam-1", "type": "camera"}]), \
+                 mock.patch("pcc_node.cli.load_or_create_keys", return_value=("ab" * 32, "cd" * 32)), \
+                 mock.patch("pcc_node.cli.register_devices") as devices, \
+                 mock.patch("pcc_node.cli.register_signing_key") as signing_key, \
+                 mock.patch("pcc_node.cli.run_daemon") as daemon:
+                result = CliRunner().invoke(main, ["start", "-c", str(config_path), "--api-key", "k-test",
+                                                   "--pcc-base", url], env={"PCC_BASE": ""})
+        finally:
+            if gateway is not None:
+                gateway.close()
+        assert result.exit_code == 1, result.output
+        assert f"Registration failed (HTTP {status})" in result.output, result.output
+        for success in ("Node running", "Config saved"):
+            assert success not in result.output, result.output
+        devices.assert_not_called()
+        signing_key.assert_not_called()
+        daemon.assert_not_called()
+        assert not config_path.exists()
+        if gateway is not None:
+            assert [(m, p) for m, p, _, _ in gateway.requests] == [("POST", "/api/kernels")]
 
 
 class TestAnnounceCapabilities:
