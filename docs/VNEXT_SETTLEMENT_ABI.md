@@ -277,7 +277,7 @@ A selector covers a function's name and its complete parameter types, nested str
 | escrow | `ClaimCreated(bytes32,bytes32,uint256,uint8,address,uint256)` |
 | escrow | `ClaimDischarged(bytes32,bytes32,address,uint256)` |
 
-VNextAbiFreeze.t.sol pins these against the real contracts, and the kit’s C5 pins the same literals.
+VNextAbiFreeze.t.sol pins these against the real contracts, and the kit's C5 pins the same literals.
 
 ## 8. Golden vectors
 

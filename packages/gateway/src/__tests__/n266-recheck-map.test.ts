@@ -200,7 +200,16 @@ describe("N266 kit conformance", () => {
     const rows = [...doc.matchAll(/^\| (lifecycle|receipt|provenance) \| `(\/[^`]+)` \|/gm)].map(m => `${m[1]} ${m[2]}`);
     const expected = MAP.flatMap(row => row.routes.map(route => `${route} ${row.pointer}`));
     expect(sorted(rows)).toEqual(sorted(expected)); expect(doc).toContain(KIT_VERSION); expect(doc).toContain(recheckKitDescriptor().kitSha256);
-    expect(doc).not.toMatch(/\bnpx\b|npm i(nstall)?\b|registry\.npmjs/);
+    expect(doc).not.toMatch(/\bnpx\b|\bnpm i(nstall)?\b|registry\.npmjs/);
+  });
+  it("C9b canonical-record layout and redeploy prerequisite are explicit in both paragraphs", () => {
+    const doc = read(join(repoRoot, "docs/SETTLEMENT_RECHECK.md"));
+    const text = "The record layout holds one canonical record per network (deployments/vnext/<network>/CANONICAL.json), and C8 requires one kit entry per such record. A pre-redeploy reply stays re-checkable after a same-network redeploy only once a location for superseded records exists; the next same-network redeploy has to define it first.";
+    const paragraphs = doc.split("\n\n").filter(paragraph => paragraph.startsWith("The ABI is included") || paragraph.startsWith("Each deployment names"));
+    expect(paragraphs).toHaveLength(2);
+    for (const paragraph of paragraphs) { expect(paragraph).toContain(text); expect(paragraph).not.toMatch(/\bN\d+\b/); }
+    expect(doc.split(text)).toHaveLength(3);
+    expect(doc).not.toMatch(/retain/i);
   });
   it("C10 deliberate version/hash pair", () => {
     expect([KIT_VERSION, recheckKitDescriptor().kitSha256]).toEqual(["1.0.0", "76eaac0a40b6a8adc2c57f4c5040f0b2ab009d826c54e45b0b6b2a4d516cc817"]);
@@ -208,8 +217,10 @@ describe("N266 kit conformance", () => {
   it("C11 public static descriptor, exact serialization, hash, headers and no env read", async () => {
     const app = Fastify(); await app.register(settlementRecheckKitRoutes);
     try {
-      setEnv("PCC_VNEXT_RECORD_NETWORK", "base"); const first = await app.inject({ method: "GET", url: "/.well-known/pcc-settlement-recheck.json" });
-      setEnv("PCC_VNEXT_RECORD_NETWORK", undefined); const second = await app.inject({ method: "GET", url: "/.well-known/pcc-settlement-recheck.json" });
+      setEnv("PCC_VNEXT_RECORD_NETWORK", "base-sepolia"); setEnv("PCC_VNEXT_ALLOW_TESTNET_RECORD", "1");
+      const first = await app.inject({ method: "GET", url: "/.well-known/pcc-settlement-recheck.json" });
+      setEnv("PCC_VNEXT_RECORD_NETWORK", undefined); setEnv("PCC_VNEXT_ALLOW_TESTNET_RECORD", undefined);
+      const second = await app.inject({ method: "GET", url: "/.well-known/pcc-settlement-recheck.json" });
       expect(first.statusCode).toBe(200); expect(first.headers["content-type"]).toMatch(/^application\/json/); expect(first.headers["access-control-allow-origin"]).toBe("*"); expect(first.headers["cache-control"]).toBe("public, max-age=300");
       expect(first.body).toBe(second.body); expect(first.json()).toEqual(recheckKitDescriptor());
       const { kitSha256, ...content } = first.json(); expect(kitSha256).toBe(createHash("sha256").update(JSON.stringify(content), "utf8").digest("hex"));
@@ -228,6 +239,7 @@ describe("N266 kit conformance", () => {
     const row = MAP.find(row => row.pointer === "/economics/amount")!;
     expect(row.rule.toLowerCase()).toContain(phrase); expect(row.reads).toContainEqual({ kind: "call", contract: "escrow", fn: "payoutAt", args: ["unitId", "0"], output: "amount" });
     expect(row.reads.some(read => read.kind === "call" && read.output === "g_")).toBe(false);
+    expect(row.reads.some(read => read.kind === "call" && read.fn === "feeAmountsOf" && (read.output === "g_" || read.output === "0"))).toBe(false);
     const app = Fastify(); await app.register(settlementRecheckKitRoutes);
     try { const res = await app.inject({ method: "GET", url: "/.well-known/pcc-settlement-recheck.json" }); expect(res.json().readSurfaces["vnext-read-v1"].find((r: any) => r.pointer === "/economics/amount")).toEqual(row); } finally { await app.close(); }
     const doc = read(join(repoRoot, "docs/SETTLEMENT_RECHECK.md")); expect(doc.split("\n").find(line => line.startsWith("| receipt | `/economics/amount` |"))!.toLowerCase()).toContain(phrase);

@@ -244,11 +244,10 @@ function deploymentEcho(deployment: DeploymentIdentity): DeploymentIdentity {
   };
 }
 
-function validDeployment(binding: UnitBinding): boolean {
-  const deployment = binding.deployment;
+function validDeployment(deployment: DeploymentIdentity | null, chainId: number): deployment is DeploymentIdentity {
   return deployment !== null && typeof deployment === "object"
     && Number.isSafeInteger(deployment.chainId) && deployment.chainId > 0
-    && deployment.chainId === binding.chainId
+    && deployment.chainId === chainId
     && typeof deployment.factory === "string" && /^0x[0-9a-f]{40}$/.test(deployment.factory)
     && typeof deployment.implementation === "string" && /^0x[0-9a-f]{40}$/.test(deployment.implementation)
     && typeof deployment.recordSha256 === "string" && /^[0-9a-f]{64}$/.test(deployment.recordSha256);
@@ -325,9 +324,19 @@ export async function settlementReadRoutes(app: FastifyInstance) {
       }
       throw e;
     }
-    if (!validDeployment(binding)) {
+    if (binding === null || typeof binding !== "object") {
+      fail(reply, "INDEX_NOT_READY", "Settlement read is misbound: no valid binding");
+      return null;
+    }
+    const deployment = binding.deployment !== null && typeof binding.deployment === "object" ? deploymentEcho(binding.deployment) : null;
+    if (!validDeployment(deployment, binding.chainId)) {
       req.log?.error({ unitId }, "settlement read has no valid deployment identity");
       fail(reply, "INDEX_NOT_READY", "Settlement read is misbound: no valid deployment identity");
+      return null;
+    }
+    if (!(typeof binding.windows?.challengeWindow === "bigint" && binding.windows.challengeWindow >= 0n
+      && typeof binding.windows?.appealWindow === "bigint" && binding.windows.appealWindow >= 0n)) {
+      fail(reply, "INDEX_NOT_READY", "Settlement read is misbound: no valid binding");
       return null;
     }
 
@@ -342,7 +351,7 @@ export async function settlementReadRoutes(app: FastifyInstance) {
       }
       throw e;
     }
-    return { r, anchors, lifecycle, snap, binding };
+    return { r, anchors, lifecycle, snap, binding, deployment };
   }
 
   // ── GET /lifecycle ──────────────────────────────────────────────────
@@ -358,7 +367,7 @@ export async function settlementReadRoutes(app: FastifyInstance) {
         chainId,
         escrow,
         unitId: req.params.unitId,
-        deployment: deploymentEcho(binding.deployment),
+        deployment: ctx.deployment,
         ...snapshotEcho(snap),
         unitState: lifecycle.unitState,
         phase: lifecycle.phase,
@@ -433,7 +442,7 @@ export async function settlementReadRoutes(app: FastifyInstance) {
         chainId,
         escrow,
         unitId,
-        deployment: deploymentEcho(binding.deployment),
+        deployment: ctx.deployment,
         ...snapshotEcho(snap),
         // rule 2 — no settled/verified/paid boolean. Callers key off finalState.
         finalState: lifecycle.finalState,
@@ -489,7 +498,7 @@ export async function settlementReadRoutes(app: FastifyInstance) {
         chainId,
         escrow,
         unitId,
-        deployment: deploymentEcho(binding.deployment),
+        deployment: ctx.deployment,
         ...snapshotEcho(snap),
         provenanceAvailability: page.availability,
       });
@@ -499,7 +508,7 @@ export async function settlementReadRoutes(app: FastifyInstance) {
       chainId,
       escrow,
       unitId,
-      deployment: deploymentEcho(binding.deployment),
+      deployment: ctx.deployment,
       ...snapshotEcho(snap),
       provenanceAvailability: "AVAILABLE",
       compositionRoot: page.compositionRoot,

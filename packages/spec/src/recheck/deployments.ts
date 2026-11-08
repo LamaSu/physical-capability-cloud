@@ -1,6 +1,6 @@
 import type { RecheckDeployment } from "./types.js";
 
-/** All committed records, retained across redeployments; never selected by env. */
+/** One entry per committed canonical record (C8); never selected by env. */
 export const KNOWN_DEPLOYMENTS: readonly Readonly<RecheckDeployment>[] = Object.freeze([
   Object.freeze({
     "network": "base-sepolia",
