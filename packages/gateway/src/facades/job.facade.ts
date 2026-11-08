@@ -344,7 +344,7 @@ export class JobFacade extends BaseFacade {
         return { jobId, deviceId: null, status: "queued" as const, reason };
       };
 
-      const decision = localJobDispatchDecision(svc?.kernelId, kernelId, svc?.hasExplicitConfig ?? false, body.queueOnly);
+      const decision = localJobDispatchDecision(svc?.kernelId, kernelId, svc?.hasExplicitConfig ?? false, body.queueOnly, svc?.usesTestSigner);
       if (!decision.ok) return queued(decision.reason);
 
       // Local kernel: fire-and-forget via KernelService

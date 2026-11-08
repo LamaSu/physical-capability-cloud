@@ -330,7 +330,7 @@ export async function setupRoutes(app: FastifyInstance) {
       const svc = getKernelService();
       kernelServiceReady = true;
       const devices = await svc.listDevices();
-      localDispatch = localJobDispatchDecision(svc.kernelId, svc.kernelId, svc.hasExplicitConfig).ok
+      localDispatch = localJobDispatchDecision(svc.kernelId, svc.kernelId, svc.hasExplicitConfig, undefined, svc.usesTestSigner).ok
         && devices.some((d) => d.type === "machine" && svc.hasRunner(d.id));
       kernelServiceDevices = devices.map((d) => ({
         id: d.id,
@@ -947,9 +947,10 @@ export async function setupRoutes(app: FastifyInstance) {
     // it for real; there is no self-attest fallback.
 
     // Submit the job
-    // A setup test is also a physical job: queue-only mode and the kernel's
-    // emergency stop apply before entering the in-process runtime.
-    const dispatch = localJobDispatchDecision(svc.kernelId, kernelId, svc.hasExplicitConfig, queueOnly);
+    // A setup test is also a physical job: queue-only mode, the kernel's
+    // emergency stop and, in production, the kernel's signer (N267) apply
+    // before entering the in-process runtime.
+    const dispatch = localJobDispatchDecision(svc.kernelId, kernelId, svc.hasExplicitConfig, queueOnly, svc.usesTestSigner);
     if (!dispatch.ok) return queuedResponse(dispatch.reason);
 
     let submitResult: Awaited<ReturnType<typeof svc.submitJob>>;
