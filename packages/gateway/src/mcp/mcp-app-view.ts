@@ -1284,7 +1284,7 @@ export function buildMcpAppIrDashboardHtml(nonce: string = cspNonce()): string {
 </head>
 <body>
 <main id="pcc-ir-root">
-  <p class="pcc-invalid">Waiting for the host to hand off a dashboard&hellip;</p>
+  <p class="pcc-invalid pcc-src-ephemeral" data-source="ephemeral">Waiting for the host to hand off a dashboard&hellip;</p>
 </main>
 <script nonce="${nonce}">
 ${dashboardIrViewBootScript()}

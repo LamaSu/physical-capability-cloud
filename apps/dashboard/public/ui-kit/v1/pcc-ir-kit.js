@@ -1047,12 +1047,14 @@
     return spec.bindKey;
   }
   function sourceClassOf(node) {
+    if (!Object.prototype.hasOwnProperty.call(NODE_SCHEMA, node.type)) return "unconfirmed";
     const spec = NODE_SCHEMA[node.type];
-    if (!spec) return null;
     if (spec.prose) return isWithheldProse(node) ? null : "proposed";
+    if (spec.parentOf !== void 0) return "proposed";
     const key = policyKeyOf(node);
-    const policy = key !== null && Object.prototype.hasOwnProperty.call(BIND_POLICY, key) ? BIND_POLICY[key] : void 0;
-    return policy ? policy.sourceClass : null;
+    if (key === null) return null;
+    const policy = Object.prototype.hasOwnProperty.call(BIND_POLICY, key) ? BIND_POLICY[key] : void 0;
+    return policy ? policy.sourceClass : "unconfirmed";
   }
   function provenanceOf(node) {
     if (!node.bind) return null;
@@ -1256,6 +1258,7 @@
     return n;
   }
   var UNAVAILABLE = kitText("\u2014");
+  var UNCONFIRMED = kitText("couldn't confirm the source");
   var SCHEMA_FIELDS = Object.freeze({
     "capability-summary-v1": Object.freeze({
       heading: kitText("Capability"),
@@ -1448,10 +1451,7 @@
   });
   function paintNode(doc, node) {
     const p = PAINTERS[node.type];
-    if (!p) {
-      return el(doc, CLS.invalid, kitText(""));
-    }
-    const e = p(doc, node);
+    const e = !p ? el(doc, CLS.invalid, UNCONFIRMED) : p(doc, node);
     const src = sourceClassOf(node);
     if (src !== null) {
       e.setAttr("data-source", src);

@@ -108,6 +108,7 @@ export function agentEl(doc: RDocument, cls: string, text: AgentText): RElement 
 // or (c) mint a privileged-looking "receipt" — the settlement record is always framed
 // read-only with an explicit "not proof of payment" warning.
 export const UNAVAILABLE: KitText = kitText("—"); // em dash — honest "not available", never a partial fake
+const UNCONFIRMED: KitText = kitText("couldn't confirm the source");
 // Every field has a `kind`: a closed, typed grammar (astra r3 M3 / #348 r2b F1). `money` STAYS only
 // as documentation that a price field shows money as the card's own — it is no longer consulted to
 // skip validation: the "amount"/"currency" kinds admit no prose at all, so the withheld notice can
@@ -355,10 +356,11 @@ const PAINTERS: Readonly<Record<IrNodeType, Painter>> = Object.freeze({
 });
 function paintNode(doc: RDocument, node: IrNode): RElement {
   const p = PAINTERS[node.type];
-  if (!p) { return el(doc, CLS.invalid, kitText("")); } // frozen dispatch; unknown type → inert
-  const e = p(doc, node);
-  // PX-4 provenance: stamp the DERIVED authority class (never read from the node or the
-  // manifest). Prose → "proposed"; bound data → its registered class; constants → none.
+  // Frozen dispatch: an unknown type paints inert and says so.
+  const e = !p ? el(doc, CLS.invalid, UNCONFIRMED) : p(doc, node);
+  // Stamp the DERIVED authority class (never read from the node or the manifest): prose and
+  // containers are "proposed", bound data takes its registered class, an unknown type is
+  // "unconfirmed", and PCC constants carry none.
   const src = sourceClassOf(node);
   if (src !== null) { e.setAttr("data-source", src); e.className = e.className + " pcc-src-" + src; }
   return e;

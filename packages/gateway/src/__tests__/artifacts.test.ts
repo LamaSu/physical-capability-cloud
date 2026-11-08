@@ -438,6 +438,17 @@ describe("GET /a/:slug — render shell", () => {
     expect(html).not.toContain("innerHTML");
   });
 
+  it("marks the manifest's title and description agent-authored and the kit status line a passing state", async () => {
+    const manifest = validManifest({ description: "About this view" });
+    const a = (await save({ manifest })).json();
+    const res = await app.inject({ method: "GET", url: `/a/${a.slug}` });
+    expect(res.body).toContain('<h1 class="pcc-agent pcc-untrusted pcc-src-proposed" data-source="proposed">');
+    expect(res.body).toContain('<p class="pcc-agent pcc-untrusted pcc-src-proposed" data-source="proposed">About this view</p>');
+    expect(res.body).toContain('<p id="pcc-kit-status" class="pcc-src-ephemeral" data-source="ephemeral">Loading the PCC dashboard kit&hellip;</p>');
+    const missing = await app.inject({ method: "GET", url: "/a/no-such-dashboard" });
+    expect(missing.body).not.toContain("data-source");
+  });
+
   it("escapes hostile manifest content — no script breakout (XSS-safe)", async () => {
     const manifest = validManifest({
       sections: [
