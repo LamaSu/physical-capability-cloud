@@ -21,7 +21,7 @@ export function isRelayRequest(req: { url: string; routeOptions?: { url?: string
   return isRelayPath(req.url.split("?")[0].replace(/\/+/g, "/"));
 }
 
-function countAdminKeyFields(req: FastifyRequest): number {
+export function countAdminKeyFields(req: FastifyRequest): number {
   let count = 0;
   const { rawHeaders } = req.raw;
   for (let i = 0; i < rawHeaders.length; i += 2) {

@@ -256,3 +256,28 @@ export interface EscrowSummaryDTO {
   disputedCount: number;
   challengeWindowEnd?: Timestamp;
 }
+
+/** Account read from GET /api/agent/me; each section can report its own failure. */
+export interface AgentMeDTO {
+  ok: boolean;
+  as_of: Timestamp;
+  identity: {
+    operator: string;
+    key_id: Id | null;
+    key_name: string | null;
+    scopes: string[];
+  };
+  kernels: {
+    count: number | null;
+    items: Array<{ id: Id; name: string; status: string; last_heartbeat: Timestamp | null }>;
+    unavailable?: string;
+  };
+  devices: { count: number | null; unavailable?: string };
+  work: {
+    in_flight: number | null;
+    items: Array<{ id: Id; kernel_id: Id; status: string; progress: number | null }>;
+    unavailable?: string;
+  };
+  keys: { active: number | null; wildcard_keys: number | null; unavailable?: string };
+  next: string[];
+}

@@ -666,7 +666,7 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
       // this once with a "back this up before continuing" gate.
       mnemonic: wallet.mnemonic ?? null,
       mnemonicWarning: wallet.mnemonic
-        ? "Save this 12-word phrase NOW. It is the only way to recover your wallet. We do not store it. If you lose it, your wallet and all royalty payouts are gone forever."
+        ? "Save this 12-word phrase NOW. It is the only way to recover your wallet. We do not store it. If you lose it, your wallet is gone forever."
         : null,
       scheduleHash,
       ratePercent: body.ratePercent,

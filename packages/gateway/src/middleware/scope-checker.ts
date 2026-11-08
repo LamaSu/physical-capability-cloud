@@ -75,6 +75,9 @@ const DEFAULT_SCOPE_REQUIREMENTS: Array<{
   // Template author endpoints — publish templates
   { method: "POST",   pattern: "/api/templates/*",                  scopes: ["template_author", "operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
   { method: "PUT",    pattern: "/api/templates/*",                  scopes: ["template_author", "operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
+  // Capability Kit authors (kits K1) — publish and fork kits
+  { method: "POST",   pattern: "/api/kits",                         scopes: ["template_author", "admin"] },
+  { method: "POST",   pattern: "/api/kits/**",                      scopes: ["template_author", "admin"] },
   // Auditor endpoints — read-only audit and compliance access
   { method: "GET",    pattern: "/api/audit/*",                      scopes: ["auditor", "admin"] },
   { method: "GET",    pattern: "/api/compliance/*",                 scopes: ["auditor", "operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
@@ -246,7 +249,7 @@ function firstMatch(
 /**
  * Extract scopes from the API key record; missing or unreadable scopes grant nothing.
  */
-function getCallerScopes(req: FastifyRequest): string[] {
+export function getCallerScopes(req: FastifyRequest): string[] {
   if (!req.apiKeyId) return [];
 
   try {

@@ -162,7 +162,8 @@ User: "Order me a pizza for delivery to 728 Geary St SF."
 2. Pick the best-rated one (check `reputation`), present to user with price + ETA.
 3. On user confirmation: `POST /api/job-offers` with `capabilityType=pizza.order`, `requirements={ shopId, items, deliveryAddress, customer }`, `pricing={ model:'fixed', amount: shopPrice, currency:'USD' }`, `idempotencyKey='pizza-728geary-{timestamp}'`.
 4. Separately: `GET /api/capabilities?type=courier.dispatch&within=...` — find a driver.
-5. `POST /api/job-offers` with `capabilityType=courier.dispatch`, `requirements={ pickup:{shopAddress}, dropoff:{userAddress}, pickupReadyAt }`, `pricing={ model:'fixed' }`.
+   Present the driver's price from the listing to the user, as in step 2, and post step 5's offer only once they confirm that price.
+5. `POST /api/job-offers` with `capabilityType=courier.dispatch`, `requirements={ pickup:{shopAddress}, dropoff:{userAddress}, pickupReadyAt }`, `pricing={ model:'fixed', amount: driverPrice, currency:'USD' }`.
 6. Poll `GET /api/job-offers/:id` for both, reading `offer.status` and each offer's `events`. A `delivered` status is a claim: any caller can post it, with no evidence.
 7. Report to the user only what evidence shows: a photo the operator or courier shares as a storage CID. Say that PCC has not verified it.
 
@@ -173,7 +174,7 @@ User: "I have an STL file. Print it on an FDM printer near me."
 1. Upload the STL's raw bytes via `POST /api/storage` (`Content-Type: model/stl` or `application/octet-stream`). Save the returned CID.
 2. `GET /api/capabilities?type=manufacturing.fdm&within=<user-coords>,25` — find local print shops.
 3. Pick by price + material support. Present to user.
-4. `POST /api/job-offers` with `capabilityType=manufacturing.fdm`, `requirements={ stl_cid, material:'PLA', infill:0.2, layer_height:0.2 }`, `pricing={ model:'quote-required' }` (let operator quote).
+4. `POST /api/job-offers` with `capabilityType=manufacturing.fdm`, `requirements={ stl_cid, material:'PLA', infill:0.2, layer_height:0.2 }`, `pricing={ model:'quote-required', amount: 0, currency:'USDC' }` (let operator quote).
 5. Wait for operator to claim + quote. Show user the quote. On confirmation, accept.
 6. Operator prints and shares a photo as a storage CID (an offer has no evidence field).
 7. `GET /api/storage/<cid>` to view the photo. Confirm to the user only what it shows; `offer.status` alone proves nothing.

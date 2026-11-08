@@ -29,16 +29,14 @@ import { computeTermsHashV21, TermsHashV21Error } from "./terms-hash-v21.js";
 import { assertChain, describeRevert, pinBlock, pinnedReader } from "./chain.js";
 import { refuse } from "./errors.js";
 import { parsePreparePayload, type PreparePayload } from "./payload.js";
-import { resolvePins, type FundingPins } from "./pins.js";
+import { reclaimWindowFor, resolvePins, type FundingPins } from "./pins.js";
 import {
   ECDSA_S_MAX,
   ESCROW_ABI,
   FACTORY_ABI,
   JOB_POLICY_FIELDS,
-  MAX_RECLAIM_DELAY,
   MAX_PAYOUT_LEGS,
   MAX_UNITS,
-  MIN_RECLAIM_DELAY,
   POLICY_VERSION,
   acceptanceDigest,
   domainSeparator,
@@ -57,7 +55,7 @@ import {
   type UnitConfig,
 } from "./vnext.js";
 
-/** Seconds the acceptance must outlive the latest block, and the slack kept above the 10-day reclaim floor. */
+/** Seconds the acceptance must outlive the latest block, and the slack kept above the chain's reclaim floor (reclaimWindowFor). */
 export const DEFAULT_MARGIN_SECONDS = 300n;
 
 /**
@@ -426,19 +424,21 @@ export async function recoverSigner(digest: Hex, signature: Hex): Promise<Addres
 
 /**
  * The time rules at a block. The factory refuses `block.timestamp > expiry` (FAC:237) and `fund()` refuses a
- * reclaimAt outside [10 d, 365 d] after its own block (ESC:796-801). The transactions land after `timestamp`,
- * so both keep `margin` seconds of slack on the side that time erodes.
+ * reclaimAt outside the deployment's window after its own block (ESC:796-801). The SDK takes that window
+ * from reclaimWindowFor by the chain id the caller has already checked with assertChain. The transactions
+ * land after `timestamp`, so both keep `margin` seconds of slack on the side that time erodes.
  */
-export function checkTiming(p: { expiry: bigint; configs: readonly UnitConfig[] }, timestamp: bigint, margin: bigint): void {
+export function checkTiming(p: { expiry: bigint; configs: readonly UnitConfig[] }, timestamp: bigint, margin: bigint, chainId: bigint): void {
   if (p.expiry < timestamp + margin) {
     refuse("EXPIRY_TOO_SOON", `the acceptance expires at ${p.expiry}; the latest block is at ${timestamp}, and the margin is ${margin}s`);
   }
+  const w = reclaimWindowFor(chainId);
   p.configs.forEach((c, i) => {
     const delay = c.reclaimAt - timestamp;
-    if (delay < MIN_RECLAIM_DELAY + margin || delay > MAX_RECLAIM_DELAY) {
+    if (delay < w.min + margin || delay > w.max) {
       refuse(
         "RECLAIM_WINDOW",
-        `fund.configs[${i}].reclaimAt is ${delay}s after the latest block; fund() needs [${MIN_RECLAIM_DELAY}, ${MAX_RECLAIM_DELAY}]s after its own block (margin ${margin}s)`,
+        `fund.configs[${i}].reclaimAt is ${delay}s after the latest block; fund() needs [${w.min}, ${w.max}]s after its own block (margin ${margin}s)`,
       );
     }
   });
@@ -620,7 +620,7 @@ export async function prepareFunding(args: PrepareFundingArgs): Promise<Prepared
   }
   const liveToken = await live("implementation.USDC()", () => reader.read<Address>(m.implementation, ESCROW_ABI, "USDC"));
   if (!same(liveToken, pins.usdc)) refuse("TOKEN_NOT_PINNED", `the implementation settles in ${liveToken}, not the pinned USDC ${pins.usdc}`);
-  checkTiming({ expiry: p.expiry, configs: p.fund.configs }, block.timestamp, margin);
+  checkTiming({ expiry: p.expiry, configs: p.fund.configs }, block.timestamp, margin, p.chainId);
 
   const reclaims = p.fund.configs.map((c) => c.reclaimAt);
   const prepared: PreparedFunding = deepFreeze({

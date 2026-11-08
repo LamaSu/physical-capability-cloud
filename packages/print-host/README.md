@@ -310,6 +310,8 @@ in the URI are refused. The defaults are a 2000 ms poll interval, a 20000 ms
 cancel-confirm deadline, a 15000 ms request timeout, a 120000 ms Print-Job
 timeout, a 32 MiB maximum document and the `application/pdf` document format.
 Printer initialization errors exit with the closed code `adapter_init_failed`.
+Use the printer's IP address or an ASCII (punycode) hostname; the port must be
+1-65535 and the canonical URI at most 1023 octets.
 
 Testnet-only is a policy enforced on the configuration's `chainId`. The operator
 EOA has the same address on every chain: never fund it on mainnet. The evidence
@@ -361,7 +363,8 @@ Real mode requires positive `maxFeePerGasCap`, `maxPriorityFeePerGasCap`, and
 `gasCap` before startup. Use `--no-submit` explicitly to print and relay without
 package submission. A unit first processed with sending disabled (`--no-submit`,
 missing caps, `realMode: false`, or no broadcaster or keys) ends
-`evidence_stored` with `submit_disabled` (or `package_inputs_missing` for an
+`evidence_stored` with `submit_disabled` (or, except under `--no-submit` or in a
+simulated `realMode: false` rehearsal, `package_inputs_missing` for an
 incomplete manifest); a later sending run never settles it.
 All run logs contain closed codes only.
 
@@ -379,17 +382,16 @@ unit or job that a rehearsal directory already printed.
 Before a sending run, check:
 - the data directory follows the rule above: never used by a `--no-submit`
   run, and the same one for every later sending run and restart;
-- the run is supervised and covers one unit. PR #624's next round, r5d (the
-  r5b review's R2-R4 and A3), must merge before any unattended or multi-unit
-  sending run. Until then a torn first session record halts the host (R2), the
-  gateway's 503 `wallet_link_unavailable` forfeits a unit's evidence (R3), and
-  receipt refusals can retry without end and block polling (R4, A3). Only a
-  watching operator sees these.
+- the run is supervised and covers one unit, unless r5d's chain change
+  (the collapse review's F1) has also merged. That change narrows which
+  decoded send-time escrow errors release the operator's nonce; see
+  "Evidence transaction caps".
 
 A real-mode adapter must report `source.simulated` as exactly `false`.
-Otherwise the host halts with `adapter_simulated` before polling, claiming or
-printing, logs that code once, and the CLI exits non-zero. Poll-only operation
-without an adapter is unaffected.
+Otherwise, or if a real-mode host that is not poll-only has no adapter at all,
+the host halts with `adapter_simulated` before polling, claiming or printing,
+logs that code once, and the CLI exits non-zero.
+Only poll-only operation may run without an adapter.
 
 The CLI uses the **STRICT e-stop reader by default**. Execution requires a parsed
 poll with an own `emergencyStop: "clear"` field and an own `jobs` array.
@@ -439,8 +441,15 @@ saved signed bundle. Appends sync their file and directory before returning.
 Before recording or reporting a claim, the host reserves its lowercase bytes32
 settlement unit in a mode-0600 `.unit-<hex>.used.json` sidecar and syncs the file
 and directory. Every job state retains this reservation. A crash after the marker
-leaves the unit used even if no claim was recorded. Older public package, bundle,
-receipt and session artifacts also establish a used unit.
+leaves the unit used even if no claim was recorded. The reservation check
+reads older public package, bundle, receipt and session artifacts only for
+journaled jobs that no valid reservation marker names; an artifact naming the
+unit establishes that it is used. A job named by a valid marker is never
+rescanned, and a malformed marker of another unit names no job. An empty or
+unparseable first session record (`00000000.json`) of an unmarked legacy job
+binds no unit: that session never opened, so nothing was printed under it. A
+first record that parses with a malformed unit ID, or any other unreadable
+older artifact, still fails closed with `journal_invalid`.
 The bundle, package, and receipt artifacts share an atomic save: a unique
 exclusive temporary file is written and fsynced, linked to its final name,
 then unlinked and the directory fsynced. A leftover temporary file is ignored
@@ -479,9 +488,20 @@ library rehearsal may relay simulated evidence as an unsigned `{events, bundleHa
 envelope that retains its simulation tags, without adding it to the strict unit
 session or granting it delegated authority. It always ends `evidence_stored`
 with `submit_disabled`, even for an incomplete manifest, and never packages or
-submits it, including on a later sending run. An ambiguous relay post ends with
-`evidence_indeterminate`; a refusal ends with `evidence_refused`.
-Neither reaches package submission.
+submits it, including on a later sending run. When the gateway refuses an
+evidence POST without storing anything (`500 evidence_store_failed`;
+`503 read_failed`, `503 scope_requirements_unavailable` or
+`503 wallet_link_unavailable`; any `429`), the host re-posts the same saved bundle in the same process, at
+most five POSTs in all. Before each re-post it waits 5, 20, 60, then 120
+seconds, or a longer reply's `Retry-After`, capped at 300 seconds per wait.
+Each refused POST logs its closed code (`server_error`, `unavailable` or
+`rate_limited`). While waiting, the host sends no heartbeat, polls nothing
+and claims nothing. A host stop ends the wait with no further journal record;
+a restart marks the job `interrupted` and never re-posts its bundle. If the
+last POST is also refused, the job ends `evidence_refused` with that refusal's
+code. An ambiguous post (`indeterminate`) is never re-posted and ends
+`evidence_indeterminate`; any other refusal ends `evidence_refused` at once.
+None of these outcomes reaches package submission.
 
 Only after durable `evidence_stored` does the host build and sign D1 and D2.
 It saves and fsyncs the full signed public package as a mode-0600
@@ -516,13 +536,27 @@ the host checks the device key's load-time delegation parent against its operato
 principal and refuses missing, mismatched or compromised device identities.
 
 A pre-send RPC failure, `unreconciled_transaction`, or `caps_exceeded` leaves the
-job at its previous state and writes no attempt. Receipt 503, 429, 5xx, network,
-timeout, and other refusals also retry without a new journal record. Failures
-back off per job from 5 seconds, doubling to 60 seconds; a low cap keeps logging
-`submit_caps_exceeded` until the operator raises it. Only receipt 409
-`receipt_exists` is terminal `receipt_conflict`. A 409 `kernel_emergency_stopped`
-and other 409 errors retry without submission; a receipt for a different package
-is terminal `receipt_mismatch`.
+job at its previous state and writes no attempt. Receipt 429s, 5xx replies
+(including `503 receipt_signer_unavailable`), network and timeout failures,
+unrecognized refusals, and the operator-fixable refusals below retry without
+a new journal record. Failures back off per job from 5 seconds, doubling to
+60 seconds; a low cap keeps logging `submit_caps_exceeded` until the operator
+raises it.
+Receipt `409 receipt_exists` (`receipt_conflict`), `409 kernel_mismatch`
+(`receipt_kernel_mismatch`), `400 invalid_package_body`
+(`receipt_invalid_package_body`), `422 invalid_package_signatures`
+(`receipt_invalid_package_signatures`) and `400 invalid_settlement_unit`
+(`receipt_invalid_settlement_unit`) are terminal `refused`: they are never
+submitted and their receipts are never posted again. The persisted package
+cannot pass these checks, so the unit is never paid; the payer reclaims at
+`reclaimAt`. These gateway-fixable refusals retry under their own log codes:
+`404 job_not_found`, `422 package_challenge_refused`,
+`422 package_registry_refused`, `422 package_operator_refused` and
+`503 receipt_storage_unavailable`; the recovery scheduler shares attempts
+between these units and preserves polling opportunities while they retry
+(see recovery below). A `409 kernel_emergency_stopped` and other 409 errors
+retry without submission; a receipt for a different package is terminal
+`receipt_mismatch`.
 A source failure on restart logs its closed input code and retries from
 `evidence_stored`; only a returned incomplete manifest writes `package_inputs_missing`.
 
@@ -548,6 +582,21 @@ POST a receipt. Missing or altered package artifacts likewise halt.
 Unresolved attempts take priority over every new send on the operator's nonce
 stream. Repeated unchanged read-back outcomes log their code without growing
 the durable journal.
+Recovered code-less `evidence_stored`, `package_built` and `receipt_stored`
+units are skipped while their retries back off. After each non-blocking
+recovery attempt, the next tick polls, checks e-stop and may claim new work,
+instead of selecting another non-blocking recovery. Recovery may still run
+while the poll itself is backing off. Among ready recovered units, those not
+yet attempted in this process go first; otherwise the oldest retry time
+(`until`) goes first. Each attempt tick returns its result before polling.
+After an attempt the run loop waits until the backoff ends or the next
+heartbeat is due, whichever is sooner. The exception is the
+operator's spend caps: while any stored receipt backs off on
+`submit_caps_exceeded`, the host polls and claims nothing because new units
+would face the same caps. Other recovered units keep their retries during the
+stall. `submit_attempted` and `submit_indeterminate` still
+block: every tick reads them back first, and the host polls and claims nothing
+until read-back resolves them.
 Escrow accepts one `submitEvidence` per unit; preserving the attempt before
 sending prevents restart from consuming that slot twice.
 
@@ -621,7 +670,15 @@ and keeps the API key in a closure. The frozen client exposes five calls:
   receiptDigest, kid}`; the receipt contains only `{chainId, escrow,
   settlementUnitId, packageDigest, receivedAt}`. The same package digest returns
   the original receipt. A different digest returns `409 receipt_exists`; a
-  missing gateway signer returns `503 receipt_signer_unavailable`.
+  missing gateway signer returns `503 receipt_signer_unavailable`. A `409`
+  `kernel_mismatch` returns the closed code `receipt_kernel_mismatch`.
+  The route's other refusal constants return `receipt_refused` with the
+  constant as sub-code, each only under its matching status:
+  `404 job_not_found`, `400 invalid_package_body`, `400 invalid_settlement_unit`,
+  `422 invalid_package_signatures`, `422 package_challenge_refused`,
+  `422 package_registry_refused`, `422 package_operator_refused` and
+  `503 receipt_storage_unavailable`. Any other status or error keeps the generic
+  mapping.
 
 The optional wallet must be `0x` followed by 40 hex digits and is normalized to
 lowercase once. Only evidence and receipt POSTs carry one `X-PCC-Wallet` header;
@@ -644,12 +701,17 @@ never returned. JSON, strings, and inspection of the client expose only its
 base URL and kernel id.
 
 Evidence is limited to 1,000,000 serialized UTF-8 bytes and a tagged
-`sha256:` hash with 64 lowercase hex digits before any request. Evidence posts are
-not idempotent and are never retried. An unreadable or malformed acknowledgment,
-timeout, network failure, or unrecognized 5xx returns `indeterminate`; the host
-must reconcile from its journal before deciding what to do next. The known
-`500 evidence_store_failed` and `503 read_failed` or
-`scope_requirements_unavailable` refusals establish that nothing was stored.
+`sha256:` hash with 64 lowercase hex digits before any request. Evidence posts
+are not idempotent, and the client never retries one. An unreadable or
+malformed acknowledgment, timeout, network failure, or unrecognized 5xx returns
+`indeterminate`; the host must reconcile from its journal before deciding what
+to do next. Three refusal classes prove storage did not occur: the known
+`500 evidence_store_failed` (`server_error`); `503 read_failed`,
+`scope_requirements_unavailable` and `wallet_link_unavailable` (`unavailable`);
+and any `429` (`rate_limited`). On this route a `429` comes only from the
+gateway's global rate limiter before the handler runs, or from an edge proxy
+that never passed the request on. Only those allow the host to post the same
+bundle again; see the run loop.
 
 bundleHash is spec's tagged SHA256, as hashBundle produces it.
 
@@ -761,16 +823,20 @@ The closed outcomes are `submitted`, `already_committed`, `conflict`,
 read-back means `already_committed`; a different stored commitment means
 `conflict`. After a send with no confirmed receipt in time, `indeterminate`
 requires caller reconciliation by read-back. Never automatically resend it.
-A send-time refusal requires a decoded escrow error. Undecoded hex data or a
-transport error is `indeterminate` with the transaction hash unless read-back
-shows a commitment. Every post-send refusal includes the transaction hash for
+A send-time refusal requires a decoded `OnlyOperator`, `NotActive`,
+`TooLateForEvidence` or `EvidenceAlreadyCommitted` escrow error. Any other
+decoded escrow error (`EvidenceNotCommitted`, `ZeroEvidenceDigest`,
+`UnitNotFound` or `Reentrancy`), undecoded hex data or a transport error is
+`indeterminate` with the transaction hash unless read-back shows a commitment.
+Every post-send refusal includes the transaction hash for
 journaling. Reconciliation returns `already_committed` or `conflict` for a
 committed unit, and an unreadable unit is `indeterminate`.
 The broadcaster serializes submissions within its instance for operator nonce
 safety and remembers sent units, including ambiguous sends. The run loop's
 durable `submit_attempted` record preserves the no-resend rule across process
 restarts.
-Within an instance, a decoded send-time escrow error releases that attempt's
+Within an instance, a decoded send-time `OnlyOperator`, `NotActive`,
+`TooLateForEvidence` or `EvidenceAlreadyCommitted` releases that attempt's
 nonce from both cross-unit checks, whatever its read-back outcome, while the
 unit's own latch remains. Otherwise, `submit` refuses another unit as
 `unreconciled_transaction` until each earlier transaction it sent has a receipt
@@ -814,11 +880,14 @@ a synthetic journal at least ten times the r8 reference's size.
 
 When a toolkit change makes a GAP test pass, the same PR changes that test's `gap(` to `it(`; the repro is then that fix's acceptance test.
 
+GAP-1 to GAP-6 and GAP-8 are fixed: each is a plain `it` (as of master 23bdab59),
+and only GAP-7 is still registered with `gap(`.
+
 Paths and line numbers below refer to the supplied toolkit HEAD, a57ca6e1.
 
 | Test name | What the host called | What it needs | Toolkit lines (path:line) |
 | --- | --- | --- | --- |
-| GAP-1 real mode never simulates | `createIppPrintKernel({mockMode:false, uri:"ipp://127.0.0.1:9/ipp/print", kernelId, deviceId}).print({documentData, ...})` | Refuse unavailable real printing, or record no simulated or mock events. Reporting a downgrade is not enough: simulated evidence cannot settle. The current repro fails on its own assertion only because the IPP mock finishes inside its 1 s timeout. | `packages/kernel/src/adapters/ipp-adapter.ts:130`, `:136`, `:143`, `:432`; `packages/kernel/src/printer-job.ts:352` |
+| GAP-1 real mode never simulates | `createIppPrintKernel({mockMode:false, uri:"ipp://127.0.0.1:9/ipp/print", kernelId, deviceId}).print({documentData, ...})` | Refuse unavailable real printing, or record no simulated or mock events. Reporting a downgrade is not enough: simulated evidence cannot settle. | `packages/kernel/src/adapters/ipp-adapter.ts:130`, `:136`, `:143`, `:432`; `packages/kernel/src/printer-job.ts:352` |
 | GAP-2 a print's evidence holds only its own job's events (N106) | Two sequential `runPrintJob` calls sharing one adapter and emitter; `emitter.getEvents(A.jobId, A.stepId)` after B | A holds exactly its three events, each with `ippJobId:101`, and contains none of B's events. | `packages/kernel/src/printer-job.ts:193`, `:208`; `packages/kernel/src/adapters/types.ts:59` |
 | GAP-3 a reported failure returns a SIGNED execution_failed bundle | `runPrintJob` followed by adapter `execution_failed {ippJobId, state:"canceled"}` | A bundle containing failure and no completion, with a verifiable Ed25519 signature over its bundle hash. | `packages/kernel/src/printer-job.ts:256`, `:269` |
 | GAP-4 a timeout cancels the device job and returns a SIGNED execution_failed bundle | `runPrintJob({timeoutMs:300, ...})`; advance exactly 300 ms, then await real async work; also use a silent printer | One or more cancels, all for the print's own id (never `"stop"`); return a signed failure bundle with no completion and exactly one `execution_failed` with `origin:"device"`. A reporting printer reaches state 7; the silent printer reports `reason:"cancel-unconfirmed"` at its deadline and permits a following print instead of a busy refusal with `reason:"quiescing"`. The result has `failure:{kind:"timeout", origin:"device"}` and truthy `cancelRequested`. Assumes a contract-honouring adapter: these GAPs do not test the real IppAdapter's own origin stamping or cancel-confirm deadline. | `packages/kernel/src/printer-job.ts:230`, `:240`, `:248`; `packages/kernel/src/adapters/ipp-adapter.ts:231`, `:477-481`, `:717-725` |
@@ -846,9 +915,10 @@ PRINT_HOST_SHOW_GAPS=1 pnpm --filter @pcc/print-host test
 pnpm --filter @pcc/print-host typecheck
 ```
 
-The default run has nine flipped expected-failure registrations; the SHOW run
-reports only GAP-1 and GAP-7 as actual unmet assertions. GAP-5 has two
-cancel/event orders, and GAP-4 and GAP-5 each have a silent-printer variant.
+The default run has one expected-failure registration, GAP-7, which passes as
+`it.fails` while the toolkit lacks the unit-session API; the SHOW run reports
+only GAP-7. GAP-5 has two cancel/event orders, and GAP-4 and GAP-5 each have a
+silent-printer variant.
 A root `pnpm test` may drop `PRINT_HOST_SHOW_GAPS` under turbo's strict environment
 mode; use the `--filter` commands above.
 Typecheck `test/` separately as well: the production tsconfig deliberately excludes

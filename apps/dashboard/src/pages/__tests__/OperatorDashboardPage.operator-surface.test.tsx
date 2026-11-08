@@ -101,6 +101,18 @@ describe("operator overview from the caller's machines", () => {
     expectNoInventedValues();
   });
 
+  it("a failed refetch removes Your Machines and its links", async () => {
+    authorizedFetch.mockResolvedValueOnce(json(me([LATHE])));
+    await renderPage();
+    expect(container.querySelector("h2")?.textContent).toBe("Your Machines");
+    expect(container.querySelector('a[href="/operator/k1"]')).not.toBeNull();
+    authorizedFetch.mockResolvedValueOnce(json({ error: "Unreadable response" }, 500));
+    await act(async () => { await client.refetchQueries(); });
+    await settle();
+    expect(container.querySelector("h2")).toBeNull();
+    expect(container.querySelectorAll("a")).toHaveLength(0);
+  });
+
   it.each([
     ["an empty list", me([])],
     ["withheld machines", { ok: true, kernels: { count: null, items: [], unavailable: "requires owner proof (SIWE sign-in, a session key, or a linked wallet)" } }],

@@ -86,8 +86,6 @@ export function ProtocolDetailPage() {
   const navigate = useNavigate();
   const setPageMeta = useUIStore((s) => s.setPageMeta);
   const [activeTab, setActiveTab] = useState<"params" | "forks" | "runs">("params");
-  const [showForkForm, setShowForkForm] = useState(false);
-  const [forkName, setForkName] = useState("");
 
   React.useEffect(() => {
     setPageMeta("Protocol Detail", templateId ?? "");
@@ -200,43 +198,16 @@ export function ProtocolDetailPage() {
           </div>
           <div className="flex gap-2">
             <button
-              onClick={() => setShowForkForm(!showForkForm)}
-              className="px-3 py-1.5 rounded-lg text-xs bg-white/[0.04] border border-white/[0.08] text-white/50 hover:text-white/70 transition-colors"
+              type="button"
+              disabled
+              title="Running a protocol from this page is not available yet."
+              className="px-3 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-xs text-white/30 cursor-not-allowed"
             >
-              Fork Protocol
-            </button>
-            <button
-              onClick={() => navigate(`/protocols/${template.id}/edit`)}
-              className="px-3 py-1.5 rounded-lg text-xs bg-white/[0.04] border border-white/[0.08] text-white/50 hover:text-white/70 transition-colors"
-            >
-              Edit
-            </button>
-            <button
-              className="px-3 py-1.5 rounded-lg text-xs bg-green-500/20 border border-green-500/30 text-green-400 hover:bg-green-500/30 transition-colors"
-            >
-              Run Protocol
+              Run (not available yet)
             </button>
           </div>
         </div>
 
-        {/* Fork form */}
-        {showForkForm && (
-          <div className="mt-4 p-4 rounded-lg bg-white/[0.03] border border-white/[0.06]">
-            <h4 className="text-xs font-medium text-white/50 mb-2">Fork this protocol</h4>
-            <input
-              type="text"
-              placeholder="Fork name..."
-              value={forkName}
-              onChange={(e) => setForkName(e.target.value)}
-              className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-1.5 text-sm text-white/80 outline-none focus:border-green-500/30 mb-2"
-            />
-            <button
-              className="px-3 py-1.5 rounded-lg text-xs bg-green-500/20 border border-green-500/30 text-green-400 hover:bg-green-500/30 transition-colors"
-            >
-              Create Fork
-            </button>
-          </div>
-        )}
       </GlassPanel>
 
       {/* KPI cards */}

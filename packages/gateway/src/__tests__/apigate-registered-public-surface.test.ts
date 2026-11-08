@@ -317,6 +317,7 @@ const EXPECTED_TEMPLATE_INTERSECTIONS: string[] = [
   "GET /api/kernels/:kernelId/agent-package/suggest AMBIGUOUS",
   "GET /api/kernels/:kernelId/devices AMBIGUOUS",
   "GET /api/kernels/:kernelId/jobs AMBIGUOUS",
+  "GET /api/kernels/:kernelId/payout AMBIGUOUS",
   "GET /api/kernels/:kernelId/sdk/:language AMBIGUOUS",
   "GET /api/kernels/marketplace/:kernelId AMBIGUOUS",
   "GET /api/marketplace/classes/:id INTERSECTS",
@@ -350,6 +351,7 @@ const EXPECTED_TEMPLATE_INTERSECTIONS: string[] = [
   "HEAD /api/kernels/:kernelId/agent-package/suggest AMBIGUOUS",
   "HEAD /api/kernels/:kernelId/devices AMBIGUOUS",
   "HEAD /api/kernels/:kernelId/jobs AMBIGUOUS",
+  "HEAD /api/kernels/:kernelId/payout AMBIGUOUS",
   "HEAD /api/kernels/:kernelId/sdk/:language AMBIGUOUS",
   "HEAD /api/kernels/marketplace/:kernelId AMBIGUOUS",
   "HEAD /api/marketplace/classes/:id INTERSECTS",
@@ -506,9 +508,11 @@ const EXPECTED_PUBLIC_API_SURFACE: string[] = [
 const EXPECTED_ADMIN_KEY_DECLARATIONS = [
   [["POST", "GET", "HEAD"], "regex", null, "^\\/api\\/operator\\/jobs\\/[^/]+\\/receipt$", "", "N149 gateway receipts: the receipt route also accepts the gateway admin secret itself"],
   [["POST"], "exact", "/api/admin/settlement-challenges", null, null, "N149 one-use settlement challenge issuance: also accepts the gateway admin secret itself"],
+  [["GET"], "exact", "/api/admin/posture", null, null, "N237 posture read: also accepts the gateway admin secret itself"],
 ];
 
 const EXPECTED_ADMIN_KEY_SURFACE = [
+  "GET /api/admin/posture",
   "GET /api/operator/jobs/:jobId/receipt",
   "HEAD /api/operator/jobs/:jobId/receipt",
   "POST /api/admin/settlement-challenges",

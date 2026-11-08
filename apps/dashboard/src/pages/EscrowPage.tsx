@@ -1,130 +1,65 @@
 import React from "react";
-import {
-  GlassPanel, AmountDisplay, TierBadge, GlowBadge, DataCell,
-  EmptyState, LoadingShell,
-} from "@pcc/ui";
-import { useUIStore } from "../stores/ui-store.js";
+import { classifySettlementRead, statusPillText } from "@pcc/spec";
+import { DataCell, EmptyState, GlassPanel, GlowBadge, LoadingShell } from "@pcc/ui";
 import { useEscrows } from "../api/hooks/use-pcc-data.js";
+import { EscrowAmount } from "../components/EscrowAmount.js";
+import { StaleNotice, UnavailableState } from "../components/ReadState.js";
 import { DisputeModal } from "../components/escrow/DisputeModal.js";
-import { moneyBadgeColor } from "../lib/money-badge.js";
-
-interface DisputeContext {
-  escrowId: string;
-  milestoneStepId?: string;
-}
+import { moneyToneColor } from "../lib/money-badge.js";
+import { useUIStore } from "../stores/ui-store.js";
 
 export function EscrowPage() {
-  const setPageMeta = useUIStore((s) => s.setPageMeta);
-  const [selectedEscrow, setSelectedEscrow] = React.useState<string | null>(null);
-  const [dispute, setDispute] = React.useState<DisputeContext | null>(null);
-  React.useEffect(() => { setPageMeta("Escrow", "Milestone escrow, bonds, and challenge windows"); }, [setPageMeta]);
-
-  const { data: escrows = [], isLoading } = useEscrows();
-
-  if (isLoading) return <LoadingShell rows={4} />;
-
-  const totalLocked = escrows.reduce((sum: number, e: any) => sum + parseFloat(e.totalAmount || "0"), 0);
-  const activeCount = escrows.filter((e: any) => e.status === "active").length;
+  const setPageMeta = useUIStore((state) => state.setPageMeta);
+  React.useEffect(() => { setPageMeta("Escrow"); }, [setPageMeta]);
+  const query = useEscrows();
+  const [selected, setSelected] = React.useState<string | null>(null);
+  const [dispute, setDispute] = React.useState<string | null>(null);
+  const escrows = query.data;
+  const milestoneTotal = escrows?.every((escrow) => typeof escrow.milestoneCount === "number")
+    ? escrows.reduce((sum, escrow) => sum + escrow.milestoneCount, 0)
+    : undefined;
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <GlassPanel padding="md">
-          <DataCell label="Total Locked" value={<AmountDisplay amount={totalLocked.toFixed(2)} size="md" />} />
-        </GlassPanel>
-        <GlassPanel padding="md"><DataCell label="Active Escrows" value={activeCount} sub={`of ${escrows.length} total`} mono /></GlassPanel>
-        <GlassPanel padding="md"><DataCell label="Challenge Windows" value={0} sub="currently open" mono /></GlassPanel>
-        <GlassPanel padding="md"><DataCell label="Total Milestones" value={escrows.reduce((s: number, e: any) => s + (e.milestones?.length ?? 0), 0)} mono /></GlassPanel>
-      </div>
-
-      {escrows.length === 0 ? (
-        <GlassPanel padding="lg">
-          <EmptyState
-            title="No escrows yet"
-            description="Escrows are created automatically when jobs are submitted with milestone-based payment. Each milestone has its own evidence requirements and release conditions."
-          />
-        </GlassPanel>
+      <p className="text-xs text-white/30">Every account's escrows, as the gateway records them.</p>
+      {query.isLoading ? <LoadingShell rows={4} /> : !escrows ? (
+        <GlassPanel padding="lg"><UnavailableState what="escrows" error={query.error} onRetry={() => void query.refetch()} /></GlassPanel>
       ) : (
-        <div className="space-y-3">
-          {escrows.map((esc: any) => (
-            <GlassPanel
-              key={esc.id}
-              hover
-              padding="md"
-              glow={esc.id === selectedEscrow ? "gold" : undefined}
-              onClick={() => setSelectedEscrow(esc.id === selectedEscrow ? null : esc.id)}
-            >
-              <div className="flex items-center gap-4">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-white/80">{esc.id}</span>
-                    {/* money honesty: the ONE canonical @pcc/spec map. On this page green is reserved for settlement (a bare escrow status is never green); selection and totals use neutral accents. */}
-                    <GlowBadge color={moneyBadgeColor(esc.status)}>
-                      {esc.status}
-                    </GlowBadge>
-                  </div>
-                </div>
-                <AmountDisplay amount={esc.totalAmount ?? "0"} size="md" />
-              </div>
-              {selectedEscrow === esc.id && esc.milestones?.length > 0 && (
-                <div className="mt-4 pt-3 border-t border-white/[0.06] space-y-2">
-                  {esc.milestones.map((m: any, i: number) => (
-                    <div key={i} className="flex items-center justify-between text-xs">
-                      <span className="text-white/50">{m.name ?? `Milestone ${i + 1}`}</span>
-                      <div className="flex items-center gap-2">
-                        <GlowBadge color={moneyBadgeColor(m.status)}>
-                          {m.status}
-                        </GlowBadge>
-                        {/* T2.8 — file dispute (open per-milestone modal) */}
-                        {m.status !== "disputed" && m.status !== "refunded" && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setDispute({ escrowId: esc.id, milestoneStepId: m.stepId ?? m.step_id ?? m.id });
-                            }}
-                            className="px-2 py-0.5 rounded text-[10px] bg-red-500/10 border border-red-500/20 text-red-400/70 hover:bg-red-500/20 transition-all"
-                          >
-                            Dispute
-                          </button>
-                        )}
+        <>
+          {query.isError && <StaleNotice what="escrows" updatedAt={query.dataUpdatedAt} onRetry={() => void query.refetch()} />}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <GlassPanel padding="md"><DataCell label="Escrows" value={escrows.length} sub="all states" mono /></GlassPanel>
+            <GlassPanel padding="md"><DataCell label="Active Escrows" value={escrows.filter((escrow) => escrow.status === "active").length} sub={`of ${escrows.length} total`} mono /></GlassPanel>
+            <GlassPanel padding="md"><DataCell label="Milestones" value={milestoneTotal ?? "—"} sub={milestoneTotal === undefined ? "unavailable" : "across all escrows"} mono /></GlassPanel>
+          </div>
+          {escrows.length === 0 ? (
+            <GlassPanel padding="lg"><EmptyState title="No escrows yet" description="Escrows are created automatically when jobs are submitted with milestone-based payment. Each milestone has its own evidence requirements and release conditions." /></GlassPanel>
+          ) : (
+            <div className="space-y-3">
+              {escrows.map((escrow) => {
+                const classification = classifySettlementRead(escrow, { path: "/api/escrow", live: true });
+                return (
+                  <GlassPanel key={escrow.id} padding="md" hover glow={selected === escrow.id ? "gold" : undefined} onClick={() => setSelected(selected === escrow.id ? null : escrow.id)}>
+                    <div className="flex items-center gap-4">
+                      <div className="flex-1 min-w-0 flex items-center gap-2">
+                        <span className="text-sm font-medium text-white/80">{escrow.id}</span>
+                        <GlowBadge color={moneyToneColor(classification.tone)}>{classification.label ?? statusPillText(escrow.status, false, true)}</GlowBadge>
                       </div>
+                      <EscrowAmount amount={escrow.totalAmount} currency={escrow.currency} size="md" />
                     </div>
-                  ))}
-                </div>
-              )}
-              {selectedEscrow === esc.id && (!esc.milestones || esc.milestones.length === 0) && (
-                <div className="mt-4 pt-3 border-t border-white/[0.06] flex items-center justify-end">
-                  {/* T2.8 — escrow-level dispute when there are no milestones */}
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setDispute({ escrowId: esc.id });
-                    }}
-                    className="px-2 py-1 rounded text-[10px] bg-red-500/10 border border-red-500/20 text-red-400/70 hover:bg-red-500/20 transition-all"
-                  >
-                    File a dispute
-                  </button>
-                </div>
-              )}
-            </GlassPanel>
-          ))}
-        </div>
+                    {selected === escrow.id && (
+                      <div className="mt-4 pt-3 border-t border-white/[0.06] flex items-center justify-end">
+                        <button type="button" onClick={(event) => { event.stopPropagation(); setDispute(escrow.id); }} className="px-2 py-1 rounded text-[10px] bg-red-500/10 border border-red-500/20 text-red-400/70 hover:bg-red-500/20 transition-all">File a dispute</button>
+                      </div>
+                    )}
+                  </GlassPanel>
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
-
-      {/* T2.8 — dispute modal */}
-      {dispute && (
-        <DisputeModal
-          escrowId={dispute.escrowId}
-          milestoneStepId={dispute.milestoneStepId}
-          onClose={() => setDispute(null)}
-          onFiled={() => {
-            // Real refetch is wave-4 — for now the modal closes itself and
-            // the user sees pre-refetch data until the next page tick.
-          }}
-        />
-      )}
+      {dispute && <DisputeModal escrowId={dispute} onClose={() => setDispute(null)} onFiled={() => void query.refetch()} />}
     </div>
   );
 }
