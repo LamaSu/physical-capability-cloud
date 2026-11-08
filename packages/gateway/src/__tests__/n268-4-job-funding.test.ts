@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifySwagger from "@fastify/swagger";
-import { schema } from "@pcc/store";
+import { readFileSync } from "node:fs";
+import { eq, schema } from "@pcc/store";
 import { getRepos, getStore } from "../db.js";
 import { createOperationIdTransform } from "../openapi/operation-id.js";
 import { JOB_READ_REFUSAL } from "../readmodels/job-execution.js";
@@ -287,4 +288,73 @@ describe("GET /api/jobs/:jobId/funding (N268-4)", () => {
       await docs.close();
     }
   });
+
+/** The route is a pass-through: its scopes are exactly jobFundingOf's at the same clock. */
+function expectPassThrough(body: { scopes: unknown }, jobId: string) {
+  const expected = jobFundingOf(jobId, KERNEL, iso(T0));
+  expect(expected.read).toBe("ok");
+  expect(body.scopes).toEqual(expected.read === "ok" ? expected.scopes : null);
+}
+const setScopeStatus = (scopeId: string, status: string) =>
+  getStore().db.update(schema.executionScopes).set({ status }).where(eq(schema.executionScopes.id, scopeId)).run();
+
+it("F4c (neg-live-without-record): a scope live with no record reads unknown, never funded_verified", async () => {
+  installActivationTerms();
+  const { jobId, scopeId } = await paidScope(fixture);
+  setScopeStatus(scopeId, "active");
+  const res = await read(jobId);
+  expect(res.statusCode).toBe(200);
+  expect(res.json().scopes[0]).toMatchObject({ state: "unknown", binding: "no_record", verification: null, scope: { sourceStatus: "active" } });
+  expectPassThrough(res.json(), jobId);
+});
+
+it("F4d (neg-bound-but-revoked): a revoked scope with a bound record is listed and reads cancelled", async () => {
+  installActivationTerms();
+  const { jobId, scopeId } = await paidScope(fixture);
+  installTestFundingRecordStore().plant(verification(scopeId));
+  setScopeStatus(scopeId, "revoked");
+  const res = await read(jobId);
+  expect(res.statusCode).toBe(200);
+  expect(res.json().scopes).toHaveLength(1);
+  expect(res.json().scopes[0]).toMatchObject({ state: "cancelled", binding: "bound", scope: { sourceStatus: "revoked" } });
+  expect(res.json().scopes[0].verification).not.toBeNull();
+  expectPassThrough(res.json(), jobId);
+});
+
+it("F4e (neg-no-escrow-row): a record whose job has no escrow row reads escrow_missing, unknown", async () => {
+  installActivationTerms();
+  const { jobId, scopeId, escrowId } = await paidScope(fixture);
+  installTestFundingRecordStore().plant(verification(scopeId));
+  getStore().db.update(schema.escrows).set({ cwmId: "cwm-n268-4-elsewhere" }).where(eq(schema.escrows.id, escrowId)).run();
+  const res = await read(jobId, ADMIN_HEADERS);
+  expect(res.statusCode).toBe(200);
+  expect(res.json().scopes[0]).toMatchObject({ state: "unknown", binding: "escrow_missing", verification: null });
+  expectPassThrough(res.json(), jobId);
+});
+
+it("F4f (neg-testnet-buyer-not-listed): testnet-only terms without the buyer listed read unknown", async () => {
+  installActivationTerms({ ...TERMS, testnetOnly: true });
+  const { jobId, scopeId } = await paidScope(fixture);
+  installTestFundingRecordStore().plant(verification(scopeId));
+  const res = await read(jobId);
+  expect(res.statusCode).toBe(200);
+  expect(res.json().scopes[0]).toMatchObject({ state: "unknown", binding: "testnet_buyer_not_allowed", verification: null });
+  expectPassThrough(res.json(), jobId);
+});
+
+it("F3d: jobFundingOf is operator-relay.ts's fundingForListedJob, verbatim apart from its names", () => {
+  const text = (rel: string) => readFileSync(new URL(rel, import.meta.url), "utf8");
+  const cut = (src: string) => {
+    const start = src.indexOf("/** One listed job's buyer funding");
+    const end = src.indexOf("\n}\n", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    return src.slice(start, end + 3);
+  };
+  const norm = (s: string) => s.replace(/^export /gm, "").replaceAll("fundingForListedJob", "jobFundingOf").replaceAll("OperatorJobFunding", "JobFunding");
+  const relay = cut(text("../routes/operator-relay.ts"));
+  const copy = cut(text("../readmodels/job-funding.ts"));
+  expect(norm(relay)).toContain("function jobFundingOf(jobId: string, kernelId: string, asOf: string): JobFunding {");
+  expect(norm(copy)).toBe(norm(relay));
+});
 });
