@@ -254,6 +254,30 @@ A selector covers a function's name and its complete parameter types, nested str
 | escrow | `finalize(bytes32)` |
 | escrow | `reclaimAfterDeadline(bytes32)` |
 | escrow | `dischargeClaim(bytes32)` |
+| escrow | `settlement(bytes32)` |
+| escrow | `unitCounters(bytes32)` |
+| escrow | `feeAmountsOf(bytes32)` |
+| escrow | `requiredTierOf(bytes32)` |
+| escrow | `compositionRootOf(bytes32)` |
+| escrow | `unitExists(bytes32)` |
+| escrow | `emergencyAnchorOf(bytes32)` |
+| escrow | `initialized()` |
+| escrow | `factory()` |
+| escrow | `USDC()` |
+| factory | `implementation()` |
+
+### Event topic0s the settlement re-check kit filters on
+
+| Contract | Event |
+|---|---|
+| escrow | `Finalized(bytes32,bool,uint8)` |
+| escrow | `EscalationResolved(bytes32,bytes32,uint8,bool)` |
+| escrow | `ReleaseAllocated(bytes32,uint256)` |
+| escrow | `RefundAllocated(bytes32,uint256)` |
+| escrow | `ClaimCreated(bytes32,bytes32,uint256,uint8,address,uint256)` |
+| escrow | `ClaimDischarged(bytes32,bytes32,address,uint256)` |
+
+VNextAbiFreeze.t.sol pins these against the real contracts, and the kit’s C5 pins the same literals.
 
 ## 8. Golden vectors
 
