@@ -463,19 +463,26 @@ describe("SafetyGateway", () => {
       expect(res.executed).toBe(true);
     });
 
-    it("rate limiting is per-agent, not per-device", async () => {
-      // Two different agents should each have their own rate window
+    it("rate limiting is per-device, not per-agent (N86 G6)", async () => {
+      // The limit protects the equipment: a second agent gets no second budget on the same device
       const gw = new SafetyGateway({ envelope: { maxCommandRate: 2, maxScopeDuration: 120 } });
 
-      // Agent 1 exhausts its rate limit
+      // Agent 1 exhausts dev-001's rate limit
       await gw.validateAndRelay(makeCmd({ agentDid: "did:key:agent-1" }), noopExecute);
       await gw.validateAndRelay(makeCmd({ agentDid: "did:key:agent-1" }), noopExecute);
       const denied = await gw.validateAndRelay(makeCmd({ agentDid: "did:key:agent-1" }), noopExecute);
       expect(denied.allowed).toBe(false);
 
-      // Agent 2 should still pass (different rate window)
-      const allowed = await gw.validateAndRelay(makeCmd({ agentDid: "did:key:agent-2" }), noopExecute);
-      expect(allowed.allowed).toBe(true);
+      // Agent 2 on the same device is refused too
+      const sameDevice = await gw.validateAndRelay(makeCmd({ agentDid: "did:key:agent-2" }), noopExecute);
+      expect(sameDevice.allowed).toBe(false);
+
+      // Another device has its own rate window
+      const otherDevice = await gw.validateAndRelay(
+        makeCmd({ agentDid: "did:key:agent-1", deviceId: "dev-002" }),
+        noopExecute,
+      );
+      expect(otherDevice.allowed).toBe(true);
     });
   });
 
