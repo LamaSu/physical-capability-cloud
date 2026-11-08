@@ -245,6 +245,10 @@ describe("the kit stamps a provenance class on what it paints", () => {
     notes("PCC read", 1);
     expect(document.querySelector(".pcc-run-latest")!.textContent).toBe("Waiting for the first update…");
     stamped(".pcc-run-latest", "ephemeral");
+    boot(man([{ ...windows[4], latestFrom: "message" }]), { "/api/jobs/j1": { status: "running", timeline: [{ type: "" }] } });
+    await flush();
+    expect(document.querySelector(".pcc-run-latest")!.textContent).toBe("Waiting for the first update…");
+    stamped(".pcc-run-latest", "ephemeral");
   });
 
   it("no manifest field chooses a class", async () => {
