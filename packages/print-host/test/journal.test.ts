@@ -751,4 +751,32 @@ describe("job journal", () => {
     await fs.writeFile(journal.journalPath(jobId), `${JSON.stringify({ at, jobId, state, funding })}\n`, { mode: 0o600 });
     await expect(journal.read(jobId)).rejects.toMatchObject({ code: "journal_invalid" });
   });
+
+  it("review A5: append snapshots claim funding once, so a value that changes after validation is never written", async () => {
+    const journal = createJobJournal(dir, time);
+    let reads = 0;
+    const funding = {
+      source: "gateway", fundedAt: 1_792_083_600, operator: `0x${"a".repeat(40)}`,
+      escrowAddress: `0x${"b".repeat(40)}`, chainId: 84532, fundingBlockHash: publicWord(),
+      get fundingBlockNumber() { reads++; return reads === 1 ? "18446744073709551615" : "01"; },
+    };
+    await journal.append(jobId, "claimed", undefined, { funding } as unknown as JournalMetadata);
+    expect(reads).toBe(1);
+    expect((await journal.read(jobId))[0]!.funding).toMatchObject({ fundingBlockNumber: "18446744073709551615" });
+    await journal.close();
+  });
+
+  it("review A6: refuses claim funding with fundedAt at 2^32 on append and on read", async () => {
+    const funding = {
+      source: "gateway", fundedAt: 2 ** 32, operator: `0x${"a".repeat(40)}`,
+      escrowAddress: `0x${"b".repeat(40)}`, chainId: 84532,
+      fundingBlockNumber: "18446744073709551615", fundingBlockHash: publicWord(),
+    };
+    const journal = createJobJournal(dir, time);
+    await expect(journal.append(jobId, "claimed", undefined, { funding } as JournalMetadata))
+      .rejects.toMatchObject({ code: "journal_invalid" });
+    expect(await journal.has(jobId)).toBe(false);
+    await fs.writeFile(journal.journalPath(jobId), `${JSON.stringify({ at, jobId, state: "claimed", funding })}\n`, { mode: 0o600 });
+    await expect(journal.read(jobId)).rejects.toMatchObject({ code: "journal_invalid" });
+  });
 });

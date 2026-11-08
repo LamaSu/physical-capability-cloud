@@ -434,4 +434,26 @@ describe("host key loading and redaction", () => {
     expect(readSecretFile).not.toHaveBeenCalled();
   });
 
+  it("review A4: the sign-in method reads each field once and signs only the message built from those reads", async () => {
+    const document = operatorDocument();
+    const key = await loadOperatorKey(await writeDocument(document), 84532, {
+      now, clock: () => now, signIn: { baseUrl: "https://gateway.example.test" },
+    });
+    const base = signInFields(key.address);
+    const reads = new Map<string, number>();
+    const fields = {} as OperatorSignInFields;
+    for (const [name, value] of Object.entries(base)) {
+      Object.defineProperty(fields, name, { enumerable: true, get: () => {
+        const count = (reads.get(name) ?? 0) + 1;
+        reads.set(name, count);
+        if (count === 1) return value;
+        return name === "domain" ? "elsewhere.example.test" : name === "uri" ? "https://elsewhere.example.test" : value;
+      } });
+    }
+    const message = buildOperatorSignInMessage(base);
+    const signature = await key.signOperatorSignIn!(message, fields);
+    expect(await recoverMessageAddress({ message, signature })).toBe(key.address);
+    expect(Object.fromEntries(reads)).toEqual(Object.fromEntries(Object.keys(base).map((name) => [name, 1])));
+  });
+
 });

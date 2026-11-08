@@ -653,4 +653,28 @@ describe("print-host CLI", () => {
     expect([process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")]).toEqual(before);
   });
 
+  it("review A3: gateway mode logs keeper events as closed codes only, never a keyId or an expiry", async () => {
+    const fixture = await gatewayFixture();
+    const session = fakeSessionKeeper();
+    const keyId = `key-${randomBytes(12).toString("hex")}`;
+    const expiresAtMs = 1_799_999_999_123;
+    const captured = capture();
+    expect(await main(["run", "--config", fixture.configFile, "--once", "--inputs-dir", fixture.inputsDir], captured.io, {
+      createGateway: settings => createGatewayClient({ ...settings, fetchImpl: fixture.fetchImpl }),
+      createPrinter: fixture.createPrinter,
+      createSessionKeeper: (settings: OperatorSessionKeeperOptions) => {
+        settings.onEvent?.({ kind: "key_minted", keyId, expiresAtMs });
+        settings.onEvent?.({ kind: "mint_failed", code: "too_many_keys", status: 429, retryInMs: 5_000, step: "session_key" });
+        settings.onEvent?.({ kind: "mint_failed", code: "bad_clock", status: null, retryInMs: 10_000 });
+        settings.onEvent?.({ kind: "key_expired" });
+        settings.onEvent?.({ kind: "stopped" });
+        return session.keeper;
+      },
+    })).toBe(0);
+    expect(captured.output().stdout.split("\n").slice(0, 5)).toEqual([
+      "session_key_minted", "session_key_failed", "too_many_keys", "session_key_failed", "session_key_expired",
+    ]);
+    assertRunOutput(captured, [...fixture.secrets, session.sessionKey, keyId, String(expiresAtMs), new Date(expiresAtMs).toISOString()]);
+  });
+
 });

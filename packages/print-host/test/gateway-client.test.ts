@@ -1248,4 +1248,33 @@ describe("CODE #41 job funding on the poll (D2)", () => {
     });
     expect(await poll({ read: "ok", scopes: [scope("funded_verified", value)] })).toEqual(expectedPoll(facts(value)));
   });
+
+  it.each([
+    { read: "maybe", scopes: [scope("funded_verified")] },
+    ...[
+      { fundingBlockHash: "0x1234" }, { escrowAddress: "0x1234" }, { chainId: 0 }, { chainId: "84532" },
+    ].map(change => ({ read: "ok", scopes: [scope("funded_verified", verification(change))] })),
+  ])("review A2: verified facts %j outside the closed shapes are funding_read_failed", async (funding) => {
+    expect(await poll(funding)).toEqual(expectedPoll({ ok: false, code: "funding_read_failed" }));
+  });
+});
+
+describe("CODE #41 review appendix: a throwing key source", () => {
+  it.each(sessionCallNames)("review A1: a key() that throws, or a key whose apiKey getter throws, sends nothing from %s", async (method) => {
+    const sources: Array<SessionKeySource["key"]> = [
+      () => { throw new Error(canary); },
+      () => ({ get apiKey(): string { throw new Error(canary); }, keyId: "session-key-1" }),
+    ];
+    for (const source of sources) {
+      const key = vi.fn(source);
+      const invalidate = vi.fn();
+      const { client, fetchImpl } = sessionFixture({ key, invalidate });
+      const result = await sessionCall(client, method);
+      expect(result).toEqual({ ok: false, code: "unauthenticated", status: null });
+      expect(key).toHaveBeenCalledOnce();
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(invalidate).not.toHaveBeenCalled();
+      expectNoCanaries(result);
+    }
+  });
 });
