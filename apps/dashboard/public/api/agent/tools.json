@@ -27,7 +27,7 @@
     { "name": "get_orchestrator_status", "description": "Get orchestrator overview (transfer graph, resource pools, active workflows).", "input_schema": { "type": "object", "properties": {}, "required": [] } },
     { "name": "get_onboard_options", "description": "Get onboarding options for registering a new machine on the network.", "input_schema": { "type": "object", "properties": {}, "required": [] } },
     { "name": "search_spaces", "description": "Search for available lab/workshop spaces with filters.", "input_schema": { "type": "object", "properties": { "query": { "type": "string", "description": "Search query" } }, "required": [] } },
-    { "name": "get_depin_stats", "description": "Get DePIN statistics (treasury, certificates, reward epochs).", "input_schema": { "type": "object", "properties": {}, "required": [] } },
+    { "name": "get_depin_stats", "description": "Get DePIN statistics (certificates, reward epochs).", "input_schema": { "type": "object", "properties": {}, "required": [] } },
     { "name": "get_subnet_status", "description": "Get Bittensor verification subnet status (health, miner leaderboard).", "input_schema": { "type": "object", "properties": {}, "required": [] } },
     { "name": "list_conversations", "description": "List recent agent-to-agent conversations on the network.", "input_schema": { "type": "object", "properties": {}, "required": [] } },
     { "name": "navigate_to_page", "description": "Navigate the user to a specific dashboard page.", "input_schema": { "type": "object", "properties": { "path": { "type": "string", "description": "Dashboard route path" } }, "required": ["path"] } },

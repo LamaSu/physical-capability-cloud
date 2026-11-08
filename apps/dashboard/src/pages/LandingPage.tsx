@@ -1282,7 +1282,6 @@ function ProblemSection() {
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
                   {[
                     ["Winning bid", "$300"],
-                    ["Oracle fee", "2.35%"],
                     ["Time to job", "20 minutes"],
                     ["Proof", "cryptographic"],
                   ].map(([label, val]) => (
@@ -1342,7 +1341,7 @@ const PHASES = [
     phase: "BID",
     title: "Auction pricing. No floor.",
     description:
-      "Operators set maximum prices. Agents bid downward. Queue depth and reputation drive discounts. No broker markup, no minimum contract, no setup fee.",
+        "Operators set maximum prices. Agents bid downward. Queue depth and reputation drive discounts. No broker markup, no minimum contract.",
     tech: "Reverse auction. Queue-depth discounting. Reputation-weighted scoring.",
   },
   {
@@ -1706,7 +1705,7 @@ const STEPS = [
   {
     step: "4",
     title: "Earn",
-    text: "Capabilities announced. Jobs arrive. Escrow releases to your wallet on verified evidence. Minimal protocol fee. Nothing else.",
+      text: "Capabilities announced. Jobs arrive. Escrow releases to your wallet on verified evidence.",
     badge: "ongoing",
   },
 ];

@@ -381,19 +381,13 @@ function ProtocolCard({ data }: { data: ProtocolData }) {
         <div className="flex items-start justify-between gap-3">
           <div>
             <h3 className="text-sm font-bold text-white/90 tracking-wide">PCCProtocol</h3>
-            <p className="text-[11px] text-white/35 mt-0.5">Root escrow + fee settlement</p>
+              <p className="text-[11px] text-white/35 mt-0.5">Root escrow</p>
           </div>
           <StatusBadge status={data.status} />
         </div>
 
         <div className="space-y-2">
-          <MetricRow
-            label="Protocol Fee"
-            value={`${(data.feeBps / 100).toFixed(2)}% (${data.feeBps} bps)`}
-          />
-          <MetricRow label="Fee Recipient" value={truncateAddr(data.feeRecipient)} mono />
           <MetricRow label="Total Escrows" value={data.totalEscrows.toLocaleString()} mono />
-          <MetricRow label="Total Fees" value={`$${data.totalFeesCollected} USDC`} />
         </div>
 
         <div className="pt-1 border-t border-white/[0.06] text-[10px] text-white/25 leading-relaxed">
