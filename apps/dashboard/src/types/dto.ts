@@ -62,6 +62,15 @@ export interface PaginatedResult<T> {
   hasMore: boolean;
 }
 
+// ── Location projection (board N68) ──────────────────────────────────────────
+
+/**
+ * How precisely the gateway shows a site's location: `exact` only when the operator opted in (a
+ * public storefront); `approximate` (the default) is the centre of the site's geohash-5 cell,
+ * about 5 km across; `none` when no location is known (`location` is null).
+ */
+export type LocationPrecision = "exact" | "approximate" | "none";
+
 // ── Capability DTOs ───────────────────────────────────────────────────────────
 
 export interface CapabilityDTO {
@@ -75,7 +84,11 @@ export interface CapabilityDTO {
   envelope?: Record<string, unknown>;
   assuranceTiers: AssuranceTier[];
   pricing: Record<string, unknown>;
-  location: GeoLocation;
+  /** The site as `locationPrecision` describes it; null when none is known. */
+  location: GeoLocation | null;
+  locationPrecision: LocationPrecision;
+  /** The site's geohash-5 cell (about 5 km across); null when no location is known. */
+  locationCell: string | null;
   tags?: string[];
   // ── Enrichment (not in raw model) ──
   /** Operator reputation score (0-1000) from ERC-8004 */
@@ -146,8 +159,13 @@ export interface KernelDTO {
   id: Id;
   name: string;
   operatorAddress: string;
-  location: GeoLocation;
-  physicalAddress: string;
+  /** The site as `locationPrecision` describes it; null when none is known. */
+  location: GeoLocation | null;
+  locationPrecision: LocationPrecision;
+  /** The site's geohash-5 cell (about 5 km across); null when no location is known. */
+  locationCell: string | null;
+  /** The street address, only when the operator opted in to an exact location; otherwise null. */
+  physicalAddress: string | null;
   maxAssuranceTier: AssuranceTier;
   status: "online" | "offline" | "maintenance" | "suspended";
   lastHeartbeat: Timestamp;
@@ -237,4 +255,29 @@ export interface EscrowSummaryDTO {
   releasedCount: number;
   disputedCount: number;
   challengeWindowEnd?: Timestamp;
+}
+
+/** Account read from GET /api/agent/me; each section can report its own failure. */
+export interface AgentMeDTO {
+  ok: boolean;
+  as_of: Timestamp;
+  identity: {
+    operator: string;
+    key_id: Id | null;
+    key_name: string | null;
+    scopes: string[];
+  };
+  kernels: {
+    count: number | null;
+    items: Array<{ id: Id; name: string; status: string; last_heartbeat: Timestamp | null }>;
+    unavailable?: string;
+  };
+  devices: { count: number | null; unavailable?: string };
+  work: {
+    in_flight: number | null;
+    items: Array<{ id: Id; kernel_id: Id; status: string; progress: number | null }>;
+    unavailable?: string;
+  };
+  keys: { active: number | null; wildcard_keys: number | null; unavailable?: string };
+  next: string[];
 }

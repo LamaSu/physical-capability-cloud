@@ -78,3 +78,34 @@ describe("JobDetailPage reads the gateway read model", () => {
     expect(block).not.toMatch(/:\s*false/);
   });
 });
+
+describe("JobFlowCard preserves the live page's truth gates", () => {
+  it("NEGATIVE (review P1-4): the card colors money only through payoutBadge", () => {
+    const card = read("../components/JobFlowCard.tsx");
+    expect(card).toContain("payoutBadge(");
+    expect(card).not.toMatch(/escrow\??\.tone|moneyToneColor|moneyBadgeColor|classifyMoneyStatus|moneyStatusColor/);
+  });
+
+  it("renders the card only after the latest-read refusal gate", () => {
+    const gate = detail.indexOf('state.show !== "data"');
+    expect(gate).toBeGreaterThan(-1);
+    expect(detail.indexOf("<JobFlowCard")).toBeGreaterThan(gate);
+  });
+
+  it("passes the page's freshness into the card alongside the original panels", () => {
+    expect(detail).toContain("<JobFlowCard dto={data} stale={fresh.stale} />");
+    expect(detail).toContain("<SettlementPanel data={data} stale={fresh.stale} />");
+    expect(detail).toContain("<InspectPanel data={data} />");
+  });
+
+  it("keeps the master's age clock and freshness calculation for the live read", () => {
+    expect(detail).toContain("setInterval(() => setNow(Date.now()), 5_000)");
+    expect(detail).toContain("freshness(data.asOf, now, data.execution.terminal, state.refreshFailed)");
+    expect(detail).toContain("This read is out of date; it has not been refreshed recently.");
+  });
+
+  it("marks the snapshot card stale because a snapshot is never live", () => {
+    const snapshot = read("JobFlowPage.tsx");
+    expect(snapshot).toContain("<JobFlowCard dto={dto} stale={true} />");
+  });
+});

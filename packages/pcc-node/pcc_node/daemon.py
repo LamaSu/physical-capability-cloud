@@ -25,7 +25,7 @@ from .camera import push_camera_frame, detect_camera_device
 from .config import NodeConfig
 from .crypto import load_or_create_keys
 from .discovery import discover_network, device_to_adapter_config
-from .register import register_kernel
+from .register import register_kernel, RegistrationError
 from .ws_client import PCCGatewayClient
 
 log = logging.getLogger("pcc-node.daemon")
@@ -142,13 +142,27 @@ def _build_capabilities_from_devices(devices):
     return capabilities
 
 
-def run_daemon(config: NodeConfig):
+def run_daemon(config: NodeConfig, *, on_running=None):
     """Run the main daemon loop with the real PCC protocol.
 
     Parameters
     ----------
     config : NodeConfig
         Fully populated node configuration (must have pcc_api_key set).
+    on_running : callable, optional
+        Called once with no arguments when the daemon is up: its own kernel registration
+        succeeded and its first heartbeat went out. ``pcc-node start`` prints "Node running"
+        from here, never before (ChatGPT r3 finding 1). An error it raises is logged, not fatal.
+
+    Raises
+    ------
+    RegistrationError
+        When registration is refused, malformed or raises unexpectedly. The daemon never ran: the PID file
+        and any state file are removed first, so no caller can mistake it for a daemon that
+        ran and stopped.
+    Exception
+        When the first heartbeat raises, the PID and state files are also removed
+        before the same exception propagates.
     """
     running = True
 
@@ -168,14 +182,21 @@ def run_daemon(config: NodeConfig):
     # ------------------------------------------------------------------
     # 1. Load or generate Ed25519 keys
     # ------------------------------------------------------------------
+    # A node must not run without its own valid key. Running on with an empty
+    # secret would turn a refused key (compromised, inside a checkout, not this
+    # user's own, or PyNaCl missing) into unsigned operation, which is the
+    # failure the refusal exists to stop (N35b). The key's location is checked
+    # here, when the key is loaded or created, so once per start: a repository
+    # created around the key while the daemon runs is noticed at the next start.
     try:
         public_key, secret_key = load_or_create_keys()
-        if not config.public_key:
-            config.public_key = public_key
-        log.info(f"Node keys loaded: {public_key[:16]}...")
     except Exception as e:
-        log.warning(f"Could not load keys: {e}")
-        secret_key = ""
+        log.error(f"Refusing to start: the node key cannot be used: {e}")
+        _remove_pid()
+        raise SystemExit(2) from None
+    if not config.public_key:
+        config.public_key = public_key
+    log.info(f"Node keys loaded: {public_key[:16]}...")
 
     # ------------------------------------------------------------------
     # 2. Optional: run network discovery to find new devices
@@ -208,7 +229,22 @@ def run_daemon(config: NodeConfig):
         register_kernel(config.pcc_base, config.pcc_api_key, config)
         log.info(f"Kernel {config.kernel_id} registered")
     except Exception as e:
-        log.warning(f"Kernel registration failed: {e}")
+        # Fail CLOSED (verdict 133a MED, 133b Q1): a kernel whose registration was REFUSED (a non-2xx)
+        # is not connected. Do NOT create the gateway client, send an "online" heartbeat, write running
+        # state, or log "Daemon running". Also remove the PID file written at startup and any pre-existing
+        # state file -- the same cleanup a clean shutdown does below -- so a later `status` finds no live
+        # PID plus state and cannot report a false "PCC: connected".
+        log.error(f"Kernel registration failed ({e}); the node is NOT registered. Daemon not started.")
+        _remove_pid()
+        try:
+            os.remove(STATE_FILE)
+        except OSError:
+            pass
+        # Propagate the refusal (ChatGPT r3 finding 1): a normal return here let `pcc-node start`
+        # exit 0 for a node that never ran. The CLI turns it into exit 1; a direct caller sees it too.
+        if isinstance(e, RegistrationError):
+            raise
+        raise RegistrationError(0, {"error": "unexpected_registration_failure"}) from e
 
     # ------------------------------------------------------------------
     # 4. No capability announcements and no job polling (verdict 68c)
@@ -275,7 +311,23 @@ def run_daemon(config: NodeConfig):
     )
 
     # Send initial heartbeat
-    gateway_client.send_heartbeat("online", accepting_jobs=False)
+    try:
+        gateway_client.send_heartbeat("online", accepting_jobs=False)
+    except Exception as e:
+        log.error(f"Initial heartbeat failed ({e}); daemon not started.")
+        _remove_pid()
+        try:
+            os.remove(STATE_FILE)
+        except OSError:
+            pass
+        raise
+
+    # The daemon is up: only now may a caller say the node is running (ChatGPT r3 finding 1).
+    if on_running is not None:
+        try:
+            on_running()
+        except Exception as e:  # a banner that cannot be printed must not stop the node
+            log.warning(f"Could not report that the daemon is running: {e}")
 
     while running:
         try:

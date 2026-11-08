@@ -117,7 +117,9 @@ export type ReclaimOutcomeV3 =
       reclaimed: Array<{ index: number; transactionHash: string }>;
       stoppedAt: {
         index: number;
-        /** Absent when the broadcast itself failed (`not_sent`). */
+        /** Absent only when signing itself failed, before broadcast (`not_sent`). Present whenever a
+         *  transaction was actually signed, including after a broadcast failure (`unknown`) — the hash is
+         *  known locally before the broadcast attempt, so it is never lost by that attempt failing. */
         transactionHash?: string;
         receipt: "not_sent" | "reverted" | "timeout" | "unknown";
         error?: string;

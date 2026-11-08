@@ -566,6 +566,35 @@ contract VNextParentReleaseRoutesTest is VNextSettlementEscrowTest {
         _assertState(d.e, d.c1, UnitState.SETTLED_REFUNDED);
     }
 
+    /// @dev N22's FOURTH sibling-refund route (astra MEDIUM on #479): an appeal OVERTURN refunds sibling C1
+    ///      between P's acceptance and finalize(P) — the C1 appeal-overturn trace above
+    ///      (test_n37_acceptedButUnfinalizedChild_canStillBecomeARefund_viaChallengeAndAppealOverturn),
+    ///      extended with P accepted FIRST and finalized AFTER. Sibling independence holds on the
+    ///      appeal-overturn route too, not just reclaim / backup-timeout / emergency-silence (the three
+    ///      traces above): an OVERTURN is a quorum FINDING on C1 alone and touches none of P's own state.
+    function test_n22_siblingC1RefundsByAppealOverturn_afterPsAssertionWasAccepted_andBeforeFinalizeP_andFinalizePStillReleases()
+        public
+    {
+        Deal memory d = _deal(_shape());
+        uint256 acceptedAt = _mintAndAccept(d, d.p); // P accepted FIRST
+
+        _mintAndAccept(d, d.c1);
+        uint256 bond = _challenge(d.e, d.c1);
+        _adjudicate(d.e, d.c1, O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN);
+        uint256 payerBefore = usdc.balanceOf(payer);
+        vm.prank(STRANGER);
+        d.e.resolveEscalation(d.c1, O5_ADJ_ROLE_APPEAL);
+        _assertState(d.e, d.c1, UnitState.SETTLED_REFUNDED);
+        assertEq(usdc.balanceOf(payer), payerBefore + GC1 + bond, "C1 refunded in full, and the challenger's bond returned");
+        _assertState(d.e, d.p, UnitState.PRIMARY_ASSERTED); // P untouched by the sibling's overturn-refund
+
+        vm.warp(acceptedAt + CW);
+        vm.prank(STRANGER);
+        d.e.finalize(d.p);
+        _assertPReleasedInFull(d);
+        _assertState(d.e, d.c1, UnitState.SETTLED_REFUNDED);
+    }
+
     /// @dev The sibling being mid-dispute (a bonded challenge, appeal pending) does not hold P either.
     function test_finalize_byStranger_releasesP_whileSiblingC2IsChallengedAndItsAppealIsPending() public {
         Deal memory d = _deal(_shape());
@@ -790,10 +819,16 @@ contract VNextParentReleaseRoutesTest is VNextSettlementEscrowTest {
     }
 
     /// @dev ROUTE R3. A payer challenge does not turn P into a refund by silence: appeal silence RELEASES.
+    ///      astra MEDIUM on #479: the bond's two legs must land on the right addresses, not merely empty
+    ///      their buckets. For P, bond = 50 USDC (5% of GP's 1000 USDC) and compensation = 10 USDC (1% of
+    ///      GP, capped by the bond): silence (§8.3 C-1, unadjudicated) pays the operator its capped
+    ///      compensation and returns the REST — 40 USDC — to the challenger, who IS the payer here
+    ///      (`challenge` is payer-only, so `u.challenger == payer`).
     function test_finalize_byStranger_afterAppealWindow_releasesP_onAppealSilence_afterThePayersChallenge() public {
         Deal memory d = _deal(_shape());
         _mintAndAccept(d, d.p);
-        _challenge(d.e, d.p);
+        uint256 bond = _challenge(d.e, d.p);
+        assertEq(bond, 50e6, "5% of GP's 1000 USDC");
         _assertState(d.e, d.p, UnitState.CHALLENGED);
         uint256 challengedAt = block.timestamp;
 
@@ -802,6 +837,8 @@ contract VNextParentReleaseRoutesTest is VNextSettlementEscrowTest {
         vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
         d.e.finalize(d.p);
 
+        uint256 operatorBefore = usdc.balanceOf(operator);
+        uint256 payerBefore = usdc.balanceOf(payer); // the challenger: it posted the bond via `challenge`
         vm.warp(challengedAt + AW);
         vm.expectEmit(true, false, false, true, address(d.e));
         emit VNextSettlementEscrow.Finalized(d.p, true, 1); // 1 == appeal-silence release
@@ -809,15 +846,22 @@ contract VNextParentReleaseRoutesTest is VNextSettlementEscrowTest {
         d.e.finalize(d.p);
         _assertPReleasedInFull(d);
         assertEq(d.e.bondLiability() + d.e.compLiability() + d.e.burnLiability(), 0, "every bond bucket paid out");
+        assertEq(usdc.balanceOf(operator), operatorBefore + 10e6, "operator's capped delay compensation (1% of GP)");
+        assertEq(usdc.balanceOf(payer), payerBefore + 40e6, "the REST of the bond returned to the challenger (payer), never to the sink");
         _assertState(d.e, d.c1, UnitState.FUNDED_ACTIVE);
     }
 
     /// @dev ROUTE R4. An appeal UPHOLD releases P, but only over the EXACT accepted assertion, and only for a unit that
     ///      has an accepted assertion at all (it is a CHALLENGED-state action).
+    ///      astra MEDIUM on #479: an adjudicated LOSS (§2.4) is the one branch that BURNS the bond's rest,
+    ///      never returning it to any counterparty. Operator compensation is the SAME capped 10 USDC either
+    ///      way (R3's silence and this UPHOLD); only the destination of the remaining 40 USDC differs — the
+    ///      sink here, the challenger on silence.
     function test_resolveEscalation_appealUphold_byStranger_releasesP_onlyForTheExactAcceptedAssertion() public {
         Deal memory d = _deal(_shape());
         _mintAndAccept(d, d.p);
-        _challenge(d.e, d.p);
+        uint256 bond = _challenge(d.e, d.p);
+        assertEq(bond, 50e6, "5% of GP's 1000 USDC");
 
         // a record that reviews some OTHER assertion cannot release P
         escalation.setAdjudication(
@@ -846,10 +890,14 @@ contract VNextParentReleaseRoutesTest is VNextSettlementEscrowTest {
 
         // the record over the exact accepted assertion releases
         _adjudicate(d.e, d.p, O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        uint256 operatorBefore = usdc.balanceOf(operator);
+        uint256 sinkBefore = usdc.balanceOf(VNextSettlementLib.BURN_SINK);
         vm.prank(STRANGER);
         d.e.resolveEscalation(d.p, O5_ADJ_ROLE_APPEAL);
         _assertPReleasedInFull(d);
         _assertState(d.e, d.c1, UnitState.FUNDED_ACTIVE);
+        assertEq(usdc.balanceOf(operator), operatorBefore + 10e6, "operator's capped delay compensation (1% of GP)");
+        assertEq(usdc.balanceOf(VNextSettlementLib.BURN_SINK), sinkBefore + 40e6, "the REST of the bond burned to the sink, never to a counterparty");
     }
 
     /// @dev ROUTE R5. The emergency cohort's UPHOLD releases an ACCEPTED P, and is useless for a unit with no accepted
@@ -1276,7 +1324,11 @@ contract VNextParentReleaseRoutesTest is VNextSettlementEscrowTest {
 
     // ══ authority per edge (who cannot touch P) ═══════════════════════════════════════════════════════
 
-    function test_challenge_byStrangerOrOperator_revertsOnlyPayer_soOnlyThePayerCanDelayPsRelease() public {
+    /// @dev astra LOW on #479: renamed. The old name ("...soOnlyThePayerCanDelayPsRelease") overstated this
+    ///      test's own finding — it shows only that `challenge` itself is payer-only. The primary cohort's
+    ///      revoker can ALSO pause an eligible release, through an emergency, without ever posting a bond
+    ///      (see the trace immediately below).
+    function test_challenge_byStrangerOrOperator_revertsOnlyPayer_soOnlyThePayerCanInitiateABondedChallenge() public {
         Deal memory d = _deal(_shape());
         _mintAndAccept(d, d.p);
         vm.prank(STRANGER);
@@ -1286,6 +1338,40 @@ contract VNextParentReleaseRoutesTest is VNextSettlementEscrowTest {
         vm.expectRevert(VNextSettlementEscrow.OnlyPayer.selector);
         d.e.challenge(d.p);
         _assertState(d.e, d.p, UnitState.PRIMARY_ASSERTED);
+    }
+
+    /// @dev astra LOW on #479 (optional, "cheap"): the revoker-pause trace. The payer's bonded challenge is
+    ///      not the only way an eligible release can be paused — the primary cohort's revoker can do it too,
+    ///      through an emergency, posting no bond at all. P is accepted; the primary is disabled while P's
+    ///      ordinary challenge window is still open; at the ordinary deadline `finalize` is STILL paused
+    ///      (`VNextSettlementEscrow.sol:1631` admits the emergency since the disable predates that deadline;
+    ///      `:1835` is the gate `finalize` gives it priority over). It resolves only at the emergency deadline.
+    function test_emergency_duringPsChallengeWindow_pausesFinalizeAtTheOrdinaryDeadline_untilTheEmergencyDeadline()
+        public
+    {
+        Deal memory d = _deal(_shape());
+        uint256 acceptedAt = _mintAndAccept(d, d.p);
+        vm.warp(acceptedAt + 1); // still well inside P's challenge window
+        attester.disableAtNow();
+        uint256 emergencyDue = block.timestamp + EW;
+
+        vm.warp(acceptedAt + CW); // P's ORDINARY challenge deadline
+        vm.prank(STRANGER);
+        vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
+        d.e.finalize(d.p); // paused: the emergency governs now, not the ordinary deadline
+
+        vm.warp(emergencyDue - 1);
+        vm.prank(STRANGER);
+        vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
+        d.e.finalize(d.p);
+
+        vm.warp(emergencyDue);
+        uint256 payerBefore = usdc.balanceOf(payer);
+        vm.prank(STRANGER);
+        d.e.finalize(d.p);
+        _assertState(d.e, d.p, UnitState.SETTLED_REFUNDED);
+        assertEq(usdc.balanceOf(payer), payerBefore + GP, "the payer, not the recipients, is paid");
+        assertEq(_paidToP(), 0);
     }
 
     function test_invokeBackup_byStrangerOrPayer_revertsOnlyOperator() public {

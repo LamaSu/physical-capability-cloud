@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import {
   ReactFlow,
   Background,
@@ -116,10 +116,8 @@ type SidebarTab = "palette" | "step" | "transfer" | "params";
 // ---------------------------------------------------------------------------
 
 export function ProtocolBuilderPage() {
-  const { templateId } = useParams<{ templateId: string }>();
   const navigate = useNavigate();
   const setPageMeta = useUIStore((s) => s.setPageMeta);
-  const isEdit = !!templateId;
 
   const {
     name, description, version, tags,
@@ -136,11 +134,8 @@ export function ProtocolBuilderPage() {
   const [tagInput, setTagInput] = useState("");
 
   React.useEffect(() => {
-    setPageMeta(
-      isEdit ? "Edit Protocol" : "Protocol Builder",
-      isEdit ? `Editing ${templateId}` : "Design a new protocol DAG",
-    );
-  }, [setPageMeta, isEdit, templateId]);
+    setPageMeta("Protocol Builder", "Design a new protocol DAG");
+  }, [setPageMeta]);
 
   // Convert store steps to React Flow nodes
   const flowNodes: Node[] = useMemo(
@@ -297,15 +292,19 @@ export function ProtocolBuilderPage() {
             >
               Clear
             </button>
-            <button
-              className="px-3 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-xs text-white/50 hover:text-white/70 transition-colors"
+            <span
+              className="self-center text-[10px] text-white/30"
+              title="This protocol lives only in this browser tab. It is not saved anywhere."
             >
-              Save Draft
-            </button>
+              Local draft, not saved
+            </span>
             <button
-              className="px-3 py-1.5 rounded-lg bg-green-500/20 border border-green-500/30 text-xs text-green-400 hover:bg-green-500/30 transition-colors"
+              type="button"
+              disabled
+              title="Publishing is not available yet: the protocol library doesn't store protocols."
+              className="px-3 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-xs text-white/30 cursor-not-allowed"
             >
-              Publish
+              Publish (not available yet)
             </button>
           </div>
         </div>

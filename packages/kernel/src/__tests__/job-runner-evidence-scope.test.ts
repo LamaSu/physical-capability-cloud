@@ -11,6 +11,7 @@
  * R1 to R6 reproduce those findings through the public JobRunner API.
  */
 
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EvidenceBundle, EvidenceEvent, EvidenceSource, SHA256, Signature } from "@pcc/spec";
 import { verifyBundleHash } from "@pcc/spec";
@@ -35,6 +36,37 @@ const KERNEL_ID = "kernel-scope-test";
 const STEP = "step-1";
 const GUARD_MS = 2_000;
 const STILL_PENDING = `run() still pending after ${GUARD_MS} ms`;
+
+const realDigest = globalThis.crypto.subtle.digest;
+
+/** Keep these bounded-chain tests independent of WebCrypto's threadpool timing. */
+function installMicrotaskSha256(): void {
+  // Install per test: R4's echo flood needs each digest to yield to a macrotask.
+  vi.spyOn(globalThis.crypto.subtle, "digest").mockImplementation(async (algorithm, data) => {
+    const name = typeof algorithm === "string" ? algorithm : algorithm.name;
+    if (name.toUpperCase() !== "SHA-256") return realDigest.call(globalThis.crypto.subtle, algorithm, data);
+    const bytes = ArrayBuffer.isView(data)
+      ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+      : new Uint8Array(data);
+    return Uint8Array.from(createHash("sha256").update(bytes).digest()).buffer;
+  });
+}
+
+/** Arm the actual bound before blocking the worker, once; afterEach restores the hook. */
+function stallAfterNextTimer(delayMs: number, stallMs: number): number[] {
+  const stalls: number[] = [];
+  const realSetTimeout = globalThis.setTimeout;
+  vi.spyOn(globalThis, "setTimeout").mockImplementation(((...args: Parameters<typeof setTimeout>) => {
+    const timer = realSetTimeout(...args);
+    if (args[1] === delayMs && stalls.length === 0) {
+      const started = performance.now();
+      while (performance.now() - started < stallMs) {}
+      stalls.push(performance.now() - started);
+    }
+    return timer;
+  }) as typeof setTimeout);
+  return stalls;
+}
 
 function evidence(type: Emitted["type"], deviceId: string, deviceType: DeviceType, payload: Record<string, unknown> = {}): Emitted {
   return { type, timestamp: new Date().toISOString(), source: { deviceId, deviceType, kernelId: KERNEL_ID }, payload };
@@ -341,6 +373,7 @@ class StuckEmitter extends EvidenceEmitter {
 
 describe("R3: an addEvent that never settles", () => {
   it("run() still resolves, as a failure, and finalizes nothing", async () => {
+    installMicrotaskSha256();
     // The stuck event is the last one and not a required one, so if the timeout
     // were treated as success the run would pass its tier check and finalize.
     const emitter = new StuckEmitter("camera_snapshot");
@@ -356,6 +389,27 @@ describe("R3: an addEvent that never settles", () => {
     expect(outcome).toEqual({ success: false, error: "evidence recording did not settle within 200 ms", durationMs: expect.any(Number) });
     expect(emitter.stuckCalls, "addEvent calls still stuck when the run returned").toBe(1);
     expect(bundles).toEqual([]);
+  });
+
+  it("run() reaches the stuck event after a 250 ms worker stall", async () => {
+    installMicrotaskSha256();
+    // The stuck event is the last one and not a required one, as in R3 above.
+    const emitter = new StuckEmitter("camera_snapshot");
+    const bundles: EvidenceBundle[] = [];
+    emitter.onBundle((bundle) => bundles.push(bundle));
+    const machine = testMachine("machine-r3");
+    const camera = testCamera("camera-r3");
+    camera.afterInspection = () => camera.emit(evidence("camera_snapshot", "camera-r3", "camera", { after: "inspection" }));
+
+    const stalls = stallAfterNextTimer(200, 250);
+    const runner = new JobRunner(machine, [], camera, emitter, { evidenceSettleTimeoutMs: 200 });
+    const outcome = await withinGuard(runner.run({ jobId: "job-r3", stepId: STEP, gcodeHash: gcode(3), assuranceTier: 2 }));
+
+    expect(outcome).toEqual({ success: false, error: "evidence recording did not settle within 200 ms", durationMs: expect.any(Number) });
+    expect(emitter.stuckCalls, "addEvent calls still stuck when the run returned").toBe(1);
+    expect(bundles).toEqual([]);
+    expect(stalls, "one stall immediately after arming the settle bound").toHaveLength(1);
+    expect(stalls[0], "worker time blocked in the stall").toBeGreaterThanOrEqual(250);
   });
 });
 
@@ -633,6 +687,7 @@ describe("Busy: an adapter serves one job at a time", () => {
     ["evidence recording does not settle", (_m, c) => void (c.afterInspection = () => c.emit(evidence("camera_snapshot", c.id, "camera")))],
     ["finalizeBundle throws", (_m, _c, e) => void vi.spyOn(e, "finalizeBundle").mockRejectedValueOnce(new Error("signer offline"))],
   ])("after a run that ends because %s, the adapters are free for the next job as soon as it returns", async (why, breakIt) => {
+    installMicrotaskSha256();
     const emitter = new StuckEmitter("camera_snapshot");
     // Every exit quiesces before it returns, so the next job needs no wait (round 3 waited
     // out a quiet period). A device per case keeps the cases apart.
@@ -649,6 +704,82 @@ describe("Busy: an adapter serves one job at a time", () => {
     Object.assign(camera, { inspectionsThatEmit: Number.POSITIVE_INFINITY, afterInspection: null });
     const second = await new JobRunner(machine, [], camera, emitter, options).run({ jobId: "job-free-2", stepId: STEP, gcodeHash: gcode(15), assuranceTier: 2 });
     expect(second).toMatchObject({ success: true });
+  });
+
+  it.each<[string, BreakIt]>([
+    ["load_gcode fails", (m) => void (m.failing = "load_gcode")],
+    ["start fails", (m) => void (m.failing = "start")],
+    ["the machine reports an error", (m) => void ((m.progress = () => 50), (m.status = "error"))],
+    ["the Tier 2 check fails", (_m, c) => void (c.inspectionsThatEmit = 0)],
+    ["evidence recording does not settle", (_m, c) => void (c.afterInspection = () => c.emit(evidence("camera_snapshot", c.id, "camera")))],
+    ["finalizeBundle throws", (_m, _c, e) => void vi.spyOn(e, "finalizeBundle").mockRejectedValueOnce(new Error("signer offline"))],
+  ])("after %s, a 150 ms worker stall still leaves the adapters free for the next job", async (why, breakIt) => {
+    installMicrotaskSha256();
+    const emitter = new StuckEmitter("camera_snapshot");
+    const slug = why.replace(/\W+/g, "-");
+    const machine = testMachine(`machine-free-${slug}`);
+    const camera = testCamera(`camera-free-${slug}`);
+    breakIt(machine, camera, emitter);
+    const options = { evidenceSettleTimeoutMs: 100 };
+
+    const first = await new JobRunner(machine, [], camera, emitter, options).run({ jobId: "job-free-1", stepId: STEP, gcodeHash: gcode(14), assuranceTier: 2 });
+    expect(first.success).toBe(false);
+
+    // Only run 2's next 100 ms timer is its settle bound; run 1 can arm it twice.
+    const stalls = stallAfterNextTimer(100, 150);
+    Object.assign(machine, { failing: null, progress: () => 100, status: "busy" });
+    Object.assign(camera, { inspectionsThatEmit: Number.POSITIVE_INFINITY, afterInspection: null });
+    const second = await new JobRunner(machine, [], camera, emitter, options).run({ jobId: "job-free-2", stepId: STEP, gcodeHash: gcode(15), assuranceTier: 2 });
+    expect(second).toMatchObject({ success: true });
+    expect(stalls, "one stall immediately after arming run 2's settle bound").toHaveLength(1);
+    expect(stalls[0], "worker time blocked in the stall").toBeGreaterThanOrEqual(150);
+  });
+});
+
+describe("the SHA-256 timing shim", () => {
+  it("SHA-256 alone settles in microtasks, hashes exact source bytes, and restores WebCrypto", async () => {
+    installMicrotaskSha256();
+    const source = new Uint8Array([91, 1, 2, 3, 92]);
+    const view = new Uint8Array(source.buffer, 1, 3);
+    const buffer = new Uint8Array([4, 5, 6]).buffer;
+    const [realView, realBuffer, realSha512] = await Promise.all([
+      realDigest.call(globalThis.crypto.subtle, "SHA-256", view),
+      realDigest.call(globalThis.crypto.subtle, { name: "sha-256" }, buffer),
+      realDigest.call(globalThis.crypto.subtle, "SHA-512", view),
+    ]);
+    let viewSettled = false;
+    let bufferSettled = false;
+    let sha512Settled = false;
+    const viewDigest = globalThis.crypto.subtle.digest("SHA-256", view).then((bytes) => {
+      viewSettled = true;
+      return bytes;
+    });
+    const bufferDigest = globalThis.crypto.subtle.digest({ name: "sha-256" }, buffer).then((bytes) => {
+      bufferSettled = true;
+      return bytes;
+    });
+    const sha512Digest = globalThis.crypto.subtle.digest("SHA-512", view).then((bytes) => {
+      sha512Settled = true;
+      return bytes;
+    });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(viewSettled, "SHA-256 view settles before a macrotask").toBe(true);
+    expect(bufferSettled, "SHA-256 ArrayBuffer settles before a macrotask").toBe(true);
+    expect(sha512Settled, "SHA-512 keeps WebCrypto's timing").toBe(false);
+    expect(new Uint8Array(await viewDigest)).toEqual(new Uint8Array(realView));
+    expect(new Uint8Array(await bufferDigest)).toEqual(new Uint8Array(realBuffer));
+    expect(new Uint8Array(await sha512Digest)).toEqual(new Uint8Array(realSha512));
+
+    vi.restoreAllMocks();
+    expect(globalThis.crypto.subtle.digest).toBe(realDigest);
+    let restoredSettled = false;
+    const restoredDigest = globalThis.crypto.subtle.digest("SHA-256", view).then((bytes) => {
+      restoredSettled = true;
+      return bytes;
+    });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(restoredSettled, "restored SHA-256 keeps WebCrypto's timing").toBe(false);
+    expect(new Uint8Array(await restoredDigest)).toEqual(new Uint8Array(realView));
   });
 });
 

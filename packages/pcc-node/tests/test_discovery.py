@@ -609,6 +609,28 @@ class TestDiscoverCommand:
         assert "registered" in result.output
         mock_reg.assert_called_once()
 
+    def test_discover_register_counts_a_refused_registration_as_skipped(self):
+        # verdict 133a MED: a refused (non-2xx) registration must NOT be counted as registered.
+        from click.testing import CliRunner
+        from pcc_node.cli import main
+        from pcc_node.register import RegistrationError
+        runner = CliRunner()
+        devices = [
+            _make_device(
+                ip="192.168.1.50", ports=[31950], protocol="opentrons",
+                device_type="liquid-handler", confidence=0.95,
+                details={"name": "ot2", "api_version": "8", "fw_version": "2", "robot_model": "OT-2"},
+            )
+        ]
+        with mock.patch("pcc_node.cli.discover_network", return_value=devices), \
+             mock.patch("pcc_node.cli.register_kernel",
+                        side_effect=RegistrationError(401, {"error": "unauthorized"})) as mock_reg, \
+             mock.patch("pcc_node.cli.load_or_create_keys", return_value=("ab" * 16, "cd" * 16)):
+            result = runner.invoke(main, ["discover", "--register", "--api-key", "test-key"])
+        assert result.exit_code == 0, result.output
+        assert "registered 0" in result.output
+        mock_reg.assert_called_once()
+
     def test_start_with_discover_flag(self):
         """start --discover runs discovery before hardware detection."""
         from click.testing import CliRunner

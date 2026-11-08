@@ -81,6 +81,15 @@ contract VNextDeployVerifyTest is Test {
     ///      salt other than the real spec salt demonstrates the gap; this one is simply unmistakable.
     bytes32 internal constant NON_SPEC_SALT = keccak256("N38-repro: not this build's spec salt for these inputs");
 
+    /// @dev M1 (astra pack-410 Q2): the lead's exact mixed-band value — escalation in the PROVISIONAL
+    ///      band while the primary (`PRIMARY_COHORT` above) stays canonical.
+    uint64 internal constant ESCALATION_COHORT_MIXED_PROVISIONAL = 0xF000000000000002;
+
+    /// @dev M2 (astra pack-410 Q4): distinct, clearly-in-band provisional cohort ids.
+    uint64 internal constant PRIMARY_COHORT_PROVISIONAL = VNextDeploySpec.PROVISIONAL_COHORT_FLOOR + 1;
+    uint64 internal constant ESCALATION_COHORT_PROVISIONAL = VNextDeploySpec.PROVISIONAL_COHORT_FLOOR + 2;
+    string internal constant REVIEW_LABEL = "review-test";
+
     DeployVNextSettlement internal dvs;
 
     function setUp() public {
@@ -133,6 +142,43 @@ contract VNextDeployVerifyTest is Test {
         ctorArgs = abi.encode(USDC_ADDR, primary, escalation, SCHEMA, typeHash);
         specFactorySalt =
             VNextDeploySpec.contractSalt(VNextDeploySpec.MODE_CANONICAL, block.chainid, VNextDeploySpec.TAG_FACTORY, "");
+    }
+
+    /// @dev M2 (astra pack-410 Q4): the provisional-mode mirror of {_buildCohorts} — same proxy helper,
+    ///      provisional-band cohort ids, and PROVISIONAL-mode salts (primary attester, escalation
+    ///      attester, factory) all under the given label, exactly as `provisional()` would produce for
+    ///      `VNEXT_LABEL=<label>`.
+    function _buildProvisionalCohorts(string memory label)
+        internal
+        returns (address primary, address escalation, bytes32 factorySalt, bytes memory ctorArgs)
+    {
+        bytes32 primarySalt = VNextDeploySpec.contractSalt(
+            VNextDeploySpec.MODE_PROVISIONAL, block.chainid, VNextDeploySpec.TAG_PRIMARY_ATTESTER, label
+        );
+        primary = _deployViaProxy(
+            primarySalt,
+            abi.encodePacked(
+                type(SingleSignerO5Attester).creationCode,
+                abi.encode(SIGNER_P, EAS_ADDR, SCHEMA, PRIMARY_COHORT_PROVISIONAL, REVOKER_P)
+            )
+        );
+
+        bytes32 escalationSalt = VNextDeploySpec.contractSalt(
+            VNextDeploySpec.MODE_PROVISIONAL, block.chainid, VNextDeploySpec.TAG_ESCALATION_ATTESTER, label
+        );
+        escalation = _deployViaProxy(
+            escalationSalt,
+            abi.encodePacked(
+                type(SingleSignerO5Attester).creationCode,
+                abi.encode(SIGNER_E, EAS_ADDR, SCHEMA, ESCALATION_COHORT_PROVISIONAL, REVOKER_E)
+            )
+        );
+
+        bytes32 typeHash = SingleSignerO5Attester(primary).o5TypeHash();
+        ctorArgs = abi.encode(USDC_ADDR, primary, escalation, SCHEMA, typeHash);
+        factorySalt = VNextDeploySpec.contractSalt(
+            VNextDeploySpec.MODE_PROVISIONAL, block.chainid, VNextDeploySpec.TAG_FACTORY, label
+        );
     }
 
     /// @dev Etches a minimal CREATE2 shim at `VNextDeploySpec.CREATE2_DEPLOYER` if the local test chain
@@ -220,6 +266,140 @@ contract VNextDeployVerifyTest is Test {
         }
     }
 
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    //                      3. M1 (astra pack-410 Q2, MEDIUM): MIXED-BAND COHORTS
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// @notice THE LEAD'S REPRO. Primary cohort id `1` (canonical band), escalation cohort id
+    ///         `0xF000000000000002` (provisional band), factory at the CANONICAL spec salt. `_verify`
+    ///         infers the mode from the primary cohort alone and `_assertCohortSeparation` checks only
+    ///         that the two ids are DISTINCT, never that they share a band — so this passed `verify()`
+    ///         at `08f24f12`. It must revert.
+    function test_M1_MixedBandCohorts_VerifyMustRejectBandMismatch() public {
+        bytes32 primarySalt = VNextDeploySpec.contractSalt(
+            VNextDeploySpec.MODE_CANONICAL, block.chainid, VNextDeploySpec.TAG_PRIMARY_ATTESTER, ""
+        );
+        address primary = _deployViaProxy(
+            primarySalt,
+            abi.encodePacked(
+                type(SingleSignerO5Attester).creationCode,
+                abi.encode(SIGNER_P, EAS_ADDR, SCHEMA, PRIMARY_COHORT, REVOKER_P)
+            )
+        );
+
+        bytes32 escalationSalt = VNextDeploySpec.contractSalt(
+            VNextDeploySpec.MODE_CANONICAL, block.chainid, VNextDeploySpec.TAG_ESCALATION_ATTESTER, ""
+        );
+        address escalation = _deployViaProxy(
+            escalationSalt,
+            abi.encodePacked(
+                type(SingleSignerO5Attester).creationCode,
+                abi.encode(SIGNER_E, EAS_ADDR, SCHEMA, ESCALATION_COHORT_MIXED_PROVISIONAL, REVOKER_E)
+            )
+        );
+        assertTrue(
+            VNextDeploySpec.isProvisionalCohort(ESCALATION_COHORT_MIXED_PROVISIONAL)
+                && !VNextDeploySpec.isProvisionalCohort(PRIMARY_COHORT),
+            "fixture is wrong: primary must be canonical-band and escalation provisional-band"
+        );
+
+        bytes32 typeHash = SingleSignerO5Attester(primary).o5TypeHash();
+        bytes memory ctorArgs = abi.encode(USDC_ADDR, primary, escalation, SCHEMA, typeHash);
+        bytes32 factorySalt =
+            VNextDeploySpec.contractSalt(VNextDeploySpec.MODE_CANONICAL, block.chainid, VNextDeploySpec.TAG_FACTORY, "");
+        address factory =
+            _deployViaProxy(factorySalt, abi.encodePacked(type(VNextSettlementEscrowFactory).creationCode, ctorArgs));
+
+        try dvs.verify(factory) returns (DeployVNextSettlement.Tuple memory) {
+            fail(
+                "SECURITY GAP (N38 follow-up M1): verify(address) ACCEPTED a factory whose primary cohort "
+                "is canonical-band and escalation cohort is provisional-band - it must reject mixed bands"
+            );
+        } catch Error(string memory reason) {
+            assertTrue(
+                _contains(reason, "different bands"),
+                string.concat("verify() reverted, but for the wrong reason: ", reason)
+            );
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    //                      4. M2 (astra pack-410 Q4, MEDIUM): PROVISIONAL COVERAGE
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// @notice The provisional positive control: genuine provisional-band cohorts and factory, deployed
+    ///         through the same proxy helper, with the correct label supplied through the `virtual`
+    ///         accessor (never `vm.setEnv` — see the file-level doc on the env race). `verify()` must
+    ///         pass. This is COVERAGE, not a bug: it already worked at `08f24f12`, just untested.
+    function test_M2_ProvisionalPositiveControl_VerifyPassesWithCorrectLabel() public {
+        (,, bytes32 factorySalt, bytes memory ctorArgs) = _buildProvisionalCohorts(REVIEW_LABEL);
+        address factory =
+            _deployViaProxy(factorySalt, abi.encodePacked(type(VNextSettlementEscrowFactory).creationCode, ctorArgs));
+
+        DeployVNextSettlement labeled = new VerifyLabelHarness(REVIEW_LABEL);
+        try labeled.verify(factory) returns (DeployVNextSettlement.Tuple memory t) {
+            assertEq(t.factory, factory, "returned tuple names a different factory");
+        } catch Error(string memory reason) {
+            fail(string.concat("provisional positive control: verify() reverted unexpectedly: ", reason));
+        }
+    }
+
+    /// @notice An EMPTY label must revert with the "VNEXT_LABEL is required" message, never reaching the
+    ///         address re-derivation.
+    function test_M2_ProvisionalEmptyLabel_VerifyMustRevert() public {
+        (,, bytes32 factorySalt, bytes memory ctorArgs) = _buildProvisionalCohorts(REVIEW_LABEL);
+        address factory =
+            _deployViaProxy(factorySalt, abi.encodePacked(type(VNextSettlementEscrowFactory).creationCode, ctorArgs));
+
+        DeployVNextSettlement labeled = new VerifyLabelHarness("");
+        try labeled.verify(factory) returns (DeployVNextSettlement.Tuple memory) {
+            fail("verify() accepted an EMPTY VNEXT_LABEL for a provisional factory - it must revert");
+        } catch Error(string memory reason) {
+            assertTrue(
+                _contains(reason, "VNEXT_LABEL is required"),
+                string.concat("verify() reverted, but for the wrong reason: ", reason)
+            );
+        }
+    }
+
+    /// @notice A DIFFERENT (non-empty, wrong) label re-derives the WRONG salt and must revert with the
+    ///         address-equality message, not the "label is required" one.
+    function test_M2_ProvisionalWrongLabel_VerifyMustRevert() public {
+        (,, bytes32 factorySalt, bytes memory ctorArgs) = _buildProvisionalCohorts(REVIEW_LABEL);
+        address factory =
+            _deployViaProxy(factorySalt, abi.encodePacked(type(VNextSettlementEscrowFactory).creationCode, ctorArgs));
+
+        DeployVNextSettlement labeled = new VerifyLabelHarness("a-different-label");
+        try labeled.verify(factory) returns (DeployVNextSettlement.Tuple memory) {
+            fail("verify() accepted the WRONG VNEXT_LABEL for a provisional factory - it must revert");
+        } catch Error(string memory reason) {
+            assertTrue(
+                _contains(reason, "not this build's CREATE2 output"),
+                string.concat("verify() reverted, but for the wrong reason: ", reason)
+            );
+        }
+    }
+
+    /// @notice THE ONE REAL environment-variable case (astra pack-410 Q4's fourth bullet): the variable
+    ///         genuinely MISSING, exercised through the UN-overridden `_verifyLabel` -> `vm.envString`
+    ///         path, so forge's own environment-not-found revert fires. Safe to do for real: nothing in
+    ///         this entire file ever calls `vm.setEnv("VNEXT_LABEL", ...)` — the other three label cases
+    ///         above go through the `virtual` accessor instead — so there is nothing anywhere in this
+    ///         suite for this test to race with.
+    function test_M2_ProvisionalMissingLabelEnvVar_VerifyMustRevert() public {
+        (,, bytes32 factorySalt, bytes memory ctorArgs) = _buildProvisionalCohorts(REVIEW_LABEL);
+        address factory =
+            _deployViaProxy(factorySalt, abi.encodePacked(type(VNextSettlementEscrowFactory).creationCode, ctorArgs));
+
+        // `dvs` is a plain VerifyHarness: it does NOT override _verifyLabel, so `verify` reaches the
+        // real `vm.envString("VNEXT_LABEL")`. That failure is a CHEATCODE-level revert, not a standard
+        // `Error(string)` from this script's own `require` — a Solidity `catch Error(string)` clause
+        // does not match it and the exception propagates uncaught, so `vm.expectRevert` (which matches
+        // any revert encoding) is used instead of this file's usual try/catch pattern.
+        vm.expectRevert(bytes("vm.envString: environment variable \"VNEXT_LABEL\" not found"));
+        dvs.verify(factory);
+    }
+
     function _contains(string memory haystack, string memory needle) internal pure returns (bool) {
         bytes memory h = bytes(haystack);
         bytes memory n = bytes(needle);
@@ -245,6 +425,24 @@ contract VNextDeployVerifyTest is Test {
 contract VerifyHarness is DeployVNextSettlement {
     function _unknownChainAllowed() internal pure override returns (bool) {
         return true;
+    }
+}
+
+/// @dev M2 (astra pack-410 Q4): `_verifyLabel` ALSO moved into EVM state — a fixed label supplied at
+///      construction, isolated per test. This is the "cover empty and missing through the accessor"
+///      half of the brief's instruction; the "missing" case is covered separately through the
+///      UN-overridden `VerifyHarness` (see {VNextDeployVerifyTest.test_M2_ProvisionalMissingLabelEnvVar_VerifyMustRevert}),
+///      since simulating "missing" through this accessor would not exercise forge's real
+///      environment-not-found revert at all.
+contract VerifyLabelHarness is VerifyHarness {
+    string internal _fixedLabel;
+
+    constructor(string memory label_) {
+        _fixedLabel = label_;
+    }
+
+    function _verifyLabel() internal view override returns (string memory) {
+        return _fixedLabel;
     }
 }
 

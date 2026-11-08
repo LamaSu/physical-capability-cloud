@@ -51,8 +51,10 @@
  *
  * UNFUNDED CLONE. `unitCount()` on a clone that was created but never funded returns 0 — a plain storage
  * read, never a revert — so this never throws for that case: it fails closed on the named
- * "escrow funded (unitCount > 0)" check and, independently, on "prePolicyRoot" (an empty reconstruction's
- * root cannot equal the escrow's zero, never-written `_prePolicyRoot`). A clone with no code at all fails the
+ * "escrow funded (unitCount > 0)" check and, independently, on "prePolicyRoot" (`initialize`
+ * (`VNextSettlementEscrow.sol:677`) already writes `_prePolicyRoot` to the off-chain-compiled commitment
+ * BEFORE `fund()` ever runs — it is not zero or unwritten pre-funding — so an empty reconstruction's root,
+ * over zero units, cannot equal whatever that already-committed value is). A clone with no code at all fails the
  * same two checks the same way: `unitCount()` then throws (empty return data), which is caught, not thrown.
  *
  * No contract change. No write, anywhere. Pure read, then pure proof (compiler.ts is pure; see its header).
@@ -265,7 +267,10 @@ export async function readUnitConfigs(p: {
           record(`units[${i}] unitId derivation`, derived === unitId, `derived ${derived}; read as ${unitId}`);
         }
       } catch (e) {
-        record(`units[${i}] read`, false, `could not reconstruct unit ${i}: ${describeRevert(e)}`);
+        // UNIT_READ_ABI as the extra fragment: a stale/malformed unitId can revert `UnitNotFound` (:87),
+        // which is declared there, not in the frozen `VNextSettlementEscrowABI` — without it the detail
+        // would name no error at all.
+        record(`units[${i}] read`, false, `could not reconstruct unit ${i}: ${describeRevert(e, UNIT_READ_ABI)}`);
       }
     }
   }

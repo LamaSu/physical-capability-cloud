@@ -574,7 +574,18 @@ describe("M7, L7: training manifests and lookup tables", () => {
     const m = { ...body, manifestHash: computeManifestHash(body) } as unknown as CompositionManifest;
     const rateSource = { scheduleHash: `0x${"ab".repeat(32)}`, evaluatedAt: 0, context: { jobValueCents: 0, jobsPerDay: 0, captureClass: null } };
     const r = clausesFromCompositionManifest({ manifest: m, pinnedRates: [{ bps: 10, rateSource }], partyByAddress: {}, appliesTo: { allUnits: true }, idPrefix: "p" });
-    expect(r.ok ? "ok" : r.refusals.map((x) => x.code).join(",")).toBe("UNKNOWN_CONTRIBUTOR");
+    // Since astra EC5 the manifest is schema-checked first, so "__proto__" is refused as an address
+    // before any lookup. A real address the table does not hold as its own key is still no party.
+    expect(r.ok ? "ok" : r.refusals.map((x) => x.code).join(",")).toBe("MANIFEST_INVALID");
+    const real = { ...body, entries: [{ ...body.entries[0]!, contributorAddress: a(0x13) }] };
+    const r2 = clausesFromCompositionManifest({
+      manifest: { ...real, manifestHash: computeManifestHash(real) },
+      pinnedRates: [{ bps: 10, rateSource }],
+      partyByAddress: {},
+      appliesTo: { allUnits: true },
+      idPrefix: "p",
+    });
+    expect(r2.ok ? "ok" : r2.refusals.map((x) => x.code).join(",")).toBe("UNKNOWN_CONTRIBUTOR");
   });
 });
 
@@ -776,10 +787,20 @@ describe("clean-room round 3: schedule bodies, unit selection, the verified flag
 // ── Clean-room round 3b (spec at 15208e38) ───────────────────────────────────
 
 describe("clean-room round 3b: every number in a schedule body means one value to every reader", () => {
-  /** A body as a server might hold it, sealed under the hash of exactly these numbers. */
+  /**
+   * A body as a server might hold it, sealed under the hash of exactly these numbers. Under the evidence
+   * profile's D5 (#359) a body holding a number the canonical form cannot write has no hash at all, so it
+   * carries a stand-in: the compiler must refuse it whatever hash it carries.
+   */
   const sealed = (segment: Record<string, unknown>, version = 1): RateSchedule => {
     const body = { version, segments: [segment], publishedAt: "2026-06-01T00:00:00Z" };
-    return { ...body, scheduleHash: computeScheduleHash(body as unknown as RateSchedule) } as unknown as RateSchedule;
+    let scheduleHash: string;
+    try {
+      scheduleHash = computeScheduleHash(body as unknown as RateSchedule);
+    } catch {
+      scheduleHash = `0x${"5d".repeat(32)}`;
+    }
+    return { ...body, scheduleHash } as unknown as RateSchedule;
   };
   const optionsRefusal = (s: RateSchedule) => refusals(compileEconomics(printerOn(s, 40), { schedules: [s] }));
 
@@ -848,9 +869,46 @@ describe("clean-room round 3b: every number in a schedule body means one value t
   });
 
   it("a real number in a schedule body is written as ECMAScript Number.prototype.toString writes it", () => {
-    expect(canonicalize({ a: 1e-9, b: 0.000001, c: 1.5e-7, d: 100.5, e: 1e16, f: 1e21 })).toBe('{"a":1e-9,"b":0.000001,"c":1.5e-7,"d":100.5,"e":10000000000000000,"f":1e+21}');
+    // Only reals with a canonical form: from 2^53 up, every double is an integer outside the safe range,
+    // which D5 refuses to write and rule 5 refuses (the D5 tests below).
+    expect(canonicalize({ a: 1e-9, b: 0.000001, c: 1.5e-7, d: 100.5, e: 2 ** 53 - 1 })).toBe('{"a":1e-9,"b":0.000001,"c":1.5e-7,"d":100.5,"e":9007199254740991}');
     const tiny = sealed({ kind: "exponential-decay", startTime: 0, endTime: null, startBps: 40, endBps: 40, decayPerSecond: 1e-9 });
     expect(tiny.scheduleHash).toBe(computeScheduleHash({ version: 1, segments: JSON.parse('[{"kind":"exponential-decay","startTime":0,"endTime":null,"startBps":40,"endBps":40,"decayPerSecond":1e-9}]') } as RateSchedule));
     expect(compileEconomics(printerOn(tiny, 40), { schedules: [tiny] }).ok).toBe(true);
+  });
+
+  it("D5 (#359): a real of magnitude 2^53 or more has no canonical form, so rule 5 refuses it and the compiler refuses, never throws", () => {
+    const adoption = (scale: number) => ({ kind: "adoption-indexed", startTime: 0, endTime: null, scale, floorBps: 0, capBps: 500 });
+    const decay = (decayPerSecond: number) => ({ kind: "exponential-decay", startTime: 0, endTime: null, startBps: 500, endBps: 40, decayPerSecond });
+    for (const v of [2 ** 53, 1e16, 1e21, Number.MAX_VALUE]) {
+      for (const segment of [adoption(v), decay(v)]) {
+        expect(() => assertScheduleIsWellFormed({ version: 1, segments: [segment as unknown as RateSchedule["segments"][number]] })).toThrow(
+          /is not a finite number of magnitude at most 2\^53-1/,
+        );
+        const s = sealed(segment);
+        expect(refusals(compileEconomics(printerOn(s, 40), { schedules: [s], rateFacts: { jobsPerDay: 7 } }))).toEqual([["SCHEMA_INVALID", ["options"]]]);
+      }
+    }
+    // The largest real with a form still compiles: a scale of 2^53 - 1 over sqrt(7) jobs a day is held at the cap.
+    const largest = sealed(adoption(2 ** 53 - 1));
+    expect(compileEconomics(printerOn(largest, 500), { schedules: [largest], rateFacts: { jobsPerDay: 7 } }).ok).toBe(true);
+  });
+
+  it("D5 (#359): every schedule number without a canonical form is an options refusal, with or without D5 in canonicalize", () => {
+    const base = { startTime: 0, endTime: null };
+    const bodies = [
+      { ...base, kind: "piecewise-value", thresholdCents: 2 ** 53, bpsLow: 40, bpsHigh: 40 },
+      { ...base, kind: "adoption-indexed", scale: Infinity, floorBps: 0, capBps: 500 },
+      { ...base, kind: "exponential-decay", startBps: 500, endBps: 40, decayPerSecond: -Infinity },
+      { kind: "constant", startTime: 2 ** 60, endTime: null, bps: 40 },
+    ];
+    for (const segment of bodies) {
+      const s = sealed(segment);
+      let result: CompileResult | undefined;
+      expect(() => {
+        result = compileEconomics(printerOn(s, 40), { schedules: [s], rateFacts: { jobsPerDay: 7 } });
+      }).not.toThrow();
+      expect(refusals(result!)).toEqual([["SCHEMA_INVALID", ["options"]]]);
+    }
   });
 });

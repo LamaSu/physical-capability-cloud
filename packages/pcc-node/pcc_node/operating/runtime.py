@@ -23,7 +23,9 @@ only part that touches the device, and it keeps these promises:
    answer is capped in size. A watchdog shuts the request's socket the moment
    the run is cancelled, its lease is lost, or the operation's total deadline
    passes: a header wait, a stalled read or a slow connect never outlives
-   them. A run id of "." or ".." is refused before it can change a path.
+   them. Malformed or ambiguous framing, incomplete chunks and a read the watch
+   ended are never taken for a whole answer. A run id of "." or ".." is refused before
+   it can change a path.
 5. **The result says whether the device may be running.** Once any byte of the
    start request has left the node, every failure is labelled
    ``<reason>:device_state_unknown``: a lost connection, any answer that is not
@@ -388,20 +390,99 @@ def _connect(host: str, port: int, tls: bool, watch: _Watch) -> socket.socket:
     raise last or OSError("the device's address did not resolve")
 
 
+class _DeviceHTTPResponse(http.client.HTTPResponse):
+    """Keep chunked reads, but require the delimiters stdlib tolerates losing."""
+
+    def _framing_line(self, kind):
+        line = self.fp.readline(http.client._MAXLINE + 1)
+        if len(line) > http.client._MAXLINE:
+            raise http.client.LineTooLong(kind)
+        if not line.endswith(b"\r\n"):
+            raise http.client.IncompleteRead(b"")
+        return line[:-2]
+
+    def _read_next_chunk_size(self):
+        line = self._framing_line("chunk size")
+        size = line.split(b";", 1)[0]
+        if re.fullmatch(b"[0-9A-Fa-f]+", size) is None:
+            raise http.client.HTTPException("malformed chunk size")
+        return int(size, 16)
+
+    def _read_and_discard_trailer(self):
+        for _ in range(http.client._MAXHEADERS + 1):
+            line = self._framing_line("trailer line")
+            if not line:
+                return
+        raise http.client.HTTPException("too many chunk trailers")
+
+    def _get_chunk_left(self):
+        # HTTPResponse's implementation discards the two bytes after a data
+        # chunk without verifying they are CRLF (on both Python 3.9 and 3.12).
+        chunk_left = self.chunk_left
+        if not chunk_left:
+            if chunk_left is not None and self._safe_read(2) != b"\r\n":
+                raise http.client.HTTPException("malformed chunk terminator")
+            chunk_left = self._read_next_chunk_size()
+            if chunk_left == 0:
+                self._read_and_discard_trailer()
+                self._close_conn()
+                chunk_left = None
+            self.chunk_left = chunk_left
+        return chunk_left
+
+
+def _check_framing(resp: http.client.HTTPResponse) -> None:
+    """Check original fields before the parser's discarded length can look like EOF framing.
+
+    Refuse a head the parser did not take entirely as fields: a bare CR (invalid
+    under RFC 9112 section 2.2) can hide later fields in the message payload.
+    """
+    if resp.headers.defects or resp.headers.get_payload():
+        raise http.client.HTTPException("malformed response headers")
+    lengths = resp.headers.get_all("Content-Length", [])
+    transfers = resp.headers.get_all("Transfer-Encoding", [])
+    # Reject duplicates (even identical) and comma forms instead of choosing
+    # one of several advertised lengths. Only one ASCII decimal is supported.
+    if lengths and (len(lengths) != 1 or re.fullmatch(r"[0-9]+", lengths[0].strip(" \t")) is None
+                    or resp.length is None):
+        raise http.client.HTTPException("malformed or duplicate Content-Length")
+    if transfers:
+        if resp.version == 10:
+            raise http.client.HTTPException("Transfer-Encoding on HTTP/1.0 response")
+        if lengths or len(transfers) != 1 or transfers[0].strip(" \t").lower() != "chunked":
+            raise http.client.HTTPException("ambiguous or unsupported Transfer-Encoding")
+        # stdlib does not strip trailing OWS when recognizing chunked. Apply
+        # the validated encoding so it can never become close-delimited JSON.
+        resp.chunked = True
+        resp.chunk_left = None
+
+
 def _read_bounded(resp: http.client.HTTPResponse, max_bytes: int, watch: _Watch) -> str:
-    """Read an answer in pieces, never more than max_bytes, never past the watch."""
+    """Read an answer in pieces, never more than max_bytes, never past the watch.
+
+    The watch is checked after every read as well as before it. A socket the watch shut on a stop
+    reads as empty, exactly like a device ending its answer, so an empty read ends the answer only
+    if the watch has no reason to stop. An answer that ends before its Content-Length did not
+    arrive whole: http.client's read1 ends there without saying so, and this raises IncompleteRead
+    instead of returning the shorter answer (ChatGPT r3 finding 3).
+    """
+    _check_framing(resp)
     read1 = getattr(resp, "read1", None)
     chunks, total = [], 0
     while True:
         watch.check()
         chunk = read1(65536) if read1 is not None else resp.read(min(65536, max_bytes + 1 - total))
+        watch.check()  # EOF included: a stop that shut the socket must not pass for the answer's end
         if not chunk:
             break
         total += len(chunk)
         if total > max_bytes:
             raise _Abort("device_response_too_large")
         chunks.append(chunk)
-    return b"".join(chunks).decode("utf-8", "replace")
+    raw = b"".join(chunks)
+    if resp.length:  # what the Content-Length still promised (None when the answer named none)
+        raise http.client.IncompleteRead(raw, resp.length)
+    return raw.decode("utf-8", "replace")
 
 
 def _request(method: str, url: str, body: Any = None, *, deadline: float, clock: Callable[[], float],
@@ -442,6 +523,7 @@ def _request(method: str, url: str, body: Any = None, *, deadline: float, clock:
         sock.settimeout(max(_WATCH_S, deadline - clock()))  # a backstop: the watch acts first
         watch.arm(sock)
         conn = http.client.HTTPConnection(target.hostname, target.port)
+        conn.response_class = _DeviceHTTPResponse
         conn.sock = sock
         conn.putrequest(method, path, skip_accept_encoding=True)
         for name, value in send_headers.items():

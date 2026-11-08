@@ -18,8 +18,10 @@
 import type { FastifyInstance } from "fastify";
 import { getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
+import { AUTHENTICATION_REQUIRED, authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
 import type { OperatorPolicy } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
+import { locationVisibilityOf, publicLocation, type PublicLocation } from "../facades/populators/public-location.js";
 import {
   suggestTools,
   applyOperatorToolConfig,
@@ -89,6 +91,9 @@ export async function kernelAgentPackageRoutes(app: FastifyInstance) {
         const baseUrl = `${req.protocol}://${req.hostname}`;
         const systemPrompt = buildSystemPrompt(kernel, devices, caps, policy, baseUrl);
 
+        // N68: the package shows the kernel's location as every other read does.
+        const place = publicLocation(kernel.location, locationVisibilityOf(kernel.location));
+
         // Build the agent package
         const agentPackage = {
           schema: "pcc-agent-package/2.0",
@@ -100,7 +105,9 @@ export async function kernelAgentPackageRoutes(app: FastifyInstance) {
           kernel: {
             id: kernel.id,
             name: kernel.name,
-            location: kernel.location,
+            location: place.location,
+            locationPrecision: place.locationPrecision,
+            locationCell: place.locationCell,
             status: kernel.status,
             reputation: kernel.reputation,
           },
@@ -212,21 +219,20 @@ export async function kernelAgentPackageRoutes(app: FastifyInstance) {
         disabledTools?: string[];
         customTools?: SuggestedTool[];
       };
+      const { kernelId } = req.params;
+
+      // N31 (cross-family review r1 of #575, HIGH): the tool configuration is stored in the
+      // kernel's operator policy and shapes the agent package every agent loads, so writing it is
+      // a decision: the admin, or the kernel's operator by a proven wallet. The check here used
+      // to compare kernel.operatorId, a column kernels do not have, so it never refused anyone
+      // and wrote a policy for kernels that do not exist.
+      const authority = authorityOf(req);
+      if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+      const refusal = refuseKernelAction(req, authority, kernelId, "decide");
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
 
       try {
         const { db } = getStore();
-        const { kernelId } = req.params;
-
-        // Verify the caller owns this kernel (prevents unauthorized policy injection)
-        const operatorId = (req as any).operatorId ?? (req as any).userId;
-        if (operatorId) {
-          const kernel = db.select().from(schema.shopKernels)
-            .where(eq(schema.shopKernels.id, kernelId))
-            .get();
-          if (kernel && (kernel as any).operatorId && (kernel as any).operatorId !== operatorId) {
-            return reply.status(403).send({ error: "You can only configure your own kernel's agent package" });
-          }
-        }
 
         // Load current policy
         const row = db.select().from(operatorPolicies)
@@ -409,6 +415,13 @@ curl -s -X POST $BASE/negotiate/session/$SID/commit | jq '.jobId'
 
 // ── System Prompt Builder ─────────────────────────────────────────
 
+/** The prompt's location line, from the same projection every read uses (N68). */
+function describeLocation(place: PublicLocation): string {
+  if (place.locationPrecision === "none") return "not set";
+  if (place.locationPrecision === "exact") return `${JSON.stringify(place.location)} (exact, published by the operator)`;
+  return `${JSON.stringify(place.location)} (approximate: the centre of geohash cell ${place.locationCell}, about 5 km across)`;
+}
+
 function buildSystemPrompt(
   kernel: any,
   devices: any[],
@@ -427,7 +440,7 @@ function buildSystemPrompt(
 
 ## Your Kernel: ${kernel.name}
 - ID: ${kernel.id}
-- Location: ${JSON.stringify(kernel.location)}
+- Location: ${describeLocation(publicLocation(kernel.location, locationVisibilityOf(kernel.location)))}
 - Status: ${kernel.status}
 - Reputation: ${kernel.reputation}/1000
 

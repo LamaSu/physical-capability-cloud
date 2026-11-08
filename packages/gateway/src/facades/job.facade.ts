@@ -22,7 +22,8 @@ import {
   populateJobDetailDTO,
   populateJobList,
 } from "./populators/job.populator.js";
-import { getKernelService } from "../services/kernel-service.js";
+import { getKernelService, type LocalRunQueueReason } from "../services/kernel-service.js";
+import { localJobDispatchDecision } from "../services/local-job-dispatch.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
@@ -58,6 +59,9 @@ export interface JobFilters {
    *  under TENANT_ENFORCE), filters rows to this tenant. Omitted = today's
    *  cross-tenant default. */
   tenantId?: string;
+  /** Only these jobs: the ids the caller may read (jobReadScopeOf). Applied before the
+   *  page is cut, so `total` and `hasMore` count only readable jobs. */
+  jobIds?: ReadonlySet<string>;
 }
 
 export interface SubmitJobInput {
@@ -72,12 +76,15 @@ export interface SubmitJobInput {
   description?: string;
   title?: string;
   parameters?: Record<string, unknown>;
+  /** A strict true can only remove local dispatch. */
+  queueOnly?: unknown;
 }
 
 export interface JobSubmitResult {
   jobId: string;
   deviceId: string | null;
   status: "queued" | "accepted";
+  reason?: LocalRunQueueReason;
 }
 
 export interface JobStatusResult {
@@ -184,6 +191,10 @@ export class JobFacade extends BaseFacade {
       } else {
         jobs = this.repos.jobs.findAll(opts);
       }
+      if (filters?.jobIds) {
+        const readable = filters.jobIds;
+        jobs = jobs.filter((job) => readable.has(job.id));
+      }
 
       const total = jobs.length;
       const page = jobs.slice(offset, offset + limit);
@@ -259,6 +270,7 @@ export class JobFacade extends BaseFacade {
    */
   async submit(
     body: SubmitJobInput,
+    localRunAuthority: "decide" | "none",
     actorId?: string,
     ip?: string,
     userAgent?: string,
@@ -306,42 +318,43 @@ export class JobFacade extends BaseFacade {
         assuranceTier: typeof assuranceTier === "number" ? assuranceTier : 0,
       });
 
-      // Determine if this is an external kernel (daemon will pick up the job)
+      // Only an explicitly matched, enabled, unstopped local kernel may run.
       let svc;
       try {
         svc = getKernelService();
       } catch {
         // KernelService not initialized — treat as external kernel path
-        pipelineTelemetry.emit(jobId, "job_submit", "completed", {
-          metadata: { kernelId, stepId, external: true },
-        });
-        return { jobId, deviceId: null, status: "queued" as const };
       }
 
-      const localKernelId = (svc as any).config?.kernelId;
-      const isExternalKernel = localKernelId && kernelId !== localKernelId;
-
-      if (isExternalKernel) {
+      const queued = (reason: LocalRunQueueReason) => {
         pipelineTelemetry.emit(jobId, "job_submit", "completed", {
-          metadata: { kernelId, stepId, external: true },
+          metadata: { kernelId, stepId, external: true, reason },
         });
-        trackServerEvent("job_submitted", { kernelId, capabilityType: body.capabilityId, external: true }, actorId);
+        trackServerEvent("job_submitted", { kernelId, capabilityType: body.capabilityId, external: true, reason }, actorId);
         auditService.log({
           eventType: "job.submitted",
           actor: actorId,
           resourceType: "job",
           resourceId: jobId,
           action: "create",
-          metadata: { kernelId, stepId, external: true, assuranceTier },
+          metadata: { kernelId, stepId, external: true, assuranceTier, reason },
           ip,
           userAgent,
         });
-        return { jobId, deviceId: null, status: "queued" as const };
-      }
+        return { jobId, deviceId: null, status: "queued" as const, reason };
+      };
+
+      const decision = localJobDispatchDecision(svc?.kernelId, kernelId, svc?.hasExplicitConfig ?? false, body.queueOnly);
+      if (!decision.ok) return queued(decision.reason);
 
       // Local kernel: fire-and-forget via KernelService
       try {
-        const result = await svc.submitJob({ jobId, stepId, deviceId, gcodeHash, assuranceTier });
+        const result = await svc!.submitJob({ jobId, kernelId, stepId, deviceId, gcodeHash, assuranceTier, localRunAuthority });
+        if (result.status === "refused") {
+          throw new ConflictError("This gateway does not run the named device.", "device_not_runnable_here");
+        }
+        // The stop or operator switch may have changed during safety preflight.
+        if (result.status === "queued") return queued(result.reason);
         pipelineTelemetry.emit(result.jobId, "job_submit", "completed", {
           metadata: { kernelId, stepId, deviceId: result.deviceId },
         });

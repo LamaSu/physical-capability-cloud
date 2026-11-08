@@ -624,8 +624,9 @@ describe("Settlement Routes", () => {
     });
 
     it("NEGATIVE: a completed job is not settled by its row (readmodels F1)", async () => {
-      // job-004 is seeded "completed"; its escrow (esc-001, by CWM) has no milestone for
-      // its step, so the records cannot say whether this job was paid.
+      // job-004 is seeded "completed"; its escrow (esc-001, by CWM) sits at the seed's
+      // 0xESCROW_CONTRACT_001, which is no contract address, so the escrow is mock data and the
+      // payout reads simulated (#409 r1 MEDIUM 1), never settled and never paid.
       const res = await app.inject({
         method: "GET",
         url: "/api/settlement/job-004",
@@ -633,7 +634,7 @@ describe("Settlement Routes", () => {
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body.settled).toBe(false);
-      expect(body.status).toBe("unknown");
+      expect(body.status).toBe("simulated");
       expect(body.jobStatus).toBe("completed");
       expect(body.settledAt).toBeNull();
     });
@@ -731,8 +732,9 @@ describe("Full evidence-to-settlement flow", () => {
     // Step 3: the settlement read reports what the records show. The release was sent to
     // 0xDeAdBeEf...01, which the gateway holds no escrow record for, and
     // SettlementService.releaseMilestone updates only the job row. job-004's own escrow
-    // record has no milestone for its step, so the payout is unknown, not settled; the
-    // row's "settled" is reported as the job row's claim (readmodels F1).
+    // record is the seed's mock esc-001 (no contract address), so the payout is simulated
+    // (#409 r1 MEDIUM 1), not settled; the row's "settled" is reported as the job row's claim
+    // (readmodels F1).
     const settlementRes = await app.inject({
       method: "GET",
       url: "/api/settlement/job-004",
@@ -741,7 +743,7 @@ describe("Full evidence-to-settlement flow", () => {
     const settlementBody = settlementRes.json();
     expect(settlementBody.jobStatus).toBe("settled");
     expect(settlementBody.settled).toBe(false);
-    expect(settlementBody.status).toBe("unknown");
+    expect(settlementBody.status).toBe("simulated");
     expect(settlementBody.notices).toContain("job_row_reports_settled");
   });
 

@@ -264,7 +264,8 @@ function dtoToCandidate(
     estimatedDurationMs: FACADE_DEFAULT_DURATION_MS,
     assuranceTier: maxAssuranceTier(dto.assuranceTiers),
     reputation: dto.reputation,
-    location: dto.location,
+    // N68: the capability's projected site (coarse unless its operator opted in), or none.
+    location: dto.location ?? undefined,
     available: dto.available,
   };
 }
@@ -289,7 +290,11 @@ const facadeProvider: CapabilityProvider = {
       if (maxAssuranceTier(dto.assuranceTiers) < constraints.minAssuranceTier) {
         return false;
       }
-      if (constraints.location && dto.location) {
+      if (constraints.location) {
+        // A capability with no known location cannot be shown to be within the radius
+        // (before N68 it read as {0,0}, which fell outside any radius away from 0,0). Its
+        // projected location is within about 3.5 km of the site unless the operator opted in.
+        if (!dto.location) return false;
         const km = haversineKm(constraints.location, dto.location);
         const radius = constraints.location.radiusKm ?? 50;
         if (km > radius) return false;
@@ -659,7 +664,7 @@ function getWorkflowEngine(): WorkflowEngine {
 
 /** Minimal interface for the JobFacade subset that createProductionBinding needs. */
 export interface JobSubmitter {
-  submit(input: SubmitJobInput): Promise<Result<JobSubmitResult>>;
+  submit(input: SubmitJobInput, localRunAuthority: "decide" | "none"): Promise<Result<JobSubmitResult>>;
 }
 
 /**
@@ -686,7 +691,7 @@ export function createProductionBinding(
         capabilityId: step.capabilityId,
         assuranceTier: step.assuranceTier,
         description: `Composition step: ${step.capabilityType}`,
-      });
+      }, "none");
       if (!result.success) {
         throw new Error(
           `Job submission failed for step ${step.index} (${step.capabilityId}): ${result.error?.message ?? "unknown error"}`,

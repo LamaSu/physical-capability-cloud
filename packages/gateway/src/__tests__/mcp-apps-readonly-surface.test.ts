@@ -4,6 +4,7 @@ import {
   appsHttpMcpRoutes,
   dispatchToolCall,
   httpMcpRoutes,
+  loadAgentPackage,
   withoutMcpAppViewLink,
   type AgentPackageTool,
 } from "../mcp/http-mcp-server.js";
@@ -200,8 +201,11 @@ describe("read-only /mcp/apps surface (non-prod: surface active)", () => {
     const tools = await listTools(app, "/mcp", session);
     const names = toolNames(tools);
 
-    // Full surface is unchanged — the whole ~254-tool proxy catalog + render.
-    expect(tools.length).toBeGreaterThanOrEqual(250);
+    // Full surface is unchanged — every tool in the served pack, plus render and the typed tools.
+    const packNames = loadAgentPackage().tools.map((t) => t.name);
+    expect(packNames.length).toBeGreaterThan(200);
+    expect(names).toEqual(expect.arrayContaining(packNames));
+    expect(tools.length).toBeGreaterThan(packNames.length);
     expect(names).toContain("render_pcc_dashboard");
     expect(names).toContain("list_kernels");
     // The writes the app surface hides ARE present on the full surface.

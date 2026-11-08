@@ -8,12 +8,24 @@ Handles:
 
 import logging
 import time
+from http.client import HTTPException
+from urllib.error import HTTPError
 
 from .http_util import pcc_request
 from .crypto import sign_announcement
 from .log_capture import sign_ed25519_utf8, LogSigningRefused
 
 log = logging.getLogger("pcc-node.register")
+
+
+class RegistrationError(RuntimeError):
+    """A kernel registration was refused or its response could not be read. Carries the status and body so callers report
+    it and fail CLOSED, instead of proceeding as if registration succeeded (item 133, board N119)."""
+
+    def __init__(self, status, data):
+        super().__init__(f"kernel registration failed (HTTP {status}): {data}")
+        self.status = status
+        self.data = data
 
 
 def kernel_signing_proof_message(kernel_id):
@@ -126,7 +138,13 @@ def register_kernel(pcc_base, api_key, config):
     Returns
     -------
     dict
-        Registration response, or error dict.
+        The gateway's registration response, on a 2xx (200 upsert / 201 create).
+
+    Raises
+    ------
+    RegistrationError
+        On a refusal, unreadable response or malformed body, carrying the status and body, so callers fail CLOSED instead of
+        mistaking an error for success (item 133).
     """
     payload = {
         "id": config.kernel_id,
@@ -138,19 +156,29 @@ def register_kernel(pcc_base, api_key, config):
         "registeredAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
-    status, data = pcc_request(
-        "POST", "/api/kernels",
-        body=payload,
-        base_url=pcc_base,
-        api_key=api_key,
-    )
+    try:
+        status, data = pcc_request(
+            "POST", "/api/kernels",
+            body=payload,
+            base_url=pcc_base,
+            api_key=api_key,
+        )
+    except (HTTPException, OSError) as exc:
+        # A read inside gateway_request's HTTPError handler can itself fail.
+        # Preserve a refusal if the exception carries its status. Other read
+        # failures carry no status through this API and become transport failure.
+        status = exc.code if isinstance(exc, HTTPError) else 0
+        raise RegistrationError(status, {"error": "registration_response_unreadable"}) from exc
 
-    if status in (200, 201):
-        log.info(f"Kernel {config.kernel_id} registered on PCC")
-    else:
+    if status not in (200, 201):
+        # A non-2xx must never be mistaken for success: raise so `start` and the daemon fail CLOSED and
+        # never log "registered" / print "Node running" after a 401 (item 133, board N119 incident).
         log.warning(f"Kernel registration failed (HTTP {status}): {data}")
-
-    return data if isinstance(data, dict) else {"raw": data, "status": status}
+        raise RegistrationError(status, data)
+    if not isinstance(data, dict):
+        raise RegistrationError(0, {"error": "malformed_registration_response"})
+    log.info(f"Kernel {config.kernel_id} registered on PCC")
+    return data
 
 
 def register_devices(pcc_base, api_key, kernel_id, devices):

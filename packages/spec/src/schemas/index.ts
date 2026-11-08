@@ -103,6 +103,8 @@ export const EvidenceSourceSchema = z.object({
   deviceType: z.enum(EVIDENCE_DEVICE_TYPES),
   kernelId: z.string(),
   firmwareVersion: z.string().optional(),
+  // Preserve the kernel-only marker across schema-validated event round trips.
+  writer: z.literal("kernel").optional(),
   // Fabricated-by-design marker (mock/simulated adapters). Kept in the schema
   // so schema-validated round-trips do not strip the honesty tag.
   simulated: z.boolean().optional(),

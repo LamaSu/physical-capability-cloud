@@ -375,7 +375,9 @@ is no fractional-wei accounting.
 
 ---
 
-## Relationship to Story Protocol — honest scoping
+## Relationship to Story Protocol (now The DATA Foundation) — honest scoping
+
+**Status (2026-11-06):** Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. The `pcc_ip_*` tools and `/api/ip/*` routes reach Story only through PCC's Story service, which returns placeholder values by default and refuses every operation in real mode, and Story's protocol contracts have been deprecated since 2026-09-19.
 
 The original design ambition was that PCC's contributor economics would
 *extend* the existing Story Protocol IP graph integration (`pcc_ip_*` MCP
@@ -394,7 +396,7 @@ derivative tree). Reality landed differently:
   `/api/ip/*`. The two surfaces share the same database (Drizzle) but have
   separate Zod schemas, separate route handlers, separate MCP tools.
 - **`pcc_contributor_*` and `pcc_schedule_*` MCP tools** are parallel to
-  `pcc_ip_*` (the existing Story Protocol-backed tools), not replacements.
+  `pcc_ip_*` (the Story Protocol tools, which make no on-chain call), not replacements.
 
 **Why the parallel path**: the contributor-economics primitives (immutable
 `RateSchedule`, `CompositionManifest` with role-tagged entries,
@@ -402,7 +404,7 @@ derivative tree). Reality landed differently:
 enough in semantics from Story Protocol's derivative-tree-with-decay model
 that a clean separation was lower-risk than retrofitting.
 
-**v2 unification path**: a future branch should converge the two graphs.
+**v2 unification path (on hold while Story's contracts are deprecated)**: a future branch could converge the two graphs.
 Specifically:
 1. Mint each `ContributorNFT` as a Story Protocol `IPAsset` at registration
    time, capturing the same `ipId` in both registries.
@@ -426,7 +428,7 @@ schedule for the v2 cutover are documented in `docs/AGENT_INTEGRATION.md`
 migration path"). Headline result: zero v1 deprecations because there are
 zero v1 operation-level duplicates; every contributor route targets a
 distinct on-chain pay rail (`MilestoneEscrow.splitPayout`) from the
-Story-Royalty-Vault rail used by `/api/ip/*`.
+Story Royalty Vault rail that `/api/ip/*` names but never calls.
 
 ---
 

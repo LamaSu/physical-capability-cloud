@@ -190,6 +190,52 @@ class TestRunDaemonLoop:
         values.update(overrides)
         return NodeConfig(**values)
 
+    def test_the_daemon_fails_closed_on_a_registration_401(self):
+        # verdict 133a MED: a refused (non-2xx) registration must stop the daemon BEFORE it creates the
+        # gateway client, sends an "online" heartbeat, writes running state, or logs "Daemon running" --
+        # so `status` cannot report a false "PCC: connected".
+        from pcc_node import daemon as daemon_module
+        from pcc_node.register import RegistrationError
+        with mock.patch.object(daemon_module, "load_or_create_keys", return_value=("pub", "sec")), \
+             mock.patch.object(daemon_module, "discover_network", return_value=[]), \
+             mock.patch.object(daemon_module, "register_kernel",
+                               side_effect=RegistrationError(401, {"error": "unauthorized"})), \
+             mock.patch.object(daemon_module, "detect_camera_device", return_value=None), \
+             mock.patch("pcc_node.daemon.PCCGatewayClient") as MockClient, \
+             mock.patch("pcc_node.ui_server.start_ui_server"), \
+             mock.patch.object(daemon_module, "_write_state") as write_state, \
+             mock.patch.object(daemon_module.time, "sleep", side_effect=KeyboardInterrupt):
+            # ChatGPT r3 F1: the refusal is raised (after the cleanup), not returned as a normal stop.
+            with pytest.raises(RegistrationError):
+                daemon_module.run_daemon(self._config())
+        MockClient.assert_not_called()   # no gateway client / no "online" heartbeat
+        write_state.assert_not_called()  # no running state written
+
+    def test_a_refused_registration_leaves_no_pid_or_state_file(self):
+        # verdict 133b MED (Q1 NOT CLOSED): the fail-closed return at the 401 bypasses the daemon-file
+        # cleanup, so the PID written at startup plus a PRE-EXISTING state file from an earlier run let
+        # `status` still print "PCC: connected" after a refused registration. The fail path must leave
+        # disk as a clean shutdown does -- no PID file, no state file.
+        from pcc_node import daemon as daemon_module
+        from pcc_node.register import RegistrationError
+        # A stale state file from an earlier, successful run is already on disk.
+        with open(daemon_module.STATE_FILE, "w") as f:
+            json.dump({"kernel_id": "k-old", "pcc_base": "http://pcc-test", "pid": os.getpid()}, f)
+        with mock.patch.object(daemon_module, "load_or_create_keys", return_value=("pub", "sec")), \
+             mock.patch.object(daemon_module, "discover_network", return_value=[]), \
+             mock.patch.object(daemon_module, "register_kernel",
+                               side_effect=RegistrationError(401, {"error": "unauthorized"})), \
+             mock.patch.object(daemon_module, "detect_camera_device", return_value=None), \
+             mock.patch("pcc_node.daemon.PCCGatewayClient") as MockClient, \
+             mock.patch("pcc_node.ui_server.start_ui_server"):
+            with pytest.raises(RegistrationError):  # ChatGPT r3 F1: raised after the cleanup
+                daemon_module.run_daemon(self._config())
+        # The daemon never started, so it must leave no live-looking footprint: a subsequent `status`
+        # keys off read_pid()/read_state(), so both must be gone.
+        assert daemon_module.read_pid() is None, "PID file left behind after a refused registration"
+        assert daemon_module.read_state() is None, "state file left behind after a refused registration"
+        MockClient.assert_not_called()
+
     def test_the_daemon_keeps_the_kernel_online_without_taking_jobs(self):
         client, _, _ = self._run_once(self._config())
         client.send_heartbeat.assert_any_call("online", accepting_jobs=False)
@@ -205,3 +251,40 @@ class TestRunDaemonLoop:
         config = self._config(kernel_id="k-reg", devices=[])
         _, register, _ = self._run_once(config)
         register.assert_called_once_with("http://pcc-test", "key", config)
+
+
+class TestDaemonRefusesToRunWithoutItsKey:
+    """N35b (cross-family A02): a refused key (compromised, inside a checkout,
+    not this user's own, or PyNaCl missing) stops the daemon. It must never run
+    on unsigned with an empty secret."""
+
+    def test_a_refused_key_stops_the_daemon_and_leaves_no_pid_file(self, monkeypatch, tmp_path):
+        import pcc_node.daemon as daemon_mod
+        import pcc_node.register as register_mod
+        from pcc_node.config import NodeConfig
+        from pcc_node.crypto import KeyFileError
+
+        pid_file = tmp_path / "daemon.pid"
+        monkeypatch.setattr(daemon_mod, "PID_FILE", str(pid_file))
+        monkeypatch.setattr(daemon_mod, "STATE_FILE", str(tmp_path / "state.json"))
+
+        def refused():
+            raise KeyFileError("refusing to use a key file inside a source checkout")
+
+        monkeypatch.setattr(daemon_mod, "load_or_create_keys", refused)
+
+        # Should a regression let the daemon run on, it must stop at once and
+        # never reach the network. SystemExit(99) escapes every `except Exception`.
+        def must_not_run(*args, **kwargs):
+            raise SystemExit(99)
+
+        for name in ("register_kernel", "PCCGatewayClient", "discover_network"):
+            monkeypatch.setattr(daemon_mod, name, must_not_run)
+        # Master no longer imports announcements into daemon.py. Guard the
+        # registration module's function at its actual location instead.
+        monkeypatch.setattr(register_mod, "announce_capabilities", must_not_run)
+        monkeypatch.setattr(daemon_mod.time, "sleep", must_not_run)
+        with pytest.raises(SystemExit) as exc:
+            daemon_mod.run_daemon(NodeConfig())
+        assert exc.value.code == 2
+        assert not pid_file.exists()

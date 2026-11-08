@@ -18,16 +18,47 @@ export const MAX_INPUT_NODES = 1_000_000;
 
 export type SnapshotResult = { ok: true; value: unknown } | { ok: false; reason: string };
 
-class NotPlainData extends Error {}
+export interface SnapshotOptions {
+  /**
+   * Copy only what the canonical form writes, the same with or without the evidence profile's D5:
+   *   - an object member whose value is undefined is dropped, as `canonicalize` drops it;
+   *   - a number it cannot write is refused: one that is not finite, or of magnitude above 2^53 - 1
+   *     (every double from 2^53 up is an integer outside the safe range, which D5 refuses).
+   */
+  canonical?: boolean;
+}
 
-export function snapshotJson(value: unknown): SnapshotResult {
+// Recognize only this module's refusals by membership, never by inspecting an arbitrary thrown
+// value: instanceof invokes a hostile Proxy's getPrototypeOf trap, and reading a property invokes
+// its get trap; either could throw past the catch (N183). Bind the WeakSet methods at module load
+// so a later replacement cannot reach the constructor or the catch.
+const call = Function.prototype.call;
+const weakSetAdd = call.bind(WeakSet.prototype.add) as unknown as (set: WeakSet<object>, value: object) => void;
+const weakSetHas = call.bind(WeakSet.prototype.has) as unknown as (set: WeakSet<object>, value: unknown) => boolean;
+const ownRefusals = new WeakSet<object>();
+
+class NotPlainData extends Error {
+  constructor(message: string) {
+    super(message);
+    weakSetAdd(ownRefusals, this);
+  }
+}
+
+export function snapshotJson(value: unknown, options: SnapshotOptions = {}): SnapshotResult {
+  const canonical = options.canonical === true;
   let nodes = 0;
   const onPath = new Set<object>();
 
   const copy = (v: unknown, depth: number, where: string): unknown => {
     nodes += 1;
     if (nodes > MAX_INPUT_NODES) throw new NotPlainData(`more than ${MAX_INPUT_NODES} values`);
-    if (v === null || typeof v === "string" || typeof v === "boolean" || typeof v === "number") return v;
+    if (v === null || typeof v === "string" || typeof v === "boolean") return v;
+    if (typeof v === "number") {
+      if (canonical && !(Number.isFinite(v) && Math.abs(v) <= Number.MAX_SAFE_INTEGER)) {
+        throw new NotPlainData(`${where} is ${v}, a number the canonical form cannot write (send it as a decimal string)`);
+      }
+      return v;
+    }
     if (typeof v !== "object") throw new NotPlainData(`${where} is a ${typeof v}, not JSON data`);
     if (depth >= MAX_INPUT_DEPTH) throw new NotPlainData(`${where} nests deeper than ${MAX_INPUT_DEPTH}`);
     if (onPath.has(v)) throw new NotPlainData(`${where} contains itself`);
@@ -55,6 +86,7 @@ export function snapshotJson(value: unknown): SnapshotResult {
         const d = Object.getOwnPropertyDescriptor(v, key);
         if (d === undefined || !d.enumerable) continue; // as JSON.stringify: only own enumerable keys
         if (!("value" in d)) throw new NotPlainData(`${where}.${key} is an accessor`);
+        if (canonical && d.value === undefined) continue; // canonicalize drops an undefined member
         // defineProperty, not assignment: a "__proto__" key stays an ordinary own key and is refused by
         // the closed schema, instead of replacing the copy's prototype.
         Object.defineProperty(out, key, {
@@ -74,6 +106,12 @@ export function snapshotJson(value: unknown): SnapshotResult {
     return { ok: true, value: copy(value, 0, "input") };
   } catch (e) {
     // A Proxy trap or an engine limit can throw anything; none of it escapes as an exception.
-    return { ok: false, reason: e instanceof NotPlainData ? e.message : "the input could not be read as JSON data" };
+    return {
+      ok: false,
+      reason:
+        typeof e === "object" && e !== null && weakSetHas(ownRefusals, e)
+          ? (e as NotPlainData).message
+          : "the input could not be read as JSON data",
+    };
   }
 }

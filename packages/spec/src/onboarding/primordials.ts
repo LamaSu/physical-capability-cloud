@@ -46,9 +46,11 @@ export const ObjectIsFrozen = Object.isFrozen;
 export const ObjectKeys = Object.keys;
 export const NumberIsFinite = Number.isFinite;
 export const NumberIsInteger = Number.isInteger;
+export const NumberIsSafeInteger = Number.isSafeInteger;
 export const DateParse = Date.parse;
 export const JSONParse = JSON.parse;
 export const JSONStringify = JSON.stringify;
+const TypeErrorAtLoad = TypeError;
 export const Uint8ArrayCtor = Uint8Array;
 const ObjectPrototypeHasOwnProperty = uncurryThis(Object.prototype.hasOwnProperty);
 const StringPrototypeTrim = uncurryThis(String.prototype.trim);
@@ -204,11 +206,22 @@ export function quoted(v: unknown): string {
  * depth, no whitespace, strings as JSON.stringify writes them, numbers as
  * JavaScript writes them, null and undefined as "null", and an object member
  * whose value is undefined omitted.
+ *
+ * A number canonical JSON has no form for is refused, as D5's canonicalize
+ * refuses it (evidence profile v1 sec 1, #359): a non-finite number, or an
+ * integer outside the safe range (every number of magnitude 2^53 or more is
+ * one). So an envelope digest is always one the oracle can recompute.
  */
 export function canonicalJson(value: unknown): string {
   if (value === null || value === undefined) return "null";
   if (typeof value === "string") return JSONStringify(value);
-  if (typeof value === "number" || typeof value === "boolean") return `${value}`;
+  if (typeof value === "boolean") return `${value}`;
+  if (typeof value === "number") {
+    if (!NumberIsFinite(value) || (NumberIsInteger(value) && !NumberIsSafeInteger(value))) {
+      throw new TypeErrorAtLoad(`canonical JSON has no form for the number ${text(value)}`);
+    }
+    return `${value}`;
+  }
   if (ArrayIsArray(value)) {
     let out = "[";
     for (let i = 0; i < value.length; i++) out += (i === 0 ? "" : ",") + canonicalJson(value[i]);

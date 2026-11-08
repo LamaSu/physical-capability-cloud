@@ -7,6 +7,7 @@ import {VNextDeploySpec} from "./vnext/VNextDeploySpec.sol";
 import {VNextSettlementEscrow} from "../src/VNextSettlementEscrow.sol";
 import {VNextSettlementEscrowFactory} from "../src/VNextSettlementEscrowFactory.sol";
 import {VNextSettlementLib, PolicyIdentity} from "../src/libraries/VNextSettlementLib.sol";
+import {SCHEDULE_ID, SCHEDULE_IS_TESTNET, SCHEDULE_WORK_MARGIN} from "vnext-schedule/VNextSchedule.sol";
 import {Fixed2of3O5Attester} from "../src/attesters/Fixed2of3O5Attester.sol";
 import {SingleSignerO5Attester} from "../src/attesters/SingleSignerO5Attester.sol";
 import {MockUSDC} from "../src/MockUSDC.sol";
@@ -232,15 +233,14 @@ contract DeployVNextSettlement is Script {
         address escalationAttester;
         address usdc;
         /// @dev GATE 4's subject: the provenance registry BOTH cohorts mirror into, read from the attesters
-        ///      themselves. Recorded in the artifact but deliberately NOT added to {_digest}'s fifteen-word
-        ///      preimage — adding a word would silently re-address every digest published to date, and the
-        ///      field needs no digest protection because {_verify} re-derives it from chain state anyway.
+        ///      themselves. Recorded in the artifact but deliberately NOT added to {_digest}'s preimage:
+        ///      {_verify} re-derives it from chain state. Revision 2 extends that preimage only with the schedule.
         address eas;
         bytes32 schemaUid;
         bytes32 typeHash;
         uint64 primaryCohortId;
         uint64 escalationCohortId;
-        // ── Deploy-gate results. Diagnostics, deliberately OUTSIDE {_digest}'s fifteen-word preimage. ──
+        // ── Deploy-gate results. Diagnostics, deliberately OUTSIDE {_digest}'s preimage. ───────────────
         //    They are not signed into the digest because they do not need to be: {verify} RE-DERIVES and
         //    RE-ENFORCES both gates from chain state, so a doctored artifact field is contradicted by the
         //    next `--sig 'verify(address)'` run rather than merely mismatching a hash. Adding them to the
@@ -259,6 +259,8 @@ contract DeployVNextSettlement is Script {
 
     /// @notice CANONICAL deploy. Idempotent, resumable, refuses to publish a rival deployment.
     function run() external {
+        _assertScheduleChain();
+        _printSchedule();
         Inputs memory i = _readInputs(VNextDeploySpec.MODE_CANONICAL, "");
         i.usdc = vm.envAddress("VNEXT_USDC");
         _deploy(i);
@@ -279,6 +281,8 @@ contract DeployVNextSettlement is Script {
     ///         The artifact adds `"canonical": false` and `"doNotPin": true` and lands under a
     ///         `PROVISIONAL-<label>.json` filename — belt and braces on top of the on-chain tag.
     function provisional() external {
+        _assertScheduleChain();
+        _printSchedule();
         string memory label = vm.envString("VNEXT_LABEL");
         require(bytes(label).length > 0, "VNEXT_LABEL is required for a provisional deployment");
         require(block.chainid != VNextDeploySpec.CHAIN_BASE, "provisional deployments are forbidden on Base mainnet");
@@ -307,6 +311,7 @@ contract DeployVNextSettlement is Script {
     ///         build's O5 type hash (see {_o5TypeHashOfThisBuild}). Created outside any broadcast, so it is
     ///         never a transaction.
     function predict() external {
+        _assertScheduleChain();
         string memory mode = vm.envOr("VNEXT_MODE", VNextDeploySpec.MODE_CANONICAL);
         string memory label = vm.envOr("VNEXT_LABEL", string(""));
         Inputs memory i = _readInputs(mode, label);
@@ -320,6 +325,7 @@ contract DeployVNextSettlement is Script {
         console2.log("== V-next settlement stack : PREDICT ==");
         console2.log("mode:                ", i.mode);
         console2.log("chainId:             ", block.chainid);
+        _printSchedule();
         console2.log("library (linked):    ", address(VNextSettlementLib));
         console2.log("primary attester:    ", primary);
         console2.log("escalation attester: ", escalation);
@@ -328,7 +334,8 @@ contract DeployVNextSettlement is Script {
         console2.log("implementation codehash: requires execution - run `--sig run()` WITHOUT --broadcast");
     }
 
-    /// @notice Re-derive the whole tuple from the FACTORY ADDRESS ALONE and re-run every assertion.
+    /// @notice Re-derive the whole tuple from the FACTORY ADDRESS ALONE — plus, for a provisional
+    ///         deployment, its `VNEXT_LABEL` — and re-run every assertion.
     /// @dev    This is what makes the published artifact tamper-EVIDENT rather than merely trusted. The
     ///         artifact is not an authority — it is a claim, and every field of it is re-derivable here
     ///         from one address plus this git commit's build:
@@ -351,19 +358,32 @@ contract DeployVNextSettlement is Script {
     ///         A reviewer runs this against the recorded factory and gets a revert if any recorded field
     ///         was altered. No trusted store, no signature infrastructure required.
     ///
-    ///         ACCEPTANCE BINDS THE ADDRESS (H7 — what invalidates it). An acceptance binds the factory
-    ///         ADDRESS; any change of code or inputs is a different address, which this function then
-    ///         refuses. There is no upgrade path for an accepted factory to drift onto without becoming a
-    ///         different address: `implementation` is an immutable set once in the factory's constructor,
-    ///         and neither the factory nor the escrow has an owner, an admin, a mutable delegatecall
-    ///         target, or a `selfdestruct`. A change of code or inputs is therefore the only way the bound
-    ///         code can ever differ — exactly the case this re-derivation catches.
+    ///         WHAT THIS PROVES, PRECISELY (astra pack-410 Q1/Q5). The bound attester ADDRESSES — not the
+    ///         attesters' code, nor the truth of their getters. The attester-shape probes elsewhere in
+    ///         this file ({_isFixed2of3}/{_isSingleSigner}/{_routeOf}) are SELECTOR-based, not proofs of
+    ///         correct behavior. Passing `verify()` is therefore not clearance to arm arbitrary supplied
+    ///         cohorts; it certifies the factory/implementation pairing alone.
+    ///
+    ///         ACCEPTANCE BINDS A SPECIFIC ADDRESS — this is NOT "no change ever passes" (H7, corrected
+    ///         per astra pack-410 LOW). `verify(factory)` proves only that `factory` IS this build's
+    ///         CREATE2 output for ITS OWN read-back inputs — not that it is the one address any
+    ///         particular consumer accepted. A DIFFERENT, independently and correctly deployed factory
+    ///         from this SAME build also passes `verify()`, on ITS OWN address: changing the code or the
+    ///         inputs does not make verification of that other address fail, it simply produces a
+    ///         different, equally genuine address. An acceptance is bound to the SPECIFIC factory address
+    ///         a consumer accepted, so the CONSUMER — not this function — must compare `verify`'s returned
+    ///         `factory` against that accepted address. What `verify` does rule out, for the one address
+    ///         actually passed in, is that address's code or inputs having drifted since acceptance: there
+    ///         is no upgrade path to drift onto — `implementation` is an immutable set once in the
+    ///         factory's constructor, and neither the factory nor the escrow has an owner, an admin, a
+    ///         mutable delegatecall target, or a `selfdestruct`.
     ///
     ///         WHAT THIS DOES NOT PROVE: the git commit the build came from. "This build" is only as
     ///         trustworthy as whoever compiled and ran it; the published artifact's solc version and
     ///         optimizer settings stand in for the commit, and pinning the actual commit is the
     ///         publisher's responsibility, not something an address can certify by itself.
     function verify(address factory) external view returns (Tuple memory t) {
+        _assertScheduleChain();
         t = _verify(factory);
         console2.log("== V-next settlement stack : VERIFY (read-only) ==");
         _printTuple(t);
@@ -411,10 +431,21 @@ contract DeployVNextSettlement is Script {
         // is empty for canonical and comes from the environment for provisional, since it is not
         // recoverable from chain state alone.
         bool provisional = VNextDeploySpec.isProvisionalCohort(t.primaryCohortId);
+        // N38 follow-up M1 (astra pack-410 Q2, MEDIUM): the mode above is inferred from the PRIMARY
+        // cohort's band ALONE, and {_assertCohortSeparation} below checks the two cohorts hold DISTINCT
+        // ids but never that they share a BAND. Without this, a primary in the canonical band paired
+        // with an escalation cohort in the provisional band (or the reverse) passes every check that
+        // follows — including the address re-derivation, since its mode never looks at the escalation
+        // side at all. `_assertPreflight` (`:614`) already refuses this for script-made deployments, so
+        // this closes the gap for STANDALONE `verify(address)` only.
+        require(
+            VNextDeploySpec.isProvisionalCohort(t.escalationCohortId) == provisional,
+            "verify: primary and escalation cohorts are in different bands (one canonical, one provisional)"
+        );
         string memory mode = provisional ? VNextDeploySpec.MODE_PROVISIONAL : VNextDeploySpec.MODE_CANONICAL;
         string memory label = "";
         if (provisional) {
-            label = vm.envString("VNEXT_LABEL");
+            label = _verifyLabel();
             require(
                 bytes(label).length > 0,
                 "verify: VNEXT_LABEL is required to re-derive a provisional factory's salt"
@@ -567,9 +598,19 @@ contract DeployVNextSettlement is Script {
     //                                        ASSERTIONS
     // ════════════════════════════════════════════════════════════════════════════════════════════════
 
+    /// @dev Build-time testnet schedules may deploy only to Base Sepolia or a local anvil/fork.
+    ///      Called before input reads and any broadcast, including the provisional token deployment.
+    function _assertScheduleChain() internal view {
+        require(
+            !SCHEDULE_IS_TESTNET || block.chainid == 84532 || block.chainid == 31337,
+            "testnet schedule is restricted to Base Sepolia or anvil"
+        );
+    }
+
     /// @dev The guards that depend on nothing but the toolchain and the RPC. Run FIRST, and separately, so
     ///      a misconfigured invocation cannot spend gas before it is caught.
     function _assertToolchain() internal view {
+        _assertScheduleChain();
         // THE `--libraries` GUARD, and the most important assertion in this file.
         //
         // Forge links this script against a library it deploys itself at
@@ -1088,6 +1129,17 @@ contract DeployVNextSettlement is Script {
         return vm.envOr("VNEXT_ALLOW_UNKNOWN_CHAIN", uint256(0)) == 1;
     }
 
+    /// @dev The ONE reader of `VNEXT_LABEL` inside {_verify}'s re-derivation (N38 follow-up M2, astra
+    ///      pack-410 Q4). `virtual` for the same reason as {_signerOverlapAllowed}/{_unknownChainAllowed}:
+    ///      it reads HOST process state rather than chain state, and `forge` runs the tests within a
+    ///      suite in PARALLEL against one shared environment, so a suite driving this with `vm.setEnv`
+    ///      would race with every other test that touches the variable. Overriding it in a test harness
+    ///      moves the label into EVM state, which forge does isolate per test. Behavior-preserving: the
+    ///      production reader is unchanged (`vm.envString("VNEXT_LABEL")`, same revert on a missing var).
+    function _verifyLabel() internal view virtual returns (string memory) {
+        return vm.envString("VNEXT_LABEL");
+    }
+
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     //                                    PREDICTION + ARTIFACT
     // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1188,11 +1240,24 @@ contract DeployVNextSettlement is Script {
         _assertRecordRootContained(_recordRoot());
         string memory path = _artifactPath(i);
         if (!vm.exists(path)) return;
-        address recorded = vm.parseJsonAddress(vm.readFile(path), ".factory");
+        string memory record = vm.readFile(path);
+        address recorded = vm.parseJsonAddress(record, ".factory");
         require(
             recorded == predictedFactory,
             "an artifact already records a DIFFERENT factory for this mode/chain/label - inputs changed. "
             "Bump VNextDeploySpec.SPEC_VERSION (or use a new VNEXT_LABEL) to publish deliberately."
+        );
+        // A factory match alone must not let a modified record claim a different build-time schedule.
+        require(
+            keccak256(bytes(vm.parseJsonString(record, ".scheduleId"))) == keccak256(bytes(_scheduleIdString()))
+                && vm.parseJsonBool(record, ".scheduleTestnetOnly") == SCHEDULE_IS_TESTNET
+                && vm.parseJsonUint(record, ".challengeWindowSec") == VNextSettlementLib.CHALLENGE_WINDOW
+                && vm.parseJsonUint(record, ".appealWindowSec") == VNextSettlementLib.APPEAL_WINDOW
+                && vm.parseJsonUint(record, ".backupWindowSec") == VNextSettlementLib.BACKUP_WINDOW
+                && vm.parseJsonUint(record, ".emergencyReviewWindowSec") == VNextSettlementLib.EMERGENCY_REVIEW_WINDOW
+                && vm.parseJsonUint(record, ".minReclaimDelaySec") == VNextSettlementLib.MIN_RECLAIM_DELAY
+                && vm.parseJsonUint(record, ".maxReclaimDelaySec") == VNextSettlementLib.MAX_RECLAIM_DELAY,
+            "recorded settlement schedule != this build"
         );
     }
 
@@ -1288,11 +1353,25 @@ contract DeployVNextSettlement is Script {
         vm.serializeUint(j, "chainId", block.chainid);
         vm.serializeUint(j, "specVersion", VNextDeploySpec.SPEC_VERSION);
         vm.serializeUint(j, "blockNumber", block.number);
+        // State THIS build's money-path schedule, including the short-window demo restriction.
+        vm.serializeString(j, "scheduleId", _scheduleIdString());
+        vm.serializeBool(j, "scheduleTestnetOnly", SCHEDULE_IS_TESTNET);
+        vm.serializeUint(j, "challengeWindowSec", VNextSettlementLib.CHALLENGE_WINDOW);
+        vm.serializeUint(j, "appealWindowSec", VNextSettlementLib.APPEAL_WINDOW);
+        vm.serializeUint(j, "backupWindowSec", VNextSettlementLib.BACKUP_WINDOW);
+        vm.serializeUint(j, "emergencyReviewWindowSec", VNextSettlementLib.EMERGENCY_REVIEW_WINDOW);
+        vm.serializeUint(j, "minReclaimDelaySec", VNextSettlementLib.MIN_RECLAIM_DELAY);
+        vm.serializeUint(j, "maxReclaimDelaySec", VNextSettlementLib.MAX_RECLAIM_DELAY);
         // A codehash is only meaningful relative to a build, so the build is part of the record.
         vm.serializeString(j, "solc", "0.8.24");
         vm.serializeString(j, "optimizer", "enabled, runs=200");
         vm.serializeString(
-            j, "reverify", "forge script script/DeployVNextSettlement.s.sol --sig 'verify(address)' <factory>"
+            j,
+            "reverify",
+            string.concat(
+                SCHEDULE_IS_TESTNET ? "FOUNDRY_PROFILE=testnet " : "",
+                "forge script script/DeployVNextSettlement.s.sol --sig 'verify(address)' <factory>"
+            )
         );
         string memory finalJson = vm.serializeBytes32(j, "digest", _digest(t));
         string memory path = _artifactPath(i);
@@ -1310,16 +1389,20 @@ contract DeployVNextSettlement is Script {
 
     /// @notice Self-digest over the tuple. Cheap integrity for the FILE; the real tamper-evidence is
     ///         {verify}, which re-derives every field from chain state and needs no digest at all.
-    /// @dev    PREIMAGE, so an off-chain consumer can reproduce it: fifteen 32-byte STATIC words, in this
-    ///         order, ABI-encoded and hashed —
+    /// @dev    SPEC_VERSION 2 PREIMAGE, so an off-chain consumer can reproduce it: twenty-three 32-byte
+    ///         STATIC words, in this order, ABI-encoded and hashed —
     ///           keccak256(NAMESPACE), SPEC_VERSION, chainId, factory, implementation, library,
     ///           implementationCodehash, libraryCodehash, primaryAttester, escalationAttester, usdc,
-    ///           o5SchemaUid, o5TypeHash, primaryCohortId, escalationCohortId.
+    ///           o5SchemaUid, o5TypeHash, primaryCohortId, escalationCohortId,
+    ///           keccak256(bytes(scheduleId)), scheduleTestnetOnly, challengeWindowSec, appealWindowSec, backupWindowSec,
+    ///           emergencyReviewWindowSec, minReclaimDelaySec, maxReclaimDelaySec.
+    ///         Hash the exact unpadded scheduleId string, encode the testnet flag as bool, and encode each
+    ///         duration as uint256. Editing any schedule field changes the digest, including string padding.
     ///         The namespace is HASHED rather than embedded so every word is static — which is what lets
-    ///         the encoding be split across two `abi.encode` calls without changing the result. The split
+    ///         the encoding be split across three `abi.encode` calls without changing the result. The split
     ///         itself is the stack-too-deep remedy the factory already uses for the same reason
     ///         (`VNextSettlementEscrowFactory.sol:293-319`): with all-static members,
-    ///         `bytes.concat(abi.encode(a..h), abi.encode(i..o))` is byte-identical to `abi.encode(a..o)`.
+    ///         `bytes.concat(abi.encode(a..h), abi.encode(i..o), abi.encode(p..w))` is byte-identical to `abi.encode(a..w)`.
     function _digest(Tuple memory t) internal view returns (bytes32) {
         return keccak256(
             bytes.concat(
@@ -1341,9 +1424,30 @@ contract DeployVNextSettlement is Script {
                     t.typeHash,
                     t.primaryCohortId,
                     t.escalationCohortId
+                ),
+                abi.encode(
+                    keccak256(bytes(_scheduleIdString())),
+                    SCHEDULE_IS_TESTNET,
+                    VNextSettlementLib.CHALLENGE_WINDOW,
+                    VNextSettlementLib.APPEAL_WINDOW,
+                    VNextSettlementLib.BACKUP_WINDOW,
+                    VNextSettlementLib.EMERGENCY_REVIEW_WINDOW,
+                    VNextSettlementLib.MIN_RECLAIM_DELAY,
+                    VNextSettlementLib.MAX_RECLAIM_DELAY
                 )
             )
         );
+    }
+
+    /// @dev SCHEDULE_ID is a bytes32 constant; the JSON record and its digest use the unpadded string.
+    function _scheduleIdString() internal pure returns (string memory) {
+        uint256 length = 32;
+        while (length > 0 && SCHEDULE_ID[length - 1] == bytes1(0)) --length;
+        bytes memory id = new bytes(length);
+        for (uint256 k; k < length; ++k) {
+            id[k] = SCHEDULE_ID[k];
+        }
+        return string(id);
     }
 
     // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1520,7 +1624,22 @@ contract DeployVNextSettlement is Script {
         c.cohortId = uint64(id);
     }
 
+    /// @dev Seconds, ready to copy into the deployment manifest and CANONICAL record.
+    function _printSchedule() internal pure {
+        console2.log("SCHEDULE_ID:");
+        console2.logBytes32(SCHEDULE_ID);
+        console2.log("SCHEDULE_IS_TESTNET:  ", SCHEDULE_IS_TESTNET);
+        console2.log("CHALLENGE_WINDOW:     ", VNextSettlementLib.CHALLENGE_WINDOW);
+        console2.log("APPEAL_WINDOW:        ", VNextSettlementLib.APPEAL_WINDOW);
+        console2.log("BACKUP_WINDOW:        ", VNextSettlementLib.BACKUP_WINDOW);
+        console2.log("EMERGENCY_REVIEW_WINDOW:", VNextSettlementLib.EMERGENCY_REVIEW_WINDOW);
+        console2.log("WORK_MARGIN:          ", SCHEDULE_WORK_MARGIN);
+        console2.log("MIN_RECLAIM_DELAY:    ", VNextSettlementLib.MIN_RECLAIM_DELAY);
+        console2.log("MAX_RECLAIM_DELAY:    ", VNextSettlementLib.MAX_RECLAIM_DELAY);
+    }
+
     function _printTuple(Tuple memory t) internal pure {
+        _printSchedule();
         console2.log("factory:             ", t.factory);
         console2.log("implementation:      ", t.implementation);
         console2.log("library:             ", t.settlementLib);

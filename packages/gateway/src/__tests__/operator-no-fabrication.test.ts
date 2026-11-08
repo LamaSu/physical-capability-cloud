@@ -16,6 +16,18 @@ import { schema, eq } from "@pcc/store";
 import { operatorRoutes } from "../routes/operator.js";
 import { initStore, closeStore, getStore } from "../db.js";
 
+// N31 (#6278): the operator write routes now need operator authority. These tests check body
+// validation, read honesty and decision semantics, not authority (n31-operator-route-ownership
+// does that), so the gateway admin secret stands in for the operator here.
+const N31_ADMIN = "n31-test-admin-secret";
+const ADMIN_HEADERS = { "x-admin-key": N31_ADMIN };
+const PREV_ADMIN_KEY = process.env.PCC_ADMIN_KEY;
+process.env.PCC_ADMIN_KEY = N31_ADMIN;
+afterAll(() => {
+  if (PREV_ADMIN_KEY === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = PREV_ADMIN_KEY;
+});
+
 const UNAVAILABLE = [
   "/api/operator/machines",
   "/api/operator/earnings",
@@ -46,9 +58,18 @@ describe("operator read routes: no fabricated data", () => {
       expect(res.statusCode).toBe(501);
       const body = res.json();
       expect(body.error).toBe("not_available");
-      expect(body.message).toMatch(/not recorded/);
+      // Certifications' wording is deliberately different from the other three: registration
+      // DOES record a certification claim, so its 501 says there is no VERIFIED read rather
+      // than "not recorded" (verdict rm-n32-362-r2-7fccd046, M2).
+      if (url === "/api/operator/certifications") {
+        expect(body.message).toMatch(/no verified operator-certification read/);
+      } else {
+        expect(body.message).toMatch(/not recorded/);
+      }
       expect(Array.isArray(body.see)).toBe(true);
-      // NEGATIVE: none of the old fabricated fields come back.
+      // Narrow check for these five named fixtures only, not a general fabrication guard
+      // (verdict rm-n32-362-r2-7fccd046, L1): it would miss a differently named or shaped
+      // leak. The 501/not_available assertions above are the real, behavioral protection.
       for (const k of ["machines", "earnings", "total", "certifications", "events"]) {
         expect(body, k).not.toHaveProperty(k);
       }
@@ -114,6 +135,7 @@ describe("operator approvals: no silent substitution", () => {
   async function submit(payload: Record<string, unknown> = {}) {
     const res = await app.inject({
       method: "POST",
+      headers: ADMIN_HEADERS,
       url: "/api/operator/approvals",
       payload: { kernelId: KERNEL, agentId: "agent-test", capabilityType: "fdm", ...payload },
     });
@@ -186,6 +208,7 @@ describe("operator approvals: no silent substitution", () => {
       // Only kernelId and agentId: the caller asserted no capability type.
       const res = await app.inject({
         method: "POST",
+        headers: ADMIN_HEADERS,
         url: "/api/operator/approvals",
         payload: { kernelId: KERNEL, agentId: "agent-no-type" },
       });
@@ -220,6 +243,7 @@ describe("operator approvals: no silent substitution", () => {
     const decide = (id: string, action: "approve" | "reject", payload?: Record<string, unknown>) =>
       app.inject({
         method: "POST",
+        headers: ADMIN_HEADERS,
         url: `/api/operator/approvals/${id}/${action}`,
         ...(payload ? { payload } : {}),
       });
@@ -308,6 +332,10 @@ describe("operator approvals: no silent substitution", () => {
 describe("operator.ts source ratchet", () => {
   const src = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../routes/operator.ts"), "utf-8");
 
+  // Narrow, source-text check for these exact fixture/API names only (verdict
+  // rm-n32-362-r2-7fccd046, L1): it misses a differently named mock const, an imported
+  // fixture, a `let` declaration, or any random API besides Math.random(). It is not a
+  // general fabrication guard; the behavioral contract tests above are the real protection.
   it("NEGATIVE: holds no mock arrays and no random VALUES (random id suffixes are fine)", () => {
     expect(src).not.toMatch(/\bconst mock[A-Z]/);
     // Math.random() is allowed only as an id suffix: Math.random().toString(36)

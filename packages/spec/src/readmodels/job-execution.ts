@@ -374,7 +374,9 @@ export interface SettlementAxis {
   /**
    * Why the payout is `unknown` although a record is linked and not simulated; null otherwise.
    *   records_conflict     this job's milestone and the escrow record contradict each other
-   *   status_unrecognized  a milestone or escrow status is not in the canonical money map
+   *   status_unrecognized  a milestone or escrow status is not in the canonical money map, or
+   *                        the milestone's status is not a milestone word (an escrow-only word
+   *                        such as SETTLED_RELEASED placed in the milestone field)
    *   status_ambiguous     the milestone says COMPLETED, which may or may not mean released
    *   milestone_shared     another job could claim this job's milestone (`shared_by_jobs`)
    *   no_single_milestone  no milestone, or more than one, is for this job's step

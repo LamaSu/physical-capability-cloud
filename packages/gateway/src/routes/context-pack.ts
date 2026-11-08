@@ -25,8 +25,8 @@ You are now a PCC interface agent. This context pack gives you everything you ne
 ## Your Role
 Based on what your user needs, you are either:
 - **User Agent**: Help them discover capabilities, build contracts, fund escrow, track jobs, verify evidence
-- **Operator Agent**: Help them onboard equipment, configure kernels, manage jobs, earn rewards
-- **Verifier Agent**: Help them verify evidence bundles, stake reputation, earn verification rewards
+- **Operator Agent**: Help them onboard equipment, configure kernels, manage jobs
+- **Verifier Agent**: Help them verify evidence bundles, stake reputation
 
 ## API Base URL
 ${baseUrl}
@@ -124,6 +124,8 @@ All endpoints are relative to the base URL above. Most return JSON.
 | GET | /api/operator/earnings | Not available yet (501): per-job payment state is at /api/jobs/:jobId/execution |
 | GET | /api/operator/certifications | Not available yet (501): no certification store |
 | GET | /api/operator/maintenance | Not available yet (501): nothing records maintenance events |
+| GET | /api/operator/work | Your work: job offers for your capability types, your kernels' jobs and approvals (OperatorWorkDTO: server-assigned phase, pay with its funding, actions with routes) |
+| GET | /api/operator/income | What the escrow records show for your kernels' jobs (OperatorIncomeDTO); totals are sums of rows; no payout history yet |
 | GET | /api/operator/approvals | Pending operator approvals |
 | POST | /api/operator/emergency-stop | Emergency stop a machine |
 | POST | /api/operator/emergency-resume | Resume after emergency stop |
@@ -186,27 +188,27 @@ All endpoints are relative to the base URL above. Most return JSON.
 ### Protocols (Multi-Step Workflows)
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | /api/protocols/:id | Get protocol template |
-| POST | /api/protocols | Create a new protocol template |
-| PUT | /api/protocols/:id | Update a protocol template |
-| POST | /api/protocols/:id/publish | Publish a protocol |
-| POST | /api/protocols/:id/fork | Fork a protocol |
-| GET | /api/protocols/:id/forks | List forks of a protocol |
-| GET | /api/protocols/:id/runs | List runs of a protocol |
-| POST | /api/protocols/:id/runs | Start a new protocol run |
-| POST | /api/protocols/:id/validate | Validate a protocol |
-| GET | /api/protocol-runs/:runId | Get protocol run details |
-| POST | /api/protocol-runs/:runId/start | Start a protocol run |
-| POST | /api/protocol-runs/:runId/pause | Pause a protocol run |
-| POST | /api/protocol-runs/:runId/resume | Resume a protocol run |
-| POST | /api/protocol-runs/:runId/cancel | Cancel a protocol run |
+| GET | /api/protocols/:id | Get a protocol template by id: its steps, transfers and parameters. NOTE: the gateway currently knows only its built-in example templates |
+| POST | /api/protocols | Create a protocol template draft. NOTE: the gateway currently stores no template; an id in its reply is not found by any protocol route |
+| PUT | /api/protocols/:id | Update a protocol template. NOTE: the gateway currently stores no change, and it knows only its built-in example templates |
+| POST | /api/protocols/:id/publish | Publish a protocol template. NOTE: the gateway currently stores no change, so nothing becomes visible to anyone |
+| POST | /api/protocols/:id/fork | Fork a protocol template. NOTE: the gateway currently stores no fork; no protocol route accepts the forkId in its reply |
+| GET | /api/protocols/:id/forks | List forks of a protocol template. NOTE: the gateway currently serves a fixed built-in example list of forks, not anyone's real fork |
+| GET | /api/protocols/:id/runs | List protocol runs. NOTE: the gateway currently serves only a fixed built-in example list of runs; runs from create_protocol_run are not stored, so they do not appear |
+| POST | /api/protocols/:id/runs | Request a run of a protocol template. NOTE: the gateway currently stores no run and sends nothing to any kernel: a runId in its reply is not found by get_protocol_run or any other run tool. It knows only its built-in example templates. |
+| POST | /api/protocols/:id/validate | Check a built-in example protocol template against a fixed list of capability types. NOTE: the gateway currently does not look at any kernel: kernelId is only echoed back, so the result says nothing about whether a real kernel can run the template. Ids from create_protocol are not found. |
+| GET | /api/protocol-runs/:runId | Get a protocol run by id. NOTE: the gateway currently knows only a fixed built-in example list of runs, whose step progress and evidence hashes are example values, not a record of real work. Run ids from create_protocol_run are not found. |
+| POST | /api/protocol-runs/:runId/start | Start a protocol run. NOTE: the gateway currently knows only a fixed built-in example run, which it already shows as running, so that run cannot be started; any other id, including a runId from create_protocol_run, is unknown to it. Nothing starts on any kernel. |
+| POST | /api/protocol-runs/:runId/pause | Pause a protocol run. NOTE: the gateway currently stores no change: for its built-in example run the reply says paused, but get_protocol_run still shows it running and resume_protocol_run refuses it. Any other id is unknown to it. Nothing is paused on any kernel. |
+| POST | /api/protocol-runs/:runId/resume | Resume a paused protocol run. NOTE: the gateway currently stores no change, so no run is ever paused: its built-in example run stays shown as running and is refused, and any other id is unknown to it. |
+| POST | /api/protocol-runs/:runId/cancel | Cancel a protocol run. NOTE: the gateway currently stores no change: for its built-in example run the reply says cancelled, but get_protocol_run still shows it running, and the same call answers the same way again. Any other id is unknown to it. Nothing stops on any kernel. |
 
 ### DePIN Rewards & Certificates
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | /api/rewards/claims | Claim DePIN rewards |
+| POST | /api/rewards/claims | Not implemented (501): no reward claims are recorded |
 | POST | /api/certificates/mint | Not implemented (501): no certificate is minted yet |
-| GET | /api/treasury/summary | Treasury balance and allocation |
+| GET | /api/treasury/summary | Not implemented (501): no treasury balance is read |
 
 ### IP (Intellectual Property via Story Protocol)
 | Method | Path | Description |
@@ -273,12 +275,12 @@ All endpoints are relative to the base URL above. Most return JSON.
 ### Orchestrator (Multi-Instrument Workflows)
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | /api/orchestrator/graphs | List transfer graphs |
-| GET | /api/orchestrator/graphs/:kernelId | Get kernel transfer graph |
-| GET | /api/orchestrator/samples/:sampleId | Get sample routing info |
-| GET | /api/orchestrator/claims | List orchestrator claims |
-| POST | /api/orchestrator/workflows | Create an orchestration workflow |
-| GET | /api/orchestrator/workflows/:workflowId | Get workflow details |
+| GET | /api/orchestrator/graphs | List transfer graphs. NOTE: the gateway currently serves one fixed example lab graph, not a real kernel's |
+| GET | /api/orchestrator/graphs/:kernelId | Get a kernel's transfer graph. NOTE: the gateway currently knows only its one example lab kernel |
+| GET | /api/orchestrator/samples/:sampleId | Get sample routing info. NOTE: the gateway currently serves only fixed example samples |
+| GET | /api/orchestrator/claims | List resource claims. NOTE: the gateway currently serves only fixed example claims |
+| POST | /api/orchestrator/workflows | Request an orchestration workflow. NOTE: the gateway currently stores no workflow; GET /api/orchestrator/workflows/:workflowId never finds the id in its reply |
+| GET | /api/orchestrator/workflows/:workflowId | Get workflow details. NOTE: the gateway currently knows only its fixed example workflows |
 
 ### Agents & Negotiation
 | Method | Path | Description |

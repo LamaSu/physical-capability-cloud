@@ -19,7 +19,7 @@ import click
 
 from . import __version__
 from .config import ConfigFileError, NodeConfig, generate_config, save_config, load_config, load_config_data
-from .crypto import KeyFileError, load_or_create_keys
+from .crypto import CompromisedKeyError, CryptoUnavailableError, KeyFileError, load_or_create_keys
 from .daemon import run_daemon, is_running, read_state
 from .detect import detect_all
 from .discovery import (
@@ -33,6 +33,7 @@ from .register import (
     register_kernel,
     register_devices,
     register_signing_key,
+    RegistrationError,
 )
 from .log_capture import LogSigningRefused
 
@@ -62,7 +63,7 @@ def _setup_logging(verbose):
 DIAG_ACK_PATH = os.path.expanduser("~/.pcc-node/diagnostics-acknowledged")
 
 
-def _maybe_prompt_diagnostics(config):
+def _maybe_prompt_diagnostics(config, config_file="./pcc-node.json"):
     """First-run banner: explain auto-diagnostics and let operator opt in/out.
 
     Shown once per machine (sentinel at ~/.pcc-node/diagnostics-acknowledged).
@@ -70,7 +71,25 @@ def _maybe_prompt_diagnostics(config):
     operators can say no here or run `pcc-node feedback off` later.
     """
     if os.path.exists(DIAG_ACK_PATH):
+        try:
+            with open(DIAG_ACK_PATH) as f:
+                recorded = "".join(f).strip()
+        except (OSError, UnicodeError):
+            recorded = ""
+        if recorded not in ("mode=errors", "mode=periodic"):
+            config.diagnostics_mode = "off"
         return  # already acknowledged, don't nag
+
+    if not _interactive():
+        config.diagnostics_mode = "off"
+        path = os.path.abspath(config_file)
+        if not all(c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./-" for c in path):
+            path = "'" + path.replace("'", "'\"'\"'") + "'"
+        click.echo(
+            "  No terminal to ask about auto-diagnostics, so they are off for this run. "
+            f"To turn them on: pcc-node feedback on --config-file {path}"
+        )
+        return
 
     click.echo("")
     click.echo("─" * 64)
@@ -153,7 +172,7 @@ def _load_node_keys():
     """The node's key pair, or a plain message and exit 1 if its key file is unusable."""
     try:
         return load_or_create_keys()
-    except KeyFileError as exc:
+    except (KeyFileError, CompromisedKeyError, CryptoUnavailableError) as exc:
         click.echo(f"Cannot use this node's key file: {exc}", err=True)
         sys.exit(1)
 
@@ -350,6 +369,22 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
         click.echo(f"Node is already running (PID {pid}). Use 'pcc-node status'.")
         sys.exit(1)
 
+    # item 133 (board N119): do not ASSUME the public network. With no gateway explicitly chosen (the
+    # default) AND no API key, refuse before any network step -- provisioning / registering / scanning
+    # against PROD by accident (a stray `pcc-node start`, e.g. the heredoc-backtick incident) is the
+    # hazard. Require an explicit gateway or an API key. The systemd unit sets PCC_BASE (-> source
+    # "env", not "default") and PCC_API_KEY, so it is unaffected; a provisioned flow (key present)
+    # still defaults to the public gateway as before.
+    if target_source == "default" and not (api_key or "").strip():
+        click.echo(
+            "Refusing to start: no gateway chosen and no API key, so pcc-node will not assume the "
+            "public network (capability.network). Choose a gateway with PCC_BASE or --pcc-base, and "
+            "provide an API key with PCC_API_KEY or --api-key (provision one first via "
+            "POST /api/auth/provision).",
+            err=True,
+        )
+        sys.exit(1)
+
     # N57: a default public registration needs a yes, before any network step.
     if not _confirm_public_target(target, target_source, yes):
         sys.exit(1)
@@ -427,9 +462,18 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
                 "Could not provision API key. Set PCC_API_KEY env var or use --api-key."
             )
 
-    # Register kernel
+    # Register kernel. A non-2xx (e.g. a 401) must stop the node HERE -- it is not registered, so we do
+    # not go on to register devices, save config, or print "Node running" (item 133, board N119).
     click.echo("Registering on PCC network...")
-    register_kernel(config.pcc_base, config.pcc_api_key, config)
+    try:
+        register_kernel(config.pcc_base, config.pcc_api_key, config)
+    except RegistrationError as exc:
+        click.echo(
+            f"Registration failed (HTTP {exc.status}) at {config.pcc_base}: {exc.data}. "
+            "The node is NOT registered; check the API key and gateway. Not starting.",
+            err=True,
+        )
+        sys.exit(1)
 
     # Devices reference the kernel, so register them only after the authenticated
     # kernel registration succeeds.
@@ -459,20 +503,31 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
     # No capability announcement: this node takes no jobs (verdict 68d, finding 3).
 
     # First-run diagnostics banner (no-op if already acknowledged)
-    _maybe_prompt_diagnostics(config)
+    _maybe_prompt_diagnostics(config, config_file)
 
     # Save config
     saved_path = save_config(config, config_file)
     click.echo(f"  Config saved to {saved_path}")
 
-    # Start daemon
-    click.echo("")
-    click.echo("Node running. It keeps the kernel online and does not take jobs: devices run only through the operating agent's typed operations.")
-    click.echo(f"  Dashboard: {config.pcc_base}/operator")
-    click.echo("  Press Ctrl+C to stop.")
-    click.echo("")
+    # Start daemon. It registers the kernel again; "Node running" is printed only once that
+    # registration succeeded and the daemon is up, and a refusal there ends `start` with exit 1
+    # (ChatGPT r3 finding 1): a launcher must not read a node that never ran as started.
+    def _say_running():
+        click.echo("")
+        click.echo("Node running. It keeps the kernel online and does not take jobs: devices run only through the operating agent's typed operations.")
+        click.echo(f"  Dashboard: {config.pcc_base}/operator")
+        click.echo("  Press Ctrl+C to stop.")
+        click.echo("")
 
-    run_daemon(config)
+    try:
+        run_daemon(config, on_running=_say_running)
+    except RegistrationError as exc:
+        click.echo(
+            f"Registration failed (HTTP {exc.status}) at {config.pcc_base}: {exc.data}. "
+            "The node is NOT registered and the daemon did not start; check the API key and gateway.",
+            err=True,
+        )
+        sys.exit(1)
 
 
 @main.command("discover")
@@ -533,8 +588,12 @@ def discover_cmd(subnet, register, pcc_base, api_key):
                 node_config.pcc_api_key = api_key
             pub_key, _ = _load_node_keys()
             node_config.public_key = pub_key
-            register_kernel(pcc_base, api_key, node_config)
-            registered += 1
+            try:
+                register_kernel(pcc_base, api_key, node_config)
+                registered += 1
+            except RegistrationError as exc:
+                click.echo(f"  Registration failed (HTTP {exc.status}): {exc.data}", err=True)
+                skipped += 1
 
         click.echo(
             f"\nDiscovered {len(devices)} device(s), "
@@ -889,6 +948,13 @@ def feedback_cmd(config_file, mode, interval):
 
     from .config import save_config as _sc
     _sc(cfg, config_path)
+
+    try:
+        os.makedirs(os.path.dirname(DIAG_ACK_PATH), exist_ok=True)
+        with open(DIAG_ACK_PATH, "w") as f:
+            f.write(f"mode={cfg.diagnostics_mode}\n")
+    except OSError:
+        pass
 
     if mode == "off":
         click.echo("Diagnostic feedback: DISABLED")

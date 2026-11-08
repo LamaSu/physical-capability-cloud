@@ -86,7 +86,19 @@ export const CompileOptionsSchema = z
     // A body is trusted only for the hash it actually has, so a repeated or mislabeled body can never
     // make the result depend on the order the server listed them in.
     (o.schedules ?? []).forEach((s, i) => {
-      if (computeScheduleHash(s).toLowerCase() !== s.scheduleHash.toLowerCase()) {
+      // The canonical form refuses a number it cannot write (D5), so such a body has no hash at all. It is
+      // refused here like any other malformed body: the compiler never throws.
+      let computed: string | null = null;
+      try {
+        computed = computeScheduleHash(s);
+      } catch (e) {
+        ctx.addIssue({
+          code: "custom",
+          message: `schedule ${s.scheduleHash} has no canonical form: ${e instanceof Error ? e.message : "it could not be hashed"}`,
+          path: ["schedules", i],
+        });
+      }
+      if (computed !== null && computed.toLowerCase() !== s.scheduleHash.toLowerCase()) {
         ctx.addIssue({ code: "custom", message: `schedule ${s.scheduleHash} does not hash to its scheduleHash`, path: ["schedules", i] });
       }
       try {

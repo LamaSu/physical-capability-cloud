@@ -21,6 +21,7 @@ import {
   buildMcpAppCsp,
   cspNonce,
   MCP_APP_FRAME_ANCESTORS,
+  mcpAppMirrorRefusal,
   registerMcpAppHttpRoute,
   renderSavedDashboardHtml,
 } from "../mcp/mcp-app-view.js";
@@ -76,12 +77,25 @@ interface KitFns {
 }
 
 const kit: KitFns = (() => {
+  // describeRealRequest is the display projection of the kit's ONE canonical request descriptor
+  // (requestDescriptor), so the bundle carries the descriptor and the pure helpers it closes over.
+  const nonMoneyWrites = /var NON_MONEY_WRITES = \[[\s\S]*?\];/.exec(PCC_UI_SRC);
+  if (!nonMoneyWrites) throw new Error("kit var not found: NON_MONEY_WRITES");
   const bundle = [
     `var API_DEFAULT = ${JSON.stringify(PCC_ORIGIN)};`,
     `var API_ORIGIN = new URL(API_DEFAULT).origin;`,
-    extractFn(PCC_UI_SRC, "isAbsoluteOrSchemeUrl"),
+    nonMoneyWrites[0],
+    extractFn(PCC_UI_SRC, "dataAt"), extractFn(PCC_UI_SRC, "isAbsoluteOrSchemeUrl"),
     extractFn(PCC_UI_SRC, "safeApiPath"),
     extractFn(PCC_UI_SRC, "resolveApiBase"),
+    extractFn(PCC_UI_SRC, "pinnedUrl"),
+    extractFn(PCC_UI_SRC, "actionMethod"),
+    extractFn(PCC_UI_SRC, "canonicalPath"),
+    extractFn(PCC_UI_SRC, "matchesWriteTemplate"),
+    extractFn(PCC_UI_SRC, "isNonMoneyWrite"),
+    extractFn(PCC_UI_SRC, "plainBody"),
+    extractFn(PCC_UI_SRC, "ownFields"),
+    extractFn(PCC_UI_SRC, "requestDescriptor"),
     extractFn(PCC_UI_SRC, "describeRealRequest"),
     "return { isAbsoluteOrSchemeUrl:isAbsoluteOrSchemeUrl, safeApiPath:safeApiPath, resolveApiBase:resolveApiBase, describeRealRequest:describeRealRequest };",
   ].join("\n");
@@ -275,6 +289,49 @@ describe("directive 12 — HTTP mirror route (real header, frame-ancestors, no A
     // The served HTML's boot script carries the SAME nonce as the header CSP.
     const nonce = /script-src 'nonce-([^']+)'/.exec(csp)?.[1];
     expect(res.body).toContain(`<script nonce="${nonce}">`);
+  });
+});
+
+describe("#495 160b — direct production HTTP mirror Host gate", () => {
+  let savedNodeEnv: string | undefined;
+  let savedDomain: string | undefined;
+
+  beforeEach(() => {
+    savedNodeEnv = process.env.NODE_ENV;
+    savedDomain = process.env.PCC_MCP_APP_DOMAIN;
+    process.env.NODE_ENV = "production";
+  });
+  afterEach(() => {
+    if (savedNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = savedNodeEnv;
+    if (savedDomain === undefined) delete process.env.PCC_MCP_APP_DOMAIN;
+    else process.env.PCC_MCP_APP_DOMAIN = savedDomain;
+  });
+
+  it.each([
+    ["absent Host", "https://pcc-apps.example", undefined],
+    ["trailing dot", "https://pcc-apps.example", "pcc-apps.example."],
+    ["foreign Unicode IDN", "https://pcc-apps.example", "bücher.example"],
+    ["foreign punycode IDN", "https://pcc-apps.example", "xn--bcher-kva.example"],
+    ["configured IDN's raw Unicode Host", "https://bücher.example", "bücher.example"],
+    ["configured non-default port omitted", "https://pcc-apps.example:8443", "pcc-apps.example"],
+    ["configured non-default port differs", "https://pcc-apps.example:8443", "pcc-apps.example:443"],
+  ])("refuses %s", (_label, domain, host) => {
+    process.env.PCC_MCP_APP_DOMAIN = domain;
+    expect(mcpAppMirrorRefusal(host)).toEqual({
+      status: 404,
+      message: "Not found: this MCP App view is served only on its own origin.",
+    });
+  });
+
+  it("serves the exact configured non-default port", () => {
+    process.env.PCC_MCP_APP_DOMAIN = "https://pcc-apps.example:8443";
+    expect(mcpAppMirrorRefusal("pcc-apps.example:8443")).toBeNull();
+  });
+
+  it("serves only the exact punycode Host for a configured IDN", () => {
+    process.env.PCC_MCP_APP_DOMAIN = "https://bücher.example";
+    expect(mcpAppMirrorRefusal("xn--bcher-kva.example")).toBeNull();
   });
 });
 

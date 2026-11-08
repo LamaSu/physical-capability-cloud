@@ -51,7 +51,7 @@ export PCC_BASE="${PCC_BASE:-https://capability.network}"
 
 Every path below is relative to it. The full machine-readable surface is
 also published as an OpenAPI 3 document (`GET /openapi.json`) and as a
-single-file agent package (`GET /agent-package.json` — 250+ tools with
+single-file agent package (`GET /agent-package.json` — 240+ tools with
 JSON-Schema inputs and HTTP endpoint mappings, built for any LLM that isn't
 Claude and doesn't have this skill loaded).
 
@@ -188,7 +188,7 @@ curl -X POST "$PCC_BASE/api/job-offers" \
   -d '{
     "capabilityType": "manufacturing.fdm",
     "requirements": { "stl_cid": "bafy...", "material": "PLA" },
-    "pricing": { "model": "quote-required" },
+    "pricing": { "amount": 0, "currency": "USDC", "model": "quote-required" },
     "idempotencyKey": "stl-print-2026-07-13"
   }'
 ```
@@ -291,7 +291,7 @@ through the operating agent's typed operations.
 ## Reference
 
 - Full OpenAPI 3 spec: `GET /openapi.json`
-- Full agent package (250+ tools, JSON-Schema inputs): `GET /agent-package.json`
+- Full agent package (240+ tools, JSON-Schema inputs): `GET /agent-package.json`
 - Agent Skills discovery index: `GET /.well-known/agent-skills/index.json`
 - A2A agent card: `GET /.well-known/agent-card.json`
 - Status: `GET /health`

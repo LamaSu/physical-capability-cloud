@@ -10,13 +10,10 @@
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyRequest } from "fastify";
+import { SELF_SERVICE_KEY_SCOPES } from "../middleware/scope-checker.js";
 import { PCC_API_KEY_LIVE_PREFIX } from "@pcc/spec";
 import { getRepos } from "../db.js";
-import {
-  generateEd25519Keypair,
-  normalizePublicKeyHex,
-  type Ed25519Keypair,
-} from "./ed25519.js";
+import { normalizePublicKeyHex } from "./ed25519.js";
 
 // Note: FastifyRequest augmentation for apiKeyId/operatorId lives in
 // require-auth.ts alongside the userId declaration.
@@ -90,29 +87,59 @@ export function resolveApiKey(req: FastifyRequest) {
 }
 
 /**
+ * F3 owner proof: only an active key minted by SIWE carries its stored session identity.
+ * Valid only while every session deletion revokes its keys (logout revokes in the
+ * same transaction; other deletions happen only after expiry); a new session-ending
+ * path must revoke the session's keys too.
+ */
+export function siweSessionKeyAddress(key: ReturnType<typeof resolveApiKey>): string | null {
+  if (!key || key.revokedAt || (key.expiresAt !== null && !(Date.parse(key.expiresAt) > Date.now()))) {
+    return null;
+  }
+  try {
+    return JSON.parse(key.metadata ?? "null")?.source === "siwe-session"
+      ? key.operatorId.toLowerCase()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Provision a new API key for an operator.
  * Returns the raw key (shown once) + key record.
  */
 // Per-operator provisioning lock to prevent TOCTOU race on concurrent requests
 const provisioningLocks = new Set<string>();
 
+export type ProvisionErrorCode =
+  | "too_many_keys"
+  | "provision_in_progress"
+  | "invalid_public_key";
+
+/** Only closed codes may cross the provisioning error boundary. */
+export function classifyProvisionError(err: unknown): ProvisionErrorCode | "unknown" {
+  if (!(err instanceof Error) || !("code" in err)) return "unknown";
+  switch (err.code) {
+    case "too_many_keys": return "too_many_keys";
+    case "provision_in_progress": return "provision_in_progress";
+    case "invalid_public_key": return "invalid_public_key";
+    default: return "unknown";
+  }
+}
+
 /**
  * Result of provisioning an API key.
  *
  * `rawKey` is the bearer token (shown ONCE, then forgotten).
  *
- * `record` is the persisted row, including the agent's Ed25519 public key
- * if one was provided/generated.
- *
- * `ed25519` is populated iff this provision call MINTED a keypair (caller
- * didn't bring their own). It is the one and only chance the caller has
- * to capture the matching private key — surface it to the agent in the
- * HTTP response and forget it.
+ * `record` stores an Ed25519 public key only when supplied by the caller.
+ * Otherwise it has no signing key on file. Provisioning never generates
+ * or returns a signing private key.
  */
 export interface ProvisionResult {
   rawKey: string;
   record: ReturnType<ReturnType<typeof getRepos>["apiKeys"]["insert"]>;
-  ed25519?: Ed25519Keypair;
 }
 
 export function provisionApiKey(opts: {
@@ -121,17 +148,14 @@ export function provisionApiKey(opts: {
   description?: string;
   scopes?: string[];
   rateLimit?: string;
+  expiresAt?: string;
   expiresInDays?: number;
   metadata?: Record<string, unknown>;
   /**
-   * Optional caller-provided Ed25519 public key (hex, 64 chars, no 0x).
-   * When set, the gateway stores it AS-IS and does NOT generate one or
-   * return any private material — the agent already has the matching
-   * private key.
-   *
-   * When omitted, the gateway generates a fresh Ed25519 keypair, stores
-   * the public half, and returns the private half in the ProvisionResult
-   * (only chance to capture it).
+   * Optional caller-provided Ed25519 public key (64 hex chars, optional 0x).
+   * The gateway normalizes and stores only this public key. When omitted,
+   * no signing key is on file. Provisioning never generates or returns
+   * the private half.
    *
    * Invalid input (non-hex, wrong length) throws — the route layer maps
    * that to HTTP 400.
@@ -140,7 +164,10 @@ export function provisionApiKey(opts: {
 }): ProvisionResult {
   // Serialize provisioning per operator to prevent race condition (VULN-05 fix)
   if (provisioningLocks.has(opts.operatorId)) {
-    throw new Error("Key provisioning in progress — try again in a moment");
+    throw Object.assign(
+      new Error("Key provisioning in progress — try again in a moment"),
+      { code: "provision_in_progress" as const },
+    );
   }
   provisioningLocks.add(opts.operatorId);
 
@@ -150,24 +177,23 @@ export function provisionApiKey(opts: {
     // Limit keys per operator (max 5 active)
     const activeCount = repo.countByOperator(opts.operatorId);
     if (activeCount >= 5) {
-      throw new Error("Maximum 5 active API keys per operator");
+      throw Object.assign(
+        new Error("Maximum 5 active API keys per operator"),
+        { code: "too_many_keys" as const },
+      );
     }
 
-    // Ed25519: BYOK or mint
+    // Only caller-supplied Ed25519 public keys are stored.
     let storedPublicKeyHex: string | null = null;
-    let mintedKeypair: Ed25519Keypair | undefined;
     if (opts.publicKey !== undefined) {
       const cleaned = normalizePublicKeyHex(opts.publicKey);
       if (cleaned === null) {
         throw Object.assign(
           new Error("publicKey must be a 32-byte Ed25519 public key (64 hex chars, optional 0x prefix)"),
-          { code: "invalid_public_key" },
+          { code: "invalid_public_key" as const },
         );
       }
       storedPublicKeyHex = cleaned;
-    } else {
-      mintedKeypair = generateEd25519Keypair();
-      storedPublicKeyHex = mintedKeypair.publicKeyHex;
     }
 
     const { rawKey, keyHash, keyPrefix } = generateApiKey();
@@ -180,18 +206,18 @@ export function provisionApiKey(opts: {
       operatorId: opts.operatorId,
       name: opts.name ?? null,
       description: opts.description ?? null,
-      scopes: JSON.stringify(opts.scopes ?? ["*"]),
+      scopes: JSON.stringify(opts.scopes ?? SELF_SERVICE_KEY_SCOPES),
       rateLimit: opts.rateLimit ?? "1000/hour",
       usageCount: "0",
       createdAt: now.toISOString(),
-      expiresAt: opts.expiresInDays
+      expiresAt: opts.expiresAt ?? (opts.expiresInDays
         ? new Date(now.getTime() + opts.expiresInDays * 86400000).toISOString()
-        : null,
+        : null),
       metadata: opts.metadata ? JSON.stringify(opts.metadata) : null,
       publicKey: storedPublicKeyHex,
     });
 
-    return { rawKey, record, ed25519: mintedKeypair };
+    return { rawKey, record };
   } finally {
     provisioningLocks.delete(opts.operatorId);
   }

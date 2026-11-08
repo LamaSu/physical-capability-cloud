@@ -81,7 +81,7 @@ Every capability advertises the assurance level it can provide, from 0 to 3:
 - **Tier 2**: Quality verification. Sensor readings, QC photographs, dimensional measurements, or chromatography results. Evidence is encrypted via Lit Protocol and content-addressed. Oracle verification cascade (UMA Optimistic Oracle → Chainlink Functions → EigenLayer AVS) scores quality.
 - **Tier 3**: Third-party attestation. Independent EvaluatorAgent reviews evidence. ZK Merkle proof anchors the commitment on Starknet. Disputes resolved via UMA's DVM (Data Verification Mechanism) — token-holder vote with economic bonds.
 
-Higher tiers require larger bonds from the operator. A Tier-2 job requires the operator to post a slashable bond before the job begins. If evidence is rejected during the challenge window, the bond is slashed and redistributed to the challenger and the network treasury.
+Higher tiers require larger bonds from the operator. A Tier-2 job requires the operator to post a slashable bond before the job begins. If evidence is rejected during the challenge window, the bond is slashed.
 
 ### 2.4 Milestone Escrow with Slashable Bonds
 
@@ -342,9 +342,8 @@ Every IP Asset's Royalty Vault holds 100 Royalty Tokens. PCC distributes these t
 | Role | Default Tokens | Revenue Share | Who |
 |------|----------------|---------------|-----|
 | CSD Designer | 10 | 10% | Person who authored the capability definition |
-| Machine Operator | 70 | 70% | Person whose equipment ran the job |
+| Machine Operator | 80 | 80% | Person whose equipment ran the job |
 | Verifier | 10 | 10% | Subnet/agent that verified evidence quality |
-| Network Treasury | 10 | 10% | PCC protocol fee, non-transferable |
 
 These are defaults. During the contract negotiation phase, the BrokerAgent can propose custom splits — operators can require a minimum revenue floor, designers can negotiate higher royalty rates for novel processes, and multi-party collaborations can encode arbitrary splits as on-chain license terms before the job begins. Once the job starts, the split is immutable.
 
@@ -358,11 +357,10 @@ A 4-step workflow — CNC milling → anodizing → quality inspection → shipp
 Customer pays $100 for the full workflow
 ├── Step 1: CNC Milling  ($40) → IP Asset 0xA1
 │   ├── CNC CSD Designer (10%): $4.00
-│   ├── CNC Operator (70%):     $28.00
-│   ├── Verifier (10%):          $4.00
-│   └── Network (10%):           $4.00
+│   ├── CNC Operator (80%):     $32.00
+│   └── Verifier (10%):          $4.00
 ├── Step 2: Anodizing    ($25) → IP Asset 0xB1
-│   └── [same distribution pattern — $2.50 / $17.50 / $2.50 / $2.50]
+│   └── [same distribution pattern — $2.50 / $20.00 / $2.50]
 ├── Step 3: Inspection   ($15) → IP Asset 0xC1
 │   └── [same distribution pattern]
 └── Step 4: Shipping     ($20) → IP Asset 0xD1
@@ -435,7 +433,7 @@ This structure means the economic risk is symmetric and clearly allocated before
 
 ### 7.3 DePIN Reward Epochs
 
-Operators who consistently execute verified work earn additional rewards from the network treasury through DePIN epoch scoring. The `RewardEngine` evaluates operators on three axes:
+Operators who consistently execute verified work earn additional rewards through DePIN epoch scoring. The `RewardEngine` evaluates operators on three axes:
 
 - **Uptime**: What fraction of scheduled hours was the device available and accepting jobs?
 - **Quality**: What is the mean evidence quality score from the oracle verification cascade?
@@ -448,18 +446,6 @@ Epoch rewards create a baseline income floor for operators who maintain reliable
 Royalty Tokens represent fractional ownership of a capability's revenue stream. A designer who publishes a CSD receives 10 Royalty Tokens (10% of all revenue). They can hold these indefinitely, sell them to investors, or distribute them to collaborators.
 
 This creates a secondary market for manufacturing process IP. A researcher who designs a breakthrough polymerization process and encodes it as a CSD can sell a portion of their Royalty Tokens to a lab equipment manufacturer interested in seeing the protocol proliferate. Both parties earn proportionally from the protocol's adoption. Process IP becomes a liquid asset class.
-
-### 7.5 Network Treasury and Protocol Fees
-
-PCC's network treasury receives 10% of every job's royalty payment. These funds finance:
-
-- Oracle verification costs (UMA bonds, Chainlink DON fees, EigenLayer AVS operator incentives)
-- ZK proof anchoring costs (Starknet transaction fees)
-- Story Protocol transaction fees (IP registration and royalty distribution)
-- Protocol development grants
-- Dispute resolution bond pool
-
-Treasury flows are on-chain and auditable.
 
 ---
 
@@ -654,7 +640,7 @@ Physical Capability Cloud is the missing coordination layer for the physical wor
 
 The result is a network where a machinist in Detroit and a biologist in Boston can form a trustless workflow without a broker, a marketplace, or a negotiated contract. Where the intellectual property embedded in a manufacturing process earns royalties for its designer forever. Where verified physical work builds permanent on-chain credentials. Where any AI agent can discover, book, and settle a physical capability through a typed API, the same way it calls any other microservice.
 
-The Story Protocol integration is not an afterthought — it is the mechanism that makes the network self-sustaining. When designers earn from every use of their CSDs, they are incentivized to publish better definitions. When operators earn not just from execution but from the IP equity in their device profiles, they are incentivized to maintain and improve their capabilities. When the network treasury accumulates from protocol fees, it can fund the verification infrastructure that makes evidence credible. The economic flywheel is fully specified in the protocol.
+The Story Protocol integration is not an afterthought — it is the mechanism that makes the network self-sustaining. When designers earn from every use of their CSDs, they are incentivized to publish better definitions. When operators earn not just from execution but from the IP equity in their device profiles, they are incentivized to maintain and improve their capabilities. The economic flywheel is fully specified in the protocol.
 
 This is not a marketplace. It is a protocol — and protocols are how the internet got built.
 
@@ -679,9 +665,8 @@ Both Story mainnet (chain 1514) and Aeneid testnet (chain 1513) share the same a
 |-----------|---------|-------------|-------------|
 | `commercialRevShare` | 5% | 1–50% | Percent of derivative revenue flowing to parent CSD IP |
 | Designer Royalty Tokens | 10 / 100 | Yes | Share of all revenue earned by CSD author |
-| Operator Royalty Tokens | 70 / 100 | Yes | Share of revenue earned by executing operator |
+| Operator Royalty Tokens | 80 / 100 | Yes | Share of revenue earned by executing operator |
 | Verifier Royalty Tokens | 10 / 100 | Yes | Share earned by evidence verifier |
-| Network Treasury Tokens | 10 / 100 | No | Protocol fee, non-transferable |
 
 ## Appendix C: Key Environment Variables
 

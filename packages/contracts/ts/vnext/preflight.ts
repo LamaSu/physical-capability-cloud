@@ -89,14 +89,22 @@ function revertDataOf(e: unknown): Hex | undefined {
   return undefined;
 }
 
-/** The revert's error name when the contract gave one, else the first line of the message. */
-export function describeRevert(e: unknown): string {
+/**
+ * The revert's error name when the contract gave one, else the first line of the message.
+ *
+ * `extraAbi` is OPTIONAL and additive only: every existing caller that omits it decodes against exactly
+ * `VNextSettlementEscrowABI`, unchanged. A caller that reads through a local, hand-declared fragment not in
+ * that frozen ABI (read.ts's `UNIT_READ_ABI`, e.g. for `UnitNotFound`) passes its own fragment here so a
+ * revert from THAT selector still decodes by name, without adding anything to the frozen ABI itself.
+ */
+export function describeRevert(e: unknown, extraAbi?: Abi): string {
   const data = revertDataOf(e);
   if (data) {
     try {
-      return decodeErrorResult({ abi: VNextSettlementEscrowABI, data }).errorName;
+      const abi = extraAbi ? [...VNextSettlementEscrowABI, ...extraAbi] : VNextSettlementEscrowABI;
+      return decodeErrorResult({ abi, data }).errorName;
     } catch {
-      // not an error this ABI declares; fall through to the message
+      // not an error either ABI declares; fall through to the message
     }
   }
   if (e instanceof BaseError) {

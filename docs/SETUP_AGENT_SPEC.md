@@ -728,7 +728,7 @@ The gateway has endpoints across these route files:
 | `pool.ts` | `/api/pool` | 8 | Liquidity pools + staking |
 | `tmp-tasks.ts` | `/api/tmp` | 8 | Task management protocol |
 | `feedback.ts` | `/api/feedback` | 2 | Bug reports |
-| `pgtr-relay.ts` | `/api/pgtr` | 2 | Payment-gated relay |
+| `pgtr-relay.ts` | `/api/pgtr` | 2 | Payment-gated relay (**disabled**: POST /api/pgtr/relay answers 501 PGTR_RELAY_DISABLED until the target and calldata are bound to the payer's signature) |
 | `well-known.ts` | `/.well-known` | 2 | ERC-8004 agent registration |
 | `setup.ts` (NEW) | `/api/setup` | 6 | **Setup agent endpoints** |
 | SSE | `/sse/stream/*` | 4 | Real-time event streams |

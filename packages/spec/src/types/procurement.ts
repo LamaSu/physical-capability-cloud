@@ -5,7 +5,7 @@
  * Each mode defines how workers are selected, priced, and verified.
  */
 
-import type { Id, Address, Amount, Timestamp } from "./common.js";
+import type { Id, Address, Amount, AssuranceTier, Timestamp } from "./common.js";
 
 /** TMP procurement modes from ERC-8195 */
 export type TMPMode = "bounty" | "claim" | "pitch" | "benchmark" | "auction";
@@ -97,6 +97,12 @@ export interface MilestoneProcurement {
   tmpContractAddress?: Address;
   mode: TMPMode;
   modeConfig: ModeConfig;
+  /**
+   * The assurance tier the milestone's evidence must meet: set when the task is created, from the
+   * poster's terms, and handed to validation as authenticated state. A worker's proof never chooses it
+   * (N118).
+   */
+  acceptedTier?: AssuranceTier;
   status: "pending" | "active" | "completed" | "expired";
   createdAt?: Timestamp;
   completedAt?: Timestamp;

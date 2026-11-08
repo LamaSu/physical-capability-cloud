@@ -45,6 +45,8 @@ export type {
   JobTimelineEvent,
   KernelDTO,
   KernelHealthSnapshot,
+  LocationPrecision,
+  LocationVisibility,
   DeviceStatusDTO,
   EvidenceSummaryDTO,
   ComplianceReportDTO,

@@ -44,7 +44,7 @@ function boot(opts: { badSource?: boolean } = {}): Scene {
   const dispatch = (manifest: unknown) => w.dispatchEvent(new w.MessageEvent("message", { source: src(), data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: { manifest } } } }));
   const deliver = (manifest: unknown) => dispatch(manifest === undefined ? undefined : w.JSON.parse(w.JSON.stringify(manifest))); // window-realm clone (as postMessage does)
   const teardown = (id: number) => w.dispatchEvent(new w.MessageEvent("message", { source: src(), data: { jsonrpc: "2.0", id, method: "ui/resource-teardown" } }));
-  return { w, posted, mount: w.document.getElementById("pcc-ir-root"), deliver, dispatch, teardown, fetches: () => fetchCount, close: () => w.close() };
+  return { w, posted, mount: w.document.getElementById("pcc-ir-root"), deliver, dispatch, teardown, fetches: () => fetchCount, close: () => { expect(w.__PCC_UI_TEXT_VIOLATIONS__ ?? 0).toBe(0); w.close(); } };
 }
 
 describe("pcc-ir-kit.js — static negative scan", () => {
@@ -117,6 +117,7 @@ describe("pcc-ir-kit.js — behavioral (jsdom, committed bytes)", () => {
     expect(posted.some((m) => m && m.method === "ui/notifications/initialized")).toBe(true);
     result(); // after init: the same result renders
     expect(mount.textContent).toContain("hello <b>not-html</b>");
+    expect(w.__PCC_UI_TEXT_VIOLATIONS__ ?? 0).toBe(0);
     w.close();
   });
   it("ignores a non-parent message source (stays waiting)", () => {
@@ -164,6 +165,7 @@ describe("pcc-ir-kit.js — behavioral (jsdom, committed bytes)", () => {
     w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", id: 1, result: { protocolVersion: PROTOCOL } } })); // late init
     w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: { manifest: w.JSON.parse(w.JSON.stringify(validManifest)) } } } }));
     expect(w.document.getElementById("pcc-ir-root").textContent).toContain("waiting");
+    expect(w.__PCC_UI_TEXT_VIOLATIONS__ ?? 0).toBe(0);
     w.close();
   });
 

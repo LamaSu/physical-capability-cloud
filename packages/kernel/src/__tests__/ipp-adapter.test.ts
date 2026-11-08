@@ -128,9 +128,17 @@ describe("IppAdapter — execute()", () => {
 
   it("start returns success with jobId", async () => {
     const adapter = makeAdapter();
+    const started: Array<Record<string, unknown>> = [];
+    adapter.onEvidence((e) => {
+      if (e.type === "execution_started") started.push(e.payload);
+    });
     const result = await adapter.execute(makeCommand("start", { jobName: "invoice.pdf", totalPages: 2 }));
     expect(result.success).toBe(true);
     expect(result.message).toContain("mock");
+    // The device job it names, as real mode does: the job its events carry as ippJobId (N106 binds a
+    // print to it; payload.jobId is the PCC job's, LO-EV-9).
+    expect(result.data).toEqual({ jobId: started[0]?.ippJobId });
+    expect(typeof started[0]?.ippJobId).toBe("number");
     await adapter.dispose();
   });
 
@@ -138,7 +146,7 @@ describe("IppAdapter — execute()", () => {
     const adapter = makeAdapter();
     await adapter.execute(makeCommand("start", { jobName: "a.pdf", totalPages: 3 }));
     const second = await adapter.execute(makeCommand("start", { jobName: "b.pdf", totalPages: 1 }));
-    expect(second.success).toBe(false);
+    expect(second).toMatchObject({ success: false, busy: true });
     await adapter.dispose();
   });
 
@@ -320,11 +328,32 @@ describe("IppAdapter — getCapabilities()", () => {
 // ---------------------------------------------------------------------------
 
 describe("IppAdapter — cancelJob()", () => {
-  it("cancels a mock job without error", async () => {
+  it("cancels a mock job and reports its failure before quiescing", async () => {
     const adapter = makeAdapter();
+    const failures: Array<Record<string, unknown>> = [];
+    adapter.onEvidence((event) => {
+      if (event.type === "execution_failed") failures.push(event.payload);
+    });
     await adapter.execute(makeCommand("start", { jobName: "a.pdf", totalPages: 5 }));
+    const quiesced = adapter.quiesceEvidence().then(() => {
+      expect(failures).toEqual([{ ippJobId: 1000, jobName: "a.pdf", state: "canceled", origin: "device", mock: true }]);
+    });
     await expect(adapter.cancelJob(1000)).resolves.toBeUndefined();
+    await quiesced;
+    await adapter.cancelJob(1000);
+    expect(failures).toHaveLength(1);
     expect(await adapter.getStatus()).toBe("idle");
+    await adapter.dispose();
+  });
+
+  it("canceling a different mock job emits nothing and leaves the active job running", async () => {
+    const adapter = makeAdapter();
+    const events: string[] = [];
+    adapter.onEvidence((event) => events.push(event.type));
+    await adapter.execute(makeCommand("start", { jobName: "a.pdf", totalPages: 5 }));
+    await adapter.cancelJob(1001);
+    expect(events).toEqual(["execution_started"]);
+    expect(await adapter.getStatus()).toBe("busy");
     await adapter.dispose();
   });
 });

@@ -28,6 +28,7 @@ import { schema } from "@pcc/store";
 import { resetSettlementService } from "../services/settlement-service.js";
 import { buildCanonicalEvidenceEnvelope, isEvidenceHashForm } from "../services/evidence-envelope.js";
 import type { EvidenceBundle } from "@pcc/spec";
+import { actAsJobParty } from "./helpers/job-read-party.js";
 
 // ---------------------------------------------------------------------------
 // Mocks — must be declared before any imports that use them
@@ -174,6 +175,7 @@ function seedEnvelopeAlignedBundle(opts: {
 
 async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
+  actAsJobParty(app); // job reads are object-authorized (F3)
   await app.register(settlementRoutes);
   await app.ready();
   return app;

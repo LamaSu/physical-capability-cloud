@@ -10,9 +10,28 @@ import type {
   SensorChannelDescriptor,
   SensorAggregate,
   SensorAnomaly,
+  SensorReadingSource,
   PhysicalUnit,
 } from "@pcc/spec";
 import { ids } from "@pcc/spec";
+
+/**
+ * The distinct sources of the readings a derived record (an anomaly, an aggregate) was computed
+ * from. The record is each source's job's, batch's and sample's as much as the readings are.
+ */
+function sourcesOf(readings: readonly SensorReading[]): SensorReadingSource[] {
+  const out = new Map<string, SensorReadingSource>();
+  for (const r of readings) {
+    const source: SensorReadingSource = { kernelId: r.kernelId, deviceId: r.deviceId };
+    if (r.jobId !== undefined) source.jobId = r.jobId;
+    if (r.stepId !== undefined) source.stepId = r.stepId;
+    if (r.batchId !== undefined) source.batchId = r.batchId;
+    if (r.sampleId !== undefined) source.sampleId = r.sampleId;
+    const key = JSON.stringify([source.kernelId, source.deviceId, source.jobId, source.stepId, source.batchId, source.sampleId]);
+    if (!out.has(key)) out.set(key, source);
+  }
+  return [...out.values()];
+}
 
 /** Fixed-size circular buffer — O(1) insert, no allocation after init */
 export class RingBuffer<T> {
@@ -189,6 +208,7 @@ export class SensorPipeline {
           threshold: value < descriptor.range.min ? descriptor.range.min : descriptor.range.max,
           message: `${reading.channel} value ${value} outside range [${descriptor.range.min}, ${descriptor.range.max}]`,
           jobId: reading.jobId,
+          sources: sourcesOf([reading]),
         });
       }
     }
@@ -212,6 +232,7 @@ export class SensorPipeline {
             threshold: this.config.maxRateOfChange,
             message: `${reading.channel} rate of change ${rate.toFixed(1)}/s exceeds threshold`,
             jobId: reading.jobId,
+            sources: sourcesOf([prev, reading]),
           });
         }
       }
@@ -233,6 +254,7 @@ export class SensorPipeline {
           threshold: this.config.flatlineThreshold,
           message: `${reading.channel} has been constant at ${value} for ${this.config.flatlineThreshold} readings`,
           jobId: reading.jobId,
+          sources: sourcesOf([...tail, reading]),
         });
       }
     }
@@ -250,15 +272,15 @@ export class SensorPipeline {
     return this.buffers.get(channel)?.latest(count) ?? [];
   }
 
-  /** Compute aggregate for a channel over a time window */
-  aggregate(channel: string, windowMs: number): SensorAggregate | null {
+  /** Compute aggregate for a channel over a time window, over the readings `keep` accepts */
+  aggregate(channel: string, windowMs: number, keep: (reading: SensorReading) => boolean = () => true): SensorAggregate | null {
     const buffer = this.buffers.get(channel);
     if (!buffer || buffer.size === 0) return null;
 
     const now = Date.now();
     const cutoff = now - windowMs;
     const readings = buffer.toArray().filter(
-      (r) => new Date(r.timestamp).getTime() >= cutoff && typeof r.value === "number"
+      (r) => new Date(r.timestamp).getTime() >= cutoff && typeof r.value === "number" && keep(r)
     );
 
     if (readings.length === 0) return null;
@@ -284,6 +306,7 @@ export class SensorPipeline {
       unit: first.unit,
       jobId: first.jobId,
       batchId: first.batchId,
+      sources: sourcesOf(readings),
     };
   }
 

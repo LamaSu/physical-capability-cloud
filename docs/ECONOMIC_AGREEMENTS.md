@@ -213,7 +213,7 @@ As for a license, `outbound.shareAlikeTag` is required exactly when `outbound.cl
 
 **Reading the input.** The input and the options are untrusted. Before any check, each is copied into plain JSON data, and every property is read exactly once. All later work uses the copy, so nothing the caller does can make the compiler see two different values of one field. The copy is refused (`SCHEMA_INVALID`) if the value:
 - is anything other than null, a boolean, a number, a string, an array or a plain object (for example a function, a bigint, a Date or a class instance);
-- has an accessor property, a symbol key or a hole in an array;
+- has an accessor property (an enumerable member, or any array element), a symbol key or a hole in an array;
 - contains itself;
 - nests too deep. The input itself is at depth 0, and a value inside an object or array at depth `d` is at depth `d + 1`. An object or array at depth 64 or more is refused; a null, boolean, number or string at depth 64 is not;
 - has an array with more than 65,536 entries;
@@ -227,7 +227,7 @@ Only an object's own enumerable properties are read, as `JSON.stringify` does. A
 |---|---|
 | `forbiddenRecipients: Address[] (0..64)` | The escrow clone, the settlement token and the factory. The zero address is always forbidden. |
 | `authorityFloor: Authority` | The weakest license authority accepted; the default is `counterparty-accepted`. |
-| `schedules: RateSchedule[] (0..64)` | Sealed rate-schedule bodies. Each must hash to its own `scheduleHash`. A body is trusted only for the hash it actually has, so listing order never matters. Only `version` and `segments` enter the hash. Unknown fields are dropped before hashing, at every depth: in the body and inside each segment. The registry does the same when it publishes, so an unknown field changes neither the hash nor the rate. The one closed object is a `capture-class-indexed` segment's `byClass`; a key there other than `CC0`..`CC5` is refused. The known fields outside the hash are still checked: `scheduleHash` and `publishedAt` (a string) are required, and `notes`, when present, is a string. Each body must also be **well formed**:<br>1. No segment follows an open-ended one (`endTime: null`).<br>2. Each segment starts at or after the previous segment's `endTime`.<br>3. A set `endTime` is not before its `startTime`.<br>4. A `linear-decay` segment's `endTime` is after its `startTime`.<br>5. Its numbers are in §1's ranges: `version` is `1 .. 10^9`; every integer field (times, bps, `thresholdCents`) is `0 .. 2^53 − 1`; `scale` and `decayPerSecond` are finite. A larger integer does not mean the same number to every JSON reader (JavaScript rounds it), and `1e400` reads as infinity. The registry refuses to seal such a body, with the same rules. |
+| `schedules: RateSchedule[] (0..64)` | Sealed rate-schedule bodies. Each must hash to its own `scheduleHash`. A body is trusted only for the hash it actually has, so listing order never matters. Only `version` and `segments` enter the hash. Unknown fields are dropped before hashing, at every depth: in the body and inside each segment. The registry does the same when it publishes, so an unknown field changes neither the hash nor the rate. The one closed object is a `capture-class-indexed` segment's `byClass`; a key there other than `CC0`..`CC5` is refused. The known fields outside the hash are still checked: `scheduleHash` and `publishedAt` (a string) are required, and `notes`, when present, is a string. Each body must also be **well formed**:<br>1. No segment follows an open-ended one (`endTime: null`).<br>2. Each segment starts at or after the previous segment's `endTime`.<br>3. A set `endTime` is not before its `startTime`.<br>4. A `linear-decay` segment's `endTime` is after its `startTime`.<br>5. Its numbers are in §1's ranges: `version` is `1 .. 10^9`; every integer field (times, bps, `thresholdCents`) is `0 .. 2^53 − 1`; `scale` and `decayPerSecond` are numbers greater than 0 and at most `2^53 − 1`, and need not be integers. A larger integer does not mean the same number to every JSON reader (JavaScript rounds it), and `1e400` reads as infinity. Every double from `2^53` up is such an integer, so the canonical form has no form for it (evidence profile v1 §1, D5) and such a body has no hash. The compiler refuses a body it cannot hash (`SCHEMA_INVALID`, path `["options"]`) and never throws. The registry refuses to seal such a body, with the same rules. |
 | `fee: { feeBps: integer 0..1000, feeRecipient: Address \| null }` | The fee the server charges. It obeys §2's own rule: a recipient exactly when `feeBps > 0`. |
 | `rateFacts: { jobsPerDay?: integer >= 0 \| null, captureClass?: "CC0".."CC5" \| null }` | Facts some schedules depend on (§2.4). Each field may be omitted, which means `null`. |
 
@@ -453,7 +453,7 @@ CompiledEconomicsV1 {
 
 **Canonical JSON** is `@pcc/spec` `canonicalize`: object keys sorted, no whitespace, strings as JSON strings, `null` kept. All amounts are strings. All other numbers in an agreement are integers below 2^53, written in decimal with no exponent (`-0` is written `0`).
 
-A rate-schedule body (§3) is hashed in the same canonical form, and it has two fields that are not integers, `scale` and `decayPerSecond`. Every number in a schedule body is written as ECMAScript's `Number.prototype.toString` writes it. That is the shortest decimal that reads back as the same double, with no exponent from `10^−6` up to below `10^21` (`0.000001`, `100.5`, `10000000000000000`), and exponent form outside that range (`1e-7`, `1.5e-9`, `1e+21`). So `1e-9` is written `1e-9`, never `1e-09`.
+A rate-schedule body (§3) is hashed in the same canonical form, and it has two fields that are not integers, `scale` and `decayPerSecond`. Every number in a schedule body is written as ECMAScript's `Number.prototype.toString` writes it. That is the shortest decimal that reads back as the same double. A number of magnitude `10^−6` to `2^53 − 1` is written with no exponent (`0.000001`, `100.5`, `9007199254740991`). A number of smaller magnitude, other than 0, is written in exponent form (`1e-7`, `1.5e-9`). `0` and `-0` are written `0`. A number of magnitude `2^53` or more has no canonical form (§3, rule 5). So `1e-9` is written `1e-9`, never `1e-09`.
 
 A string is written exactly as ECMAScript `JSON.stringify` writes it:
 - `"` is written `\"` and `\` is written `\\`;
@@ -497,10 +497,24 @@ A unit's default outcome is `released`. A **released** unit pays its legs and it
   - The `ipId` becomes the clause's subject, so it must be an Id (`INVALID_ID`).
   - Contributor addresses are looked up among the table's own keys only (`UNKNOWN_CONTRIBUTOR`).
 - **`TrainingManifest`**: a `model-author` allocation pays to a split of the model author (weight `10000 − passThroughBps`) and the training inputs (weight `passThroughBps`).
-  - The training inputs are the datasets by `weightBps` and, when a base model is declared, the base model with an explicit `baseModelWeightBps`, recursively.
-  - `passThroughBps` and `baseModelWeightBps` are explicit inputs, and are refused when missing.
+  - The training inputs are the datasets by `weightBps` and, when a base model is declared, the base model with an explicit `baseModel.weightBps`, recursively.
+  - `passThroughBps` and `baseModel.weightBps` are explicit inputs, and are refused when missing.
   - The manifest must pass its own schema, so its dataset weights total exactly 10000 (`MANIFEST_INVALID`). Its model and dataset ids must be Ids (`INVALID_ID`).
   - The expansion subdivides one allocation and never adds to it.
+- **The calls.** The adapters are exported from `@pcc/spec/economics` (economics/adapters.ts). A result is `{ ok: true, ... }` or `{ ok: false, refusals }`, and a refusal is `{ code, message, path }`.
+  - `clausesFromCompositionManifest(input)` returns `{ ok: true, clauses, splits }` on success. `input` is a `ManifestAdapterInput`: `{ manifest, pinnedRates, partyByAddress, appliesTo, idPrefix }`, and every member is required. `manifest` is a `CompositionManifest` (`CompositionManifestSchema`, from `@pcc/spec`). `pinnedRates` lists `{ bps, rateSource }`: the rate each schedule gave when the deal was quoted, with its `RateSource` (§2.4). A group whose schedule has no pinned rate is `RATE_NOT_PINNED`. `partyByAddress` maps a lowercase contributor address to a party id. `appliesTo` is a clause's `appliesTo` (§2.4).
+  - `splitsFromTrainingManifest(input, idPrefix)` returns `{ ok: true, splits, rootSplitId }` on success. `input` is a `LineageInput`, one level of the lineage: `{ manifest, modelAuthorParty, passThroughBps, datasetParty, baseModel }`. Every member but `baseModel` is required. `manifest` is a `TrainingManifest` (`TrainingManifestSchema`, from `@pcc/spec`). `modelAuthorParty` is the model author's party id, and `datasetParty` maps a dataset id to a party id. `baseModel` is `{ weightBps, lineage }`, where `lineage` is the base model's own level. It is present exactly when the manifest declares a base model.
+  - `splitsFromContributionGraph(graphInput, usedComponents, idPrefix)` returns `{ ok: true, splits, rootPayee }` on success, where `rootPayee` is `{ split }`. `graphInput` is a contribution graph (`ContributionGraph`, checked by `ContributionGraphSchema`, both from `@pcc/spec/economics`; its `schema` is `"pcc.contribution-graph.v1"`). `usedComponents` is the `Set` of component refs that run in the unit: a real `Set` that is `instanceof Set`, not a proxy of one and not one from another realm. A member that is not a string is ignored.
+  - `idPrefix` is a string. Every clause and split id an adapter makes is `<idPrefix>/<suffix>`: `c0`, `s0` and so on for a composition, `m0`, `m0i`, `m0d` and so on for a training lineage, and the `nodeId` for a graph. One that is not an Id is refused (`ID_TOO_LONG`).
+- **Every adapter reads its input once**, into a plain copy (`snapshotJson` with `canonical`, economics/input.ts). Everything after that, the schema, the hash and the payout, uses that one copy, so the hash and the payout always see the same manifest.
+  - The copy is §3's (Reading the input), with two changes: an undefined object member is dropped, as `canonicalize` drops it, and a number the canonical form cannot write is refused (one that is not finite, or of magnitude `2^53` or more). A refused copy is `INPUT_INVALID`, or `GRAPH_INVALID` for a contribution graph. It is the same with or without D5 in `canonicalize`.
+  - It reads object members and array elements from their own descriptors, so it never calls their getters. On a proxy it calls only `getPrototypeOf`, `ownKeys` and `getOwnPropertyDescriptor` for an object, and `get` (for `length`) and `getOwnPropertyDescriptor` for an array. It copies what those traps report, so a proxy is refused when what they report would be refused.
+  - Composition: after the copy, `input` is checked against one schema, and only its first issue is reported. An `input` that is not a plain object is `INPUT_INVALID`. Otherwise a `manifest` that is missing or fails `CompositionManifestSchema` comes first, and is `MANIFEST_INVALID`. Then a member that is missing or not of its kind is `INPUT_INVALID`: `pinnedRates` must list `{ bps, rateSource }` with a bps (§1) and a `RateSource`, `partyByAddress` must be a plain object, `appliesTo` one of §2.4's forms, and `idPrefix` a string.
+  - Training: `idPrefix` is checked before the copy, and one that is not a string is `INPUT_INVALID`. After the copy, a level that is not a plain object, or whose `manifest` or `datasetParty` is not one, is `INPUT_INVALID`. A `manifest` that fails `TrainingManifestSchema` is `MANIFEST_INVALID`. Then a `modelAuthorParty` that is missing or not an Id is `INVALID_ID`, and a `passThroughBps` that is missing or not an integer from 0 to 10000 is `EXPANSION_SHARE_UNDECLARED`. So is a `baseModel` given without a declared base model, missing with one, not a plain object, or whose `weightBps` is not an integer from 0 to 10000. Its `lineage` is checked as a level.
+  - Graph: `idPrefix` is checked first, then the copy, then `usedComponents`, then the graph's schema. An `idPrefix` that is not a string, or a `usedComponents` that is not such a `Set`, is `INPUT_INVALID`. A graph that fails its schema is `GRAPH_INVALID`, and so is one with a repeated `nodeId`, two edges with the same `from` and `to`, or an edge or root that names an unknown node.
+  - A `partyByAddress` or `datasetParty` entry that is missing, or is not an Id, is `UNKNOWN_CONTRIBUTOR`.
+  - A manifest whose hash cannot be computed is `MANIFEST_INVALID`. Each manifest is then checked against its `manifestHash` (`MANIFEST_HASH_MISMATCH`).
+  - On any input, an adapter returns a result. It does not throw.
 - **`ContributionGraphV1`** (optional, for open ecosystems): each node keeps a `retain` weight and passes shares along **accepted** edges. An edge is dropped when:
   - it is not accepted;
   - it leads to a node that requires participation and whose component does not run in the unit;
@@ -551,3 +565,169 @@ On success it returns each unit's payouts in plan order, with `agreementHash` an
 - Any rule an agent writes as code.
 - An exact rate for an `exponential-decay` segment below its starting rate (unverifiable, §2.4).
 - A required scheduled royalty over units in different value bands (§2.4). New rule kinds are added to this document and to the compiler together, with golden vectors, under a new domain version.
+
+## 11. Templates
+
+An agreement template has an immutable, versioned economic identity and an explicit list of the values an agent may fill. It does not add a payment rule or a second compiler. The five current examples from `AGREEMENT_TEMPLATES` remain the source of the bodies, in their original order, and their ordinary `EconomicAgreementV1` hashes do not change.
+
+### 11.1 Shape, catalog and hash
+
+`AgreementTemplateV1` is a strict object with exactly `{ schema: "pcc.agreement-template.v1", templateId: Id, version: integer 1 .. 2^53 − 1, title: string, summary: string, slots: SlotV1[], body: EconomicAgreementV1 }`. `title` and `summary` are nonempty presentation strings. The body must satisfy the entire strict economic-agreement schema, including its rule refinements. All five catalog versions start at 1. A slot is exactly `{ name, kind, default, paths }`, with name matching `^[a-z][A-Za-z0-9]{0,63}$`, and kind `party`, `unit`, `amount`, `bps` or the reserved `license`. `default` is the body's present value: an Id for party/unit, an Amount string for amount, or an integer 0..10000 for bps. License slots are always refused in v1, even if no value is supplied. `paths` is a nonempty list of RFC 6901 JSON pointers into `body`, strictly ascending without repeats when compared as JavaScript strings (by UTF-16 code unit, which is byte order for the ASCII pointers of every edit surface); pointer escapes are `~0` for `~` and `~1` for `/`. A malformed template, including an unsorted or repeated pointer within a slot, is `TEMPLATE_SCHEMA_INVALID`.
+
+`AGREEMENT_TEMPLATES_V1` is the deep-frozen, readonly catalog `{ template, templateHash, compileOptions }[]`, in the exact order of the existing five examples. Each `template` copies its entry's `templateId`, `title`, `summary`, and unchanged `build()` body and declares the edit slots below. Its compilation options have the same values as the corresponding existing example; the printer carries its published-schedule example. Nothing here modifies `AGREEMENT_TEMPLATES`, its callers or the preview route's template-building behavior.
+
+The hash is exactly `templateHash(t) = H("PCC:agreement-template:v1", { templateId: t.templateId, version: t.version, slots: t.slots, body: t.body })`, with §6's `H` and `canonicalize`. The domain is exported as `AGREEMENT_TEMPLATE_DOMAIN`. The lowercase result is `0x` plus 64 hex digits. The `schema`, `title` and `summary` fields are **excluded**. Hash the body's actual array orders and fields, not a separately normalized compiler agreement: `canonicalize` sorts object keys, but never sorts arrays. Any change to a hashed field makes a different template hash. The new `agreement-templates-v1.json` fixture records every slot and pointer, plus hashes and compiled examples; the original economics goldens remain authoritative for the default bodies.
+
+### 11.2 Edit surfaces and fixed positions
+
+A slot may name only these positions, where `i`, `j` and `k` are decimal array indices (without leading zeros):
+
+- `party`: `/payer`, `/parties/i/partyId`, `/clauses/i/to/party`, `/splits/i/members/j/to/party`.
+- `unit`: `/units/i/unitRef`, `/clauses/i/appliesTo/units/k`.
+- `amount`: `/units/i/gross`, or `/clauses/i/rule/amount`, `/clauses/i/rule/rate`, `/clauses/i/rule/cost`, `/clauses/i/rule/min`, `/clauses/i/rule/max`, `/clauses/i/rule/cap`.
+- `bps`: `/clauses/i/rule/bps` or `/clauses/i/rule/markupBps`.
+
+Each pointer is checked in this order, and gets at most one of these three codes: a path not in those forms, or at a fixed position (below), is `SLOT_PATH_FORBIDDEN`; otherwise a path in one form but declared with another kind is `SLOT_KIND_MISMATCH`, even when its position does not exist; otherwise a position that does not exist, or whose current value does not equal the declared default, is `SLOT_DEFAULT_MISMATCH`. In particular, null optional rule limits are not editable amount slots. A pointer may appear in only one slot (`SLOT_PATH_DUPLICATE`), and a name may appear only once (`SLOT_NAME_DUPLICATE`).
+
+Some otherwise well-typed leaves are **always fixed**: any `payTo`, the entire `/licenses` subtree, every rule leaf in a clause with non-null `underLicense`, and every rule leaf in a percent clause with non-null `rateSource`. Slots may not change an address, a license's licensor, distribution, required payment, authority, or a published schedule's accepted rate. A license's reference is reserved too: merely changing that reference in a pure function would leave its embedded server-registry license object out of sync, so a `license` slot is `SLOT_KIND_RESERVED`. A party whose id is named inside any embedded license as licensor or distribution member cannot be made a party slot, because that fixed license reference could not follow the changed id: such a slot is `SLOT_PATH_FORBIDDEN`, with the slot's path `["slots", name]`.
+
+For each `party` slot, its paths must be **exactly** the editable party reference positions whose value equals its default, including `/payer` where relevant. For each `unit` slot, its paths must be exactly the unit reference positions whose value equals its default, including every `appliesTo.units` occurrence. Any difference from that exact list, a missing or an extra path, is `SLOT_PATHS_INCOMPLETE` with the slot's path `["slots", name]`; an extra path also gets its own refusal from the path rules above. Match positions, not equal-looking strings elsewhere: `role`, `subject`, `clauseId`, `costRef`, a component ref, or arbitrary text is not a party/unit reference. In the deck example, `contractor` and `lumber` also occur as clause ids, `lumber` as a subject and `insurer` as a role; in the lab example `model-author` also occurs as a role. None of those other occurrences is slotted.
+
+Every catalog example declares the payer, every other party eligible under these fixed-license rules, each unit reference and unit gross, and every free rule amount or bps (including each non-null `min`, `max`, `cap`). These rules, plus the exact slot declarations in `agreement-templates-v1.json`, determine the catalog; no rule, split weight, license content, address or protocol term can be introduced through a slot.
+
+### 11.3 Validation and instantiation
+
+`validateTemplate(input: unknown)` first makes one defensive plain-JSON copy by §3's "Reading the input" rules (`snapshotJson`), then parses the strict shape and checks every position, kind, default and coverage rule above. It returns `{ ok: true, template }` (the parsed copy), or `{ ok: false, refusals }`; it never throws. A malformed copy, extra field, invalid rule or malformed pointer list is `TEMPLATE_SCHEMA_INVALID`. Validation does not compile, and no catalog validation assertion runs at module load.
+
+`instantiateTemplate(template, params)` validates the template first and propagates its refusals unchanged. `params` is copied once, before use, by §3's "Reading the input" rules, and must be a plain JSON object. Only its own enumerable string keys are read; a non-enumerable string key is ignored. Null, an array, an unsupported prototype, an enumerable accessor property (its getter is never called, whether or not it would throw), a symbol key, an undefined member value or other non-JSON data is `PARAMS_INVALID`, never an exception. An unknown key, including an own `__proto__` or `payTo`, is `SLOT_UNKNOWN`. A missing slot key uses the declared default. A party or unit value must match §1's `Id` grammar, an amount must match §1's `Amount` grammar, and bps must be an integer from 0 through 10000. Any wrong type (including an object with `{ partyId, payTo }`, any array or a number given for an amount) is `SLOT_VALUE_INVALID`. A bare `0x` plus 40 hex digits in a party or unit slot is instead `SLOT_VALUE_ADDRESS`. A `wallet:0x...` prefixed string is an Id, not an address to use for payment.
+
+Apply each valid value to all and only the slot's declared pointers in a fresh body copy, without changing any authority-bearing position. Two parties or units ending with the same ID/ref, whether both slots were filled or one was already present, are one `SLOT_ID_COLLISION` at `["params"]`, however many ids collide; a filled body with a collision is not parsed, so it never also gets `INSTANCE_SCHEMA_INVALID`. When a party value **differs** from the default, set `payTo` to `null` and `label` to the new party id on the party row that the slot's own `/parties/i/partyId` pointer names (never on a row found by searching for the value). The pure function never reads an address registry and never infers an address from a `wallet:` id. If the value equals the default, preserve the original party's `payTo` and label exactly. The server's registry supplies the new address at binding time; meanwhile a paid party without one compiles to `UNRESOLVED_PARTY`. The final filled body must parse as `EconomicAgreementV1`, including all refinements, or is `INSTANCE_SCHEMA_INVALID` at `[]`. On success return `{ ok: true, agreement }` with no provenance fields added to the agreement IR.
+
+Therefore, for a body without a repeated `partyId` or `unitRef` (one with a repeat is `SLOT_ID_COLLISION` even at the defaults), `instantiateTemplate(t, {})` is deep-equal to `t.body` and has its identical canonical bytes and default compiled `agreementHash`. `agreementId`, `asOf`, `terms.acceptBy`, license terms and all un-slotted fields remain unchanged. The preview route may re-time a built example **after** building it; that is separate from template instantiation and its identity check.
+
+### 11.4 Origin proof and refusal identity
+
+`verifyTemplateOrigin(agreement, { templateKey, templateHash, params }, catalog = AGREEMENT_TEMPLATES_V1)` is pure and never throws. It reads `templateKey`, `templateHash` and `params` once each, as own data properties of the origin object; an accessor or an inherited field counts as missing (so a missing `params` is `PARAMS_INVALID`). First find the catalog entry whose key is the literal `templateId@version`, else `TEMPLATE_UNKNOWN`. Compare the supplied template hash exactly to that entry's hash, else `TEMPLATE_HASH_MISMATCH`. Re-instantiate the entry with those parameters, propagating any validation/instantiation refusals, then compare `canonicalize` of the resulting agreement to the **one canonical JSON snapshot** of the supplied agreement, before any server retiming or license rebinding. Any difference or unreadable agreement is `TEMPLATE_ORIGIN_MISMATCH`; identical bytes return `{ ok: true }`. A title or summary change does not alter the template hash. Origin is provenance, not a new payment term or an accepted-agreement hash: v1 adds no database column, migration, store write, or IR field.
+
+The `catalog` argument is caller input too. If it is an array and `templateKey` is a string, it is iterated once, with `for (const entry of catalog)`, and from each entry in turn `template` and `templateHash` are each read once, the `template` value is copied by §3's "Reading the input" rules, and, until an entry has matched, that entry's key is formed from the copy as `${copy.templateId}@${copy.version}` by ordinary property reads, so a copy that is a number, a string or `{}` has the key `undefined@undefined`, and a `null` copy throws. The first entry whose copy has the requested key is used; the hash comparison and the re-instantiation use only that copy and that one hash value. Any other catalog matches nothing. If `Array.isArray(catalog)` or the iteration throws, or, for any entry, reading either field or copying its `template` throws or fails, or forming a key throws, the result is `TEMPLATE_UNKNOWN` at `["origin"]`; the read and the copy are checked even when an earlier entry matched.
+
+The complete separate closed `TEMPLATE_REFUSAL_CODES` list is: `TEMPLATE_SCHEMA_INVALID`, `SLOT_KIND_RESERVED`, `SLOT_NAME_DUPLICATE`, `SLOT_PATH_DUPLICATE`, `SLOT_PATH_FORBIDDEN`, `SLOT_KIND_MISMATCH`, `SLOT_DEFAULT_MISMATCH`, `SLOT_PATHS_INCOMPLETE`, `PARAMS_INVALID`, `SLOT_UNKNOWN`, `SLOT_VALUE_INVALID`, `SLOT_VALUE_ADDRESS`, `SLOT_ID_COLLISION`, `INSTANCE_SCHEMA_INVALID`, `TEMPLATE_UNKNOWN`, `TEMPLATE_HASH_MISMATCH`, `TEMPLATE_ORIGIN_MISMATCH`.
+
+Each template refusal is `{ code, message, path: string[] }`. Its identity is `(code, path)`; keep the first message for a duplicate identity and sort by code, then by path element by element, comparing elements as JavaScript strings (by UTF-16 code unit, which is byte order for ASCII), a prefix first. The path is `[]` for the template as a whole and for `INSTANCE_SCHEMA_INVALID`, `["slots", name]` or `["slots", name, jsonPointer]` for a slot, `["params"]` for `PARAMS_INVALID` and `SLOT_ID_COLLISION`, `["params", key]` for one parameter, or `["origin"]` for an origin failure. Compiler `REFUSAL_CODES`, compiler refusal sorting/phases and human wording remain separate and unchanged; template refusals never enter `CompileResult`.
+
+`GET /api/economics/templates` lists the five catalog entries in order, giving `templateId`, `title`, `summary`, `version`, `templateHash`, and `slots` projected as `{ name, kind, default }` with no pointer paths. This is discovery only; adding `{ templateId, params }` to the preview POST and persisting verified origin belong to later work.
+
+## 12. Kit licenses and the lineage split
+
+A Kit version (a capability or terms template) carries an ordinary License (§2.5). Its only payment requirement, when it has one, is a percent of the gross of every unit that runs the kit, paid to the kit's fork lineage. The compile pays it as payout legs in the unit's release, like any other required payment. There is no second ledger and no claim step. The functions below are in `economics/kits.ts`, and each is pure.
+
+### 12.1 A License's content address (`licenseHash`)
+
+`licenseHash(license) = H("PCC:license:v1", license)`, with §6's `H`: `"0x"` followed by 64 lowercase hex digits.
+
+- **Read, then checked.** The License is read once, as §3's "Reading the input" reads an agreement. The copy then goes through §3's schema phase on its own: §2.5's License shape, §1's conventions, and every rule marked as a schema rule (for example, `shareAlikeTag` exactly when the class is `share-alike`, and unique `requirementId`s). A License that fails either step is refused, never hashed.
+- **No later phase.** Nothing after the schema phase applies. A requirement whose `min` is above its `max` still hashes (the compile refuses it later, `INVALID_BOUNDS`), and so does a License whose `validFrom` is after its `validUntil`. Its licensor and distribution parties need not be parties of any agreement.
+- **As published.** None of §6's normalization applies:
+  - No array is sorted. `grants.fieldsOfUse`, `grants.regions`, `requires.payments` and every `distribution` are hashed in the order they are written.
+  - No hash is lowercased. A `percent_by_schedule` requirement's `scheduleHash` is hashed in the case it is written.
+  - So reordering one of those arrays, or changing a hash's case, gives a different `licenseHash`. Key order does not matter, because canonical JSON sorts keys.
+- **Where kits use it.** A Kit manifest (`pcc.capability-kit/v1`) pins its License by this hash, in `economics.economicTermsHash` (kits #4102). The field shares its name with an agreement's `economicTermsHash` (§6), but it holds a different value, under a different domain.
+- **Result:** `{ ok: true, hash }`, or `{ ok: false, reason }`. The reason is free text, not a code.
+
+Example: this License's canonical JSON is 788 bytes. Its one requirement is `kitRoyaltyRequirement({ bps: 50, lineage: ["carol", "bob", "ann"] })` (§12.2).
+
+```
+{"authority":"registry-anchored","class":"permissive","grants":{"commercialUse":true,"compose":true,"fieldsOfUse":["*"],"modify":true,"regions":["*"],"resell":true},"label":"Kit license","licenseId":"kit-license","licensor":"carol","requires":{"attribution":true,"payments":[{"payee":{"distribution":[{"party":"ann","role":null,"subject":null,"weight":1},{"party":"bob","role":null,"subject":null,"weight":2},{"party":"carol","role":null,"subject":null,"weight":4}]},"per":"using-unit","requirementId":"kit-royalty","role":"protocol-author","rule":{"bps":50,"kind":"percent","max":null,"min":null,"of":"gross","rateSource":null}}]},"shareAlikeTag":null,"subject":"kit:sha256:abababababababababababababababababababababababababababababababab","validFrom":null,"validUntil":null,"version":1}
+```
+
+Its `licenseHash` is `0x1112bfa7d0da2195b118df02734b16a1d7ba93848157ec7eacd5922974b83686`.
+
+### 12.2 The lineage and its distribution
+
+A kit version's **lineage** lists publishers, nearest first: the kit's own publisher (the forker), then its parent's publisher, then its grandparent's, and so on. It is an array of 1 to 1,024 entries. Every entry must be an Id (§1), although only the first three are paid. Anything else is refused.
+
+`kitLineageDistribution(lineage)` is the distribution the royalty is paid to:
+
+1. Take the first three entries, or all of them if there are fewer. Nearest first, their weights are 1 for one entry, 2 : 1 for two, and 4 : 2 : 1 for three (`KIT_LINEAGE_WEIGHTS = [4, 2, 1]`). Nothing past the grandparent is paid.
+2. A party that appears more than once among them (a self-fork) is one member, with the summed weight.
+3. Divide every weight by the greatest common divisor of all of them.
+4. Sort the members by party id (byte order). Each member is `{ party, weight, role: null, subject: null }`.
+
+A refused lineage throws a `RangeError`.
+
+| Lineage | Distribution (party: weight) |
+|---|---|
+| `["ann"]` | ann: 1 |
+| `["bob", "ann"]` | ann: 1, bob: 2 |
+| `["carol", "bob", "ann"]` | ann: 1, bob: 2, carol: 4 |
+| `["dave", "carol", "bob", "ann"]` | bob: 1, carol: 2, dave: 4 |
+| `["ann", "ann"]` | ann: 1 |
+| `["ann", "bob", "ann"]` | ann: 5, bob: 2 |
+| `["ann", "ann", "bob"]` | ann: 6, bob: 1 |
+| `["ann", "bob", "bob"]` | ann: 4, bob: 3 |
+
+`kitRoyaltyRequirement({ bps, lineage })` is the payment requirement of a kit version's License. `bps` must be an integer from 0 to 10000. The lineage is then checked as above, even at 0 bps. Either failure throws a `RangeError`. A free kit (0 bps) asks for no payment, so the result is `null`. Otherwise it is:
+
+```
+{ requirementId: "kit-royalty", role: "protocol-author", per: "using-unit",
+  payee: { distribution: kitLineageDistribution(lineage) },
+  rule: { kind: "percent", bps, of: "gross", min: null, max: null, rateSource: null } }
+```
+
+### 12.3 What a buyer funds (`computeKitSplit`)
+
+`computeKitSplit({ quoteMinor, currency, feeBps, licenseBps, lineage })` prices one unit that runs one kit: the operator's quote, with the kit's royalty on top. It runs the compile (§4) for every amount, so the amounts are exactly what settlement pays at that gross.
+
+**Input.** Each field is read once, as an own data property, and so are `currency`'s two fields and the lineage's entries. A field's getter is never called, so a field given by an accessor counts as missing, and so does an inherited one. Every field is required, so such an input is refused.
+- `quoteMinor`: an Amount (§1), or a non-negative bigint. It is at least 5.
+- `currency`: `{ code, decimals }`, a string and an integer. The compile then checks them as §2 does.
+- `feeBps`: PCC's fee, an integer from 0 to 1000.
+- `licenseBps`: the royalty, an integer from 1 to 1000. A free kit pays nobody, so it has no split.
+- `lineage`: as in §12.2. The ids `kit-split:buyer` and `kit-split:operator` are reserved, and a lineage that names one is refused.
+
+A refused input answers `{ ok: false, reason }`, with a free-text reason.
+
+**The one-unit agreement** is `kitSplitAgreement(gross, input)`:
+- One unit, `job`, at the given gross. It uses the kit component `kit:kit-split` once.
+- The kit's License, `kit-license` version 1, whose licensor is `lineage[0]`. It is `permissive` and `registry-anchored`. It grants commercial use, composing, reselling and modifying in any field of use and region, requires attribution, and has one payment requirement: `kitRoyaltyRequirement({ bps: licenseBps, lineage })`.
+- A split, `lineage`, whose members are the distribution's parties at their weights.
+- The clause `kit-royalty`: a `percent` of `gross` at `licenseBps`, paid to the split `lineage` in every unit that uses the kit, under `kit-license` version 1.
+- The clause `operator`: the `residual`, paid to `kit-split:operator`.
+- PCC's fee at `feeBps`. The intended use is plain commercial use: not composite, not resold, in any field of use and region.
+
+Its other fields (labels, placeholder payout addresses and `asOf`) are fixed in the code and mean nothing. This section specifies only the amounts the agreement compiles to. `kitSplitAgreement` takes no quote, and it throws a `RangeError` for any other input that the **Input** rules above refuse. It does not compile, so an input that only the compile refuses, such as a negative `decimals`, still gives an agreement.
+
+**The gross.** Let `floor = quote − floor(quote × feeBps / 10000)`, the least the operator may receive under §9 (`OPERATOR_BELOW_QUOTE`). The gross `G` is the smallest amount, at least `quote`, at which the one-unit agreement pays the operator at least `floor`. At gross `G`, §4 gives:
+- the fee, `F = floor(G × feeBps / 10000)` (§4.2);
+- the royalty, `R`: `G × licenseBps / 10000` rounded to the nearest base unit, with a half rounding up. This is §4.3's largest remainder, for one clause against the rest claimant;
+- each member's share of `R`, by weight, by §4.5's largest remainder (a tie goes to the party whose id sorts first);
+- the operator's amount, `G − F − R`.
+
+One more base unit of gross can raise `F` and `R` together, so the operator's amount does not rise steadily with `G`. `G` is therefore the first amount from `quote` upward that passes, not the solution of an equation. If the compile refuses (a currency that §2 refuses, or a `G` above §2.2's bound), `computeKitSplit` refuses, and its reason lists the compiler's codes.
+
+**Result.**
+
+```
+{ ok: true, grossMinor: G, feeMinor: F, royaltyMinor: R, operatorMinor: G − F − R,
+  shares: { party, weight, amountMinor }[],
+  rounding: <the text below> }
+```
+
+Every amount is an Amount string. `shares` lists the distribution's members in the order they first appear in the lineage. A member whose share rounds to 0 is listed with `"0"`: it is a zero leg (§4.6), so it is not paid. `rounding` is always this text:
+
+> Exact base units. PCC's fee is the gross times its rate, rounded down. The royalty is the license's rate of the gross, rounded to the nearest base unit (a half rounds up). The royalty divides by lineage weight, by largest remainder; a tie goes to the party whose id sorts first. The operator receives the rest.
+
+**Examples** (USDC, 6 decimals):
+
+| Quote | feeBps | licenseBps | Lineage | G | F | R | Operator | Shares |
+|---|---|---|---|---|---|---|---|---|
+| 25000000 | 235 | 50 | carol, bob, ann | 25128666 | 590523 | 125643 | 24412500 | carol 71796, bob 35898, ann 17949 |
+| 2500000000 | 235 | 100 | bob, ann | 2525866528 | 59357863 | 25258665 | 2441250000 | bob 16839110, ann 8419555 |
+| 5 | 0 | 1000 | ann | 6 | 0 | 1 | 5 | ann 1 |
+| 1000 | 1000 | 1000 | ann, bob, ann | 1124 | 112 | 112 | 900 | ann 80, bob 32 |
+
+In the first row, `floor = 25000000 − 587500 = 24412500`, and at `G − 1` the operator would receive 24412499. In the third row, at `G = 5` the royalty of 0.5 rounds up to 1, which would leave the operator 4.
+
+**It assumes the operator is not one of the lineage's payees.** When the operator is also a contributor, §9's check counts the operator's share toward its minimum as well, so a smaller gross can pass. `computeKitSplit` does not look for that smaller gross.
+
+**Not in v1:** folding a share below the smallest leg into the forker's share, and a cap per unit over all kits. Both need a compiler rule, after the operator rules on the rates (operator item 99).

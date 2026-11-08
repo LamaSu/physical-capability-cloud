@@ -41,6 +41,7 @@ import {
   IdentityRegistryClient,
   REGISTRY_ADDRESSES,
 } from "@pcc/identity-8004";
+import { ChainWriteError } from "./chain-error-code.js";
 
 // ---------------------------------------------------------------------------
 // Env resolution
@@ -71,13 +72,17 @@ function resolveRegistryAddress(chainId: number): `0x${string}` {
   const override = process.env.IDENTITY_REGISTRY_ADDRESS as `0x${string}` | undefined;
   if (override) {
     if (!/^0x[0-9a-fA-F]{40}$/.test(override)) {
-      throw new Error(`IDENTITY_REGISTRY_ADDRESS is not a valid EVM address: ${override}`);
+      throw new ChainWriteError(
+        "config_invalid",
+        `IDENTITY_REGISTRY_ADDRESS is not a valid EVM address: ${override}`,
+      );
     }
     return override;
   }
   const known = REGISTRY_ADDRESSES[chainId];
   if (known) return known.identityRegistry;
-  throw new Error(
+  throw new ChainWriteError(
+    "config_invalid",
     `No ERC-8004 IdentityRegistry address known for chain ${chainId}. ` +
     `Set IDENTITY_REGISTRY_ADDRESS or use a supported chain.`,
   );
@@ -97,7 +102,8 @@ function resolvePrivateKey(): `0x${string}` | undefined {
     (process.env.DEPLOYER_PRIVATE_KEY as `0x${string}` | undefined);
   if (!key) return undefined;
   if (!/^0x[0-9a-fA-F]{64}$/.test(key)) {
-    throw new Error(
+    throw new ChainWriteError(
+      "config_invalid",
       "Identity write private key is not a valid 0x-prefixed 32-byte hex string",
     );
   }
@@ -136,7 +142,8 @@ function getWalletClient(): WalletClient {
   if (!_walletClient) {
     const key = resolvePrivateKey();
     if (!key) {
-      throw new Error(
+      throw new ChainWriteError(
+        "identity_write_disabled",
         "Identity registry write requires PCC_GATEWAY_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY",
       );
     }
@@ -256,8 +263,9 @@ export interface RegisterAgentOnChainResult {
 export async function registerAgentOnChain(
   input: RegisterAgentOnChainInput,
 ): Promise<RegisterAgentOnChainResult> {
-  if (!isIdentityWriteEnabled()) {
-    throw new Error(
+  if (!resolvePrivateKey()) {
+    throw new ChainWriteError(
+      "identity_write_disabled",
       "ERC-8004 identity write is disabled — set PCC_GATEWAY_PRIVATE_KEY",
     );
   }
@@ -276,7 +284,8 @@ export async function registerAgentOnChain(
   ];
   if (input.capabilityHash) {
     if (!/^0x[0-9a-fA-F]{64}$/.test(input.capabilityHash)) {
-      throw new Error(
+      throw new ChainWriteError(
+        "config_invalid",
         `capabilityHash must be 0x-prefixed 32-byte hex (got ${input.capabilityHash})`,
       );
     }
@@ -317,7 +326,8 @@ export async function registerAgentOnChain(
 
   const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
   if (receipt.status !== "success") {
-    throw new Error(
+    throw new ChainWriteError(
+      "tx_reverted",
       `IdentityRegistry.register reverted (tx ${txHash}, status ${receipt.status})`,
     );
   }
@@ -329,7 +339,8 @@ export async function registerAgentOnChain(
     logs: receipt.logs,
   });
   if (events.length === 0) {
-    throw new Error(
+    throw new ChainWriteError(
+      "tx_missing_event",
       `IdentityRegistry.register succeeded but emitted no Registered event (tx ${txHash})`,
     );
   }
@@ -355,42 +366,7 @@ export async function readAgentURI(agentId: bigint): Promise<string | null> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Option A ownership stopgap — per-operator operational wallet + setAgentWallet
-// See coord bulletin 234 (A/B/C debate) and 235 (strategic alignment).
-//
-// Flow:
-//   1. Gateway generates a fresh EOA per operator at provision time.
-//   2. Gateway custodies the private key at bootstrap (stored on api_keys row).
-//   3. After `register()` mints the identity to the gateway signer, gateway
-//      calls `setAgentWallet(agentId, operatorEOA, deadline, signature)` where
-//      the signature is an EIP-712 typed-data signature from the operator EOA
-//      (gateway holds the key so gateway signs on the operator's behalf).
-//   4. On-chain: agentId → agentWallet points at the operator's per-operator
-//      EOA (independently claimable/exportable). NFT owner stays the gateway
-//      (v2 via ERC-4337 passkey smart wallet will fix that — bulletin 235).
-//
-// Failure is non-fatal: if the setAgentWallet call reverts (e.g. the EIP-712
-// domain/typehash doesn't exactly match the deployed contract), we log it and
-// keep the operator's off-chain wallet — provisioning still succeeds.
-// ---------------------------------------------------------------------------
-
-export interface OperatorWallet {
-  address: `0x${string}`;
-  privateKey: `0x${string}`;
-}
-
-/**
- * Generate a fresh operator operational wallet (random EOA). The gateway
- * custodies the key at bootstrap; the operator can later claim it via a
- * future export endpoint.
- */
-export async function generateOperatorWallet(): Promise<OperatorWallet> {
-  const { generatePrivateKey, privateKeyToAccount } = await import("viem/accounts");
-  const privateKey = generatePrivateKey() as `0x${string}`;
-  const account = privateKeyToAccount(privateKey);
-  return { address: account.address, privateKey };
-}
+// The gateway never generates or holds an operator wallet key.
 
 export interface SetAgentWalletInput {
   agentId: bigint;
@@ -418,8 +394,9 @@ export interface SetAgentWalletResult {
 export async function setAgentWalletOnChain(
   input: SetAgentWalletInput,
 ): Promise<SetAgentWalletResult> {
-  if (!isIdentityWriteEnabled()) {
-    throw new Error(
+  if (!resolvePrivateKey()) {
+    throw new ChainWriteError(
+      "identity_write_disabled",
       "ERC-8004 identity write is disabled — set PCC_GATEWAY_PRIVATE_KEY",
     );
   }
@@ -468,7 +445,8 @@ export async function setAgentWalletOnChain(
 
   const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
   if (receipt.status !== "success") {
-    throw new Error(
+    throw new ChainWriteError(
+      "tx_reverted",
       `setAgentWallet reverted (tx ${txHash}, status ${receipt.status})`,
     );
   }

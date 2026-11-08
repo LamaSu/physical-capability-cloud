@@ -1,3 +1,5 @@
+import { readText } from "./dashboard-ir.js";
+import { physicalTextElement } from "./dashboard-ir-physical-text.type-test.js";
 /**
  * Phase B renderer conformance (item 7). Plain Node, no deps:
  *   npx tsx dashboard-ir-renderer.conformance.ts   (CI runs it via dashboard-ir.conformance-suite.test.ts)
@@ -13,11 +15,11 @@ const ok = (n: string, c: boolean, d?: string) => { assert.ok(c, `${n}${d ? " �
 function makeEl(tag: string): RElement {
   const attrs: Record<string, string> = {};
   const kids: RElement[] = [];
-  const e: any = {
+  const e: any = physicalTextElement({
     tagName: tag, textContent: "", className: "", children: kids, attrs,
     setAttr(name: string, value: string) { attrs[name] = value; },
     appendChild(c: RElement) { kids.push(c); return c; },
-  };
+  });
   return e as RElement;
 }
 const doc: RDocument = { createElement: makeEl };
@@ -74,7 +76,12 @@ bindListRows(doc, listEl, listNode, [
 const rowTexts = flat(listEl).map((x: any) => x.textContent).filter(Boolean);
 // ids are attributed (steward #5149: an identifier's grammar cannot exclude prose, so it reads "reported: ...")
 ok("valid rows rendered (j1 with meta+status, j2 title-only)", rowTexts.includes("reported: j1") && rowTexts.includes("reported: k9") && rowTexts.includes("done") && rowTexts.includes("reported: j2"));
-ok("malformed rows dropped (no phantom output)", listEl.children.length === 2);
+// N110: a window-disclosure sibling (the client cap: 3 shown of 6 returned) is now expected
+// alongside the 2 valid rows — select rows by class so this still proves exactly "no phantom
+// ROW output" rather than assuming the row count IS the total child count.
+const rowEls = (listEl.children as any[]).filter((c) => c.className === "pcc-row");
+ok("malformed rows dropped (no phantom output)", rowEls.length === 2);
+ok("nothing else but the one window note (exact child count)", (listEl.children as any[]).length === 3 && (listEl.children as any[])[2].className === "pcc-window");
 ok("non-selector field ('secret') NEVER rendered", !rowTexts.includes("LEAK"));
 
 // scalar bind: own-property read, proto-safe, type-validated by the field's closed kind (astra
@@ -83,12 +90,12 @@ ok("non-selector field ('secret') NEVER rendered", !rowTexts.includes("LEAK"));
 // used to exercise — exactly the behavior F2 closes — is no longer reachable through bindScalar;
 // they now exercise the same mechanics (plain read, proto-safety, nested-object rejection)
 // through a REAL (route, source) pair instead, expecting UNAVAILABLE rather than "".
-ok("bindScalar reads a typed field by its declared select (count)", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/kernels/k1", select: "kernel.reputation" } } as any, { kernel: { reputation: 42 } }) === "42");
-ok("bindScalar does not traverse the prototype chain for a nested source", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/kernels/k1", select: "kernel.reputation" } } as any, { kernel: Object.create({ reputation: 999 }) }) === UNAVAILABLE);
-ok("bindScalar rejects a nested-object value for a scalar-typed field (off-kind)", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/kernels/k1", select: "kernel.reputation" } } as any, { kernel: { reputation: { nested: 1 } } }) === UNAVAILABLE);
+ok("bindScalar reads a typed field by its declared select (count)", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/kernels/k1", select: "kernel.reputation" } } as any, { kernel: { reputation: 42 } }).t === "42");
+ok("bindScalar does not traverse the prototype chain for a nested source", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/kernels/k1", select: "kernel.reputation" } } as any, { kernel: Object.create({ reputation: 999 }) }).t === readText(UNAVAILABLE).t);
+ok("bindScalar rejects a nested-object value for a scalar-typed field (off-kind)", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/kernels/k1", select: "kernel.reputation" } } as any, { kernel: { reputation: { nested: 1 } } }).t === readText(UNAVAILABLE).t);
 // envelope source read (sol NO-GO(1) fix): a kernels stat's bind.select is "kernel.reputation",
 // which reads INTO the { kernel: … } envelope — so the metric actually populates, not inert.
-ok("bindScalar reads the kernel envelope source 'kernel.reputation'", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/kernels/k1", select: "kernel.reputation" } } as any, { kernel: { reputation: 850 } }) === "850");
+ok("bindScalar reads the kernel envelope source 'kernel.reputation'", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/kernels/k1", select: "kernel.reputation" } } as any, { kernel: { reputation: 850 } }).t === "850");
 
 // ── Fixed PCC-owned schema cards (hollow-node binding) ────────────────────────────
 // The manifest supplies a bind PATH only; PCC owns headings, labels, and each value's
@@ -132,7 +139,7 @@ ok("data-card value slots default to '—' (honest unavailable pre-fetch)", (() 
   ok("GATE-R settlement pointer never emits Paid/Verified (no fetched money field)", !/Paid|Verified/.test(rt.join(" ")));
 }
 
-const slots = (n: number) => Array.from({ length: n }, () => ({ textContent: "" }));
+const slots = (n: number) => Array.from({ length: n }, () => (physicalTextElement({ textContent: "" })));
 // GATE 1 — manifest selectors can NEVER relabel a field. The run window's statusFrom is
 // "amount"; the render reads the FIXED `status` key, never the manifest-selected `amount`.
 {

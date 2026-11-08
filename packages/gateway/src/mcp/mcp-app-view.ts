@@ -67,7 +67,7 @@ import {
   publicLookupThrottled,
   hashLookupKey,
 } from "../routes/artifacts.js";
-import { REGISTERED_OPERATION_IDS } from "./operation-ids.js";
+import { APP_HOST_OPERATION_IDS } from "./operation-ids.js";
 
 // ---------------------------------------------------------------------------
 // Constants — MIME, tool name, and the FIXED predeclared UI resource URIs.
@@ -1268,7 +1268,7 @@ export function buildMcpAppIrDashboardHtml(nonce: string = cspNonce()): string {
 /* PX-5 (build-controlled): manifest prose is agent-authored and is marked so; PCC's withheld
    notice (and every other PCC constant) is not. Bound values are data, not agent prose. */
 .pcc-agent{border-left:2px dashed currentColor;padding-left:6px}
-.pcc-text.pcc-agent::before,.pcc-heading.pcc-agent::before{content:"agent-authored";display:block;font-size:10px;letter-spacing:.06em;text-transform:uppercase;opacity:.6}
+.pcc-agent::before{content:"agent-authored";display:block;font-size:10px;letter-spacing:.06em;text-transform:uppercase;opacity:.6}
 .pcc-withheld{font-style:italic}
 /* PX-4 provenance (build-controlled; the design lane owns the final visual language).
    Authority is DERIVED, never manifest-chosen: agent-authored prose is also marked proposed
@@ -1279,7 +1279,7 @@ export function buildMcpAppIrDashboardHtml(nonce: string = cspNonce()): string {
 .pcc-fresh{font-size:12px}
 .pcc-stale,.pcc-unavail,.pcc-time-unknown{border-left:3px solid currentColor;padding-left:6px}
 .pcc-absent{font-style:italic}
-.pcc-empty{font-style:italic}
+.pcc-empty,.pcc-window{font-style:italic}
 </style>
 </head>
 <body>
@@ -1303,10 +1303,12 @@ function inlineJsonForScriptData(value: unknown): string {
 /** The shared inlined-function preamble for the single-manifest view. */
 function dashboardViewBootScript(): string {
   const kitSourceLiteral = pccUiKitSourceLiteral();
-  // R4 PR2 — the registered typed-operation ids, server-authored. Injected onto
-  // the window so the inlined kit offers ONLY these operations under host
-  // lockdown; every other action stays inert (default-DENY on the client too).
-  const operationsLiteral = JSON.stringify([...REGISTERED_OPERATION_IDS]);
+  // R4 PR2 — the typed operations a hosted view may run, server-authored. Injected onto
+  // the window so the inlined kit offers ONLY these operations under host lockdown;
+  // every other action stays inert (default-DENY on the client too). Only the
+  // read-only, approval-"none" subset (APP_HOST_OPERATION_IDS, asserted at load by
+  // operation-policy.ts): the kit runs these with no approval of its own (astra r2 F2).
+  const operationsLiteral = JSON.stringify([...APP_HOST_OPERATION_IDS]);
   return `(function () {
   'use strict';
   var KIT_SOURCE = ${kitSourceLiteral};
@@ -1859,7 +1861,7 @@ export function mcpAppMirrorRefusal(host: string | undefined): { status: number;
 }
 
 export function registerMcpAppHttpRoute(app: FastifyInstance): void {
-  app.get(HTTP_MIRROR_PATH, async (request, reply) => {
+  app.get(HTTP_MIRROR_PATH, { config: { cspOwnPolicy: true } }, async (request, reply) => {
     const refusal = mcpAppMirrorRefusal(request.headers.host);
     if (refusal) {
       return reply.code(refusal.status).type("text/plain; charset=utf-8").send(refusal.message);
