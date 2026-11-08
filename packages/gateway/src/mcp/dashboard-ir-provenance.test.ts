@@ -16,7 +16,7 @@ import { JSDOM } from "jsdom";
 import { describe, it, expect } from "vitest";
 import { kitText, dashboardManifestToIr, validateIr, sourceClassOf, provenanceOf, RECORD_CLAIM_NOTE, RECORD_STATUS_NOTE, WITHHELD_FIELD, type IrNode, type IrDoc } from "./dashboard-ir.js";
 import { sourceAsOf, isStale, acceptsNewer, ASOF_MAX_SKEW_MS } from "./dashboard-ir-binder.js";
-import { renderIrDoc, applyFreshness, applyUnknownTime, applyUnavailable, type RElement, type RDocument } from "./dashboard-ir-renderer.js";
+import { renderIrDoc, bootIrView, applyFreshness, applyUnknownTime, applyUnavailable, type RElement, type RDocument } from "./dashboard-ir-renderer.js";
 import { buildMcpAppIrDashboardHtml } from "./mcp-app-view.js";
 
 const KIT = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../../apps/dashboard/public/ui-kit/v1/pcc-ir-kit.js"), "utf8");
@@ -173,6 +173,9 @@ describe("PX-4 renderer markers (fake DOM)", () => {
       expect(e.attrs["data-source"]).toBeUndefined();
       expect(e.className.split(" ").some((c) => c.startsWith("pcc-src-"))).toBe(false);
     }
+    const failed = mk();
+    expect(bootIrView(doc, failed, {}, validateIr)).toBe(false);
+    expect(walk(failed).some((e) => e.attrs["data-source"] !== undefined || e.className.includes("pcc-src-"))).toBe(false);
   });
 
   it("an unknown node type paints inert, unconfirmed, and says couldn't confirm the source", () => {
@@ -185,6 +188,13 @@ describe("PX-4 renderer markers (fake DOM)", () => {
     expect(invalid[0]!.className.split(" ")).toContain("pcc-src-unconfirmed");
     expect(invalid[0]!.attrs["data-source"]).toBe("unconfirmed");
     expect(invalid[0]!.textContent).toBe("couldn't confirm the source");
+    ir.root.children[0]!.children = [{ type: "constructor", id: "x" } as IrNode];
+    renderIrDoc(doc, mount, ir);
+    const inherited = walk(mount).filter((e) => e.className.split(" ").includes("pcc-invalid"));
+    expect(inherited.length).toBe(1);
+    expect(inherited[0]!.className.split(" ")).toContain("pcc-src-unconfirmed");
+    expect(inherited[0]!.attrs["data-source"]).toBe("unconfirmed");
+    expect(inherited[0]!.textContent).toBe("couldn't confirm the source");
   });
 
   it("paint stamps data-source: prose 'proposed', bound 'authoritative'; nothing else", () => {
@@ -810,5 +820,27 @@ describe("astra r4 (#348 @3e615620): reproduced findings (verify before fix)", (
 describe("the IR view's waiting line", () => {
   it("the IR view's waiting line is marked as a passing state", () => {
     expect(buildMcpAppIrDashboardHtml()).toContain('<p class="pcc-invalid pcc-src-ephemeral" data-source="ephemeral">Waiting for the host to hand off a dashboard&hellip;</p>');
+  });
+});
+
+describe("the IR view's stylesheet", () => {
+  it("a container's proposed class is an attribute only: the view draws no agent-authored rule beside it", () => {
+    const html = buildMcpAppIrDashboardHtml();
+    const css = html.slice(html.indexOf("<style>") + 7, html.indexOf("</style>"));
+    const dom = new JSDOM("<!doctype html><html><head><style>" + css + '</style></head><body><main id="pcc-ir-root"></main></body></html>', { url: "https://capability.network/", runScripts: "outside-only" });
+    const w: any = dom.window;
+    w.parent.postMessage = () => {};
+    w.eval(KIT);
+    w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", id: 1, result: { protocolVersion: PROTOCOL } } }));
+    const manifest = { csd: "pcc://artifacts/dashboard/v1", title: "T", sections: [{ heading: "S", windows: [{ kind: "note", text: "n" }, { kind: "actions", actions: [{ id: "a", label: "Go" }] }, { kind: "form", schema: { type: "object", properties: { m: { title: "F", type: "string" } } } }] }] };
+    w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: { manifest: w.JSON.parse(w.JSON.stringify(manifest)) } } } }));
+    for (const sel of [".pcc-ir", ".pcc-section", ".pcc-grid", ".pcc-form"]) {
+      const e = w.document.querySelector(sel);
+      expect(e.getAttribute("data-source"), sel).toBe("proposed");
+      expect(w.getComputedStyle(e).borderLeftStyle, sel).not.toBe("dashed");
+    }
+    expect(w.getComputedStyle(w.document.querySelector(".pcc-text")).borderLeftStyle).toBe("dashed");
+    expect(w.__PCC_UI_TEXT_VIOLATIONS__ ?? 0).toBe(0);
+    w.close();
   });
 });

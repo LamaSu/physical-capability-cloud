@@ -1450,7 +1450,7 @@
     "field-label": (d, n) => paintProse(d, CLS["field-label"], n, "label")
   });
   function paintNode(doc, node) {
-    const p = PAINTERS[node.type];
+    const p = Object.prototype.hasOwnProperty.call(PAINTERS, node.type) ? PAINTERS[node.type] : void 0;
     const e = !p ? el(doc, CLS.invalid, UNCONFIRMED) : p(doc, node);
     const src = sourceClassOf(node);
     if (src !== null) {

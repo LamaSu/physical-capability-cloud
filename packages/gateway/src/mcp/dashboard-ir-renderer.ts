@@ -355,7 +355,7 @@ const PAINTERS: Readonly<Record<IrNodeType, Painter>> = Object.freeze({
   "field-label": (d, n) => paintProse(d, CLS["field-label"], n, "label"),
 });
 function paintNode(doc: RDocument, node: IrNode): RElement {
-  const p = PAINTERS[node.type];
+  const p = Object.prototype.hasOwnProperty.call(PAINTERS, node.type) ? PAINTERS[node.type] : undefined;
   // Frozen dispatch: an unknown type paints inert and says so.
   const e = !p ? el(doc, CLS.invalid, UNCONFIRMED) : p(doc, node);
   // Stamp the DERIVED authority class (never read from the node or the manifest): prose and
