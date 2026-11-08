@@ -170,7 +170,7 @@ contract VNextAbiFreezeTest is Test {
         assertEq(VNextSettlementEscrow.dischargeClaim.selector, bytes4(0xb409a86d), "dischargeClaim");
     }
 
-    function test_Freeze_KitReadSelectors() public pure {
+    function test_Freeze_KitReadSelectors() public view {
         assertEq(VNextSettlementEscrow.settlement.selector, bytes4(0x115785ee), "settlement");
         assertEq(VNextSettlementEscrow.unitCounters.selector, bytes4(0x0c5aca79), "unitCounters");
         assertEq(VNextSettlementEscrow.feeAmountsOf.selector, bytes4(0x6c523346), "feeAmountsOf");
