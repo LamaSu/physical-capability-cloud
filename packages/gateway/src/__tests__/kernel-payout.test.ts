@@ -168,6 +168,19 @@ describe("kernel payout record", () => {
     expect(bindings()).toEqual([]);
   });
 
+  it("B13b: the PUT passes the guard's missing-kernel and read-failure refusals through unchanged", async () => {
+    const app = await buildApp();
+    const owner = await ownerCredentials(app);
+    const missing = await bind(app, owner.headers, validBody(), "n21-missing");
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toEqual({ error: "kernel_not_found", message: "No kernel with this id is registered." });
+    getStore().db.run(sql`ALTER TABLE shop_kernels RENAME TO shop_kernels_b13b`);
+    const failed = await bind(app, owner.headers);
+    expect(failed.statusCode).toBe(503);
+    expect(failed.json()).toEqual({ error: "read_failed", message: "The kernel could not be read to check who operates it. Try again shortly." });
+    expect(bindings()).toEqual([]);
+  });
+
   it("T1: the owner's session key binds the proven wallet and exact consent", async () => {
     const app = await buildApp();
     const owner = await ownerCredentials(app);
