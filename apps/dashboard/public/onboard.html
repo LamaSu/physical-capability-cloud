@@ -549,7 +549,7 @@ function renderStep(){
         <div class="meta">POST /api/setup/test-job · runs only on a kernel the gateway operates in-process</div></div>`;
     } else if(S.lane==='human'){
       h=`<div class="kick">Step 05 · prove</div><div class="q" tabindex="-1">Prove a job.</div>
-      <p class="sub">No gateway route takes a skill's evidence yet, so this step activates nothing. Capture a photo + your GPS — that's a Tier 1 bundle.</p>
+      <p class="sub">No gateway route verifies a skill from its evidence yet, so this step activates nothing. Capture a photo + your GPS — that's a Tier 1 bundle.</p>
       <div class="prove-card"><div class="ico" style="font-family:var(--mono);color:var(--amber)">◐ EVIDENCE</div>
         <div class="big">${esc(S.name||'Your skill')}</div>
         <div class="evi"><button type="button" class="pill ${S.proof.photo?'got':''}" data-ev="photo">${S.proof.photo?'✓ photo':'▸ capture photo'}</button>

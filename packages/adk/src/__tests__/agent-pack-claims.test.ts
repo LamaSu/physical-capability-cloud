@@ -33,6 +33,7 @@ const ROWS = {
   "A7h": {"path": "packages/mcp-server/src/cli.ts", "old": "pcc setup test-job [--kernelId=<id>] [--deviceId=<id>] [--tier=<0-3>]\n  Submit a test job to verify the full pipeline.", "new": "pcc setup test-job --kernelId=<id> --deviceId=<id> [--tier=<0-3>]\n  Submit a test job; the gateway runs it only for a kernel it operates in-process."},
   "A22a": {"path": "packages/mcp-server/src/index.ts", "old": "Target kernel. Uses default if omitted.", "new": "Target kernel (required: the gateway answers 400 without it)."},
   "A22b": {"path": "packages/mcp-server/src/index.ts", "old": "Target device. Auto-selects if omitted.", "new": "Device on that kernel (required: the gateway answers 400 without it)."},
+  "A22c": {"path": "packages/mcp-server/src/index.ts", "old": "Assurance tier 0-3. Default 0 (no challenge window, auto-settle).", "new": "Assurance tier 0-3 (a test job settles nothing)."},
   "A9": {"path": "apps/dashboard/public/agent-package.json", "old": "Finalise a physical-operator onboarding session: registers the operator on PCC, mints a wallet, writes the SEO mirror, returns the publication payload (capabilities, operator_id, discovery_url). Idempotent — safe to retry inside the same session_id. Auth-required.", "new": "Finalise a physical-operator onboarding session. It mints no wallet, and it can't register the operator yet: its register call sends no API key, so the gateway refuses it and this call answers 500 `build_failed` with the refusal in `message`. A retry repeats the same refused call. Auth-required."},
   "B1": {"path": "apps/dashboard/public/agent-package.json", "old": "Signal that you want a capability that doesn't exist on the network yet. Creates a demand signal and may auto-create a bounty if enough demand accumulates.", "new": "Record that you want a capability no operator offers yet. The gateway keeps the signal in memory, publishes no demand yet, and creates no bounty."},
   "B2": {"path": "apps/dashboard/public/agent-package.json", "old": "List open bounties for capabilities the network needs. Operators can claim these to earn rewards by onboarding new capabilities.", "new": "List bounties. No gateway route creates a bounty and none is funded, so expect an empty list; no bounty pays anything."},
@@ -49,6 +50,16 @@ const ROWS = {
   "I7": {"path": "apps/dashboard/public/agent-package.json", "old": "Get the full IP lineage chain for an asset — parent capabilities and all derivative job registrations.", "new": "Get the IP lineage PCC has recorded for an asset: parent capabilities and derivative job records. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain."},
   "I8": {"path": "apps/dashboard/public/agent-package.json", "old": "Get the Story Protocol IP registration for a capability by its capability ID.", "new": "Get the IP record PCC holds for a capability by its capability ID. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. Any id or transaction hash in it is a placeholder."},
   "I9": {"path": "apps/dashboard/public/agent-package.json", "old": "Raise a Story Protocol IP dispute against an asset. Provide evidence hash and reason.", "new": "Record an IP dispute against an asset. Provide evidence hash and reason. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain."},
+  "I10s": {"path": "packages/mcp-server/src/index.ts", "old": "Register a PCC Capability StructureDefinition (CSD) as a Story Protocol IP Asset. Returns an ipId, nftTokenId, licenseTermsId, and transaction hash. The IP Asset enables programmable royalties for all future jobs using this capability.", "new": "Record a PCC Capability StructureDefinition (CSD) as an IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. Any ipId, nftTokenId, licenseTermsId or transaction hash it returns is a placeholder, and no royalty is paid."},
+  "I10c": {"path": "apps/dashboard/public/.well-known/mcp/server-card.json", "old": "Register a PCC Capability StructureDefinition (CSD) as a Story Protocol IP Asset. Returns an ipId, nftTokenId, licenseTermsId, and transaction hash. The IP Asset enables programmable royalties for all future jobs using this capability.", "new": "Record a PCC Capability StructureDefinition (CSD) as an IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. Any ipId, nftTokenId, licenseTermsId or transaction hash it returns is a placeholder, and no royalty is paid."},
+  "I11s": {"path": "packages/mcp-server/src/index.ts", "old": "Get the current revenue snapshot for a Story Protocol IP Asset — total accumulated revenue, unclaimed balance, and per-holder claimable amounts. Use this to check how much an IP Royalty Vault has accumulated.", "new": "Get the revenue PCC has recorded for an IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. No revenue has been paid: any figure it returns is a placeholder."},
+  "I11c": {"path": "apps/dashboard/public/.well-known/mcp/server-card.json", "old": "Get the current revenue snapshot for a Story Protocol IP Asset — total accumulated revenue, unclaimed balance, and per-holder claimable amounts. Use this to check how much an IP Royalty Vault has accumulated.", "new": "Get the revenue PCC has recorded for an IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. No revenue has been paid: any figure it returns is a placeholder."},
+  "I12s": {"path": "packages/mcp-server/src/index.ts", "old": "Claim accumulated revenue from a Story Protocol IP Royalty Vault. Returns a transaction hash and the amount claimed. Optionally specify which Royalty Token IDs to claim; omit to claim all.", "new": "Claim an IP asset's recorded revenue. Optionally specify which Royalty Token IDs to claim; omit to claim all. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. Nothing is paid out: any amount or transaction hash it returns is a placeholder."},
+  "I12c": {"path": "apps/dashboard/public/.well-known/mcp/server-card.json", "old": "Claim accumulated revenue from a Story Protocol IP Royalty Vault. Returns a transaction hash and the amount claimed. Optionally specify which Royalty Token IDs to claim; omit to claim all.", "new": "Claim an IP asset's recorded revenue. Optionally specify which Royalty Token IDs to claim; omit to claim all. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. Nothing is paid out: any amount or transaction hash it returns is a placeholder."},
+  "I13s": {"path": "packages/mcp-server/src/index.ts", "old": "Get the full IP lineage chain for a Story Protocol IP Asset — ancestors (parent CSDs this was derived from) and descendants (job evidence bundles and derivative CSDs). Shows the provenance graph of physical manufacturing work.", "new": "Get the IP lineage PCC has recorded for an IP asset: ancestors (parent CSDs) and descendants (job evidence records and derivative CSDs). Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain."},
+  "I13c": {"path": "apps/dashboard/public/.well-known/mcp/server-card.json", "old": "Get the full IP lineage chain for a Story Protocol IP Asset — ancestors (parent CSDs this was derived from) and descendants (job evidence bundles and derivative CSDs). Shows the provenance graph of physical manufacturing work.", "new": "Get the IP lineage PCC has recorded for an IP asset: ancestors (parent CSDs) and descendants (job evidence records and derivative CSDs). Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain."},
+  "I14s": {"path": "packages/mcp-server/src/index.ts", "old": "Configure revenue splits (Royalty Token distribution) for a Story Protocol IP Asset.\",\n    \"Splits must sum to 100. Each collaborator's role determines their share of all future revenue from this IP.", "new": "Configure revenue splits (Royalty Token distribution) for an IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain.\",\n    \"Splits must sum to 100. No revenue is paid from them today."},
+  "I14c": {"path": "apps/dashboard/public/.well-known/mcp/server-card.json", "old": "Configure revenue splits (Royalty Token distribution) for a Story Protocol IP Asset.\nSplits must sum to 100. Each collaborator's role determines their share of all future revenue from this IP.\n\nContributorRole taxonomy (ADR-12 §4 — see role responsibility table):\n  • operator             — runs the physical machine; residual share (typically 80-95% after others)\n  • verifier             — evaluates evidence, signs attestations; slashable (1-5%)\n  • insurer              — underwrites job failure coverage; opt-in (0-3%)\n  • integrator           — authored the machine-type adapter (OctoPrint, Bambu, ROS); 0-100 bps\n  • protocol-author      — authored the capability schema (CSD) + test vectors; 0-50 bps\n  • model-author         — trained the AI model invoked at execution time; 0-80 bps\n  • dataset-contributor  — pilot who collected training demonstrations; resolved via TrainingManifest\n  • curator              — organizes/audits a collection of contributions; 0-5%\n  • assembler            — composed multiple capabilities into a workflow; 0-50 bps\n\nLegacy aliases kept for backward decoding only — prefer the canonical names above:\n  • `designer` → use `protocol-author` / `assembler` / `integrator` depending on CSD kind\n  • `network`  → use `network-treasury`\n\nRecommended starting splits:\n  • Standard job (no AI):   operator 93, verifier 3, protocol-author 2, integrator 2\n  • Job with AI model:      operator 89, verifier 3, protocol-author 2, integrator 2, model-author 4\n\n", "new": "Configure revenue splits (Royalty Token distribution) for an IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain.\nSplits must sum to 100. No revenue is paid from them today.\n\nContributorRole taxonomy (ADR-12 §4 — see role responsibility table):\n  • operator             — runs the physical machine; residual share (typically 80-95% after others)\n  • verifier             — evaluates evidence, signs attestations; slashable (1-5%)\n  • insurer              — underwrites job failure coverage; opt-in (0-3%)\n  • integrator           — authored the machine-type adapter (OctoPrint, Bambu, ROS); 0-100 bps\n  • protocol-author      — authored the capability schema (CSD) + test vectors; 0-50 bps\n  • model-author         — trained the AI model invoked at execution time; 0-80 bps\n  • dataset-contributor  — pilot who collected training demonstrations; resolved via TrainingManifest\n  • curator              — organizes/audits a collection of contributions; 0-5%\n  • assembler            — composed multiple capabilities into a workflow; 0-50 bps\n\nLegacy aliases kept for backward decoding only — prefer the canonical names above:\n  • `designer` → use `protocol-author` / `assembler` / `integrator` depending on CSD kind\n  • `network`  → no name above replaces it; leave it out of new splits\n\nRecommended starting splits:\n  • Standard job (no AI):   operator 93, verifier 3, protocol-author 2, integrator 2\n  • Job with AI model:      operator 89, verifier 3, protocol-author 2, integrator 2, model-author 4\n\n"},
   "A12": {"path": "apps/dashboard/public/llms.txt", "old": "The `pcc-node` daemon polls for jobs and runs them locally; your endpoint never faces the network.", "new": "`pcc-node` keeps the kernel online and takes no jobs: devices run only through the operating agent's typed operations."},
   "A12o": {"path": "apps/dashboard/public/onboard.html", "old": "</code> polls for jobs and runs them locally.</span>", "new": "</code> keeps the kernel online and takes no jobs.</span>"},
   "A14": {"path": "apps/dashboard/public/llms.txt", "old": "- Settlement is real milestone escrow; funds release only when evidence meets the contracted assurance tier.", "new": "- Settlement isn't wired to job offers yet: no gateway route settles an offer or pays its operator, and a tier above 0 needs a committed evidence program that most capability types don't have."},
@@ -82,8 +93,11 @@ const ROWS = {
   "A26s": {"path": "packages/mcp-server/src/index.ts", "old": "  • `network`  → use `network-treasury`", "new": "  • `network`  → no name above replaces it; leave it out of new splits"},
   "A27": {"path": "apps/dashboard/public/agent-package.json", "old": "Starting from a fuzzy, natural-language ask is safe. The negotiate→commit dialogue (`POST /api/negotiate/session` → refine selections → commit) sharpens a loose request into exact, priced acceptance criteria BEFORE any settlement — nothing is charged until you commit a fully-specified contract, so looseness at discovery time costs nothing.", "new": "A negotiation session (`POST /api/negotiate/session`) doesn't start from a loose ask: it needs an exact capability type and one kernel that offers it. Its steps (select → quote → review → commit) turn that type's parameters into a priced quote and contract terms, and no step before commit charges anything."},
   "A28a": {"path": "apps/dashboard/public/onboard.html", "old": "POST /api/skills/&lt;id&gt;/verify · ALCOA+ · auto-activates at Tier 1", "new": "POST /api/skills/&lt;id&gt;/verify · no gateway route serves this yet, so nothing activates here"},
-  "A28b": {"path": "apps/dashboard/public/onboard.html", "old": "Human skills activate on real evidence.", "new": "No gateway route takes a skill's evidence yet, so this step activates nothing."},
+  "A28b": {"path": "apps/dashboard/public/onboard.html", "old": "Human skills activate on real evidence.", "new": "No gateway route verifies a skill from its evidence yet, so this step activates nothing."},
   "A28c": {"path": "apps/dashboard/public/onboard.html", "old": "lab:\"prove a job → photo + GPS → activate (Tier 1)\"", "new": "lab:\"photo + GPS evidence: no gateway route takes it yet\""},
+  "N2s": {"path": "packages/mcp-server/src/index.ts", "old": "Get reputation scores for a PCC kernel or agent — assurance tier, quality rating, uptime, response time, and evidence completeness.", "new": "Get the composition reputation PCC records for an agent or kernel: its score and its most recent changes. An id PCC has never seen reads as neutral."},
+  "N2c": {"path": "apps/dashboard/public/.well-known/mcp/server-card.json", "old": "Get reputation scores for a PCC kernel or agent — assurance tier, quality rating, uptime, response time, and evidence completeness.", "new": "Get the composition reputation PCC records for an agent or kernel: its score and its most recent changes. An id PCC has never seen reads as neutral."},
+  "N2h": {"path": "packages/mcp-server/src/cli.ts", "old": "pcc reputation get <agentId> [--tag=<tag>]\n  Get reputation scores for a kernel or agent.", "new": "pcc reputation get <agentId>\n  Get the composition reputation PCC records for a kernel or agent."},
   "A29": {"path": "apps/dashboard/public/agent-package.json", "old": "Operators are ERC-8004 identities with reputation scores tied to evidence-verified completions.", "new": "Operators are ERC-8004 identities, but no reputation score is tied to verified evidence yet: none checks evidence before it changes, so don't read a high score as proof of good work."},
   "A29m": {"path": "apps/dashboard/public/skills/pcc.md", "old": "Operators are ERC-8004 identities with reputation scores tied to evidence-verified completions.", "new": "Operators are ERC-8004 identities, but no reputation score is tied to verified evidence yet: none checks evidence before it changes, so don't read a high score as proof of good work."},
   "A30a": {"path": "apps/dashboard/public/onboard.html", "old": "Prove it works → go live.", "new": "Prove it works."},
@@ -138,6 +152,22 @@ describe("N240 public claims", () => {
     }
   });
 
+  it.each([
+    ["I1", "register_capability_ip"],
+    ["I2", "register_job_evidence_ip"],
+    ["I3", "distribute_royalties"],
+    ["I4", "pay_ip_royalty"],
+    ["I5", "claim_ip_revenue"],
+    ["I6", "get_ip_revenue"],
+    ["I7", "get_ip_lineage"],
+    ["I8", "get_capability_ip"],
+    ["I9", "raise_ip_dispute"],
+  ] as const)("PC3 %s keeps the exact IP description in the pack and root fixture", (id, name) => {
+    for (const pkg of [pack(), fixture()]) {
+      expect(description(pkg, name)).toBe(ROWS[id].new);
+    }
+  });
+
   it("PC3 every IP tool carries the Story sentence and promises no on-chain revenue", () => {
     const ipTools = pack().tools.filter((tool) => tool.endpoint.path.startsWith("/api/ip/"));
     const index = read(INDEX);
@@ -146,6 +176,16 @@ describe("N240 public claims", () => {
     expect(ipTools).toHaveLength(9);
     expect(names).toHaveLength(5);
     expect(cards).toHaveLength(5);
+    for (const [sourceId, cardId, name] of [
+      ["I10s", "I10c", "pcc_ip_register_capability"],
+      ["I11s", "I11c", "pcc_ip_revenue_snapshot"],
+      ["I12s", "I12c", "pcc_ip_claim"],
+      ["I13s", "I13c", "pcc_ip_lineage"],
+      ["I14s", "I14c", "pcc_ip_set_splits"],
+    ] as const) {
+      changed(sourceId, index);
+      expect(cards.find((tool) => tool.name === name)?.description).toBe(ROWS[cardId].new);
+    }
     const texts = [...ipTools.map((tool) => tool.description), ...names.map((name) => toolBlock(index, name)), ...cards.map((tool) => tool.description)];
     for (const text of texts) {
       expect(text).toContain(STORY);
@@ -159,6 +199,7 @@ describe("N240 public claims", () => {
     expect(cardTools().find((tool) => tool.name === "pcc_setup_test_job")?.description).toBe(ROWS.A7c.new);
     const index = read(INDEX);
     for (const id of ["A7s", "A22a", "A22b"] as const) changed(id, index);
+    changed("A22c", index);
     changed("A7h");
   });
 
@@ -172,6 +213,9 @@ describe("N240 public claims", () => {
 
   it("PC6 stdio and CLI reputation handlers use the served route and accept no tag", () => {
     const index = toolBlock(read(INDEX), "pcc_get_reputation");
+    changed("N2s", index);
+    changed("N2h");
+    expect(cardTools().find((tool) => tool.name === "pcc_get_reputation")?.description).toBe(ROWS.N2c.new);
     const cli = read(CLI);
     const start = cli.indexOf("  reputation: {");
     expect(start).toBeGreaterThanOrEqual(0);
