@@ -518,7 +518,7 @@ export function createHost(deps: HostDeps): {
           const code: FundingCode | undefined = facts.operator !== deps.operatorAddress?.toLowerCase() ? "funding_operator_mismatch"
             : unit.escrow === undefined || unit.escrow.toLowerCase() !== facts.escrowAddress ? "funding_escrow_mismatch"
             : facts.chainId !== config.chain.chainId ? "funding_chain_mismatch"
-            : !(Number.isSafeInteger(facts.fundedAt) && facts.fundedAt >= 1_600_000_000 && facts.fundedAt < 2 ** 32 && facts.fundedAt < unit.reclaimAt) ? "funding_bad_time"
+            : !(Number.isSafeInteger(facts.fundedAt) && facts.fundedAt >= 1_600_000_000 && facts.fundedAt < 2 ** 32 && facts.fundedAt < unit.reclaimAt && facts.fundedAt <= Math.floor(now() / 1_000)) ? "funding_bad_time"
             : unit.fundedAt !== undefined && unit.fundedAt !== facts.fundedAt ? "funding_mismatch" : undefined;
           if (code) { logFunding(job.jobId, code); continue; }
         }

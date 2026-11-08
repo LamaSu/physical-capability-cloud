@@ -1672,6 +1672,7 @@ describe("CODE #41 gateway funding (D2-D6, D4, A1)", () => {
     ["fundedAt below the protocol range", "funding_bad_time"],
     ["fundedAt at 2^32", "funding_bad_time"],
     ["fundedAt equal to reclaimAt", "funding_bad_time"],
+    ["fundedAt ahead of the host clock", "funding_bad_time"],
     ["manifest fundedAt", "funding_mismatch"],
   ] as const)("a verified funding whose %s does not match claims nothing and reserves no unit", async (field, code) => {
     const setup = await fixture();
@@ -1684,6 +1685,13 @@ describe("CODE #41 gateway funding (D2-D6, D4, A1)", () => {
     else if (field === "fundedAt below the protocol range") funding.fundedAt = 1_599_999_999;
     else if (field === "fundedAt at 2^32") funding.fundedAt = 2 ** 32;
     else if (field === "fundedAt equal to reclaimAt") funding.fundedAt = inputs.unit.reclaimAt;
+    else if (field === "fundedAt ahead of the host clock") {
+      // The fake printer's events start at this fixed time.
+      setup.advance(Date.UTC(2026, 9, 9) - 3_600_000 - setup.deps.clock!());
+      funding.fundedAt = Math.floor(setup.deps.clock!() / 1_000) + 3_600;
+      delete inputs.unit.fundedAt;
+      expect(funding.fundedAt).toBeLessThan(inputs.unit.reclaimAt);
+    }
     else inputs.unit.fundedAt = setup.funding.fundedAt - 1;
     setup.inputSource.mockResolvedValue({ ok: true, value: inputs });
     setup.gateway.pollJobs.mockResolvedValue({ ok: true, value: { stop: { proceed: true },
@@ -1694,6 +1702,24 @@ describe("CODE #41 gateway funding (D2-D6, D4, A1)", () => {
     expect(setup.gateway.reportInProgress).not.toHaveBeenCalled();
     expect(await setup.journal.has(jobId)).toBe(false);
     expect(setup.logs.filter((entry) => entry === code)).toHaveLength(1);
+    if (field === "fundedAt ahead of the host clock") {
+      setup.advance(3_599_999);
+      expect(await setup.host.runOnce()).toEqual({ kind: "idle", waitMs: 5_000 });
+      expect(reserve).not.toHaveBeenCalled();
+      expect(setup.gateway.reportInProgress).not.toHaveBeenCalled();
+      expect(await setup.journal.has(jobId)).toBe(false);
+      expect(setup.logs.filter((entry) => entry === code)).toHaveLength(1);
+      expect(setup.gateway.pollJobs).toHaveBeenCalledTimes(2);
+      setup.advance(1);
+      expect(await finish(setup)).toMatchObject({ jobId, state: "submitted" });
+      expect(setup.gateway.pollJobs).toHaveBeenCalledTimes(4);
+      expect(reserve).toHaveBeenCalledTimes(1);
+      expect(setup.gateway.reportInProgress).toHaveBeenCalledTimes(1);
+      expect((await setup.journal.read(jobId))[0]).toMatchObject({ state: "claimed",
+        funding: { ...setup.gatewayClaim, fundedAt: funding.fundedAt } });
+      expect(setup.deviceKey.signDelegation.mock.calls[0][0].fundedAt).toBe(funding.fundedAt);
+      expect(setup.logs.filter((entry) => entry === code)).toHaveLength(1);
+    }
   });
 
   it("a refused job never blocks a later verified job in the same poll", async () => {

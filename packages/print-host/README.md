@@ -371,7 +371,8 @@ In gateway mode the host claims a queued job only when its `funding` reads
 selected by state (a cancelled, expired or unknown scope never counts). That
 verification's operator must be the host's (ignoring case), its escrow the
 manifest's `unit.escrow`, and its chain `chain.chainId`; its `fundedAt` must be
-an integer in `[1_600_000_000, 2^32)` below `unit.reclaimAt`. The manifest's
+an integer in `[1_600_000_000, 2^32)` below `unit.reclaimAt`
+and no later than the host clock. The manifest's
 `unit.fundedAt` is optional and, if present, must be equal. No clock reading or
 estimate ever stands in. Otherwise the job is not claimed, stays queued, the
 host moves on to the next job, and logs one code: `funding_absent` (no
