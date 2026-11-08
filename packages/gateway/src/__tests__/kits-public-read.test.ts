@@ -199,6 +199,17 @@ describe("K1b public reads through the real gate and scope checker", () => {
       }
     }
   });
+
+  it("P8: public listing and detail replies carry only their published fields", async () => {
+    const listed = ["kitDigest", "name", "version", "parentKitDigest", "csdUrls", "compatibility", "declaredAssuranceTiers", "publishedAt"];
+    const listing = (await app.inject({ method: "GET", url: "/api/kits" })).json();
+    expect(Object.keys(listing).sort()).toEqual(["kits", "total"]);
+    expect(listing.kits).toHaveLength(1);
+    for (const kit of listing.kits) expect(Object.keys(kit).filter((key) => !listed.includes(key))).toEqual([]);
+    const detail = (await app.inject({ method: "GET", url: `/api/kits/${kitDigest}` })).json();
+    expect(Object.keys(detail)).toEqual(["kit"]);
+    expect(Object.keys(detail.kit).sort()).toEqual(["kitDigest", "manifest", "publishedAt"]);
+  });
 });
 
 describe("K1b verified listing index on real files", () => {
@@ -336,6 +347,24 @@ describe("K1b verified listing index on real files", () => {
     expect(pubAt).toBeGreaterThanOrEqual(0);
     expect(manifestAt).toBeGreaterThan(pubAt);
     expect(openAt).toBeGreaterThan(manifestAt);
+  });
+
+  it("I8b: bytes that change after verification are seen on the next call", async () => {
+    const { root, registry, digests } = await seeded();
+    const manifest = fileFor(root, "manifests", digests[0]!);
+    await delay(50);
+    await fs.writeFile(manifest, await fs.readFile(manifest));
+    type Verify = (this: KitRegistry, digest: string) => Promise<unknown>;
+    const original = (KitRegistry.prototype as unknown as { readVerified: Verify }).readVerified;
+    vi.spyOn(KitRegistry.prototype as unknown as { readVerified: Verify }, "readVerified").mockImplementationOnce(async function (this: KitRegistry, d: string) {
+      const verified = await original.call(this, d);
+      await delay(50);
+      await flipByte(manifest);
+      return verified;
+    });
+    expect((await registry.list()).total).toBe(1);
+    expect(await registry.list()).toEqual({ kits: [], total: 0 });
+    expect(registry.skipped).toContain(digests[0]);
   });
 
   it("I9: warm filters, ties, ordering, totals and pagination equal a fresh registry", async () => {
