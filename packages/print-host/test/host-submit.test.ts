@@ -1330,7 +1330,7 @@ describe("r5d receipt refusals and non-blocking recovery (R4, A3)", () => {
     }
     expect(await states(setup)).toEqual(completedStates);
     expect(setup.sentData).toHaveLength(1);
-    expect((await recovered.journal.read(otherJob)).map((entry) => entry.state)).toEqual(["evidence_stored", "package_built"]);
+    expect((await recovered.journal.read(otherJob)).map((entry) => entry.state)).toEqual(["claimed", "evidence_stored", "package_built"]);
     expect(setup.gateway.postReceipt.mock.calls.filter(([id]) => id === otherJob)).toHaveLength(2);
     expect(setup.gateway.postReceipt.mock.calls.filter(([id]) => id === jobId)).toHaveLength(3);
     expect(recovered.broadcaster.submit).toHaveBeenCalledTimes(1);
@@ -1425,6 +1425,7 @@ describe("REVIEW A3 liveness under run() (repro)", () => {
     const pkg = await setup.diskPackage();
     const stuck = ["a1:package-built", "a2:package-built", "a3:package-built", jobId];
     for (const other of stuck.slice(0, 3)) {
+      await setup.journal.append(other, "claimed", undefined, { funding: setup.gatewayClaim });
       await setup.journal.append(other, "evidence_stored");
       await setup.journal.savePackage(other, pkg);
       await setup.journal.append(other, "package_built", undefined, { packageDigest: pkg.packageDigest, evidenceBlockHash: pkg.evidenceBlockHash });
@@ -1466,6 +1467,7 @@ describe("REVIEW A3 liveness under run() (repro)", () => {
     const pkg = await setup.diskPackage();
     const stuck = [...Array.from({ length: count - 1 }, (_, index) => `a${index}:package-built`), jobId];
     for (const other of stuck.slice(0, -1)) {
+      await setup.journal.append(other, "claimed", undefined, { funding: setup.gatewayClaim });
       await setup.journal.append(other, "evidence_stored");
       await setup.journal.savePackage(other, pkg);
       await setup.journal.append(other, "package_built", undefined, { packageDigest: pkg.packageDigest, evidenceBlockHash: pkg.evidenceBlockHash });
@@ -1508,6 +1510,7 @@ describe("REVIEW A3 liveness under run() (repro)", () => {
     expect(await finish(setup)).toMatchObject({ state: "package_built" });
     const pkg = await setup.diskPackage();
     async function addRecovery(id: string) {
+      await setup.journal.append(id, "claimed", undefined, { funding: setup.gatewayClaim });
       await setup.journal.append(id, "evidence_stored");
       await setup.journal.savePackage(id, pkg);
       await setup.journal.append(id, "package_built", undefined, { packageDigest: pkg.packageDigest, evidenceBlockHash: pkg.evidenceBlockHash });
@@ -1530,6 +1533,7 @@ describe("REVIEW A3 liveness under run() (repro)", () => {
     expect(await finish(setup)).toMatchObject({ state: "package_built" });
     const other = "a:package-built";
     const pkg = await setup.diskPackage();
+    await setup.journal.append(other, "claimed", undefined, { funding: setup.gatewayClaim });
     await setup.journal.append(other, "evidence_stored");
     await setup.journal.savePackage(other, pkg);
     await setup.journal.append(other, "package_built", undefined, { packageDigest: pkg.packageDigest, evidenceBlockHash: pkg.evidenceBlockHash });
@@ -1569,6 +1573,7 @@ describe("REVIEW r3 caps stall under run()", () => {
     const pkg = await setup.diskPackage();
     for (let i = 0; i < others; i++) {
       const other = `a${i}:package-built`;
+      await setup.journal.append(other, "claimed", undefined, { funding: setup.gatewayClaim });
       await setup.journal.append(other, "evidence_stored");
       await setup.journal.savePackage(other, pkg);
       await setup.journal.append(other, "package_built", undefined, { packageDigest: pkg.packageDigest, evidenceBlockHash: pkg.evidenceBlockHash });
@@ -1604,6 +1609,7 @@ describe("REVIEW r3 caps stall under run()", () => {
     const pkg = await setup.diskPackage();
     const others = ["a0:package-built", "a1:package-built"];
     for (const other of others) {
+      await setup.journal.append(other, "claimed", undefined, { funding: setup.gatewayClaim });
       await setup.journal.append(other, "evidence_stored");
       await setup.journal.savePackage(other, pkg);
       await setup.journal.append(other, "package_built", undefined, { packageDigest: pkg.packageDigest, evidenceBlockHash: pkg.evidenceBlockHash });
@@ -1815,6 +1821,27 @@ describe("CODE #41 gateway funding (D2-D6, D4, A1)", () => {
     const before = await setup.diskRecords();
     await recovered.host.runOnce();
     expect(await setup.diskRecords()).toEqual(before);
+  });
+
+  it("A1: a recovered sendable unit with no claim record at all ends refused funding_source_manifest and is never sent", async () => {
+    const setup = await fixture();
+    setup.gateway.postReceipt.mockResolvedValueOnce({ ok: false, code: "unavailable", status: 503 });
+    expect(await finish(setup)).toMatchObject({ state: "package_built" });
+    const recoveredJob = "a:no-claim";
+    const pkg = await setup.diskPackage();
+    await setup.journal.append(recoveredJob, "evidence_stored");
+    await setup.journal.savePackage(recoveredJob, pkg);
+    await setup.journal.append(recoveredJob, "package_built", undefined, {
+      packageDigest: pkg.packageDigest, evidenceBlockHash: pkg.evidenceBlockHash });
+    expect((await setup.journal.read(recoveredJob)).map((entry) => entry.state)).toEqual(["evidence_stored", "package_built"]);
+    const recovered = await restart(setup);
+    expect(await recovered.host.runOnce()).toMatchObject({ jobId: recoveredJob, state: "refused" });
+    expect((await recovered.journal.read(recoveredJob)).at(-1)).toMatchObject({ state: "refused", code: "funding_source_manifest" });
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+    expect(setup.broadcaster.submit).not.toHaveBeenCalled();
+    expect(setup.gateway.postReceipt.mock.calls.filter(([id]) => id === recoveredJob)).toHaveLength(0);
+    expect(setup.sentData).toEqual([]);
+    expect(setup.logs.filter((code) => code === "funding_source_manifest")).toHaveLength(1);
   });
 
   it("A1: a submit_indeterminate unit whose claim record says manifest keeps its read-back and is never re-sent", async () => {
