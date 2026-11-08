@@ -13,6 +13,10 @@
  *   - log-chain.ts        — verifyLogChain + computeLogEntryHash
  *                           (from packages/kernel/src/log-capture-service.ts).
  *                           Powers #52 machine.execution_log.
+ *   - challenge-freshness.ts — verifyExecutionFreshness + verifyCaptureFreshness
+ *                           (from packages/verifier/src/workflow/challenge-service.ts)
+ *                           and makeFreshChallengeBoundVerifier. Powers #48
+ *                           fresh.challenge_bound.
  *   - oracle-binding.ts   — the fail-closed STUB seam for #52–#55; the real
  *                           PrimitiveVerifier binding is the settlement lane.
  *   - registered-signer.ts — the algorithm-tagged RegisteredSigner (Option C):
@@ -22,5 +26,6 @@
  */
 export * from "./drift-predicates.js";
 export * from "./log-chain.js";
+export * from "./challenge-freshness.js";
 export * from "./oracle-binding.js";
 export * from "./registered-signer.js";
