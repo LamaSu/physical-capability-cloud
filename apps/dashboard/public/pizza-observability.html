@@ -47,7 +47,7 @@ header{position:sticky;top:0;z-index:30;display:flex;align-items:center;justify-
 @keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 
 /* ── top stat bar ── */
-.statbar{position:relative;z-index:1;display:grid;grid-template-columns:repeat(5,1fr);gap:12px;max-width:1500px;margin:0 auto;padding:16px 18px 4px}
+.statbar{position:relative;z-index:1;display:grid;grid-template-columns:repeat(4,1fr);gap:12px;max-width:1500px;margin:0 auto;padding:16px 18px 4px}
 .tile{background:linear-gradient(180deg,var(--surface),var(--bg2));border:1px solid var(--line);border-radius:var(--r);padding:14px 16px}
 .tile .k{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint)}
 .tile .v{font-family:var(--display);font-weight:800;font-size:clamp(20px,2.4vw,30px);line-height:1.05;margin-top:6px;letter-spacing:-.01em}
@@ -204,7 +204,6 @@ body.big .oc-id{font-size:19px}
   <div class="tile lime"><div class="k">Active orders</div><div class="v" id="stActive">0</div><div class="s" id="stActiveSub">live on the substrate</div></div>
   <div class="tile cyan"><div class="k">Volume today</div><div class="v" id="stVolume">$0</div><div class="s" id="stVolumeSub">0 delivered</div></div>
   <div class="tile amber"><div class="k">Avg time-to-deliver</div><div class="v" id="stAvg">—</div><div class="s">order → dropoff</div></div>
-  <div class="tile violet"><div class="k">PCC fee today</div><div class="v" id="stFee">$0</div><div class="s">2.35% protocol fee</div></div>
   <div class="tile conn"><div class="k">Firehose</div><div class="v"><span class="dot" id="fhDot"></span><span id="fhTxt">connecting</span></div><div class="s" id="fhSub">/sse/demo/firehose</div></div>
 </div>
 
@@ -295,7 +294,7 @@ const STATUS_PILL={
 const ST={
   orders:new Map(),            // id -> order record (base + merged timeline/chain)
   feed:[], chain:[], chainSeen:new Set(),
-  stats:{activeOrders:0,completedToday:0,totalVolumeUSD:0,pccFeeUSDToday:0,avgTimeToDeliverSec:0,totalOrders:0},
+  stats:{activeOrders:0,completedToday:0,totalVolumeUSD:0,avgTimeToDeliverSec:0,totalOrders:0},
   filter:"all", search:"",
   expSteps:new Set(), expFeed:new Set(),
 };
@@ -378,7 +377,6 @@ function renderStats(){
   $("#stVolume").textContent=money(s.totalVolumeUSD);
   $("#stVolumeSub").textContent=s.completedToday+" delivered today";
   $("#stAvg").textContent=s.avgTimeToDeliverSec?fmtDur(s.avgTimeToDeliverSec):"—";
-  $("#stFee").textContent=money(s.pccFeeUSDToday);
 }
 
 function orderList(){
@@ -500,7 +498,6 @@ function renderStepDetail(o,step,at){
   if(det.assuranceTier!=null)rows.push(["assurance tier",`T${det.assuranceTier} <span class="tag mock">mock</span>`]);
   if(det.shopPayoutUSD!=null)rows.push(["shop payout",`$${det.shopPayoutUSD}`]);
   if(det.driverPayoutUSD!=null)rows.push(["driver payout",`$${det.driverPayoutUSD}`]);
-  if(det.pccFeeUSD!=null)rows.push(["pcc fee",`$${det.pccFeeUSD}`]);
   if(det.shopDelta!=null)rows.push(["shop Δrep",`+${det.shopDelta}`]);
   if(det.driverDelta!=null)rows.push(["driver Δrep",`+${det.driverDelta}`]);
   if(det.engine)rows.push(["engine",esc(det.engine)]);
@@ -563,7 +560,7 @@ function feedSummary(topic,ev){
   if(t==="timeline")return `${ev.entry.label}`;
   if(t==="chain_event"){const c=ev.chainEvent;return `${c.type.replace(/_/g," ")}${c.amountUSDC?" · "+c.amountUSDC+" USDC":""}`;}
   if(t==="status")return `status → ${ev.order.status}`;
-  if(t==="delivered")return `delivered · settled $${(ev.settlement?.shopPayoutUSD||0)+(ev.settlement?.driverPayoutUSD||0)+(ev.settlement?.pccFeeUSD||0)}`;
+  if(t==="delivered")return `delivered · settled ${money((ev.settlement?.shopPayoutUSD||0)+(ev.settlement?.driverPayoutUSD||0))}`;
   if(t==="job_assigned")return `job assigned → ${ev.job.assigneeSlug} · ${ev.job.type}`;
   if(t==="job_accepted")return `job accepted · ${ev.job.type}`;
   if(t==="job_pickup")return `picked up · ${ev.job.type}`;

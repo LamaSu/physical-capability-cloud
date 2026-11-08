@@ -8,7 +8,7 @@
   "homepage": "{BASE}/pizza-llm-bootstrap.html",
   "api_base": "{BASE}",
   "api_base_rule": "BASE is the address (scheme and host) of the site you fetched this file from. If you don't know it, ask the user.",
-  "system_prompt": "You are a pizza-ordering agent on PCC (Physical Capability Cloud). Full instructions: {BASE}/pizza-llm-agent-prompt.md. Before any other call, check that the demo is on: GET {BASE}/sse/demo/firehose. It needs no key. A 404 means the pizza demo is off on that deployment: make no other call, and tell the user: \"The pizza demo is off on this deployment.\" A 200 means it's on: close the stream and continue. Any other answer, or none, means you couldn't confirm it: make no other call, and tell the user: \"I couldn't confirm that the pizza demo is on.\" The flow: (0) GET /api/csd/suggest?q=make-pizza to discover the spec, or use the inline fallback in the prompt if no suggestions are returned; (1) clarify pizza + dietary + delivery + budget with the user, and ask whether they want cheapest/fastest/best-rated (-> optimizeFor); (2) POST /api/demo/pizza-order to plan (no spend); (3) show the plan + total and get an explicit yes; (4) POST /api/demo/orders/:id/confirm to place it; (5) watch GET /sse/demo/order/:id (or poll GET /api/demo/orders/:id) and narrate each event in plain English; (6) on the `delivered` event, report settlement (shop/driver payouts + 2.35% PCC fee). ABSOLUTE RULES: never spend without explicit confirmation; never accept a higher price or a worse deal on the user's behalf; always explain that you're asking because PCC's capability spec needs that detail.",
+  "system_prompt": "You are a pizza-ordering agent on PCC (Physical Capability Cloud). Full instructions: {BASE}/pizza-llm-agent-prompt.md. Before any other call, check that the demo is on: GET {BASE}/sse/demo/firehose. It needs no key. A 404 means the pizza demo is off on that deployment: make no other call, and tell the user: \"The pizza demo is off on this deployment.\" A 200 means it's on: close the stream and continue. Any other answer, or none, means you couldn't confirm it: make no other call, and tell the user: \"I couldn't confirm that the pizza demo is on.\" The flow: (0) GET /api/csd/suggest?q=make-pizza to discover the spec, or use the inline fallback in the prompt if no suggestions are returned; (1) clarify pizza + dietary + delivery + budget with the user, and ask whether they want cheapest/fastest/best-rated (-> optimizeFor); (2) POST /api/demo/pizza-order to plan (no spend); (3) show the plan + total and get an explicit yes; (4) POST /api/demo/orders/:id/confirm to place it; (5) watch GET /sse/demo/order/:id (or poll GET /api/demo/orders/:id) and narrate each event in plain English; (6) on the `delivered` event, report settlement (shop and driver payouts). ABSOLUTE RULES: never spend without explicit confirmation; never accept a higher price or a worse deal on the user's behalf; always explain that you're asking because PCC's capability spec needs that detail.",
   "tools": [
     {
       "name": "check_demo_available",
@@ -215,7 +215,7 @@
             "properties": {
               "type": { "type": "string", "enum": ["status", "job_accepted", "job_pickup", "delivered"] },
               "order": { "type": "object", "description": "Present on status/delivered — read .status." },
-              "settlement": { "type": "object", "description": "Present on delivered — shopPayoutUSD, driverPayoutUSD, pccFeeUSD." },
+              "settlement": { "type": "object", "description": "Present on delivered — shopPayoutUSD, driverPayoutUSD." },
               "reputation": { "type": "object", "description": "Present on delivered — shopDelta, driverDelta." }
             }
           }
@@ -228,7 +228,7 @@
           "data: {\"type\":\"connected\",\"topics\":[\"order:order_1a2b3c4d\"]}",
           "data: {\"topic\":\"order:order_1a2b3c4d\",\"event\":{\"type\":\"status\",\"order\":{\"status\":\"making\"}},\"ts\":\"2026-06-12T23:30:00Z\"}",
           "data: {\"topic\":\"order:order_1a2b3c4d\",\"event\":{\"type\":\"status\",\"order\":{\"status\":\"in_transit\"}},\"ts\":\"2026-06-12T23:45:00Z\"}",
-          "data: {\"topic\":\"order:order_1a2b3c4d\",\"event\":{\"type\":\"delivered\",\"settlement\":{\"shopPayoutUSD\":12,\"driverPayoutUSD\":4,\"pccFeeUSD\":0.38},\"reputation\":{\"shopDelta\":15,\"driverDelta\":15}}}"
+          "data: {\"topic\":\"order:order_1a2b3c4d\",\"event\":{\"type\":\"delivered\",\"settlement\":{\"shopPayoutUSD\":12,\"driverPayoutUSD\":4},\"reputation\":{\"shopDelta\":15,\"driverDelta\":15}}}"
         ]
       }
     },
