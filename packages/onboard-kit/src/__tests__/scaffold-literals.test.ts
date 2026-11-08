@@ -31,6 +31,15 @@ const VARIABLE_NAMES = [
   "implements", "interface", "let", "package", "private", "protected", "public", "static", "arguments", "eval",
   "EvidenceEmitter", "JobRunner", "capabilities", "console", "evidenceEmitter", "jobRunner", "process",
 ];
+const WINDOWS_DEVICE_NAMES = [
+  "con", "prn", "aux", "nul", "com0", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+  "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+const API_KEY_STEMS = [
+  "AIRBYTE", "AISA", "ANTHROPIC", "CARTESIA", "CDP", "COHERE", "DEEPGRAM", "DEEPSEEK", "EASYPOST", "ETHERSCAN", "GEMINI", "GOOGLE",
+  "GROQ", "LIT", "LOB", "MISTRAL", "OPENAI", "OPENROUTER", "PCC", "PCC_DECOMPOSE", "PCC_REVOKE", "PCC_SMITHERY", "POSTHOG",
+  "POSTHOG_PERSONAL", "XAI", "YELLOWCARD",
+];
 const kebab = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/([A-Z])([A-Z][a-z])/g, "$1-$2").toLowerCase();
 const camel = (s: string) => s.replace(/[-_](.)/g, (_, c) => c.toUpperCase());
 const envName = (s: string) => s.replace(/[-]/g, "_").toUpperCase();
@@ -41,8 +50,10 @@ const r2 = (v: unknown) => `${shown(v)} is a name the generated code already use
 const r4 = (v: unknown) => `${shown(v)} is not an adapter id the scaffold can use (a letter, then letters or digits with single "-" or "_" between them, at most 64 characters); the scaffold makes a variable and environment variables from it`;
 const r5variable = (v: string) => `${shown(v)} makes the variable ${camel(v)}, a name the generated kernel.ts already uses or JavaScript reserves`;
 const r5env = (v: string, name: string) => `${shown(v)} makes the environment variable ${name}, which .env.example already defines`;
+const r5api = (v: string) => `${shown(v)} makes the environment variable ${envName(v)}_API_KEY, which other software already reads as its API key; choose another adapter id`;
 const r7 = "contains a line break; the scaffold writes it as one line of .env.example";
 const r8 = (v: unknown) => `${shown(v)} is not a finite number; the scaffold writes it into the adapter's code`;
+const r9 = 'is not an environment variable name (a letter or "_", then letters, digits or "_"); the scaffold writes it as a key of .env.example';
 const scratchDirs: string[] = [];
 const marker = () => (globalThis as typeof globalThis & { __N303?: number }).__N303;
 function scratch(): string {
@@ -541,13 +552,16 @@ describe("N303 scaffold literals and identifier rules", () => {
   }
   for (const [id, path] of [["M1", "src/kernel.ts"], ["M2", "src/agent.ts"], ["M3", ".env.example"]]) {
     it(`SL3-${id} kernel name stays in its comment`, () => {
-      const config = example(); config.kernel.name = HC;
-      const text = content(config, path);
-      expect(text).toContain(comment(HC));
-      if (id === "M3") {
-        expect(text.split("\n")[0]).toBe(`# ${comment(HC)} — Environment Variables`);
-        expect(envKeys(text)).toEqual(envKeys(content(example(), path)));
-      } else inspect(text, id === "M2" ? HC : undefined);
+      for (const lineBreak of ["\n", "\r", "\r\n", "\u2028", "\u2029"]) {
+        const value = `a */ (globalThis.__N303 = 1); /* b${lineBreak}EXTRA=1`;
+        const config = example(); config.kernel.name = value;
+        const text = content(config, path);
+        expect(text).toContain(comment(value));
+        if (id === "M3") {
+          expect(text.split("\n")[0]).toBe(`# ${comment(value)} — Environment Variables`);
+          expect(envKeys(text)).toEqual(envKeys(content(example(), path)));
+        } else inspect(text, id === "M2" ? value : undefined);
+      }
     });
   }
   it("SL3-M4 protocol stays in its comment", () => {
@@ -570,22 +584,42 @@ describe("N303 scaffold literals and identifier rules", () => {
       expect(fieldErrors(config, "pollIntervalMs")).toEqual([]);
     }
   });
-  const envFields: Array<[string, string, (c: OnboardConfig, v: string) => void]> = [
-    ["a", "kernel.walletPrivateKeyEnvVar", (c, v) => { c.kernel.walletPrivateKeyEnvVar = v; }],
-    ["b", "kernel.gatewayUrl", (c, v) => { c.kernel.gatewayUrl = v; }],
-    ["c", "adapter[dev-haas-vf2].connectionString", (c, v) => { c.adapters[0].connectionString = v; }],
+  const envFields: Array<[string, string, (c: OnboardConfig, v: unknown) => void]> = [
+    ["a", "kernel.walletPrivateKeyEnvVar", (c, v) => { c.kernel.walletPrivateKeyEnvVar = v as never; }],
+    ["b", "kernel.gatewayUrl", (c, v) => { c.kernel.gatewayUrl = v as never; }],
+    ["c", "adapter[dev-haas-vf2].connectionString", (c, v) => { c.adapters[0].connectionString = v as never; }],
   ];
   for (const [id, name, set] of envFields) {
     it(`SL5${id} ${name} is one environment line`, () => {
       for (const lineBreak of ["\n", "\r", "\r\n", "\u2028", "\u2029"]) {
-        const config = example(); set(config, `prefix${lineBreak}EXTRA=1`);
-        refusal(config, name, r7);
-        set(config, "prefixEXTRA=1");
+        const text = `prefix${lineBreak}EXTRA=1`;
+        for (const value of [text, [text], [[text]]]) {
+          const config = example(); set(config, value);
+          refusal(config, name, r7);
+          if (id === "a") expect(validate({ config }).errors.filter(e => e.name === name)).toEqual([
+            { name, message: r7, passed: false, severity: "error" },
+          ]);
+        }
+        const config = example(); set(config, id === "a" ? "prefixEXTRA_1" : "prefixEXTRA=1");
         expect(validate({ config }).errors.filter(e => e.name === name)).toEqual([]);
         expect(() => scaffold({ config })).not.toThrow();
       }
     });
   }
+  it("SL5d walletPrivateKeyEnvVar is an environment variable name", () => {
+    for (const value of ["NODE_OPTIONS=--require ./x.js #", "prefixEXTRA=1", "", "9KEY", "KEY-NAME", "KEY NAME", "KEY.NAME", "KÉY", 7, true, {}, ["KERNEL_PRIVATE_KEY"]]) {
+      const config = example(); config.kernel.walletPrivateKeyEnvVar = value as never;
+      refusal(config, "kernel.walletPrivateKeyEnvVar", r9);
+    }
+    for (const value of ["KERNEL_PRIVATE_KEY", "TEST_KERNEL_KEY", "K", "_KEY", "key1", undefined, null]) {
+      const config = example();
+      if (value === undefined) Reflect.deleteProperty(config.kernel, "walletPrivateKeyEnvVar");
+      else config.kernel.walletPrivateKeyEnvVar = value as never;
+      expect(fieldErrors(config, "walletPrivateKeyEnvVar")).toEqual([]);
+      expect(() => scaffold({ config })).not.toThrow();
+      if (typeof value === "string") expect(content(config, ".env.example").split("\n")).toContain(`${value}=0x_YOUR_PRIVATE_KEY_HERE`);
+    }
+  });
   it("SL6a accepted class names keep portable file names", () => {
     for (const name of ["HaasVF2Adapter", "ShopPowerMeter", "QCCamera", "LiquidAdapter", "TestMachine", "TestSensor", "QSensor", "PrinterAdapter", "A", "A" + "b".repeat(63)]) {
       const config = sensorConfig(); config.adapters[0].className = name;
@@ -623,7 +657,7 @@ describe("N303 scaffold literals and identifier rules", () => {
     }
   });
   it("SL6f class names make files allowed on Windows", () => {
-    for (const name of ["Con", "CON", "Nul", "Aux", "Prn", "Com1", "Lpt9"]) {
+    for (const name of [...WINDOWS_DEVICE_NAMES.map(n => n[0].toUpperCase() + n.slice(1)), "CON"]) {
       const config = sensorConfig(); config.adapters[0].className = name;
       refusal(config, "adapter[dev-sensor-q].className", `${shown(name)} makes the file src/adapters/${kebab(name)}.ts, a reserved device name on Windows`);
     }
@@ -661,6 +695,10 @@ describe("N303 scaffold literals and identifier rules", () => {
     refusal(config, "adapter[gateway].adapterId", r5env("gateway", "GATEWAY_URL"));
     config.adapters[1].adapterId = "dev-power-meter"; config.kernel.walletPrivateKeyEnvVar = "DEV_HAAS_VF2_URL";
     refusal(config, "adapter[dev-haas-vf2].adapterId", r5env("dev-haas-vf2", "DEV_HAAS_VF2_URL"));
+    for (const value of ["DEV_HAAS_VF2_API_KEY", ["DEV_HAAS_VF2_API_KEY"], ["DEV_HAAS_VF2_URL"]]) {
+      config.kernel.walletPrivateKeyEnvVar = value as never;
+      refusal(config, "adapter[dev-haas-vf2].adapterId", r5env("dev-haas-vf2", String(value)));
+    }
   });
   it("SL7f variable name list covers the generated kernel declarations and globals", () => {
     for (const config of [example(), fdmExample()]) {
@@ -668,6 +706,18 @@ describe("N303 scaffold literals and identifier rules", () => {
       for (const name of moduleOrFreeNames(content(config, "src/kernel.ts"))) {
         if (/^[A-Za-z][A-Za-z0-9]*$/.test(name) && !own.has(name)) expect(VARIABLE_NAMES, name).toContain(name);
       }
+    }
+  });
+  it("SL7g adapter ids make no API key name other software reads", () => {
+    for (const id of [...API_KEY_STEMS.map(stem => stem.toLowerCase().replace(/_/g, "-")), "OpenAI"]) {
+      const config = sensorConfig(); config.adapters[0].adapterId = id;
+      refusal(config, `adapter[${id}].adapterId`, r5api(id));
+    }
+    const config = example(); config.adapters[0].adapterId = "openai";
+    refusal(config, "adapter[openai].adapterId", r5api("openai"));
+    for (const id of ["openai-sim", "pcc-node", "ot2", "trilobio", "clip", "lit-sensor"]) {
+      const config = sensorConfig(); config.adapters[0].adapterId = id;
+      expect(fieldErrors(config, "adapterId"), id).toEqual([]);
     }
   });
   it("SL8a CLI reports the class name rule before writing files", () => {

@@ -37,11 +37,18 @@ const RESERVED_VARIABLE_NAMES = new Set([
   "EvidenceEmitter", "JobRunner", "capabilities", "console", "evidenceEmitter", "jobRunner", "process",
 ]);
 const WINDOWS_DEVICE_NAMES = new Set([
-  "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
-  "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+  "con", "prn", "aux", "nul", "com0", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+  "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+]);
+// Stems of API key variables other software already reads; this interim list cannot be complete.
+const API_KEY_STEMS = new Set([
+  "AIRBYTE", "AISA", "ANTHROPIC", "CARTESIA", "CDP", "COHERE", "DEEPGRAM", "DEEPSEEK", "EASYPOST", "ETHERSCAN", "GEMINI", "GOOGLE",
+  "GROQ", "LIT", "LOB", "MISTRAL", "OPENAI", "OPENROUTER", "PCC", "PCC_DECOMPOSE", "PCC_REVOKE", "PCC_SMITHERY", "POSTHOG",
+  "POSTHOG_PERSONAL", "XAI", "YELLOWCARD",
 ]);
 const CLASS_NAME = /^[A-Z][A-Za-z0-9]{0,63}$/;
 const ADAPTER_ID = /^[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*$/;
+const ENV_VAR_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" ? value as Record<string, unknown> : {};
@@ -66,14 +73,20 @@ export function scaffoldRuleProblems(config: OnboardConfig): Array<{ name: strin
   const problems: Array<{ name: string; message: string }> = [];
   const add = (name: string, message: string) => { problems.push({ name, message }); };
   const line = (name: string, value: unknown) => {
-    if (typeof value === "string" && /[\r\n\u2028\u2029]/.test(value)) {
+    if (/[\r\n\u2028\u2029]/.test(text(value))) {
       add(name, "contains a line break; the scaffold writes it as one line of .env.example");
+      return true;
     }
+    return false;
   };
-  line("kernel.walletPrivateKeyEnvVar", kernel.walletPrivateKeyEnvVar);
+  if (!line("kernel.walletPrivateKeyEnvVar", kernel.walletPrivateKeyEnvVar)
+    && kernel.walletPrivateKeyEnvVar !== undefined && kernel.walletPrivateKeyEnvVar !== null
+    && (typeof kernel.walletPrivateKeyEnvVar !== "string" || !ENV_VAR_NAME.test(kernel.walletPrivateKeyEnvVar))) {
+    add("kernel.walletPrivateKeyEnvVar", 'is not an environment variable name (a letter or "_", then letters, digits or "_"); the scaffold writes it as a key of .env.example');
+  }
   line("kernel.gatewayUrl", kernel.gatewayUrl);
   const reservedEnvNames = new Set(["GATEWAY_URL", "MOCK_MODE"]);
-  if (typeof kernel.walletPrivateKeyEnvVar === "string") reservedEnvNames.add(kernel.walletPrivateKeyEnvVar);
+  reservedEnvNames.add(text(kernel.walletPrivateKeyEnvVar));
   const validIdAdapters = adapters.filter(a => validId(a.adapterId));
   const files = new Map<string, string>(), variables = new Map<string, string>(), envNames = new Map<string, string>();
 
@@ -92,6 +105,8 @@ export function scaffoldRuleProblems(config: OnboardConfig): Array<{ name: strin
         add(`${prefix}.adapterId`, `${display(id)} makes the variable ${variable}, which is the class name of adapter[${text(otherClass.adapterId)}]`);
       } else if (envClash) {
         add(`${prefix}.adapterId`, `${display(id)} makes the environment variable ${envClash}, which .env.example already defines`);
+      } else if (API_KEY_STEMS.has(env)) {
+        add(`${prefix}.adapterId`, `${display(id)} makes the environment variable ${env}_API_KEY, which other software already reads as its API key; choose another adapter id`);
       } else if (variables.has(variable)) {
         add(`${prefix}.adapterId`, `${display(id)} makes the variable ${variable}, which adapter[${variables.get(variable)}] also makes`);
       } else if (envNames.has(env)) {
