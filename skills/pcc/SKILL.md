@@ -33,7 +33,7 @@ capabilities, organised much like a cloud provider:
 | Availability Zone | **Shop Kernel** — a physical site (workshop, lab, factory) with equipment |
 | Billable service | **Capability** — not a machine, but what it can *do* (3D printing, CNC milling, HPLC analysis, courier dispatch) |
 | SLA tier | **Assurance Tier** (0–3) — how much evidence backs a completed job, from self-attested to full multi-verifier proof |
-| Payment | **Milestone escrow** on-chain (Base) — funds release only when evidence meets the tier |
+| Payment | **Milestone escrow** on Base Sepolia, a test network — not wired to job offers yet: nothing settles an offer or pays its operator |
 
 Operators register what their equipment can do; you, acting for the user,
 find them, agree a price, commit to the job, and verify the outcome before
@@ -51,7 +51,7 @@ export PCC_BASE="${PCC_BASE:-https://capability.network}"
 
 Every path below is relative to it. The full machine-readable surface is
 also published as an OpenAPI 3 document (`GET /openapi.json`) and as a
-single-file agent package (`GET /agent-package.json` — 240+ tools with
+single-file agent package (`GET /agent-package.json` — 230+ tools with
 JSON-Schema inputs and HTTP endpoint mappings, built for any LLM that isn't
 Claude and doesn't have this skill loaded).
 
@@ -274,7 +274,7 @@ hardware auto-detection and kernel registration in one command for operators
 who'd rather run a CLI than call the API directly. It needs an API key: provision
 one first and pass it as `PCC_API_KEY` or `--api-key`. Without one it stops,
 because the gateway refuses to provision a key without an email. Until
-0.1.1 is on PyPI, install `python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node"`.
+0.1.1 is on PyPI, install `python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@1d11f37203f99eb1c9f2cfcd2b5ccf278e835820#subdirectory=packages/pcc-node"`.
 From 0.1.1 the node keeps the kernel online but takes no jobs itself: jobs run
 through the operating agent's typed operations.
 
@@ -291,7 +291,7 @@ through the operating agent's typed operations.
 ## Reference
 
 - Full OpenAPI 3 spec: `GET /openapi.json`
-- Full agent package (240+ tools, JSON-Schema inputs): `GET /agent-package.json`
+- Full agent package (230+ tools, JSON-Schema inputs): `GET /agent-package.json`
 - Agent Skills discovery index: `GET /.well-known/agent-skills/index.json`
 - A2A agent card: `GET /.well-known/agent-card.json`
 - Status: `GET /health`

@@ -53,7 +53,7 @@ Agents can compose an interactive dashboard for a physical task by calling the M
 
 There are three "lanes" — three economic-agent shapes:
 
-- Machine — a robot, printer, instrument, or lab. Bound by an adapter (`octoprint`, `modbus`, `opcua`, `sila`, `generic-http`, `mock`). The `pcc-node` daemon polls for jobs and runs them locally; your endpoint never faces the network.
+- Machine — a robot, printer, instrument, or lab. Bound by an adapter (`octoprint`, `modbus`, `opcua`, `sila`, `generic-http`, `mock`). `pcc-node` keeps the kernel online and takes no jobs: devices run only through the operating agent's typed operations.
 - Human skill — a person offering a skill. Gets pinged, accepts within a window, finishes by a deadline.
 - Asset — a thing that posts outbound demand on its own behalf, bidding for capabilities within an owner-set budget.
 
@@ -80,7 +80,7 @@ CLI alternative: `pip install pcc-node && pcc-node start` auto-detects hardware,
 ## Notes for agents
 
 - Authentication: hiring and other protected operations require `Authorization: Bearer <key>`. Public discovery includes `POST /ask`, capability types, well-known catalogs/cards, the agent package, and the MCP transport endpoint.
-- Settlement is real milestone escrow; funds release only when evidence meets the contracted assurance tier.
+- Settlement isn't wired to job offers yet: no gateway route settles an offer or pays its operator, and a tier above 0 needs a committed evidence program that most capability types don't have.
 - The MCP server exposes 254 real tools over Streamable HTTP at `https://capability.network/mcp`. A stdio transport remains available by running `packages/mcp-server/dist/index.js` from a cloned, built repository with `PCC_URL=https://capability.network`.
 - A second, read-only MCP surface at `https://capability.network/mcp/docs` serves PCC's documentation as MCP resources (`docs://pcc/agent-guide`, `docs://pcc/api`, `docs://pcc/quickstart`) plus a `search_docs` tool — use it to learn the API before calling the product server to act on it.
 - Full human + agent integration guide is served by the gateway; this file is the short index.
