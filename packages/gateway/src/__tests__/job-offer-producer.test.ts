@@ -13,6 +13,10 @@
  * degrade (compositionRoot omitted, capabilityContractRoot stamped
  * regardless — it needs no digest), full dual-root stamping once
  * matchedCapabilityDigest is present (PR #300), and idempotency.
+ *
+ * v4 (composition 8a0f4de0's #1827 Finding C): a digest that is PRESENT but
+ * malformed must HOLD, not degrade like an absent one -- see
+ * "holds on a malformed-but-present digest" below.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -300,6 +304,28 @@ describe("produceJobOffersForRequest (bridge, coord #1276)", () => {
     expect(
       result.held!.violations.some((v) => v.includes("references a node not in the plan")),
     ).toBe(true);
+  });
+
+  it("holds on a malformed-but-present digest, unlike the absent-digest degrade case (Finding C)", async () => {
+    // Present but wrong shape (too short, not the 0x+64-hex form) -- distinct
+    // from AGENTIC_MATCHED_NODE's genuinely absent digest. @pcc/spec's own
+    // violation message is identical for "absent" and "malformed" (both are
+    // "matched node missing/invalid matchedCapabilityDigest"), so this producer
+    // must draw the distinction itself rather than degrade-publish through
+    // what could be a real upstream data-integrity bug.
+    const malformed: CapabilityNode = {
+      ...AGENTIC_MATCHED_NODE,
+      matchedCapabilityDigest: "0xnotarealdigest",
+    };
+    const req = baseRequest([malformed]);
+    const result = await produceJobOffersForRequest(req);
+
+    expect(result.created).toHaveLength(0);
+    expect(result.held).toBeDefined();
+    expect(
+      result.held!.violations.some((v) => v.includes("missing/invalid matchedCapabilityDigest")),
+    ).toBe(true);
+    expect(getJobOffersStore().listOpen({ capabilityType: "cnc-3axis" })).toHaveLength(0);
   });
 
   it("is idempotent — publishing the same request twice does not double-create offers", async () => {
