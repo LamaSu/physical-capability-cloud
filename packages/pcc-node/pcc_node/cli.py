@@ -20,7 +20,7 @@ import click
 from . import __version__
 from .config import ConfigFileError, NodeConfig, generate_config, save_config, load_config, load_config_data
 from .crypto import CompromisedKeyError, CryptoUnavailableError, KeyFileError, load_or_create_keys
-from .daemon import run_daemon, is_running, read_state
+from .daemon import FirstHeartbeatError, run_daemon, is_running, read_state
 from .detect import detect_all
 from .discovery import (
     discover_network,
@@ -524,7 +524,16 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
     except RegistrationError as exc:
         click.echo(
             f"Registration failed (HTTP {exc.status}) at {config.pcc_base}: {exc.data}. "
-            "The node is NOT registered and the daemon did not start; check the API key and gateway.",
+            "The first registration succeeded, but the daemon's own registration did not, so the daemon "
+            "did not start and the node is not running; check the API key and gateway, then run pcc-node start again.",
+            err=True,
+        )
+        sys.exit(1)
+    except FirstHeartbeatError:
+        click.echo(
+            f"The kernel registered at {config.pcc_base}, but its first heartbeat was not confirmed, "
+            "so the daemon did not start and the node is not running; check the API key and gateway, "
+            "then run pcc-node start again.",
             err=True,
         )
         sys.exit(1)
