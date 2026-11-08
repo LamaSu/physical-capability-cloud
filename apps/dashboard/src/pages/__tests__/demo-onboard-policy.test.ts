@@ -9,11 +9,15 @@ const PAGES = [
     file: "pizza-onboard-shop.html",
     rowText: "Your order policy isn't saved: this demo doesn't save policies.",
     subtitle: "This demo doesn't save your policy, so your choice here doesn't change how orders are handled.",
+    auto: "Accept orders automatically when price + capacity check out.",
+    paths: ["GET /sse/demo/firehose", "POST /api/auth/provision", "POST /api/kernels", "POST /api/capabilities", "POST /api/compose/_dev/register-candidate", "POST /api/capabilities/graph/_dev/register-node", "GET /api/skills"],
   },
   {
     file: "pizza-onboard-driver.html",
     rowText: "Your delivery policy isn't saved: this demo doesn't save policies.",
     subtitle: "This demo doesn't save your policy, so your choice here doesn't change how deliveries are handled.",
+    auto: "Accept deliveries automatically when price + range check out.",
+    paths: ["GET /sse/demo/firehose", "POST /api/auth/provision", "POST /api/skills/register", "POST /api/compose/_dev/register-candidate", "POST /api/capabilities/graph/_dev/register-node", "GET /api/capabilities/by-type/pizza"],
   },
 ];
 const MODES = [
@@ -21,6 +25,7 @@ const MODES = [
   { ...PAGES[0], mode: "negotiate" },
   { ...PAGES[0], mode: "always-prompt" },
   { ...PAGES[1], mode: "auto" },
+  { ...PAGES[1], mode: "negotiate" },
   { ...PAGES[1], mode: "always-prompt" },
 ];
 let requests: [string, string][];
@@ -99,6 +104,7 @@ describe("the onboarding wizards' policy step", () => {
 
     expect.soft(requests.filter(([, url]) => url.includes("operator-policy") || url.includes("/api/operator/policy"))).toEqual([]);
     expect.soft(requests.filter(([method]) => method === "PUT" || method === "PATCH")).toEqual([]);
+    expect.soft(requests.map(([method, url]) => method + " " + new URL(url, location.origin).pathname)).toEqual(page.paths);
     const lastRow = document.querySelector("#liveLog .call:last-child");
     expect.soft(lastRow?.querySelector(".lab")?.textContent).toBe(page.rowText);
     expect.soft(lastRow?.querySelector(".st")?.textContent).toBe("not saved");
@@ -115,6 +121,7 @@ describe("the onboarding wizards' policy step", () => {
 
     expect.soft(document.querySelector("#stepBody p.sub")?.textContent).toBe(page.subtitle);
     for (const card of document.querySelectorAll(".pcard")) expect.soft(card.textContent).not.toContain("best for the demo");
+    expect.soft(document.querySelector('.pcard[data-mode="auto"] p')?.textContent).toBe(page.auto);
   });
 
   it("neither wizard keeps the policy request, its body builder or its PUT helper", () => {
