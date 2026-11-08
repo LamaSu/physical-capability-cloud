@@ -360,7 +360,7 @@
   ],
   "quickstart": {
     "availability": "Before any other call, check that the demo is on: GET {BASE}/sse/demo/firehose. It needs no key. A 404 means the pizza demo is off on that deployment: make no other call, and tell the user: \"The pizza demo is off on this deployment.\" A 200 means it's on: close the stream and continue. Any other answer, or none, means you couldn't confirm it: make no other call, and tell the user: \"I couldn't confirm that the pizza demo is on.\" Order of operations: check_demo_available -> discover_csd_suggestions -> (clarify with user) -> place_pizza_order -> (show plan, get yes) -> confirm_order -> watch_order/get_order -> report settlement on `delivered` event.",
-    "curl_relay": "If your session has no HTTP tool, write the curl command for the user to run and ask them to paste back the JSON. For status, have them re-run `curl -s {BASE}/api/demo/orders/<id>` every ~15s instead of streaming."
+    "curl_relay": "If your session has no HTTP tool, write the curl command for the user to run and ask them to paste back the JSON. For status, have them re-run `curl -s -H 'authorization: Bearer pcc_live_...' {BASE}/api/demo/orders/<id>` every ~15s instead of streaming."
   },
   "metadata": {
     "tool_count": 12,

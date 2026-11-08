@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { PUBLISHED_SURFACES } from "../../lib/public-claims";
 
 const ROOT = fileURLToPath(new URL("../../../../../", import.meta.url));
 const PUBLIC = "apps/dashboard/public/";
@@ -23,6 +24,9 @@ describe("pizza agent documents", () => {
   it("the prompt checks the demo before its first demo call", () => {
     expect(prompt).toContain(TEXT_CHECK);
     expect(prompt.indexOf(TEXT_CHECK)).toBeLessThan(prompt.indexOf("/api/demo/"));
+    const reference = prompt.slice(prompt.indexOf("## Quick reference")).split("\n").filter((line) => /^\d+\./.test(line));
+    expect(reference[0]).toBe("0. GET  /sse/demo/firehose                     → 404: the demo is off, stop; 200: on, close the stream; anything else: you couldn't confirm it, stop");
+    expect(reference[1].split("→")[0].trimEnd()).toBe("1. GET  /api/csd/suggest?q=make-pizza");
   });
   it("the prompt tells the agent what to say when the demo is off or unconfirmed", () => {
     expect(prompt.split(TEXT_OFF).length - 1).toBeGreaterThanOrEqual(2);
@@ -44,6 +48,9 @@ describe("pizza agent documents", () => {
     expect(prompt).not.toContain("capability.network");
     expect(prompt).not.toContain("AWS for the physical world");
     expect(prompt.split(TEXT_BASE).length - 1).toBe(2);
+    expect(prompt).toContain("    -H 'authorization: Bearer pcc_live_...' \\");
+    expect(prompt).toContain("`curl -s -H 'authorization: Bearer pcc_live_...' {BASE}/api/demo/orders/<id>`");
+    expect(prompt).not.toContain("curl -s {BASE}/api/demo/");
   });
   it("the package starts with the demo check", () => {
     expect(pkg.tools[0].name).toBe("check_demo_available");
@@ -62,9 +69,11 @@ describe("pizza agent documents", () => {
     for (const tool of pkg.tools) if (/keyless|PUBLIC/.test(tool.description)) expect(open).toContain(tool.endpoint.method + " " + tool.endpoint.path);
     for (const text of ["needs no API key", "endpoints are keyless", "public (keyless)", "NOT required for the pizza demo", "PUBLIC for the demo gateway"]) expect(raw).not.toContain(text);
     expect(pkg.quickstart).not.toHaveProperty("keyless");
+    expect(pkg.quickstart.curl_relay).toContain("curl -s -H 'authorization: Bearer pcc_live_...' {BASE}/api/demo/orders/<id>");
   });
   it("the package names no fixed host for its own files and calls", () => {
     expect(pkg.api_base).toBe("{BASE}");
+    expect(pkg.api_base_rule).toBe("BASE is the address (scheme and host) of the site you fetched this file from. If you don't know it, ask the user.");
     expect(raw.match(/https:\/\/capability\.network/g)).toHaveLength(2);
     expect(raw.match(/https:\/\/capability\.network\/agent-package\.json/g)).toHaveLength(2);
   });
@@ -92,5 +101,23 @@ describe("links into the demo", () => {
     }
     for (const path of ["apps/dashboard/public", "apps/dashboard/src", "docs"]) walk(path);
     expect(links).toEqual([]);
+  });
+  it("lists every demo file as a published surface", () => {
+    for (const path of [
+      "apps/dashboard/public/order.html",
+      "apps/dashboard/public/driver.html",
+      "apps/dashboard/public/operator.html",
+      "apps/dashboard/public/operator-capture.html",
+      "apps/dashboard/public/pizza-observability.html",
+      "apps/dashboard/public/pizza-llm-bootstrap.html",
+      "apps/dashboard/public/pizza-onboard-driver.html",
+      "apps/dashboard/public/pizza-onboard-shop.html",
+      "apps/dashboard/public/pizza-llm-agent-prompt.md",
+      "apps/dashboard/public/pcc-agent-package-pizza.json",
+      "apps/dashboard/public/pizza-demo-index.html",
+      "apps/dashboard/public/pizza-onboard-user.html",
+      "apps/dashboard/public/pizza-llm-agent-prompt.html",
+      "apps/dashboard/public/demo-gate.js",
+    ]) expect(PUBLISHED_SURFACES).toContain(path);
   });
 });

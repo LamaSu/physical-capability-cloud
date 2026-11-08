@@ -4,11 +4,14 @@ import { createServer, type Server } from "node:http";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { Socket } from "node:net";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const ROOT = fileURLToPath(new URL("../../../../../", import.meta.url));
 let server: Server;
 const sockets = new Set<Socket>();
-async function run(on: boolean, reset = false, key = "") {
+async function run(on: boolean, reset: boolean | "seed" = false, key = "", options: { path?: string; trailingSlash?: boolean } = {}) {
   server = createServer((req, res) => {
     if (req.url === "/sse/demo/firehose" && req.method === "GET") {
       if (on) {
@@ -29,11 +32,11 @@ async function run(on: boolean, reset = false, key = "") {
   const address = server.address();
   if (!address || typeof address === "string") throw new TypeError("fetch failed");
   const base = "http://127.0.0.1:" + address.port;
-  const env = { ...process.env, PCC_BASE: base, TMPDIR: ROOT + "tmp" };
+  const env = { ...process.env, PCC_BASE: base + (options.trailingSlash ? "/" : ""), TMPDIR: ROOT + "tmp", ...(options.path ? { PATH: options.path } : {}) };
   delete (env as Record<string, string | undefined>).PCC_API_KEY;
   if (key) (env as Record<string, string>).PCC_API_KEY = key;
   return new Promise<{ code: number | null; output: string; base: string }>((resolve, reject) => {
-    const child = spawn("bash", ["scripts/demo-pizza.sh", ...(reset ? ["reset"] : [])], { cwd: ROOT, env });
+    const child = spawn("bash", ["scripts/demo-pizza.sh", ...(reset === "seed" ? ["seed"] : reset ? ["reset"] : [])], { cwd: ROOT, env });
     let output = "";
     child.stdout.on("data", (chunk) => { output += chunk; });
     child.stderr.on("data", (chunk) => { output += chunk; });
@@ -41,11 +44,12 @@ async function run(on: boolean, reset = false, key = "") {
     child.on("close", (code) => resolve({ code, output, base }));
   });
 }
-afterEach(async () => {
+async function closeServer() {
   for (const socket of sockets) socket.destroy();
   sockets.clear();
   if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
-});
+}
+afterEach(closeServer);
 
 describe("demo-pizza.sh", () => {
   it("stops and says so when the demo is off", async () => {
@@ -53,6 +57,22 @@ describe("demo-pizza.sh", () => {
     expect(code).toBe(1);
     expect(output).toContain("The pizza demo is off on " + base + ".");
     expect(output).not.toContain("order.html");
+    await closeServer();
+    const directory = mkdtempSync(join(tmpdir(), "demo-pizza-"));
+    const log = join(directory, "pnpm.log");
+    writeFileSync(join(directory, "pnpm"), '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "$0.log"\n', { mode: 0o700 });
+    try {
+      const seed = await run(false, "seed", "", { path: directory + ":" + process.env.PATH });
+      expect(seed.code).toBe(1);
+      expect(seed.output).toContain("The pizza demo is off on " + seed.base + ".");
+      expect(existsSync(log) ? readFileSync(log, "utf8") : "").toBe("");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+    await closeServer();
+    const trailingSlash = await run(false, false, "", { trailingSlash: true });
+    expect(trailingSlash.code).toBe(1);
+    expect(trailingSlash.output).toContain("The pizza demo is off on " + trailingSlash.base + ".");
   }, 15000);
   it("prints today's links when the demo is on", async () => {
     const { code, output, base } = await run(true);

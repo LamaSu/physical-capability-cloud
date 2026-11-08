@@ -6,6 +6,7 @@
 #   PCC_BASE=http://localhost:8080 PCC_API_KEY=pcc_live_... ./scripts/demo-pizza.sh seed
 set -euo pipefail
 BASE="${PCC_BASE:-https://capability.network}"
+BASE="${BASE%/}"
 
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$BASE/sse/demo/firehose") || true
 if [[ "$code" == "404" ]]; then
@@ -25,7 +26,7 @@ if [[ "${1:-}" == "reset" ]]; then
   if [[ -n "${PCC_API_KEY:-}" ]]; then
     auth=(-H "Authorization: Bearer $PCC_API_KEY")
   fi
-  response=$(curl -s -X POST "${auth[@]}" -w '\n%{http_code}' "$BASE/api/demo/_reset") || true
+  response=$(curl -s -X POST ${auth[@]+"${auth[@]}"} -w '\n%{http_code}' "$BASE/api/demo/_reset") || true
   code="${response##*$'\n'}"
   if [[ "$code" == 2[0-9][0-9] ]]; then
     printf '%s' "${response%$'\n'*}" | head -c 200 || true

@@ -193,6 +193,13 @@ describe.each(PAGES)("$file", (page) => {
     const parsed = new DOMParser().parseFromString(read(page.file), "text/html");
     expect(parsed.head.querySelector('meta[name="robots"]')?.getAttribute("content")).toBe("noindex");
   });
+  it("loads the gate before its own script", () => {
+    const html = read(page.file);
+    const gateIndex = html.indexOf('<script src="/demo-gate.js"');
+    const inlineIndex = html.search(/<script\b(?![^>]*\bsrc\s*=)[^>]*>/i);
+    expect(gateIndex).toBeGreaterThanOrEqual(0);
+    if (inlineIndex !== -1) expect(gateIndex).toBeLessThan(inlineIndex);
+  });
 });
 describe("deep links", () => {
   it.each(["/driver.html?driver=driver-carlos", "/operator.html?shop=shop-mamas-kitchen", "/operator-capture.html?jobId=job_deeplink&driver=driver-dana&phase=pickup", "/operator-capture.html"])("shows the notice and none of the link's query text for %s when the demo is off", async (link) => {
@@ -232,5 +239,12 @@ describe("demo labels", () => {
     const html = read("pizza-observability.html");
     expect(html).toContain('if(det.evidenceHash)rows.push(["evidence",`${esc(det.evidenceHash)} <span class="tag mock">mock</span>`]);');
     expect(html).toContain('if(det.assuranceTier!=null)rows.push(["assurance tier",`T${det.assuranceTier} <span class="tag mock">mock</span>`]);');
+  });
+});
+describe("wizard API override", () => {
+  it.each(["pizza-onboard-driver.html", "pizza-onboard-shop.html", "pizza-onboard-user.html"])("checks the API the wizard writes to: %s", (file) => {
+    answer = "pending";
+    load(file, "?api=http://other.test/");
+    expect(requests[0]).toEqual(["GET", "http://other.test/sse/demo/firehose"]);
   });
 });

@@ -76,12 +76,13 @@ Pick the mode that matches your session:
 
   ```bash
   curl -s -X POST {BASE}/api/demo/pizza-order \
+    -H 'authorization: Bearer pcc_live_...' \
     -H 'content-type: application/json' \
     -d '{"userId":"alex@vibecode","description":"1 large pepperoni","deliveryAddress":"vibecodenights venue","optimizeFor":"price"}'
   ```
 
   For watching status in no-tools mode, **don't** stream — have the user re-run
-  `curl -s {BASE}/api/demo/orders/<id>` every ~15 seconds and paste the
+  `curl -s -H 'authorization: Bearer pcc_live_...' {BASE}/api/demo/orders/<id>` every ~15 seconds and paste the
   result; read `order.status` each time. (Streaming SSE by hand is painful; polling is fine.)
 
   No HTTP tool? Ask the user to run: curl -s -o /dev/null -w '%{http_code}\n' --max-time 5 {BASE}/sse/demo/firehose — it prints 404 when the demo is off; when it's on, it prints 200 after 5 seconds. Anything else means you couldn't confirm it.
@@ -280,15 +281,16 @@ explain it can't be cancelled cleanly and offer the dispute path if there's a re
 ```
 BASE = the address (scheme and host) of the site you got this prompt from. If you don't know it, ask the user.
 
-0. GET  /api/csd/suggest?q=make-pizza          → read params, plan your questions
-1. (clarify pizza + dietary + optimizeFor + delivery + budget with the user)
-2. POST /api/demo/pizza-order                  → { order } (proposal, no spend)
+0. GET  /sse/demo/firehose                     → 404: the demo is off, stop; 200: on, close the stream; anything else: you couldn't confirm it, stop
+1. GET  /api/csd/suggest?q=make-pizza          → read params, plan your questions
+2. (clarify pizza + dietary + optimizeFor + delivery + budget with the user)
+3. POST /api/demo/pizza-order                  → { order } (proposal, no spend)
         body: { userId, description, deliveryAddress, optimizeFor, maxPriceUSD?, maxTimeMin? }
-3. (show plan + total, get an explicit YES)
-4. POST /api/demo/orders/:id/confirm           → spend; make-pizza dispatched
-5. GET  /sse/demo/order/:id                    → watch; or poll GET /api/demo/orders/:id
-6. (narrate status → making → in_transit → delivered)
-7. On the `delivered` event, report settlement (shop/driver payouts + 2.35% PCC fee).
+4. (show plan + total, get an explicit YES)
+5. POST /api/demo/orders/:id/confirm           → spend; make-pizza dispatched
+6. GET  /sse/demo/order/:id                    → watch; or poll GET /api/demo/orders/:id
+7. (narrate status → making → in_transit → delivered)
+8. On the `delivered` event, report settlement (shop/driver payouts + 2.35% PCC fee).
 
 Rules: never spend without a yes · never accept a worse deal for the user ·
 always explain why you're asking.
