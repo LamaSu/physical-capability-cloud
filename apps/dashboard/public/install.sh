@@ -120,9 +120,13 @@ if [ "$EXTERNAL_MANAGEMENT" = "externally-managed" ]; then
   if python3 -m venv "$VENV" >/dev/null 2>&1; then
     "$VENV/bin/python" -m pip install --quiet --upgrade "$SPEC" \
       || { red "pcc-node install failed"; exit 1; }
+    "$VENV/bin/python" -m pip install --quiet --force-reinstall --no-deps "$SPEC" \
+      || { red "pcc-node install failed"; exit 1; }
   elif python3 -m venv --without-pip "$VENV" >/dev/null 2>&1 &&
        python3 -m pip --python "$VENV/bin/python" --version >/dev/null 2>&1; then
     python3 -m pip --python "$VENV/bin/python" install --quiet --upgrade "$SPEC" \
+      || { red "pcc-node install failed"; exit 1; }
+    python3 -m pip --python "$VENV/bin/python" install --quiet --force-reinstall --no-deps "$SPEC" \
       || { red "pcc-node install failed"; exit 1; }
   else
     red "pcc-node was not installed: this system's Python is externally managed, and this installer couldn't set up a virtual environment for pcc-node in $VENV. On Debian and Ubuntu, install the python3-venv package (sudo apt install python3-venv), then run this again."
@@ -130,6 +134,8 @@ if [ "$EXTERNAL_MANAGEMENT" = "externally-managed" ]; then
   fi
 else
   pip3 install --user --quiet --upgrade "$SPEC" \
+    || { red "pcc-node install failed"; exit 1; }
+  pip3 install --user --quiet --force-reinstall --no-deps "$SPEC" \
     || { red "pcc-node install failed"; exit 1; }
 fi
 if [ "$EXTERNAL_MANAGEMENT" = "externally-managed" ]; then

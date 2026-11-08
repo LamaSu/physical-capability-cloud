@@ -86,6 +86,7 @@ class Installer:
             "N210_EM": "1" if managed else "0",
             "N210_ENSUREPIP": "1" if ensurepip else "0",
             "N210_PIP": pip,
+            "N210_VENV_INSTALL": "",
             "N210_NODE_STUB": str(stubs / "pcc-node"),
             "N210_VENV_PYTHON": str(stubs / "venv-python"),
             "PYTHONDONTWRITEBYTECODE": "1",
@@ -121,6 +122,17 @@ exit 0
 ''')
         self.write_stub(stubs / "venv-python", r'''printf '%s\n' "$*" >> "$N209_LOG/venv-python.calls"
 if [ "$1" = -m ] && [ "$2" = pip ] && [ "$3" = install ]; then
+    case "$N210_VENV_INSTALL" in
+        noexec) exit 0 ;;
+        fail)
+            for arg in "$@"; do
+                if [ "$arg" = --upgrade ]; then exit 1; fi
+            done ;;
+        fail-reinstall)
+            for arg in "$@"; do
+                if [ "$arg" = --force-reinstall ]; then exit 1; fi
+            done ;;
+    esac
     cp "$N210_NODE_STUB" "$(dirname "$0")/pcc-node"
     chmod 755 "$(dirname "$0")/pcc-node"
     exit 0
@@ -160,6 +172,17 @@ if [ "$1" = -m ] && [ "$2" = pip ] && [ "$3" = --python ]; then
         exit 0
     fi
     if [ "$5" = install ]; then
+        case "$N210_VENV_INSTALL" in
+            noexec) exit 0 ;;
+            fail)
+                for arg in "$@"; do
+                    if [ "$arg" = --upgrade ]; then exit 1; fi
+                done ;;
+            fail-reinstall)
+                for arg in "$@"; do
+                    if [ "$arg" = --force-reinstall ]; then exit 1; fi
+                done ;;
+        esac
         cp "$N210_NODE_STUB" "$(dirname "$4")/pcc-node"
         chmod 755 "$(dirname "$4")/pcc-node"
         exit 0
@@ -362,8 +385,11 @@ def test_T6_approved_copy():
 def install_spec(installer):
     installs = [line for name in ("pip3.calls", "python3.calls", "venv-python.calls")
                 for line in installer.calls(name) if " install " in " " + line + " "]
-    assert len(installs) == 1, installs
-    return installs[0].split("--upgrade ", 1)[1]
+    assert len(installs) == 2, installs
+    prefix, spec = installs[0].split("--upgrade ", 1)
+    assert installs == [prefix + "--upgrade " + spec,
+                        prefix + "--force-reinstall --no-deps " + spec]
+    return spec
 
 
 def test_n210_T1a_externally_managed_plain(tmp_path):
@@ -381,7 +407,10 @@ def test_n210_R1a_venv_own_pip(tmp_path):
     assert_started(case, "venv", code, output)
     assert answered == 1
     spec = install_spec(case)
-    assert case.calls("venv-python.calls") == ["-m pip install --quiet --upgrade " + spec]
+    assert case.calls("venv-python.calls") == [
+        "-m pip install --quiet --upgrade " + spec,
+        "-m pip install --quiet --force-reinstall --no-deps " + spec,
+    ]
     calls = case.calls("python3.calls")
     assert calls.count("-m venv " + str(case.venv)) == 1
     assert not any("--without-pip" in call or "-m pip" in call for call in calls)
@@ -398,6 +427,7 @@ def test_n210_R1b_system_pip_python(tmp_path):
         "-m venv --without-pip " + str(case.venv),
         "-m pip --python " + str(case.venv / "bin/python") + " --version",
         "-m pip --python " + str(case.venv / "bin/python") + " install --quiet --upgrade " + spec,
+        "-m pip --python " + str(case.venv / "bin/python") + " install --quiet --force-reinstall --no-deps " + spec,
     ]
     assert not (case.log / "venv-python.calls").exists()
     assert "The virtual environment was not created" not in output
@@ -409,10 +439,28 @@ def test_n210_R1e_no_usable_venv(tmp_path):
     assert code == 1, output
     assert ("pcc-node was not installed: this system's Python is externally managed, and this installer couldn't set up a virtual environment for pcc-node in "
             + str(case.venv) + ". On Debian and Ubuntu, install the python3-venv package (sudo apt install python3-venv), then run this again.") in output
-    assert not any("install" in call for call in case.calls("python3.calls") + case.calls("pip3.calls"))
+    assert not any("install" in call.split() for call in case.calls("python3.calls") + case.calls("pip3.calls"))
     assert not (case.log / "venv-python.calls").exists()
     assert not (case.log / "node.calls").exists()
     assert "no such option" not in output
+
+
+@pytest.mark.parametrize("ensurepip", (True, False), ids=("own-pip", "system-pip"))
+@pytest.mark.parametrize("mode", ("noexec", "fail", "fail-reinstall"))
+def test_n210_R1_venv_install_failure(tmp_path, ensurepip, mode):
+    case = Installer(tmp_path, managed=True, ensurepip=ensurepip)
+    case.env["N210_VENV_INSTALL"] = mode
+    code, output = case.no_terminal(["--vendor=mock", "--key=" + PCC_KEY])
+    assert code == 1, output
+    assert "pcc-node install failed" in output
+    assert not (case.log / "node.calls").exists()
+    assert not case.calls("pip3.calls")
+    installs = [call for name in ("python3.calls", "venv-python.calls")
+                for call in case.calls(name) if "install" in call.split()]
+    assert len(installs) == (1 if mode == "fail" else 2)
+    if ensurepip:
+        assert not any("--without-pip" in call or "-m pip --python" in call
+                       for call in case.calls("python3.calls"))
 
 
 def test_n210_T1b_pinned_crypto_spec(tmp_path):
@@ -422,9 +470,15 @@ def test_n210_T1b_pinned_crypto_spec(tmp_path):
         case = Installer(tmp_path / label, managed=managed, ensurepip=ensurepip)
         code, output = case.no_terminal(["--vendor=mock", "--key=" + PCC_KEY])
         assert code == 0, output
-        matched = SPEC_RE.fullmatch(install_spec(case))
-        assert matched is not None, install_spec(case)
-        commits.append(matched.group(1))
+        spec = install_spec(case)
+        for name in ("pip3.calls", "python3.calls", "venv-python.calls"):
+            for call in case.calls(name):
+                if "install" in call.split():
+                    flag = "--upgrade " if "--upgrade" in call.split() else "--no-deps "
+                    matched = SPEC_RE.fullmatch(call.split(flag, 1)[1])
+                    assert matched is not None, call
+                    assert matched.group(1) == PIN
+        commits.append(SPEC_RE.fullmatch(spec).group(1))
         assert "[3/4] installing pcc-node from source (commit " + commits[-1][:12] + ")" in output
     assert commits == [PIN] * 3
     assert SCRIPT.read_text().count(PIN) == 1
@@ -440,7 +494,11 @@ def test_n210_T1c_user_rung(tmp_path, stale_venv):
     assert code == 0, output
     assert answered == 1
     calls = case.calls("pip3.calls")
-    assert len(calls) == 1 and calls[0].startswith("install --user --quiet --upgrade ")
+    spec = install_spec(case)
+    assert calls == [
+        "install --user --quiet --upgrade " + spec,
+        "install --user --quiet --force-reinstall --no-deps " + spec,
+    ]
     assert not any("-m venv" in call or "-m pip" in call for call in case.calls("python3.calls"))
     assert case.read("node.which") == "home"
     assert case.read("node.bin") == str(case.nodes["home"])
@@ -695,6 +753,42 @@ def test_n210_T5f_replaced_kernel_id(installer, cell):
         assert "Replaced pcc-node's earlier config" not in output
         assert "Traceback" not in output
         assert "\x1b[2J" not in output
+
+
+@pytest.mark.parametrize("failure", ("create", "replace"))
+def test_n210_T5g_failed_write(installer, failure):
+    installer.config.parent.mkdir(mode=0o700)
+    earlier = b'{"kernel_id": "kernel_earlier_1"}\n'
+    installer.config.write_bytes(earlier)
+    installer.config.chmod(0o600)
+    if failure == "create":
+        installer.config.parent.chmod(0o500)
+    else:
+        # Fail after mkstemp so this cell also requires the finally cleanup.
+        source = (
+            "import errno, os, sys\n"
+            "from unittest.mock import patch\n"
+            "with patch('os.replace', side_effect=PermissionError(errno.EACCES, os.strerror(errno.EACCES))):\n"
+            "    exec(compile(sys.stdin.read(), '<installer-config>', 'exec'))\n"
+        )
+        original = (installer.bin / "python3").read_text().split("\n", 1)[1]
+        installer.stub("python3", 'if [ "$1" = - ]; then\n    exec '
+                       + shlex.quote(REAL_PYTHON) + " -c " + shlex.quote(source)
+                       + "\nfi\n" + original)
+    try:
+        code, output = save_without_start(installer)
+        assert code == 1, output
+        line = ("Could not save pcc-node's config in " + str(installer.config)
+                + ": Permission denied. pcc-node is installed; nothing was registered.")
+        assert output.splitlines().count(line) == 1
+        assert "Replaced pcc-node's earlier config" not in output
+        assert "Traceback" not in output
+        assert saved_line(installer) not in output
+        assert not (installer.log / "node.calls").exists()
+        assert installer.config.read_bytes() == earlier
+        assert not list(installer.config.parent.glob(".pcc-node.json.*"))
+    finally:
+        installer.config.parent.chmod(0o700)
 
 
 def test_n210_T5q_shell_paths(tmp_path):
