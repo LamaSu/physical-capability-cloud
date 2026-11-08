@@ -22,7 +22,7 @@ import { z } from "zod";
 import { getCallerScopes } from "../middleware/scope-checker.js";
 import { getKitRegistry, KitIntegrityError, KitRegistryError, type KitRegistry } from "../services/kit-registry.js";
 import { KitBindings } from "../services/kit-bindings.js";
-import { operatorIdentity } from "../services/operator-identity.js";
+import { AUTHENTICATION_REQUIRED, authorityOf, isAnonymous } from "../auth/kernel-authority.js";
 
 /** Issued scopes only: template_author, admin or *; self-service keys (operator:basic) and operator are refused until a later slice. */
 export const KIT_PUBLISH_SCOPES: readonly string[] = ["*", "template_author", "admin"];
@@ -135,10 +135,9 @@ export async function kitRoutes(
 
   /** POST /api/kits/:digest/bindings — the current kernel owner binds a capability to a kit version. */
   app.post<{ Params: { digest: string } }>("/api/kits/:digest/bindings", async (req, reply) => {
-    const identity = operatorIdentity(req);
-    if (!identity) return reply.status(401).send({ error: "authentication_required" });
+    if (isAnonymous(authorityOf(req))) return reply.status(401).send(AUTHENTICATION_REQUIRED);
     try {
-      const result = await new KitBindings(registry()).bind(req.params.digest, req.body, identity);
+      const result = await new KitBindings(registry()).bind(req.params.digest, req.body, req);
       return reply.status(result.created ? 201 : 200).send(result);
     } catch (err) {
       return sendError(reply, err);
@@ -147,10 +146,9 @@ export async function kitRoutes(
 
   /** POST /api/kits/:digest/bindings/:bindingId/withdraw — the current owner withdraws a binding once. */
   app.post<{ Params: { digest: string; bindingId: string } }>("/api/kits/:digest/bindings/:bindingId/withdraw", async (req, reply) => {
-    const identity = operatorIdentity(req);
-    if (!identity) return reply.status(401).send({ error: "authentication_required" });
+    if (isAnonymous(authorityOf(req))) return reply.status(401).send(AUTHENTICATION_REQUIRED);
     try {
-      return await new KitBindings(registry()).withdraw(req.params.digest, req.params.bindingId, req.body, identity);
+      return await new KitBindings(registry()).withdraw(req.params.digest, req.params.bindingId, req.body, req);
     } catch (err) {
       return sendError(reply, err);
     }

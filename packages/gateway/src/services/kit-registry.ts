@@ -97,7 +97,7 @@ const BindingRecordSchema = z.object({
     kernelId: z.string().min(1).max(200),
     capabilityId: z.string().min(1).max(200),
   }).strict(),
-  identityStatus: z.enum(["proven", "self_asserted"]),
+  identityStatus: z.literal("proven"),
   boundBy: z.string().regex(/^[0-9a-f]{64}$/),
   boundAt: z.string().refine((s) => !Number.isNaN(Date.parse(s)) && new Date(s).toISOString() === s),
 }).strict();
@@ -106,7 +106,7 @@ const BindingWithdrawalRecordSchema = z.object({
   schema: z.literal(WITHDRAWAL_SCHEMA),
   bindingId: z.string().regex(BINDING_ID),
   withdrawnAt: z.string().refine((s) => !Number.isNaN(Date.parse(s)) && new Date(s).toISOString() === s),
-  identityStatus: z.enum(["proven", "self_asserted"]),
+  withdrawnAs: z.enum(["owner", "admin"]),
   withdrawnBy: z.string().regex(/^[0-9a-f]{64}$/),
 }).strict();
 
@@ -364,7 +364,7 @@ export class KitRegistry {
           || (a.bindingId < b.bindingId ? -1 : a.bindingId > b.bindingId ? 1 : 0))[0];
       if (existing) return { binding: existing, created: false };
       await this.ensureBindingWritesSupported();
-      await this.claimQuota(principal, input.kitDigest, now, "binding-quota", this.bindDailyLimit,
+      await this.claimQuota(principal.toLowerCase(), input.kitDigest, now, "binding-quota", this.bindDailyLimit,
         () => new KitRegistryError("bind_quota", 429, `at most ${this.bindDailyLimit} new bindings per principal per 24 hours`));
       return { binding: await this.createBinding(input), created: true };
     });
