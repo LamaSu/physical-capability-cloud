@@ -311,6 +311,15 @@ describe("Command Center reads", () => {
     expect(elementWithText("Active Jobs").nextElementSibling?.textContent).toBe(String(active.size));
     for (const { id, status } of jobs) expect(text().includes(id), status).toBe(active.has(status));
   });
+  it("removes the left-out escrow notice after the escrow refresh fails", async () => {
+    liveRoutes(escrowRows([escrow(), escrow({ id: "escrow-unreadable", status: "unexpected" })]));
+    const client = newClient();
+    await renderPage(<DashboardPage />, client);
+    expectEscrowNotice("1 listed escrow couldn't be read and isn't shown.");
+    liveRoutes({ "/api/escrow": errorReply });
+    expect(await refresh(client)).toContain("Couldn't load escrows");
+    expect(text()).not.toContain("couldn't be read and isn't shown");
+  });
 });
 
 describe("Jobs reads", () => {
@@ -578,6 +587,13 @@ describe.each(moneyPages)("$name escrow rows that can't be read", ({ name, page 
       expect(text()).toMatch(/Active Escrows\s*1\s*of 1 total/);
       expect(text()).toMatch(/Milestones\s*1(?!\+)/);
     }
+  });
+  it("leaves out a listed row that isn't an object and says so", async () => {
+    liveRoutes(escrowRows([escrow(), null]));
+    await renderPage(page());
+    expect(text()).toContain("escrow-a");
+    expectEscrowNotice("1 listed escrow couldn't be read and isn't shown.");
+    expect(text()).not.toContain("Couldn't load escrows");
   });
 });
 
