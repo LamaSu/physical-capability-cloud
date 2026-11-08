@@ -12,6 +12,8 @@ const RETRY = "Retry";
 
 export const CAPABILITY_PAGES_NOTICE = (pages: number) =>
   `Read in ${pages} pages; the gateway gives no snapshot across pages.`;
+export const SKIPPED_ESCROWS_NOTICE = (skipped: number) =>
+  skipped === 1 ? "1 listed escrow couldn't be read and isn't shown." : `${skipped} listed escrows couldn't be read and aren't shown.`;
 
 /** A short, user-safe description of a failed read. */
 export function describeReadError(error: unknown): string {
