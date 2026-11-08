@@ -223,11 +223,11 @@ Full rationale, growth math, vacuum guidance, and recovery semantics: [`docs/WOR
 
 ## Local job dispatch on the production image (self-hosted labs)
 
-The image sets `NODE_ENV=production` (Dockerfile). **In production the gateway never runs a submitted job on a device it hosts.** It holds no kernel signing key: its own kernel's evidence emitter has only the test-only zero-address key. So in production a job that passes every check below is queued too, with reason `no_kernel_signer`, for a node that signs with the kernel's registered key, such as pcc-node, to claim. A job that fails a check keeps that check's reason.
+The image sets `NODE_ENV=production` (Dockerfile). **In production the gateway never runs a submitted job on a device it hosts.** It holds no kernel signing key: its own kernel's evidence emitter has only the test-only zero-address key. So in production a job that passes every check below is queued too, with reason `no_kernel_signer`, for a node that signs with the kernel's registered key to pick up. A job that fails a check keeps that check's reason.
 
-Outside production, a gateway runs a submitted job on a device it hosts only when ALL of these hold. Every other submitted job is queued for a remote node, such as pcc-node, to claim.
+Outside production, a gateway runs a submitted job on a device it hosts only when ALL of these hold. Every other submitted job is queued for a remote node to pick up.
 
-1. **Queue-only is off.** Outside production that's the default: only an exact `PCC_JOB_SUBMIT_QUEUE_ONLY=true` turns it on. In production it's the reverse: an unset variable or any value but an exact `false` means queue-only, and its reason, `queue_only`, comes first.
+1. **Queue-only is off.** Outside production that's the default: only an exact `PCC_JOB_SUBMIT_QUEUE_ONLY=true` turns it on. In production it's the reverse: an unset variable or any value but an exact `false` means queue-only, and its reason, `queue_only`, comes before `no_kernel_signer` (a gateway with no explicit kernel config, items 2 and 3, reports `no_configured_local_kernel` first).
 2. **An explicit kernel config:** `KERNEL_CONFIG` (the config JSON, inline) or `KERNEL_CONFIG_FILE` (a path to a JSON file). If both are set, `KERNEL_CONFIG` wins. With neither, the gateway generates a mock config, and a generated config never authorizes a local job.
 3. **The config's `kernelId` isn't the placeholder `kernel_dev_001`.**
 4. **The job is for that `kernelId`,** and that kernel's emergency stop reads clear. A stop that is engaged, or that can't be read, queues the job instead.
@@ -238,7 +238,7 @@ A submit can also send `queueOnly: true` to queue a job that would otherwise run
 
 Enable local dispatch only on a gateway that untrusted callers can't reach.
 
-Outside production, a lab that runs its devices in the gateway process sets an explicit kernel config, for example `KERNEL_CONFIG_FILE=/app/data/kernel-config.json`. In production it runs them on pcc-node, which signs with the kernel's registered key.
+Outside production, a lab that runs its devices in the gateway process sets an explicit kernel config, for example `KERNEL_CONFIG_FILE=/app/data/kernel-config.json`. In production its jobs wait in the queue for a node that signs with the kernel's registered key. pcc-node registers its signing key when it starts, but it takes no jobs yet (`pcc-node start` says so), so it doesn't run them.
 
 To check the effective policy:
 - The boot log prints `[jobs] Effective local dispatch policy` with `queueOnly`, `localDispatch` and, when local dispatch is off, the `reason`. In production, when the checks above pass, the reason is `no_kernel_signer`.
