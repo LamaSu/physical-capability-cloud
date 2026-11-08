@@ -114,6 +114,41 @@ describe("settlement replay stub cells", () => {
     expect(r.outcome).toBe("UNVERIFIED");
     expect(r.exitCode).toBe(2);
   });
+  it.each([95, 101])("R27b state 8 missing finalizedBlock witnesses from block %i stay unverified", async fromBlock => {
+    const f = fixture(8);
+    expect(await f.run()).toMatchObject({ outcome: "ALL_MATCH", exitCode: 0 });
+    const r = await f.run({ logs: { fromBlock } });
+    for (const pointer of ["/finalizedBlock", "/finalizedBlock/value"]) {
+      expect(row(r, pointer)).toMatchObject({ verdict: "UNVERIFIED", reason: "no witness in the scanned log range" });
+    }
+    expect(r.verdicts.filter(v => v.verdict === "MISMATCH")).toEqual([]);
+    expect(r.outcome).toBe("UNVERIFIED");
+    expect(r.exitCode).toBe(2);
+  });
+  it("R27c state 7 with an outstanding refund claim requires a refund witness", async () => {
+    const f = fixture(7);
+    for (const reply of [f.life, f.receipt]) {
+      reply.phase = "allocated";
+      reply.isAllocated = true;
+      reply.finalState = null;
+    }
+    f.life.isTerminal = false;
+    f.receipt.refundReason = f.sourced("DEADLINE_RECLAIM");
+    f.receipt.finalizedBlock = null;
+    f.set({ logs: [
+      f.event("ClaimCreated", { unitId: UNIT, claimId: hash(5), legIndex: 0n, class: 2, recipient: PAYEE, amount: 1n }, 90),
+      f.event("Finalized", { unitId: UNIT, released: false, reason: 4 }, 90, 1),
+      f.event("RefundAllocated", { unitId: UNIT, claimCount: 1n }, 90, 2),
+    ] });
+    expect(await f.run()).toMatchObject({ outcome: "ALL_MATCH", exitCode: 0 });
+    const r = await f.run({ logs: { fromBlock: 95 } });
+    for (const pointer of ["/refundReason", "/refundReason/value"]) {
+      expect(row(r, pointer)).toMatchObject({ verdict: "UNVERIFIED", reason: "no witness in the scanned log range" });
+    }
+    expect(r.verdicts.filter(v => v.verdict === "MISMATCH")).toEqual([]);
+    expect(r.outcome).toBe("UNVERIFIED");
+    expect(r.exitCode).toBe(2);
+  });
   it.each(["complete", "incomplete", "unknown"])("R28 accepts gateway log completeness %s and UNKNOWN claims", async completeness => {
     const f = fixture();
     f.replies.forEach(reply => { reply.logCompleteness = completeness; });
@@ -200,6 +235,14 @@ describe("settlement replay stub cells", () => {
     const r = await f.run();
     expect(row(r, "/escrow").verdict).toBe("MATCH");
     expect(row(r, "/deployment/implementation")).toMatchObject({ verdict: "MISMATCH", expected: getAddress(alien), got: alien });
+    expect(r.exitCode).toBe(1);
+  });
+  it("R41 MR10 /escrow requires the unit to exist", async () => {
+    const f = fixture();
+    f.replies.forEach(reply => { reply.unitId = hash(777); });
+    const r = await f.run();
+    expect(row(r, "/escrow").verdict).toBe("MISMATCH");
+    expect(row(r, "/refundReason")).toMatchObject({ verdict: "UNVERIFIED", reason: "escrow identity check failed" });
     expect(r.exitCode).toBe(1);
   });
 });

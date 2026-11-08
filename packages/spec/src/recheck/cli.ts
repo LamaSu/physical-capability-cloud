@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { recheckKitDescriptor } from "./descriptor.js";
 import { KNOWN_DEPLOYMENTS } from "./deployments.js";
@@ -111,7 +112,8 @@ export async function runCli(args: readonly string[], io: RecheckCliIO = {}): Pr
 function isDirectRun(): boolean {
   const argv1 = process.argv[1];
   if (!argv1) return false;
-  try { return realpathSync(argv1) === realpathSync(fileURLToPath(import.meta.url)); }
+  // Match Node's extension search before resolving symlinks for paths and bin shims.
+  try { return realpathSync(createRequire(import.meta.url).resolve(argv1)) === realpathSync(fileURLToPath(import.meta.url)); }
   catch { return false; }
 }
 if (isDirectRun()) {

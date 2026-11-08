@@ -103,6 +103,32 @@ describe("recheck CLI and HTTP RPC", () => {
       expect(child.stdout).toBe("");
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+  it.each(["extensionless path", "manifest bin shim", "npm bin symlink"])("R35b built CLI through %s runs main and exits 3", async kind => {
+    const dir = scratch();
+    try {
+      let command = process.execPath, args = [join(SPEC, "dist/recheck/cli")];
+      if (kind !== "extensionless path") {
+        const target = JSON.parse(readFileSync(join(SPEC, "package.json"), "utf8")).bin["pcc-settlement-recheck"] as string;
+        const modules = join(dir, "node_modules"), bin = join(modules, ".bin");
+        mkdirSync(bin, { recursive: true });
+        mkdirSync(join(modules, "@pcc"));
+        symlinkSync(SPEC, join(modules, "@pcc/spec"), "dir");
+        const link = join(bin, "pcc-settlement-recheck");
+        if (kind === "manifest bin shim") {
+          command = link;
+          args = [];
+          writeFileSync(command, `#!/bin/sh\nbasedir=$(dirname "$0")\nexec "$PCC_TEST_NODE" "$basedir/../@pcc/spec/${target.replace(/^\.\//, "")}" "$@"\n`, { mode: 0o755 });
+        } else {
+          symlinkSync(join("..", "@pcc/spec", target), link);
+          args = [link];
+        }
+      }
+      const child = await spawnChild(command, args, { env: { ...process.env, PCC_TEST_NODE: process.execPath } });
+      expect(child.status).toBe(3);
+      expect(child.stderr).toContain("Invalid usage or input. Usage: pcc-settlement-recheck");
+      expect(child.stdout).toBe("");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
   it("R36 the built data kit imports with viem unresolvable", async () => {
     const dir = scratch();
     try {
