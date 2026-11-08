@@ -195,6 +195,14 @@ describe("PX-4 renderer markers (fake DOM)", () => {
     expect(inherited[0]!.className.split(" ")).toContain("pcc-src-unconfirmed");
     expect(inherited[0]!.attrs["data-source"]).toBe("unconfirmed");
     expect(inherited[0]!.textContent).toBe("couldn't confirm the source");
+    for (const type of ["toString", "__proto__"]) {
+      ir.root.children[0]!.children = [{ type, id: "x" } as IrNode];
+      renderIrDoc(doc, mount, ir);
+      const more = walk(mount).filter((e) => e.className.split(" ").includes("pcc-invalid"));
+      expect(more.length, type).toBe(1);
+      expect(more[0]!.attrs["data-source"], type).toBe("unconfirmed");
+      expect(more[0]!.textContent, type).toBe("couldn't confirm the source");
+    }
   });
 
   it("paint stamps data-source: prose 'proposed', bound 'authoritative'; nothing else", () => {
@@ -838,6 +846,7 @@ describe("the IR view's stylesheet", () => {
       const e = w.document.querySelector(sel);
       expect(e.getAttribute("data-source"), sel).toBe("proposed");
       expect(w.getComputedStyle(e).borderLeftStyle, sel).not.toBe("dashed");
+      expect(w.getComputedStyle(e).paddingLeft, sel).not.toBe("6px");
     }
     expect(w.getComputedStyle(w.document.querySelector(".pcc-text")).borderLeftStyle).toBe("dashed");
     expect(w.__PCC_UI_TEXT_VIOLATIONS__ ?? 0).toBe(0);
