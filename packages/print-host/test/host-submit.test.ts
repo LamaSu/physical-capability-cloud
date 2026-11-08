@@ -1791,6 +1791,44 @@ describe("CODE #41 gateway funding (D2-D6, D4, A1)", () => {
     expect(setup.logs.filter((code) => code === "unit_expired")).toHaveLength(1);
   });
 
+  it.each(["gateway", "manifest"] as const)(
+    "review r3 A1: in %s mode a unit whose reclaimAt is one second after the host clock's second is still claimed", async (mode) => {
+      const setup = await fixture({ fundingSource: mode });
+      setup.host = createHost({ ...setup.deps, noSubmit: true });
+      // 999 ms into the second, so a ceil or round of the clock differs from its floor.
+      setup.advance(999);
+      const inputs = { ...setup.inputs, unit: { ...setup.inputs.unit,
+        reclaimAt: Math.floor(setup.deps.clock!() / 1_000) + 1 } };
+      setup.inputSource.mockResolvedValue({ ok: true, value: inputs });
+      // A terminal report ends the claimed job at once, so no print is needed.
+      setup.gateway.reportInProgress.mockResolvedValueOnce({ ok: false, code: "job_not_found", status: 404 } as never);
+      const reserve = vi.spyOn(setup.journal, "reserveUnit");
+      expect(await setup.host.runOnce()).toEqual({ kind: "job", jobId, state: "abandoned", waitMs: 5_000 });
+      expect(reserve).toHaveBeenCalledTimes(1);
+      expect(await states(setup)).toEqual(["claimed", "abandoned"]);
+      expect(setup.logs).not.toContain("unit_expired");
+    },
+  );
+
+  it("review r3 A2: a unit whose reclaimAt has passed never blocks a later job in the same poll", async () => {
+    const setup = await fixture();
+    const expired = { ...setup.inputs, unit: { ...setup.inputs.unit, settlementUnitId: word(),
+      reclaimAt: Math.floor(setup.deps.clock!() / 1_000) } };
+    setup.inputSource.mockResolvedValueOnce({ ok: true, value: expired })
+      .mockResolvedValueOnce({ ok: true, value: setup.inputs });
+    setup.gateway.pollJobs.mockResolvedValue({ ok: true, value: { stop: { proceed: true }, jobs: [
+      { jobId: "a:expired", status: "queued", funding: setup.funding },
+      { jobId, status: "queued", funding: setup.funding },
+    ], foreignJobsDropped: 0, truncated: false } });
+    setup.gateway.reportInProgress.mockResolvedValueOnce({ ok: false, code: "job_not_found", status: 404 } as never);
+    expect(await setup.host.runOnce()).toEqual({ kind: "job", jobId, state: "abandoned", waitMs: 5_000 });
+    expect(setup.inputSource).toHaveBeenCalledTimes(2);
+    expect(setup.inputSource).toHaveBeenNthCalledWith(1, "a:expired");
+    expect(setup.inputSource).toHaveBeenNthCalledWith(2, jobId);
+    expect(await setup.journal.has("a:expired")).toBe(false);
+    expect(setup.logs.filter((code) => code === "unit_expired")).toHaveLength(1);
+  });
+
   it("manifest mode journals source manifest and never reads the poll's funding", async () => {
     const setup = await fixture({ fundingSource: "manifest" });
     setup.host = createHost({ ...setup.deps, noSubmit: true });
