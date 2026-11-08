@@ -253,7 +253,7 @@ export function ProtocolRunPage() {
     setSelectedStepId(null);
   }, []);
 
-  const notAvailable = [runData, allRunsData, templateData].find(isNotAvailable);
+  const notAvailable = (runId ? [runData, templateData] : [allRunsData]).find(isNotAvailable);
 
   const selectedRunStep = run?.steps.find((s) => s.id === selectedStepId);
   const selectedRunTransfer = run?.transfers.find((t) => t.id === selectedTransferId);

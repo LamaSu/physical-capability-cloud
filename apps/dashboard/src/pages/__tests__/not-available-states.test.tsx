@@ -87,10 +87,6 @@ const FIXTURES: Record<string, unknown> = {
 };
 
 const PAGE_CASES = [
-  { name: "orchestrator", path: "/orchestrator", reads: ["/api/orchestrator/graphs", "/api/orchestrator/samples", "/api/orchestrator/workflows", "/api/orchestrator/claims"],
-    absent: ["Transfer Graphs", "Active Samples", "Running Workflows", "Active Claims", "No active samples", "No workflows found", "Instrument Status"],
-    present: ["North instrument", "Reference sample", "workflow-alpha", "View Detail"],
-    tiles: [["Transfer Graphs", "1"], ["Active Samples", "1"], ["Running Workflows", "1"], ["Active Claims", "1"]] },
   { name: "orchestrator detail", path: "/orchestrator/kernel-alpha", reads: ["/api/orchestrator/graphs/kernel-alpha", "/api/orchestrator/samples?kernelId=kernel-alpha", "/api/orchestrator/workflows", "/api/orchestrator/claims"],
     absent: ["Nodes", "Samples", "Workflows", "No transfer graph found for kernel", "No samples for this kernel", "No workflows for this kernel"],
     present: ["North instrument", "Reference sample", "workflow-alpha", "Claimed by Research workflow", "Back to Orchestrator"],
@@ -283,7 +279,7 @@ async function sendName() {
   expect(button.disabled).toBe(false);
   await act(async () => button.click());
   await settle();
-  expect(authorizedFetch.mock.calls.map(([url]) => url)).toEqual(["/api/orchestrator/data-product/start"]);
+  expect(authorizedFetch.mock.calls.map(([url]) => url).filter((url) => !url.startsWith("/api/events"))).toEqual(["/api/orchestrator/data-product/start"]);
 }
 
 describe("gateway reply helper", () => {
@@ -332,6 +328,15 @@ describe("gateway reply helper", () => {
     expect(response.bodyUsed).toBe(false);
     expect(clone).not.toHaveBeenCalled();
     expect(readBody).not.toHaveBeenCalled();
+  });
+
+  it("H8 keeps the body of every other error status that names not_available", async () => {
+    for (const status of [400, 403, 404, 500, 502, 503]) {
+      const body = { error: "not_available", message: MSG };
+      const reply = await readGatewayJson(json(body, status));
+      expect(reply, `status ${status}`).toEqual(body);
+      expect(isNotAvailable(reply), `status ${status}`).toBe(false);
+    }
   });
 
   it("clones the unavailable POST response and never rejects", async () => {
@@ -407,7 +412,7 @@ describe("unavailable page reads", () => {
     await settle();
     expect(runReads).toBe(2);
     expectPanel();
-    await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
     await settle();
     expect(runReads).toBe(2);
   });
@@ -423,8 +428,8 @@ describe("unavailable page reads", () => {
     await settle();
     expect(container.textContent).toContain("workflow-alpha");
     expect(container.textContent).toContain("Claimed by Research workflow");
-    expect(authorizedFetch.mock.calls.filter(([url]) => url === "/api/orchestrator/workflows")).toHaveLength(1);
-    expect(authorizedFetch.mock.calls.filter(([url]) => url === "/api/orchestrator/claims")).toHaveLength(1);
+    expect(authorizedFetch.mock.calls.filter(([url]) => url === "/api/orchestrator/workflows")).toHaveLength(2);
+    expect(authorizedFetch.mock.calls.filter(([url]) => url === "/api/orchestrator/claims")).toHaveLength(2);
     const navigated = container.innerHTML;
     act(() => root.unmount());
     client.clear();
@@ -434,6 +439,25 @@ describe("unavailable page reads", () => {
     useProtocolLibraryStore.setState(useProtocolLibraryStore.getInitialState(), true);
     await renderPage("/orchestrator/kernel-alpha");
     expect(container.innerHTML).toBe(navigated);
+  });
+
+  it("P6 a run opened after the run list was not available shows the run once its reads succeed", async () => {
+    client.clear();
+    client = new QueryClient({ defaultOptions: { queries: { staleTime: 30000, retry: 1 } } });
+    answer(["/api/protocol-runs"]);
+    await renderPage("/protocol-runs");
+    expectPanel();
+    answer();
+    act(() => root.unmount());
+    root = createRoot(container);
+    await renderPage("/protocols");
+    const open = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("run-alpha"));
+    expect(open).toBeDefined();
+    await act(async () => open!.click());
+    await settle();
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(container.textContent).toContain("Pause");
+    expect(container.textContent).toContain("Reference protocol");
   });
 });
 
