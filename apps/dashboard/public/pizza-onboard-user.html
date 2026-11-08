@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="robots" content="noindex">
 <title>PCC · Order Pizza with an Agent</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -177,9 +178,10 @@ input:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,va
 <div class="toast" id="toast"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="/demo-gate.js"></script>
 <script>
 const STEPS=["I'm hungry","Live"];
-const PROD="https://capability.network";
+const PROD=location.origin;
 
 function apiBase(){
   const q=new URLSearchParams(location.search).get("api");
@@ -270,8 +272,11 @@ function go(n){
   S.step=Math.max(0,Math.min(1,n)); maxReached=Math.max(maxReached,S.step);
   renderStepper(); renderStep(); window.scrollTo({top:0,behavior:"smooth"});
 }
+Promise.resolve(window.pccDemoGate).then((state) => {
+if (state === "off") return;
 $("#nextBtn").onclick=()=>go(S.step+1);
 $("#backBtn").onclick=()=>go(S.step-1);
+});
 
 function bootstrapPrompt(key){
   return `You are my pizza-ordering agent on PCC (Physical Capability Cloud) — a live control plane for real-world manufacturing and delivery. Your job: order me a pizza and get it delivered, end to end, using the live API.
@@ -359,7 +364,10 @@ function renderQR(id,text){
   el.innerHTML=`<a href="${esc(text)}" style="font-family:var(--mono);font-size:11px;color:#0a0c10;text-decoration:underline;display:block;padding:18px 10px;max-width:150px;word-break:break-all">${esc(text)}</a>`;
 }
 
+Promise.resolve(window.pccDemoGate).then((state) => {
+if (state === "off") return;
 renderStepper(); renderStep();
+});
 </script>
 </body>
 </html>

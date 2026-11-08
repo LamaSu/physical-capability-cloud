@@ -199,7 +199,7 @@ surface it understands; the network underneath is the same.
 
 The operator opens their own LLM agent (Claude / ChatGPT / Codex /
 Gemini / their tool-use loop of choice), pastes the
-[agent prompt template](https://capability.network/pizza-llm-agent-prompt.md)
+[agent prompt template](https://capability.network/skills/pcc.md)
 or equivalent, and tells the agent what they have:
 
 > "I want to onboard my pizza shop."

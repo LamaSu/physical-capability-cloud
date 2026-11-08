@@ -7,6 +7,12 @@
 set -euo pipefail
 BASE="${PCC_BASE:-https://capability.network}"
 
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$BASE/sse/demo/firehose") || true
+if [[ "$code" == "404" ]]; then
+  echo "The pizza demo is off on $BASE."
+  exit 1
+fi
+
 if [[ "${1:-}" == "seed" ]]; then
   echo "▣ seeding providers..."
   pnpm tsx scripts/seed-pizza-demo.ts
@@ -15,9 +21,19 @@ fi
 
 if [[ "${1:-}" == "reset" ]]; then
   echo "▣ resetting demo state..."
-  curl -s -X POST "$BASE/api/demo/_reset" | head -c 200
-  echo ""
-  exit
+  auth=()
+  if [[ -n "${PCC_API_KEY:-}" ]]; then
+    auth=(-H "Authorization: Bearer $PCC_API_KEY")
+  fi
+  response=$(curl -s -X POST "${auth[@]}" -w '\n%{http_code}' "$BASE/api/demo/_reset") || true
+  code="${response##*$'\n'}"
+  if [[ "$code" == 2[0-9][0-9] ]]; then
+    printf '%s' "${response%$'\n'*}" | head -c 200 || true
+    echo ""
+    exit 0
+  fi
+  echo "reset failed: HTTP $code"
+  exit 1
 fi
 
 echo "▣ vibecodenights pizza demo URLs"

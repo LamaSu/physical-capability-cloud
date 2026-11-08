@@ -226,6 +226,20 @@ export const PUBLISHED_SURFACES: readonly string[] = [
   "docs/quickstart/claude-code.md",
   "docs/quickstart/claude-desktop.md",
   "docs/quickstart/claude-web.md",
+  "apps/dashboard/public/order.html",
+  "apps/dashboard/public/driver.html",
+  "apps/dashboard/public/operator.html",
+  "apps/dashboard/public/operator-capture.html",
+  "apps/dashboard/public/pizza-observability.html",
+  "apps/dashboard/public/pizza-llm-bootstrap.html",
+  "apps/dashboard/public/pizza-onboard-driver.html",
+  "apps/dashboard/public/pizza-onboard-shop.html",
+  "apps/dashboard/public/pizza-llm-agent-prompt.md",
+  "apps/dashboard/public/pcc-agent-package-pizza.json",
+  "apps/dashboard/public/pizza-demo-index.html",
+  "apps/dashboard/public/pizza-onboard-user.html",
+  "apps/dashboard/public/pizza-llm-agent-prompt.html",
+  "apps/dashboard/public/demo-gate.js",
 ];
 
 /**
