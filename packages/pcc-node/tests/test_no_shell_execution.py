@@ -106,6 +106,7 @@ REFUSED = {
     "sys": {"modules", "_getframe", "_current_frames"},
     "operator": {"attrgetter", "methodcaller"},
     "logging": {"config"},  # dictConfig/fileConfig build any callable named by a string
+    "fcntl": {"ioctl", "fcntl"},  # flock only: ioctl/fcntl reach any descriptor (TIOCSTI can type into a terminal)
 }
 # Modules with no business in pcc-node: each can run code or start processes.
 REFUSED_IMPORTS = {"ctypes", "cffi", "multiprocessing", "webbrowser", "posix", "nt", "_posixsubprocess",
@@ -128,8 +129,8 @@ ALLOWED_DUNDERS = {"__name__", "__qualname__", "__doc__", "__init__", "__datacla
 # Rule 8: every module the package imports, exactly (test_the_package_imports_only_what_it_lists keeps this
 # list exactly that). A new import is a reviewed change to it.
 ALLOWED_IMPORTS = {
-    "ast", "base64", "click", "concurrent.futures", "contextlib", "cryptography.hazmat.primitives.ciphers.aead", "csv",
-    "dataclasses", "datetime", "errno", "glob", "hashlib", "hmac", "html", "http.client", "http.server", "httpx",
+    "__future__", "ast", "base64", "click", "concurrent.futures", "contextlib", "cryptography.hazmat.primitives.ciphers.aead", "csv",
+    "dataclasses", "datetime", "errno", "fcntl", "glob", "hashlib", "hmac", "html", "http.client", "http.server", "httpx",
     "ipaddress", "json", "logging", "logging.handlers", "math", "nacl.encoding", "nacl.exceptions", "nacl.signing",
     "os", "pathlib", "platform", "re", "secrets", "select", "shutil", "signal", "socket", "ssl", "stat",
     "subprocess", "sys", "threading", "time", "typing", "urllib.error", "urllib.parse", "urllib.request", "zeroconf",
@@ -780,6 +781,11 @@ EVASIONS = {
     "a star import of a tracked module": "from os import *\nsystem('id')",
     "a star import of an untracked module": "from shutil import *\nos.system('id')",
     "a star import of the package's own module": "from .bridge import *\nrun(remote_argv, shell=True)",
+    "fcntl.ioctl": "import fcntl\nfcntl.ioctl(0, 0)",
+    "from fcntl import ioctl": "from fcntl import ioctl",
+    "aliased fcntl.fcntl": "import fcntl as f\nf.fcntl(0, 0)",
+    "from fcntl import fcntl": "from fcntl import fcntl",
+    "fcntl.ioctl as a value": "import fcntl\ng = fcntl.ioctl",
 }
 # Rule 8 at the package level: modules outside ALLOWED_IMPORTS, each refused by import_violations().
 IMPORT_EVASIONS = {
@@ -828,6 +834,8 @@ SAFE = {
     "a package-private helper": "from .crypto import _refuse_legacy\n_refuse_legacy(path)",
     # #563: a starter's own from import stays usable, judged at the call.
     "an imported starter with a fixed argv": "from subprocess import run\nrun(['arp', '-a'], capture_output=True)",
+    "fcntl.flock": "import fcntl\nfcntl.flock(3, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+    "fcntl.lockf": "import fcntl\nfcntl.lockf(3, fcntl.LOCK_UN)",
 }
 
 
