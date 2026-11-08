@@ -13,9 +13,11 @@ import { hashBundle } from "@pcc/spec";
 import { createEvidenceBroadcaster, type EvidenceBroadcaster, type EvidenceSubmission } from "../src/chain.js";
 import type { HostConfig } from "../src/config.js";
 import type { GwResult, PollJobsValue, RelayEvidenceBundle, ReceiptEnvelope } from "../src/gateway-client.js";
+import type { JobFunding } from "../src/gateway-client.js";
 import { createHost, HOST_LOG_CODES, type HostDeps, type HostLogCode, type HostTimers } from "../src/host.js";
 import type { JobInputs } from "../src/job-inputs.js";
 import { createJobJournal, type JournalRecord, type JournalState, type SignedMilestonePackage } from "../src/journal.js";
+import type { ClaimFunding } from "../src/journal.js";
 import { generateHostKeys } from "../src/keygen.js";
 import { loadDeviceKey, loadOperatorKey } from "../src/keys.js";
 import { computePackageDigest } from "../src/package-builder.js";
@@ -53,6 +55,7 @@ async function fixture(options: {
   missingInputs?: boolean;
   simulated?: boolean;
   realMode?: boolean;
+  fundingSource?: "gateway" | "manifest";
   print?: HostDeps["print"];
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "ph4-host-submit-"));
@@ -66,11 +69,13 @@ async function fixture(options: {
   const rpcUrl = `https://rpc.example.test/${randomBytes(24).toString("base64url")}`;
   const rpcUrlFile = join(directory, "rpc-url");
   await writeFile(rpcUrlFile, `${rpcUrl}\n`, { mode: 0o600 });
+  const fundingSource = options.fundingSource ?? (options.missingInputs ? "manifest" : "gateway");
   const config: HostConfig = {
     kernelId: "kernel:submit", deviceId: "device:submit", printer: { uri: "ipp://localhost/ipp/print" },
     chain: { chainId: 31337, rpcUrlFile, receiptTimeoutMs: 50, pollingIntervalMs: 1,
       ...(options.caps === false ? {} : { maxFeePerGasCap: "100", maxPriorityFeePerGasCap: "20", gasCap: "100000" }) },
     gateway: { baseUrl: "https://gateway.example.test", apiKeyFile: "/unused/api-key" },
+    funding: { source: fundingSource },
     keys: generated.paths, dataDir: directory,
   };
   const journal = createJobJournal(directory, () => now.getTime());
@@ -108,6 +113,13 @@ async function fixture(options: {
     ...(options.missingInputs ? {} : { program: { programHash: word(), attestationSetRoot: word(), workProductRoot: word() } }),
   };
   const inputSource = vi.fn(async () => ({ ok: true as const, value: inputs }));
+  const funding: Extract<JobFunding, { ok: true }> = {
+    ok: true, fundedAt, operator: loadedOperator.address.toLowerCase(),
+    escrowAddress: packageUnit.escrow.toLowerCase(), chainId: 31337,
+    fundingBlockNumber: "9007199254740993", fundingBlockHash: word(),
+  };
+  const { operator, escrowAddress, chainId, fundingBlockNumber, fundingBlockHash } = funding;
+  const gatewayClaim: ClaimFunding = { source: "gateway", fundedAt, operator, escrowAddress, chainId, fundingBlockNumber, fundingBlockHash };
   const adapter = new FakeMachineAdapter(config.deviceId, config.kernelId);
   adapter.source.simulated = options.simulated ?? false;
   cleanups.push(() => adapter.dispose());
@@ -118,7 +130,7 @@ async function fixture(options: {
   const gateway = {
     heartbeat: vi.fn(async () => ({ ok: true as const, value: null })),
     pollJobs: vi.fn(async (): Promise<GwResult<PollJobsValue>> => ({ ok: true,
-      value: { stop: { proceed: true }, jobs: [{ jobId, status: "queued" }], foreignJobsDropped: 0, truncated: false } })),
+      value: { stop: { proceed: true }, jobs: [{ jobId, status: "queued", funding }], foreignJobsDropped: 0, truncated: false } })),
     reportInProgress: vi.fn(async () => ({ ok: true as const, value: { updated: true as const } })),
     postRelayEvidence: vi.fn(async (id: string, bundle: RelayEvidenceBundle): Promise<GwResult<{ jobId: string;
       contentHash: string; hashModel: "event_bundle_hash" }>> => ({ ok: true,
@@ -211,11 +223,22 @@ async function fixture(options: {
     logger: (code) => { logs.push(code); }, timeoutMs: 500, cancelWindowMs: 100,
     ...(options.print ? { print: options.print } : {}), ...(options.realMode === undefined ? {} : { realMode: options.realMode }) };
   const host = createHost(deps);
-  return { directory, config, journal, diskRecords, diskPackage, inputs, inputSource, adapter, gateway, fake, calls,
+  return { directory, config, journal, diskRecords, diskPackage, inputs, inputSource, funding, gatewayClaim, adapter, gateway, fake, calls,
     sendStates, sentData, d1States, operatorKey, deviceKey, broadcaster, newBroadcaster, logs, deps, host, rpcUrl, serverText, terms, receiptValue, advance: (ms = 60_000) => now.setTime(now.getTime() + ms) };
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
+async function rewriteClaim(setup: Fixture, funding: ClaimFunding | undefined) {
+  await setup.journal.close();
+  const path = setup.journal.journalPath(jobId);
+  const lines = (await readFile(path, "utf8")).trimEnd().split("\n");
+  const claim = JSON.parse(lines[0]) as JournalRecord;
+  if (funding === undefined) delete claim.funding;
+  else claim.funding = funding;
+  lines[0] = JSON.stringify(claim);
+  await writeFile(path, `${lines.join("\n")}\n`, { mode: 0o600 });
+}
+
 async function finish(setup: Fixture, failed = false) {
   setup.adapter.scriptStart({ outcome: "success", jobId: 101 });
   const started = setup.adapter.started();
@@ -481,7 +504,7 @@ describe("host package and crash-safe submitEvidence", () => {
     });
     setup.gateway.pollJobs.mockClear();
     setup.gateway.pollJobs.mockResolvedValue({ ok: true, value: { stop: { proceed: true },
-      jobs: [{ jobId, status: "queued" }, { jobId: newJob, status: "queued" }], foreignJobsDropped: 0, truncated: false } });
+      jobs: [{ jobId, status: "queued" }, { jobId: newJob, status: "queued", funding: setup.funding }], foreignJobsDropped: 0, truncated: false } });
     // Hold the new job before printing so only the old unit could reach settlement.
     const recovered = await restart(setup, { noSubmit: false, inputSource,
       gateway: { ...setup.gateway, reportInProgress: async () => ({ ok: false, code: "network", status: null }) } });
@@ -808,7 +831,7 @@ describe("pre-send retries and gateway receipts", () => {
     const newJob = "job:new-funded-unit";
     const newInputs = { ...setup.inputs, unit: { ...setup.inputs.unit, settlementUnitId: word() } };
     setup.inputSource.mockResolvedValue({ ok: true, value: newInputs });
-    setup.gateway.pollJobs.mockResolvedValue({ ok: true, value: { jobs: [{ jobId: newJob, status: "queued" }], stop: { proceed: true }, foreignJobsDropped: 0, truncated: false } });
+    setup.gateway.pollJobs.mockResolvedValue({ ok: true, value: { jobs: [{ jobId: newJob, status: "queued", funding: setup.funding }], stop: { proceed: true }, foreignJobsDropped: 0, truncated: false } });
     const print = vi.fn(async () => ({ success: false, events: [], durationMs: 0 }));
     const recovered = await restart(setup, { noSubmit: true, print });
     expect(await recovered.host.runOnce()).toMatchObject({ jobId: newJob, state: "print_failed" });
@@ -1287,6 +1310,7 @@ describe("r5d receipt refusals and non-blocking recovery (R4, A3)", () => {
     expect(await finish(setup)).toMatchObject({ state: "package_built" });
     const otherJob = "a:package-built";
     const pkg = await setup.diskPackage();
+    await setup.journal.append(otherJob, "claimed", undefined, { funding: setup.gatewayClaim });
     await setup.journal.append(otherJob, "evidence_stored");
     await setup.journal.savePackage(otherJob, pkg);
     await setup.journal.append(otherJob, "package_built", undefined, {
@@ -1361,7 +1385,7 @@ describe("rehearsal envelope and restart promises (r5d F3)", () => {
     const newJob = "job:after-rehearsal";
     const newInputs = { ...setup.inputs, unit: { ...setup.inputs.unit, settlementUnitId: word() } };
     setup.inputSource.mockResolvedValue({ ok: true, value: newInputs });
-    setup.gateway.pollJobs.mockResolvedValue({ ok: true, value: { jobs: [{ jobId: newJob, status: "queued" }], stop: { proceed: true }, foreignJobsDropped: 0, truncated: false } });
+    setup.gateway.pollJobs.mockResolvedValue({ ok: true, value: { jobs: [{ jobId: newJob, status: "queued", funding: setup.funding }], stop: { proceed: true }, foreignJobsDropped: 0, truncated: false } });
     const print = vi.fn(async () => ({ success: false, events: [], durationMs: 0 }));
     setup.adapter.source.simulated = false;
     const recovered = await restart(setup, { realMode: true, print });
@@ -1598,5 +1622,224 @@ describe("REVIEW r3 caps stall under run()", () => {
       expect(setup.gateway.postReceipt.mock.calls.filter(([id]) => id === other).length - receiptPosts[index]).toBeGreaterThanOrEqual(3);
     }
     expect(setup.sentData).toEqual([]);
+  });
+});
+
+describe("CODE #41 gateway funding (D2-D6, D4, A1)", () => {
+  it.each(["absent", "equal"] as const)(
+    "gateway mode claims a verified job whose manifest fundedAt is %s and opens the session at the verified fundedAt", async (manifestTime) => {
+      const setup = await fixture();
+      if (manifestTime === "absent") {
+        const { fundedAt: _fundedAt, ...unit } = setup.inputs.unit;
+        setup.inputSource.mockResolvedValue({ ok: true, value: { ...setup.inputs, unit } });
+      }
+      expect(await finish(setup)).toMatchObject({ state: "submitted" });
+      const claim = { at: "2026-10-13T12:00:00.000Z", jobId, state: "claimed", funding: setup.gatewayClaim };
+      expect((await setup.journal.read(jobId))[0]).toEqual(claim);
+      expect((await setup.diskRecords())[0].funding).toMatchObject({ fundingBlockNumber: "9007199254740993" });
+      const open = JSON.parse(await readFile(join(setup.journal.sessionDirectory(jobId), "00000000.json"), "utf8"));
+      expect(open.record.binding.fundedAt).toBe(setup.funding.fundedAt);
+      expect(setup.deviceKey.signDelegation).toHaveBeenCalledTimes(1);
+      expect(setup.deviceKey.signDelegation.mock.calls[0][0].fundedAt).toBe(setup.funding.fundedAt);
+    },
+  );
+
+  it.each(["funding_absent", "funding_read_failed", "funding_unverified", "funding_ambiguous"] as const)(
+    "gateway funding %s claims nothing, loads no inputs and journals nothing", async (code) => {
+      const setup = await fixture();
+      const funding = code === "funding_absent" ? {} : { funding: { ok: false as const, code } };
+      setup.gateway.pollJobs.mockResolvedValue({ ok: true, value: { stop: { proceed: true },
+        jobs: [{ jobId, status: "queued", ...funding }], foreignJobsDropped: 0, truncated: false } });
+      expect(await setup.host.runOnce()).toEqual({ kind: "idle", waitMs: 5_000 });
+      expect(setup.inputSource).not.toHaveBeenCalled();
+      expect(setup.gateway.reportInProgress).not.toHaveBeenCalled();
+      expect(await setup.journal.has(jobId)).toBe(false);
+      expect(setup.logs.filter((entry) => entry === code)).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    ["operator", "funding_operator_mismatch"],
+    ["escrow", "funding_escrow_mismatch"],
+    ["manifest with no unit.escrow", "funding_escrow_mismatch"],
+    ["chain", "funding_chain_mismatch"],
+    ["fundedAt below the protocol range", "funding_bad_time"],
+    ["fundedAt at 2^32", "funding_bad_time"],
+    ["fundedAt equal to reclaimAt", "funding_bad_time"],
+    ["manifest fundedAt", "funding_mismatch"],
+  ] as const)("a verified funding whose %s does not match claims nothing and reserves no unit", async (field, code) => {
+    const setup = await fixture();
+    const funding = { ...setup.funding };
+    const inputs = { ...setup.inputs, unit: { ...setup.inputs.unit } };
+    if (field === "operator") funding.operator = `0x${"1".repeat(40)}`;
+    else if (field === "escrow") funding.escrowAddress = `0x${"2".repeat(40)}`;
+    else if (field === "manifest with no unit.escrow") delete inputs.unit.escrow;
+    else if (field === "chain") funding.chainId = 84532;
+    else if (field === "fundedAt below the protocol range") funding.fundedAt = 1_599_999_999;
+    else if (field === "fundedAt at 2^32") funding.fundedAt = 2 ** 32;
+    else if (field === "fundedAt equal to reclaimAt") funding.fundedAt = inputs.unit.reclaimAt;
+    else inputs.unit.fundedAt = setup.funding.fundedAt - 1;
+    setup.inputSource.mockResolvedValue({ ok: true, value: inputs });
+    setup.gateway.pollJobs.mockResolvedValue({ ok: true, value: { stop: { proceed: true },
+      jobs: [{ jobId, status: "queued", funding }], foreignJobsDropped: 0, truncated: false } });
+    const reserve = vi.spyOn(setup.journal, "reserveUnit");
+    expect(await setup.host.runOnce()).toEqual({ kind: "idle", waitMs: 5_000 });
+    expect(reserve).not.toHaveBeenCalled();
+    expect(setup.gateway.reportInProgress).not.toHaveBeenCalled();
+    expect(await setup.journal.has(jobId)).toBe(false);
+    expect(setup.logs.filter((entry) => entry === code)).toHaveLength(1);
+  });
+
+  it("a refused job never blocks a later verified job in the same poll", async () => {
+    const setup = await fixture();
+    setup.gateway.pollJobs.mockResolvedValue({ ok: true, value: { stop: { proceed: true }, jobs: [
+      { jobId: "a:unfunded", status: "queued", funding: { ok: false, code: "funding_unverified" } },
+      { jobId, status: "queued", funding: setup.funding },
+    ], foreignJobsDropped: 0, truncated: false } });
+    expect(await finish(setup)).toMatchObject({ jobId, state: "submitted" });
+    expect(await setup.journal.has("a:unfunded")).toBe(false);
+    expect(setup.inputSource).toHaveBeenCalledTimes(1);
+    expect(setup.inputSource).toHaveBeenCalledWith(jobId);
+    expect(setup.logs.filter((entry) => entry === "funding_unverified")).toHaveLength(1);
+  });
+
+  it("logs each job's funding code once until it changes, and again after the job leaves the queued list", async () => {
+    const setup = await fixture();
+    const a = (code: "funding_unverified" | "funding_read_failed") => ({ jobId: "job:A", status: "queued", funding: { ok: false as const, code } });
+    const b = { jobId: "job:B", status: "queued", funding: { ok: false as const, code: "funding_unverified" as const } };
+    const polls = [[a("funding_unverified")], [a("funding_unverified")], [a("funding_unverified")],
+      [a("funding_read_failed")], [a("funding_unverified"), b], [], [a("funding_unverified")]];
+    for (const jobs of polls) setup.gateway.pollJobs.mockResolvedValueOnce({ ok: true, value: {
+      stop: { proceed: true }, jobs, foreignJobsDropped: 0, truncated: false,
+    } });
+    for (let tick = 1; tick <= 7; tick++) {
+      expect(await setup.host.runOnce()).toEqual({ kind: "idle", waitMs: 5_000 });
+      if (tick === 3) expect(setup.logs.filter((code) => code === "funding_unverified")).toHaveLength(1);
+      if (tick === 5) expect(setup.logs.filter((code) => code === "funding_unverified")).toHaveLength(3);
+      if (tick === 7) expect(setup.logs.filter((code) => code === "funding_unverified")).toHaveLength(4);
+      setup.advance();
+    }
+    expect(setup.gateway.pollJobs).toHaveBeenCalledTimes(7);
+    expect(setup.logs.filter((code) => code === "funding_read_failed")).toHaveLength(1);
+    expect(setup.inputSource).not.toHaveBeenCalled();
+  });
+
+  it("manifest mode journals source manifest and never reads the poll's funding", async () => {
+    const setup = await fixture({ fundingSource: "manifest" });
+    setup.host = createHost({ ...setup.deps, noSubmit: true });
+    setup.gateway.pollJobs.mockResolvedValue({ ok: true, value: { stop: { proceed: true },
+      jobs: [{ jobId, status: "queued", funding: { ok: false, code: "funding_unverified" } }], foreignJobsDropped: 0, truncated: false } });
+    expect(await finish(setup)).toMatchObject({ state: "evidence_stored" });
+    expect((await setup.journal.read(jobId))[0].funding).toEqual({ source: "manifest" });
+    expect((await setup.journal.read(jobId)).at(-1)).toMatchObject({ state: "evidence_stored", code: "submit_disabled" });
+    expect(setup.logs.some((code) => code.startsWith("funding_"))).toBe(false);
+  });
+
+  it("a restart resumes a gateway claim from the journal, never reads funding again, and sends once", async () => {
+    const setup = await fixture();
+    vi.spyOn(setup.journal, "savePackage").mockRejectedValueOnce(new Error("crash"));
+    expect(await finish(setup)).toMatchObject({ kind: "halted" });
+    const claim = (await setup.diskRecords())[0];
+    const { fundedAt: _fundedAt, ...unit } = setup.inputs.unit;
+    const inputSource = vi.fn(async () => ({ ok: true as const, value: { ...setup.inputs, unit } }));
+    setup.gateway.pollJobs.mockResolvedValue({ ok: true, value: { stop: { proceed: true },
+      jobs: [{ jobId, status: "queued", funding: { ok: false, code: "funding_read_failed" } }], foreignJobsDropped: 0, truncated: false } });
+    const recovered = await restart(setup, { inputSource });
+    const polls = setup.gateway.pollJobs.mock.calls.length;
+    expect(await recovered.host.runOnce()).toMatchObject({ state: "submitted" });
+    expect(setup.gateway.pollJobs).toHaveBeenCalledTimes(polls);
+    expect(await recovered.host.runOnce()).toMatchObject({ kind: "idle" });
+    expect(setup.gateway.pollJobs).toHaveBeenCalledTimes(polls + 1);
+    expect((await recovered.journal.read(jobId))[0]).toEqual(claim);
+    expect(setup.logs.some((code) => code.startsWith("funding_"))).toBe(false);
+    expect(inputSource).toHaveBeenCalledTimes(1);
+    expect(setup.sentData).toHaveLength(1);
+  });
+
+  it("A1: a unit claimed under manifest with --no-submit is never submitted after a restart in gateway mode with submit on", async () => {
+    const setup = await fixture({ fundingSource: "manifest" });
+    setup.host = createHost({ ...setup.deps, noSubmit: true });
+    expect(await finish(setup)).toMatchObject({ state: "evidence_stored" });
+    const before = await setup.diskRecords();
+    expect(before.at(-1)).toMatchObject({ code: "submit_disabled" });
+    const recovered = await restart(setup, { config: { ...setup.config, funding: { source: "gateway" } }, noSubmit: false });
+    for (let tick = 0; tick < 3; tick++) {
+      setup.advance();
+      await recovered.host.runOnce();
+    }
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+    expect(setup.gateway.postReceipt).not.toHaveBeenCalled();
+    expect(setup.operatorKey.signD1).not.toHaveBeenCalled();
+    expect(await setup.diskRecords()).toEqual(before);
+    expect(setup.sentData).toEqual([]);
+  });
+
+  it.each(["evidence_stored", "receipt_stored"] as const)(
+    "A1: a sendable %s unit whose claim record says manifest ends refused funding_source_manifest and is never sent", async (boundary) => {
+      const setup = await fixture();
+      if (boundary === "evidence_stored") {
+        vi.spyOn(setup.journal, "savePackage").mockRejectedValueOnce(new Error("crash"));
+        expect(await finish(setup)).toMatchObject({ kind: "halted" });
+      } else {
+        setup.broadcaster.submit.mockResolvedValueOnce({ code: "caps_exceeded", cap: "gasCap" });
+        expect(await finish(setup)).toMatchObject({ state: "receipt_stored" });
+      }
+      await rewriteClaim(setup, { source: "manifest" });
+      const receiptPosts = setup.gateway.postReceipt.mock.calls.length;
+      const recovered = await restart(setup);
+      expect(await recovered.host.runOnce()).toMatchObject({ state: "refused" });
+      expect((await recovered.journal.read(jobId)).at(-1)).toMatchObject({ state: "refused", code: "funding_source_manifest" });
+      expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+      expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(receiptPosts);
+      expect(setup.sentData).toEqual([]);
+      expect(setup.logs.filter((code) => code === "funding_source_manifest")).toHaveLength(1);
+      const before = await setup.diskRecords();
+      await recovered.host.runOnce();
+      expect(await setup.diskRecords()).toEqual(before);
+    },
+  );
+
+  it("A1: a sendable unit whose claim record has no funding source (an older host) ends refused funding_source_manifest", async () => {
+    const setup = await fixture();
+    vi.spyOn(setup.journal, "savePackage").mockRejectedValueOnce(new Error("crash"));
+    expect(await finish(setup)).toMatchObject({ kind: "halted" });
+    await rewriteClaim(setup, undefined);
+    const receiptPosts = setup.gateway.postReceipt.mock.calls.length;
+    const recovered = await restart(setup);
+    expect(await recovered.host.runOnce()).toMatchObject({ state: "refused" });
+    expect((await recovered.journal.read(jobId)).at(-1)).toMatchObject({ state: "refused", code: "funding_source_manifest" });
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+    expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(receiptPosts);
+    expect(setup.sentData).toEqual([]);
+    expect(setup.logs.filter((code) => code === "funding_source_manifest")).toHaveLength(1);
+    const before = await setup.diskRecords();
+    await recovered.host.runOnce();
+    expect(await setup.diskRecords()).toEqual(before);
+  });
+
+  it("A1: a submit_indeterminate unit whose claim record says manifest keeps its read-back and is never re-sent", async () => {
+    const setup = await fixture();
+    setup.fake.send = "throw_after_commit";
+    expect(await finish(setup)).toMatchObject({ state: "submit_indeterminate" });
+    await rewriteClaim(setup, { source: "manifest" });
+    const recovered = await restart(setup);
+    expect(await recovered.host.runOnce()).toMatchObject({ state: "already_committed" });
+    expect(recovered.broadcaster.readBack).toHaveBeenCalledTimes(1);
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+    expect(setup.sentData).toHaveLength(1);
+    expect(setup.logs).not.toContain("funding_source_manifest");
+  });
+
+  it.each([401, null])("R3 with D1: an unauthenticated evidence refusal with status %s is held and posted again", async (status) => {
+    const setup = await fixture({ caps: false });
+    setup.gateway.postRelayEvidence.mockResolvedValueOnce({ ok: false, code: "unauthenticated", status });
+    const { waits, timers } = evidenceHoldTimers(setup);
+    setup.host = createHost({ ...setup.deps, timers });
+    expect(await finish(setup)).toMatchObject({ kind: "job", jobId, state: "evidence_stored" });
+    expect(setup.gateway.postRelayEvidence).toHaveBeenCalledTimes(2);
+    expect(setup.gateway.postRelayEvidence.mock.calls[0][1]).toBe(setup.gateway.postRelayEvidence.mock.calls[1][1]);
+    expect(waits).toEqual([5_000]);
+    expect((await setup.journal.read(jobId)).at(-1)).toMatchObject({ state: "evidence_stored", code: "submit_disabled" });
+    expect(setup.adapter.commands.map((command) => command.type)).toEqual(["start"]);
   });
 });

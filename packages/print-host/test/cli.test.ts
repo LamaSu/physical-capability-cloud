@@ -3,7 +3,8 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getAddress, keccak256, parseTransaction, toBytes } from "viem";
+import { getAddress, keccak256, parseTransaction, recoverMessageAddress, toBytes } from "viem";
+import { buildOperatorSignInMessage, type OperatorSessionKeeper, type OperatorSessionKeeperOptions, type OperatorSignInFields } from "@pcc/adk";
 import { main } from "../src/cli.js";
 import { generateHostKeys } from "../src/keygen.js";
 import { createGatewayClient } from "../src/gateway-client.js";
@@ -112,6 +113,27 @@ async function runFixture(stopFields: Record<string, unknown> = { emergencyStop:
   const operator = JSON.parse(await readFile(generated.paths.operatorKeyFile, "utf8"));
   return { configFile, inputsDir, dataDir, calls, fetchImpl, adapter, dispose, createPrinter, operatorAddress: generated.identity.operatorAddress,
     secrets: [apiToken, providerToken, device.seed, operator.privateKey.slice(2), jobName, "private buyer document"] };
+}
+
+function fakeSessionKeeper(ready: "now" | "never" = "now") {
+  const sessionKey = ["pcc", "test", randomBytes(24).toString("hex")].join("_");
+  const key = { apiKey: sessionKey, keyId: "session-key-1", expiresAtMs: Date.now() + 3_600_000 };
+  const stop = vi.fn(async () => undefined);
+  const invalidate = vi.fn();
+  const keeper: OperatorSessionKeeper = {
+    key: () => key,
+    ready: () => ready === "now" ? Promise.resolve(key) : new Promise(() => {}),
+    stop, invalidate,
+  };
+  return { keeper, sessionKey, stop, invalidate };
+}
+
+async function gatewayFixture() {
+  const fixture = await runFixture();
+  const config = JSON.parse(await readFile(fixture.configFile, "utf8"));
+  config.funding = { source: "gateway" };
+  await writeFile(fixture.configFile, JSON.stringify(config), { mode: 0o600 });
+  return { ...fixture, config };
 }
 
 function assertRunOutput(captured: ReturnType<typeof capture>, secrets: string[]) {
@@ -263,7 +285,7 @@ describe("print-host CLI", () => {
       return fixture.fetchImpl(input, init);
     });
     const captured = capture();
-    expect(await main(["run", "--config", fixture.configFile, "--once", "--inputs-dir", fixture.inputsDir], captured.io, {
+    expect(await main(["run", "--config", fixture.configFile, "--once", "--no-submit", "--inputs-dir", fixture.inputsDir], captured.io, {
       createGateway: config => createGatewayClient({ ...config, fetchImpl }),
       createPrinter: fixture.createPrinter,
     })).toBe(0);
@@ -283,7 +305,7 @@ describe("print-host CLI", () => {
     const createGateway = vi.fn((config: Parameters<typeof createGatewayClient>[0]) =>
       createGatewayClient({ ...config, fetchImpl: fixture.fetchImpl }));
     const captured = capture();
-    expect(await main(["run", "--config", fixture.configFile, "--once", "--inputs-dir", fixture.inputsDir], captured.io, {
+    expect(await main(["run", "--config", fixture.configFile, "--once", "--no-submit", "--inputs-dir", fixture.inputsDir], captured.io, {
       createGateway, createPrinter: fixture.createPrinter,
     })).toBe(0);
     expect(fixture.calls).toEqual(["/api/operator/heartbeat", "/api/operator/jobs"]);
@@ -299,6 +321,7 @@ describe("print-host CLI", () => {
     const fixture = await runFixture();
     const config = JSON.parse(await readFile(fixture.configFile, "utf8"));
     config.chain = { ...config.chain, chainId: 31337, maxFeePerGasCap: "100", maxPriorityFeePerGasCap: "10", gasCap: "250000" };
+    config.funding = { source: "gateway" };
     await writeFile(fixture.configFile, JSON.stringify(config), { mode: 0o600 });
     fixture.adapter.scriptStart({ outcome: "busy" });
     const broadcaster: EvidenceBroadcaster = {
@@ -321,6 +344,7 @@ describe("print-host CLI", () => {
     expect(await main(["run", "--config", fixture.configFile, "--once", "--inputs-dir", fixture.inputsDir], captured.io, {
       createGateway: settings => createGatewayClient({ ...settings, fetchImpl: fixture.fetchImpl }),
       createPrinter: fixture.createPrinter, createBroadcaster,
+      createSessionKeeper: () => fakeSessionKeeper().keeper,
     })).toBe(0);
     expect(createBroadcaster).toHaveBeenCalledOnce();
     expect(parseTransaction(await transaction!).chainId).toBe(31337);
@@ -483,7 +507,7 @@ describe("print-host CLI", () => {
     fixture.adapter.scriptStart({ outcome: "success", jobId: 901 });
     const captured = capture();
     const before = process.listenerCount(signal);
-    const running = main(["run", "--config", fixture.configFile, "--once", "--inputs-dir", fixture.inputsDir], captured.io, {
+    const running = main(["run", "--config", fixture.configFile, "--once", "--no-submit", "--inputs-dir", fixture.inputsDir], captured.io, {
       createGateway: config => createGatewayClient({
         ...config, fetchImpl: fixture.fetchImpl, emergencyStopReader: () => ({ proceed: true }),
       }),
@@ -505,4 +529,128 @@ describe("print-host CLI", () => {
     expect(process.listenerCount(signal)).toBe(before);
     assertRunOutput(captured, fixture.secrets);
   });
+
+  it("run refuses manifest funding without --no-submit before opening credentials or devices", async () => {
+    const fixture = await runFixture();
+    const config = JSON.parse(await readFile(fixture.configFile, "utf8"));
+    await rm(config.keys.operatorKeyFile);
+    const createGateway = vi.fn(() => { throw new Error("credentials must stay closed"); });
+    const createBroadcaster = vi.fn(() => { throw new Error("broadcaster must stay closed"); });
+    const captured = capture();
+    expect(await main(["run", "--config", fixture.configFile, "--once", "--inputs-dir", fixture.inputsDir], captured.io, {
+      createGateway, createPrinter: fixture.createPrinter, createBroadcaster,
+    })).toBe(1);
+    expect(captured.output()).toEqual({ stdout: "", stderr: "manifest_requires_no_submit\n" });
+    expect(createGateway).not.toHaveBeenCalled();
+    expect(createBroadcaster).not.toHaveBeenCalled();
+    expect(fixture.createPrinter).not.toHaveBeenCalled();
+  });
+
+  it("run refuses gateway funding with --poll-only", async () => {
+    const fixture = await gatewayFixture();
+    const createGateway = vi.fn(() => { throw new Error("gateway must stay closed"); });
+    const captured = capture();
+    expect(await main(["run", "--config", fixture.configFile, "--once", "--poll-only"], captured.io, {
+      createGateway, createPrinter: fixture.createPrinter,
+    })).toBe(1);
+    expect(captured.output()).toEqual({ stdout: "", stderr: "gateway_refuses_poll_only\n" });
+    expect(createGateway).not.toHaveBeenCalled();
+    expect(fixture.createPrinter).not.toHaveBeenCalled();
+  });
+
+  it("gateway mode signs in with the bound closure, sends the session key per request and never reads apiKeyFile", async () => {
+    const fixture = await gatewayFixture();
+    await rm(fixture.config.gateway.apiKeyFile);
+    const session = fakeSessionKeeper();
+    const createSessionKeeper = vi.fn((settings: OperatorSessionKeeperOptions) => {
+      expect(settings.baseUrl).toBe(fixture.config.gateway.baseUrl);
+      expect(settings.address).toBe(fixture.operatorAddress);
+      expect(settings.chainId).toBe(84532);
+      return session.keeper;
+    });
+    const createGateway = vi.fn((settings: Parameters<typeof createGatewayClient>[0]) =>
+      createGatewayClient({ ...settings, fetchImpl: fixture.fetchImpl }));
+    const captured = capture();
+    expect(await main(["run", "--config", fixture.configFile, "--once", "--inputs-dir", fixture.inputsDir], captured.io, {
+      createGateway, createPrinter: fixture.createPrinter, createSessionKeeper,
+    })).toBe(0);
+    const settings = createSessionKeeper.mock.calls[0]![0];
+    const fields: OperatorSignInFields = {
+      domain: "gateway.example.test", address: fixture.operatorAddress,
+      statement: "Sign in to Physical Capability Cloud as an operator host.",
+      uri: "https://gateway.example.test", version: "1", chainId: 84532,
+      nonce: "Nonce123456", issuedAt: new Date().toISOString(),
+    };
+    const message = buildOperatorSignInMessage(fields);
+    const signature = await settings.signMessage(message, fields) as `0x${string}`;
+    expect(await recoverMessageAddress({ message, signature })).toBe(fixture.operatorAddress);
+    expect(createGateway.mock.calls[0]![0].sessionKeys).toBe(session.keeper);
+    expect(createGateway.mock.calls[0]![0]).not.toHaveProperty("apiKey");
+    expect(fixture.calls).toEqual(["/api/operator/heartbeat", "/api/operator/jobs"]);
+    for (const [, init] of fixture.fetchImpl.mock.calls) expect(new Headers(init?.headers).get("Authorization")).toBe(`Bearer ${session.sessionKey}`);
+    expect(captured.output().stdout.split("\n").filter(code => code === "funding_absent")).toHaveLength(1);
+    expect(session.stop).toHaveBeenCalledOnce();
+    assertRunOutput(captured, [...fixture.secrets, session.sessionKey]);
+  });
+
+  it.each(["--once", "SIGTERM", "SIGINT"] as const)("gateway mode stops the keeper on %s", async (exit) => {
+    const fixture = await gatewayFixture();
+    const session = fakeSessionKeeper();
+    const before = [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")];
+    let firstPoll!: () => void;
+    const polled = new Promise<void>(resolve => { firstPoll = resolve; });
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const response = await fixture.fetchImpl(input, init);
+      if (new URL(String(input)).pathname.endsWith("/jobs")) firstPoll();
+      return response;
+    };
+    const captured = capture();
+    const running = main(["run", "--config", fixture.configFile, ...(exit === "--once" ? ["--once"] : []), "--inputs-dir", fixture.inputsDir], captured.io, {
+      createGateway: settings => createGatewayClient({ ...settings, fetchImpl }),
+      createPrinter: fixture.createPrinter, createSessionKeeper: () => session.keeper,
+    });
+    if (exit !== "--once") { await polled; process.emit(exit); }
+    expect(await running).toBe(0);
+    expect(session.stop).toHaveBeenCalledOnce();
+    expect([process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")]).toEqual(before);
+    assertRunOutput(captured, [...fixture.secrets, session.sessionKey]);
+  });
+
+  it("gateway mode exits operator_session_unavailable when no key arrives by the startup deadline", async () => {
+    const fixture = await gatewayFixture();
+    const session = fakeSessionKeeper("never");
+    const createGateway = vi.fn(() => { throw new Error("gateway must stay closed"); });
+    const captured = capture();
+    expect(await main(["run", "--config", fixture.configFile, "--once"], captured.io, {
+      createGateway, createPrinter: fixture.createPrinter, createSessionKeeper: () => session.keeper,
+      sessionStartDeadlineMs: 20,
+    })).toBe(1);
+    expect(captured.output()).toEqual({ stdout: "", stderr: "operator_session_unavailable\n" });
+    expect(createGateway).not.toHaveBeenCalled();
+    expect(fixture.createPrinter).not.toHaveBeenCalled();
+    expect(session.stop).toHaveBeenCalledOnce();
+  });
+
+  it("a shutdown signal during the startup wait exits 0 with no gateway call and stops the keeper", async () => {
+    const fixture = await gatewayFixture();
+    const session = fakeSessionKeeper("never");
+    const before = [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")];
+    let started!: () => void;
+    const starting = new Promise<void>(resolve => { started = resolve; });
+    const createGateway = vi.fn(() => { throw new Error("gateway must stay closed"); });
+    const captured = capture();
+    const running = main(["run", "--config", fixture.configFile], captured.io, {
+      createGateway, createPrinter: fixture.createPrinter,
+      createSessionKeeper: () => { started(); return session.keeper; },
+    });
+    await starting;
+    process.emit("SIGTERM");
+    expect(await running).toBe(0);
+    expect(captured.output()).toEqual({ stdout: "", stderr: "" });
+    expect(createGateway).not.toHaveBeenCalled();
+    expect(fixture.createPrinter).not.toHaveBeenCalled();
+    expect(session.stop).toHaveBeenCalledOnce();
+    expect([process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")]).toEqual(before);
+  });
+
 });

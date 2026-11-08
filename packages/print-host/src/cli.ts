@@ -4,6 +4,10 @@ import { open, unlink } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { acceptanceDigest, domainSeparator, jobPolicyHash } from "@pcc/contracts/vnext";
 import { getAddress } from "viem";
+import {
+  createOperatorSessionKeeper, OperatorSessionError,
+  type OperatorSessionKeeper, type OperatorSessionKey, type OperatorSessionEvent,
+} from "@pcc/adk";
 import { createEvidenceBroadcaster, EvidenceChainConfigError } from "./chain.js";
 import { checkHostConfig, HostConfigError, loadHostConfig, requireSubmissionCaps } from "./config.js";
 import type { HostConfig } from "./config.js";
@@ -42,6 +46,8 @@ export interface CliRunRuntime {
   createGateway?: (config: GatewayClientConfig) => GatewayClient;
   createPrinter?: (config: HostConfig) => CliPrintComponents;
   createBroadcaster?: typeof createEvidenceBroadcaster;
+  createSessionKeeper?: typeof createOperatorSessionKeeper;
+  sessionStartDeadlineMs?: number;
 }
 
 interface RunOptions {
@@ -74,6 +80,13 @@ function parseRunOptions(argv: string[]): RunOptions | undefined {
   return configPath ? { configPath, once, pollOnly, noSubmit, inputsDir } : undefined;
 }
 
+const SESSION_START_DEADLINE_MS = 60_000;
+
+class SessionStartError extends Error {
+  readonly code = "operator_session_unavailable";
+  constructor() { super("operator_session_unavailable"); this.name = "SessionStartError"; }
+}
+
 class PrinterInitializationError extends Error {
   readonly code = "adapter_init_failed";
   constructor() { super("adapter_init_failed"); this.name = "PrinterInitializationError"; }
@@ -95,12 +108,21 @@ async function runCommand(options: RunOptions, io: CliIo, runtime: CliRunRuntime
   process.on("SIGTERM", stop);
   let printer: CliPrintComponents | undefined;
   let journal: ReturnType<typeof createJobJournal> | undefined;
+  let keeper: OperatorSessionKeeper | undefined;
+  const logger = (code: string) => {
+    // Preserve the runtime's closed logging contract at the CLI boundary.
+    if ((HOST_LOG_CODES as readonly string[]).includes(code)) io.stdout.write(`${code}\n`);
+  };
   try {
     const config = await loadHostConfig(options.configPath);
     if (!options.pollOnly && !options.noSubmit) requireSubmissionCaps(config.chain);
+    const gatewayMode = config.funding?.source === "gateway";
+    if (!gatewayMode && !options.noSubmit && !options.pollOnly) throw new HostConfigError("manifest_requires_no_submit", "config");
+    if (gatewayMode && options.pollOnly) throw new HostConfigError("gateway_refuses_poll_only", "config");
     // Poll-only is usable before key provisioning and never opens the printer.
     const identity = options.pollOnly ? undefined : await checkHostConfig(config);
-    const operator = identity ? await loadOperatorKey(config.keys.operatorKeyFile, config.chain.chainId) : undefined;
+    const operator = identity ? await loadOperatorKey(config.keys.operatorKeyFile, config.chain.chainId,
+      gatewayMode ? { signIn: { baseUrl: config.gateway.baseUrl } } : {}) : undefined;
     const deviceKey = operator ? await loadDeviceKey(config.keys.deviceKeyFile, {
       delegationBinding: { chainId: config.chain.chainId, operator: getAddress(operator.address) },
     }) : undefined;
@@ -109,31 +131,64 @@ async function runCommand(options: RunOptions, io: CliIo, runtime: CliRunRuntime
     const operatorKey = operator ? Object.freeze({ address: operator.address, signD1: operator.signD1 }) : undefined;
     const broadcaster = operator && !options.noSubmit ? (runtime.createBroadcaster ?? createEvidenceBroadcaster)({ chain: config.chain },
       Object.freeze({ address: operator.address, signSubmitEvidenceTx: operator.signSubmitEvidenceTx })) : undefined;
-    const apiBytes = await readSecretFile(config.gateway.apiKeyFile);
     let gateway: GatewayClient;
-    try {
-      const text = apiBytes.toString("utf8");
-      const apiKey = text.endsWith("\r\n") ? text.slice(0, -2)
-        : text.endsWith("\n") ? text.slice(0, -1) : text;
-      if (!apiKey || /\s/.test(apiKey)) throw new HostConfigError("bad_api_key", config.gateway.apiKeyFile);
-      gateway = (runtime.createGateway ?? createGatewayClient)({
-        baseUrl: config.gateway.baseUrl, kernelId: config.kernelId, apiKey,
-        ...(operator === undefined ? {} : { wallet: operator.address }),
-        emergencyStopReader: strictEmergencyStopReader,
+    if (gatewayMode) {
+      if (!operator?.signOperatorSignIn) throw new SessionStartError();
+      const onEvent = (event: OperatorSessionEvent) => {
+        if (event.kind === "key_minted") logger("session_key_minted");
+        else if (event.kind === "mint_failed") { logger("session_key_failed"); logger(event.code); }
+        else if (event.kind === "key_expired") logger("session_key_expired");
+      };
+      keeper = (runtime.createSessionKeeper ?? createOperatorSessionKeeper)({
+        baseUrl: config.gateway.baseUrl, address: operator.address, chainId: config.chain.chainId,
+        signMessage: operator.signOperatorSignIn, onEvent,
       });
-    } finally { apiBytes.fill(0); }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let onAbort: (() => void) | undefined;
+      let key: OperatorSessionKey | null;
+      try {
+        key = await Promise.race([
+          keeper.ready(),
+          new Promise<null>((resolve) => {
+            onAbort = () => resolve(null);
+            if (shutdown.signal.aborted) { resolve(null); return; }
+            shutdown.signal.addEventListener("abort", onAbort, { once: true });
+            timer = setTimeout(() => resolve(null), runtime.sessionStartDeadlineMs ?? SESSION_START_DEADLINE_MS);
+          }),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        if (onAbort) shutdown.signal.removeEventListener("abort", onAbort);
+      }
+      if (shutdown.signal.aborted) return;
+      if (!key) throw new SessionStartError();
+      gateway = (runtime.createGateway ?? createGatewayClient)({
+        baseUrl: config.gateway.baseUrl, kernelId: config.kernelId, sessionKeys: keeper,
+        wallet: operator.address, emergencyStopReader: strictEmergencyStopReader,
+      });
+    } else {
+      const apiBytes = await readSecretFile(config.gateway.apiKeyFile);
+      try {
+        const text = apiBytes.toString("utf8");
+        const apiKey = text.endsWith("\r\n") ? text.slice(0, -2)
+          : text.endsWith("\n") ? text.slice(0, -1) : text;
+        if (!apiKey || /\s/.test(apiKey)) throw new HostConfigError("bad_api_key", config.gateway.apiKeyFile);
+        gateway = (runtime.createGateway ?? createGatewayClient)({
+          baseUrl: config.gateway.baseUrl, kernelId: config.kernelId, apiKey,
+          ...(operator === undefined ? {} : { wallet: operator.address }),
+          emergencyStopReader: strictEmergencyStopReader,
+        });
+      } finally { apiBytes.fill(0); }
+    }
     if (!options.pollOnly) printer = (runtime.createPrinter ?? createPrinter)(config);
     journal = createJobJournal(config.dataDir);
     const host = createHost({
       config, gateway, adapter: printer?.adapter, deviceKey, operatorAddress: operator?.address,
       operatorKey, broadcaster,
-      inputSource: options.inputsDir ? fileJobInputSource(options.inputsDir) : defaultJobInputSource,
+      inputSource: options.inputsDir ? fileJobInputSource(options.inputsDir, { fundedAt: gatewayMode ? "optional" : "required" }) : defaultJobInputSource,
       journal, pollOnly: options.pollOnly, noSubmit: options.noSubmit,
       stopSignal: shutdown.signal,
-      logger: (code) => {
-        // Preserve the runtime's closed logging contract at the CLI boundary.
-        if ((HOST_LOG_CODES as readonly string[]).includes(code)) io.stdout.write(`${code}\n`);
-      },
+      logger,
     });
     if (options.once) {
       const tick = await host.runOnce();
@@ -148,7 +203,10 @@ async function runCommand(options: RunOptions, io: CliIo, runtime: CliRunRuntime
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
     try { await printer?.dispose(); }
-    finally { await journal?.close(); }
+    finally {
+      try { await journal?.close(); }
+      finally { await keeper?.stop(); }
+    }
   }
 }
 
@@ -263,7 +321,8 @@ export async function main(argv: string[], io: CliIo, runtime: CliRunRuntime = {
       io.stderr.write(`${argv[0] === "run" ? error.code : error.message}\n`);
     } else if (error instanceof GatewayClientError || error instanceof JournalError || error instanceof HostIdentityError
       || error instanceof HostAdapterError || error instanceof PrinterInitializationError
-      || error instanceof EvidenceChainConfigError || error instanceof OperatorSigningError) {
+      || error instanceof EvidenceChainConfigError || error instanceof OperatorSigningError
+      || error instanceof OperatorSessionError || error instanceof SessionStartError) {
       io.stderr.write(`${error.code}\n`);
     } else {
       // Native/library errors may contain input values. Never format them.

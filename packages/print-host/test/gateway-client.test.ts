@@ -6,6 +6,7 @@ import {
   GatewayClientError,
   strictEmergencyStopReader,
   type EmergencyStopReader,
+  type SessionKeySource,
 } from "../src/gateway-client.js";
 
 const baseUrl = "https://gateway.example.test";
@@ -1063,5 +1064,188 @@ describe("N149 receipt posting", () => {
     const timed = createGatewayClient({ baseUrl, apiKey, kernelId, fetchImpl: hung, timeoutMs: 5 });
     expect(await timed.postReceipt(jobId, envelope)).toEqual({ ok: false, code: "timeout", status: null });
     expect(hung).toHaveBeenCalledOnce();
+  });
+});
+
+const sessionCallNames = ["pollJobs", "heartbeat", "reportInProgress", "postRelayEvidence", "postReceipt"] as const;
+function sessionCall(client: Client, method: typeof sessionCallNames[number]) {
+  if (method === "pollJobs") return client.pollJobs();
+  if (method === "heartbeat") return client.heartbeat();
+  if (method === "reportInProgress") return client.reportInProgress(jobId);
+  if (method === "postRelayEvidence") return client.postRelayEvidence(jobId, bundle as Evidence);
+  return client.postReceipt(jobId, { body: {}, signatures: [] });
+}
+
+function sessionFixture(sessionKeys: SessionKeySource, response: Response | (() => Response) = () => json({ jobs: [] })) {
+  return fixture(response, { apiKey: undefined, sessionKeys });
+}
+
+describe("CODE #41 session-key transport (D1)", () => {
+  it.each(sessionCallNames)("sends nothing and returns unauthenticated with no status from %s while key() is null", async (method) => {
+    const key = vi.fn(() => null);
+    const invalidate = vi.fn();
+    const { client, fetchImpl } = sessionFixture({ key, invalidate });
+    expect(await sessionCall(client, method)).toEqual({ ok: false, code: "unauthenticated", status: null });
+    expect(key).toHaveBeenCalledOnce();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it("reads key() once per request and sends the bearer it returned", async () => {
+    const key2 = ["pcc", "test", randomBytes(24).toString("hex")].join("_");
+    const key = vi.fn()
+      .mockReturnValueOnce({ apiKey, keyId: "session-key-1" })
+      .mockReturnValueOnce({ apiKey: key2, keyId: "session-key-2" });
+    const { client, fetchImpl } = sessionFixture({ key, invalidate: vi.fn() });
+    await client.pollJobs();
+    await client.pollJobs();
+    expect(request(fetchImpl, 0).headers.authorization).toBe(`Bearer ${apiKey}`);
+    expect(request(fetchImpl, 1).headers.authorization).toBe(`Bearer ${key2}`);
+    expect(key).toHaveBeenCalledTimes(2);
+    for (const display of [String(client), JSON.stringify(client), inspect(client)]) {
+      expect(display).not.toContain(apiKey);
+      expect(display).not.toContain(key2);
+    }
+  });
+
+  it.each([
+    { apiKey: "", keyId: "session-key-1" },
+    { apiKey: `${apiKey}\n`, keyId: "session-key-1" },
+    { apiKey: "pcc_test_short", keyId: "session-key-1" },
+    { apiKey: 42, keyId: "session-key-1" },
+    { apiKey, keyId: "" },
+  ])("a malformed session key %# counts as no key and sends nothing", async (value) => {
+    const key = vi.fn(() => value as ReturnType<SessionKeySource["key"]>);
+    const invalidate = vi.fn();
+    const { client, fetchImpl } = sessionFixture({ key, invalidate });
+    expect(await client.pollJobs()).toEqual({ ok: false, code: "unauthenticated", status: null });
+    expect(key).toHaveBeenCalledOnce();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it("a late 401 invalidates the keyId captured at send, never the key current when it arrives (M36)", async () => {
+    const key2 = ["pcc", "test", randomBytes(24).toString("hex")].join("_");
+    let current = { apiKey, keyId: "session-key-1" };
+    const key = vi.fn(() => current);
+    const invalidate = vi.fn();
+    let release!: (response: Response) => void;
+    const delayed = new Promise<Response>((resolve) => { release = resolve; });
+    const fetchImpl = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => delayed)
+      .mockImplementationOnce(() => delayed)
+      .mockImplementationOnce(async () => json({ jobs: [] }));
+    const client = createGatewayClient({ baseUrl, kernelId, sessionKeys: { key, invalidate }, fetchImpl });
+    const first = client.pollJobs();
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    current = { apiKey: key2, keyId: "session-key-2" };
+    release(json({ error: "api_key_required" }, 401));
+    expect(await first).toEqual({ ok: false, code: "unauthenticated", status: 401 });
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(invalidate).toHaveBeenCalledWith("session-key-1");
+    expect(key).toHaveBeenCalledOnce();
+    expect(await client.pollJobs()).toMatchObject({ ok: true });
+    expect(request(fetchImpl, 1).headers.authorization).toBe(`Bearer ${key2}`);
+    expect(key).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["operator_proof_required", "not_kernel_operator", "forbidden"] as const)(
+    "a 403 %s never invalidates the session key", async (code) => {
+      for (const method of ["pollJobs", "postRelayEvidence", "postReceipt"] as const) {
+        const invalidate = vi.fn();
+        const { client } = sessionFixture({ key: () => ({ apiKey, keyId: "session-key-1" }), invalidate },
+          () => json({ error: code }, 403));
+        expect(await sessionCall(client, method)).toEqual({ ok: false, code, status: 403 });
+        expect(invalidate).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it.each([
+    ["both credentials", { apiKey, sessionKeys: { key: () => null, invalidate: vi.fn() } }, "bad_config"],
+    ["sessionKeys without a key function", { sessionKeys: { invalidate: vi.fn() } }, "bad_config"],
+    ["no credential", {}, "bad_api_key"],
+  ] as const)("refuses %s with a closed code before any request", (_description, credentials, code) => {
+    const fetchImpl = vi.fn(async () => json({ jobs: [] }));
+    let caught: unknown;
+    try { createGatewayClient({ baseUrl, kernelId, fetchImpl, ...credentials } as ClientConfig); }
+    catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(GatewayClientError);
+    expect((caught as GatewayClientError).code).toBe(code);
+    expectNoCanaries(caught);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("CODE #41 job funding on the poll (D2)", () => {
+  const verification = (change: Record<string, unknown> = {}) => ({
+    escrowAddress: `0x${"a".repeat(40)}`, chainId: 84532,
+    blockNumber: "21", blockHash: `0x${"b".repeat(64)}`, verifierVersion: "funding-v1", verifiedAt: "2026-10-13T12:00:00.000Z",
+    operator: `0x${"c".repeat(40)}`, fundingBlockNumber: "9007199254740993", fundingBlockHash: `0x${"d".repeat(64)}`,
+    fundedAt: 1_792_084_000, ...change,
+  });
+  const scope = (state: string, facts: unknown = verification()) => ({ scopeId: `scope:${state}`, state, verification: facts });
+  const facts = (value: ReturnType<typeof verification>) => ({
+    ok: true, fundedAt: value.fundedAt, operator: value.operator.toLowerCase(), escrowAddress: value.escrowAddress.toLowerCase(),
+    chainId: value.chainId, fundingBlockNumber: value.fundingBlockNumber, fundingBlockHash: value.fundingBlockHash.toLowerCase(),
+  });
+  async function poll(funding: unknown) {
+    const { client } = fixture(json({ emergencyStop: "clear", jobs: [
+      { id: jobId, kernelId, status: "queued", funding },
+      { id: "job:other", kernelId, status: "queued" },
+    ] }), { emergencyStopReader: strictEmergencyStopReader });
+    return client.pollJobs();
+  }
+  const expectedPoll = (funding: unknown) => ({ ok: true, value: {
+    stop: { proceed: true }, jobs: [{ jobId, status: "queued", funding }, { jobId: "job:other", status: "queued" }],
+    foreignJobsDropped: 0, truncated: false,
+  } });
+
+  it("selects the funded_verified entry by its state beside a cancelled scope that still shows a bound verification", async () => {
+    const a = verification({ fundedAt: 1_792_080_000, fundingBlockNumber: "15" });
+    const b = verification();
+    expect(await poll({ read: "ok", scopes: [scope("cancelled", a), scope("funded_verified", b)] }))
+      .toEqual(expectedPoll(facts(b)));
+  });
+
+  it.each(["cancelled", "expired", "unknown"])("a %s scope with a bound verification alone is funding_unverified", async (state) => {
+    expect(await poll({ read: "ok", scopes: [scope(state)] }))
+      .toEqual(expectedPoll({ ok: false, code: "funding_unverified" }));
+  });
+
+  it("two funded_verified entries are funding_ambiguous", async () => {
+    expect(await poll({ read: "ok", scopes: [scope("funded_verified"), scope("funded_verified")] }))
+      .toEqual(expectedPoll({ ok: false, code: "funding_ambiguous" }));
+  });
+
+  it("read failed is funding_read_failed", async () => {
+    expect(await poll({ read: "failed" })).toEqual(expectedPoll({ ok: false, code: "funding_read_failed" }));
+  });
+
+  it("an empty scopes list, or a funded_verified entry with a null verification, is funding_unverified", async () => {
+    for (const scopes of [[], [scope("funded_verified", null)]]) {
+      expect(await poll({ read: "ok", scopes })).toEqual(expectedPoll({ ok: false, code: "funding_unverified" }));
+    }
+  });
+
+  it.each([
+    null, "ok", [], { read: "maybe" }, { read: "ok" }, { read: "ok", scopes: [null] },
+    { read: "ok", scopes: [{ verification: verification() }] },
+    ...[
+      { fundingBlockNumber: 7 }, { fundingBlockNumber: "18446744073709551616" }, { operator: "0x1234" }, { fundedAt: 1.5 },
+    ].map(change => ({ read: "ok", scopes: [scope("funded_verified", verification(change))] })),
+  ])("malformed funding %j is funding_read_failed and changes nothing else in the poll", async (funding) => {
+    const result = await poll(funding);
+    expect(result).toEqual(expectedPoll({ ok: false, code: "funding_read_failed" }));
+    if (!result.ok) throw new Error("poll failed");
+    expect(Object.hasOwn(result.value.jobs[1]!, "funding")).toBe(false);
+    expect(result.value.stop).toEqual({ proceed: true });
+  });
+
+  it("keeps fundingBlockNumber as the lossless decimal string and lowercases the operator, escrow and block hash", async () => {
+    const value = verification({
+      fundingBlockNumber: "18446744073709551615", operator: `0x${"C".repeat(40)}`,
+      escrowAddress: `0x${"A".repeat(40)}`, fundingBlockHash: `0x${"D".repeat(64)}`,
+    });
+    expect(await poll({ read: "ok", scopes: [scope("funded_verified", value)] })).toEqual(expectedPoll(facts(value)));
   });
 });

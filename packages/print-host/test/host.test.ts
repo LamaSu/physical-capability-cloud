@@ -940,6 +940,19 @@ describe("print-host run loop", () => {
     expect(await states(setup)).toEqual(["claimed", "in_progress_reported", "printing", "printed", "bundle_saved", "evidence_stored"]);
   });
 
+  it("an unauthenticated in_progress refusal retries the same claim and prints only after acknowledgement", async () => {
+    const setup = await fixture();
+    setup.gw.reportInProgress.mockResolvedValueOnce(failed("unauthenticated") as never);
+    await setup.host.runOnce();
+    expect(await states(setup)).toEqual(["claimed"]);
+    expect(setup.adapter.commands).toEqual([]);
+    await setup.timers.advance(5_000);
+    await complete(setup);
+    expect(setup.inputSource).toHaveBeenCalledTimes(1);
+    expect(setup.gw.reportInProgress).toHaveBeenCalledTimes(2);
+    expect(await states(setup)).toEqual(["claimed", "in_progress_reported", "printing", "printed", "bundle_saved", "evidence_stored"]);
+  });
+
   it("indeterminate evidence is never re-posted across ticks or restarts", async () => {
     const setup = await fixture();
     setup.gw.postRelayEvidence.mockResolvedValue(failed("indeterminate") as never);

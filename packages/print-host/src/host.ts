@@ -7,9 +7,9 @@ import { formatOperatorPrincipalId, hashBundle, isCompromisedDevicePublicKey, ty
 import { getAddress, type Hex } from "viem";
 import type { EvidenceBroadcaster, EvidenceBroadcastOutcome, EvidenceSubmission } from "./chain.js";
 import type { HostConfig } from "./config.js";
-import type { EStopDecision, GatewayClient, GwCode, GwResult, PollJobsValue, ReceiptEnvelope, RelayEvidenceBundle } from "./gateway-client.js";
+import type { EStopDecision, GatewayClient, GwCode, GwResult, PollJobsValue, ReceiptEnvelope, RelayEvidenceBundle, JobFunding } from "./gateway-client.js";
 import { hasPackageInputs, isUnitBinding, JOB_INPUT_CODES, type JobInputSource, type JobInputs } from "./job-inputs.js";
-import { JournalError, SUBMIT_CODES, type JobJournal, type JournalCode, type JournalState, type PackageHashes } from "./journal.js";
+import { JournalError, SUBMIT_CODES, type JobJournal, type JournalCode, type JournalState, type JournalMetadata, type ClaimFunding } from "./journal.js";
 import type { DeviceKey, OperatorKey } from "./keys.js";
 import { buildMilestonePackage, computePackageBodyHash, computePackageDigest, signMilestonePackage } from "./package-builder.js";
 import { makeKernelEd25519Signer } from "./kernel-signer.js";
@@ -25,6 +25,9 @@ const gatewayCodes = [
   "evidence_refused", "indeterminate", "kernel_emergency_stopped",
 ] as const satisfies readonly GwCode[];
 
+export const FUNDING_CODES = ["funding_absent", "funding_read_failed", "funding_unverified", "funding_ambiguous", "funding_operator_mismatch", "funding_escrow_mismatch", "funding_chain_mismatch", "funding_bad_time", "funding_mismatch"] as const;
+export type FundingCode = typeof FUNDING_CODES[number];
+
 /** No caller, server, document, or device text is passed to the host logger. */
 export const HOST_LOG_CODES = [
   "heartbeat_ok", "poll_ok", "poll_only", "idle", "claimed", "in_progress_reported",
@@ -35,7 +38,8 @@ export const HOST_LOG_CODES = [
   "package_built", "receipt_stored", "data_dir_locked", "receipt_exists", "receipt_signer_unavailable", "submit_attempted", "submitted", "already_committed", "conflict", "refused", "submit_indeterminate",
   "device_identity_mismatch", "compromised_device", "adapter_simulated", "unit_already_used",
   "package_challenge_refused", "package_registry_refused", "package_operator_refused", "receipt_storage_unavailable",
-  ...gatewayCodes, ...JOB_INPUT_CODES, ...SUBMIT_CODES,
+  "session_key_minted", "session_key_failed", "session_key_expired", "unexpected_status", "sign_in_refused", "session_refused", "too_many_keys", "address_mismatch", "signer_failed",
+  ...FUNDING_CODES, ...gatewayCodes, ...JOB_INPUT_CODES, ...SUBMIT_CODES,
 ] as const;
 export type HostLogCode = typeof HOST_LOG_CODES[number];
 export type HostPrintOptions = PrintJobOptions;
@@ -87,12 +91,12 @@ const terminalReportCodes = new Set<GwCode>([
   "job_not_found", "settlement_owned_status", "job_kernel_changed", "invalid_status",
 ]);
 const transientReportCodes = new Set<GwCode>([
-  "network", "timeout", "unavailable", "server_error", "rate_limited", "malformed_response",
+  "network", "timeout", "unavailable", "server_error", "rate_limited", "malformed_response", "unauthenticated",
 ]);
 
 // These are known to store no relay evidence: 500 evidence_store_failed,
 // 503 read_failed/scope_requirements_unavailable/wallet_link_unavailable, or any 429.
-const storedNothingEvidenceCodes = new Set<GwCode>(["server_error", "unavailable", "rate_limited"]);
+const storedNothingEvidenceCodes = new Set<GwCode>(["server_error", "unavailable", "rate_limited", "unauthenticated"]);
 const evidenceRetryWaitsMs = [5_000, 20_000, 60_000, 120_000] as const;
 const evidenceRetryMaxWaitMs = 300_000;
 const terminalReceiptRefusals = {
@@ -108,6 +112,7 @@ const timerDefaults: HostTimers = {
   setTimeout: (callback, ms) => setTimeout(callback, ms),
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
+type ClaimedInputs = JobInputs & { unit: JobInputs["unit"] & { fundedAt: number } };
 type HostGatewayCode = typeof gatewayCodes[number];
 function safeGwCode(code: GwCode): HostGatewayCode {
   for (const allowed of gatewayCodes) if (code === allowed) return allowed;
@@ -128,6 +133,7 @@ export function createHost(deps: HostDeps): {
   const print = deps.print ?? runPrintJob;
   const sendEnabled = !deps.noSubmit && deps.realMode !== false && [config.chain.maxFeePerGasCap,
     config.chain.maxPriorityFeePerGasCap, config.chain.gasCap].every((cap) => cap !== undefined && BigInt(cap) > 0n);
+  const gatewayFunding = config.funding?.source === "gateway";
   let initialized = false;
   let halted = false;
   let haltCode: NonNullable<HostTickResult["code"]> = "journal_failed";
@@ -144,6 +150,10 @@ export function createHost(deps: HostDeps): {
     } catch { identityFailure = "device_identity_mismatch"; }
   }
   const retries = new Map<string, { failures: number; until: number; code: HostLogCode }>();
+  const fundingLogged = new Map<string, FundingCode>();
+  function logFunding(jobId: string, code: FundingCode): void {
+    if (fundingLogged.get(jobId) !== code) { log(code); fundingLogged.set(jobId, code); }
+  }
   let stopped = deps.stopSignal?.aborted === true;
   let lastHeartbeat = -Infinity;
   let pollFailures = 0;
@@ -152,7 +162,7 @@ export function createHost(deps: HostDeps): {
   let activeTick: Promise<HostTickResult> | undefined;
   let activePrint: AbortController | undefined;
   let activeHold: AbortController | undefined;
-  let pending: { jobId: string; inputs: JobInputs; reported: boolean; reports: number; prints: number;
+  let pending: { jobId: string; inputs: ClaimedInputs; reported: boolean; reports: number; prints: number;
     session?: UnitEvidenceSession } | undefined;
   const requestStop = () => {
     stopped = true;
@@ -184,8 +194,8 @@ export function createHost(deps: HostDeps): {
     const why = ["reader_unavailable", "stopped", "unavailable", "absent", "malformed", "poll_failed"] as const;
     log(why.includes(stop.why) ? stop.why : "malformed");
   }
-  async function record(jobId: string, state: JournalState, code?: JournalCode, hashes?: PackageHashes | { transactionHash: string }): Promise<void> {
-    await journal.append(jobId, state, code, hashes);
+  async function record(jobId: string, state: JournalState, code?: JournalCode, metadata?: JournalMetadata): Promise<void> {
+    await journal.append(jobId, state, code, metadata);
     log(state);
     if (code && (HOST_LOG_CODES as readonly string[]).includes(code)) log(code as HostLogCode);
   }
@@ -268,6 +278,8 @@ export function createHost(deps: HostDeps): {
     // Relay evidence storage is a durable prerequisite, including on restart.
     if (!entries.some((entry) => entry.state === "evidence_stored")) throw new JournalError("journal_invalid");
     const readOnly = last.state === "submit_attempted" || last.state === "submit_indeterminate";
+    const claimFunding = entries.find((entry) => entry.state === "claimed")?.funding;
+    if (!readOnly && claimFunding?.source !== "gateway") { await record(jobId, "refused", "funding_source_manifest"); return "refused"; }
     let signed = await journal.readPackage(jobId);
     const builtRecord = entries.find((entry) => entry.state === "package_built");
     if ((builtRecord || readOnly) && !signed) throw new JournalError("journal_invalid");
@@ -284,6 +296,7 @@ export function createHost(deps: HostDeps): {
           return last.state;
         }
         inputs = result.value;
+        if (claimFunding?.source === "gateway") inputs = { ...inputs, unit: { ...inputs.unit, fundedAt: claimFunding.fundedAt } };
       }
       const skip = skipSubmission(inputs);
       if (skip) {
@@ -469,6 +482,8 @@ export function createHost(deps: HostDeps): {
     nextPollAt = -Infinity;
     pollFailures = 0;
     log("poll_ok");
+    const listedJobs = new Set(initial.value.jobs.map((job) => job.jobId));
+    for (const jobId of fundingLogged.keys()) if (!listedJobs.has(jobId)) fundingLogged.delete(jobId);
     if (initial.value.stop.proceed !== true) {
       stopReason(initial.value.stop);
       return { kind: "blocked", waitMs: 5_000 };
@@ -478,6 +493,12 @@ export function createHost(deps: HostDeps): {
     if (!pending) {
       for (const job of initial.value.jobs) {
         if (job.status !== "queued" || await journal.has(job.jobId)) continue;
+        let verified: Extract<JobFunding, { ok: true }> | undefined;
+        if (gatewayFunding) {
+          const code = job.funding === undefined ? "funding_absent" : job.funding.ok ? undefined : job.funding.code;
+          if (code) { logFunding(job.jobId, code); continue; }
+          if (job.funding?.ok) verified = job.funding;
+        }
         let input;
         try { input = await deps.inputSource(job.jobId); }
         catch { log("job_inputs_unavailable"); return { kind: "idle", waitMs: 5_000 }; }
@@ -487,10 +508,22 @@ export function createHost(deps: HostDeps): {
         }
         // Custom sources must obey the same binding contract as file manifests.
         // Missing funding/unit information never claims a real job.
-        if (!isUnitBinding(input.value?.unit)) {
+        if (!isUnitBinding(input.value?.unit, gatewayFunding ? "optional" : "required")) {
           log("job_inputs_bad_schema");
           return { kind: "idle", waitMs: 5_000 };
         }
+        const unit = input.value.unit;
+        if (gatewayFunding) {
+          const facts = verified!;
+          const code: FundingCode | undefined = facts.operator !== deps.operatorAddress?.toLowerCase() ? "funding_operator_mismatch"
+            : unit.escrow === undefined || unit.escrow.toLowerCase() !== facts.escrowAddress ? "funding_escrow_mismatch"
+            : facts.chainId !== config.chain.chainId ? "funding_chain_mismatch"
+            : !(Number.isSafeInteger(facts.fundedAt) && facts.fundedAt >= 1_600_000_000 && facts.fundedAt < 2 ** 32 && facts.fundedAt < unit.reclaimAt) ? "funding_bad_time"
+            : unit.fundedAt !== undefined && unit.fundedAt !== facts.fundedAt ? "funding_mismatch" : undefined;
+          if (code) { logFunding(job.jobId, code); continue; }
+        }
+        const fundedAt = gatewayFunding ? verified!.fundedAt : unit.fundedAt;
+        if (fundedAt === undefined) { log("job_inputs_bad_schema"); return { kind: "idle", waitMs: 5_000 }; }
         if (stopped) return { kind: "blocked", waitMs: 5_000 };
         // The fsynced reservation consumes this funded unit even if the process
         // dies before recording or reporting the claim.
@@ -498,8 +531,12 @@ export function createHost(deps: HostDeps): {
           log("unit_already_used");
           continue;
         }
-        pending = { jobId: job.jobId, inputs: input.value, reported: false, reports: 0, prints: 0 };
-        await append("claimed");
+        pending = { jobId: job.jobId, inputs: { ...input.value, unit: { ...input.value.unit, fundedAt } }, reported: false, reports: 0, prints: 0 };
+        const claim: ClaimFunding = verified ? { source: "gateway", fundedAt: verified.fundedAt,
+          operator: verified.operator, escrowAddress: verified.escrowAddress, chainId: verified.chainId,
+          fundingBlockNumber: verified.fundingBlockNumber, fundingBlockHash: verified.fundingBlockHash } : { source: "manifest" };
+        await record(job.jobId, "claimed", undefined, { funding: claim });
+        fundingLogged.delete(job.jobId);
         break;
       }
     }

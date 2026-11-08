@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { constants } from "node:fs";
 import { createJobJournal, JOURNAL_STATES, JournalError, type JournalCode, type JournalState, type SignedMilestonePackage } from "../src/journal.js";
 import type { ReceiptEnvelope, RelayEvidenceBundle } from "../src/gateway-client.js";
+import type { ClaimFunding, JournalMetadata } from "../src/journal.js";
 
 let dir: string;
 const jobId = "job-journal-1";
@@ -694,4 +695,60 @@ describe("job journal", () => {
       expect(await journal.read(jobId)).toEqual([{ at, jobId, state: "abandoned", code }]);
     },
   );
+
+  it("a claimed record round-trips gateway funding with the block number as a decimal string", async () => {
+    const funding: ClaimFunding = {
+      source: "gateway", fundedAt: 1_792_083_600, operator: `0x${"a".repeat(40)}`,
+      escrowAddress: `0x${"b".repeat(40)}`, chainId: 84532,
+      fundingBlockNumber: "18446744073709551615", fundingBlockHash: publicWord(),
+    };
+    const original = createJobJournal(dir, time);
+    await original.append(jobId, "claimed", undefined, { funding });
+    const record = { at, jobId, state: "claimed", funding };
+    expect(await original.read(jobId)).toEqual([record]);
+    expect(JSON.parse((await fs.readFile(original.journalPath(jobId), "utf8")).trim()).funding.fundingBlockNumber)
+      .toBe("18446744073709551615");
+    await original.close();
+    const restarted = createJobJournal(dir, time);
+    expect((await restarted.read(jobId))[0]).toEqual(record);
+    await restarted.close();
+  });
+
+  it("a claimed record round-trips manifest funding", async () => {
+    const original = createJobJournal(dir, time);
+    const funding: ClaimFunding = { source: "manifest" };
+    await original.append(jobId, "claimed", undefined, { funding });
+    const record = { at, jobId, state: "claimed", funding };
+    expect(await original.read(jobId)).toEqual([record]);
+    await original.close();
+    const restarted = createJobJournal(dir, time);
+    expect((await restarted.read(jobId))[0]).toEqual(record);
+    await restarted.close();
+  });
+
+  it.each<[string, JournalState, Record<string, unknown>]>([
+    ["on a printing record", "printing", {}],
+    ["a numeric block number", "claimed", { fundingBlockNumber: 7 }],
+    ["a block number with a leading zero", "claimed", { fundingBlockNumber: "01" }],
+    ["a block number above uint64", "claimed", { fundingBlockNumber: "18446744073709551616" }],
+    ["an uppercase operator", "claimed", { operator: `0x${"A".repeat(40)}` }],
+    ["an extra key", "claimed", { extra: true }],
+    ["a missing key", "claimed", { fundingBlockHash: undefined }],
+    ["an unknown source", "claimed", { source: "other" }],
+    ["facts on a manifest source", "claimed", { source: "manifest" }],
+    ["a fundedAt below the protocol range", "claimed", { fundedAt: 1_599_999_999 }],
+  ])("refuses claim funding %s on append and on read without persisting it", async (_label, state, change) => {
+    const funding = {
+      source: "gateway", fundedAt: 1_792_083_600, operator: `0x${"a".repeat(40)}`,
+      escrowAddress: `0x${"b".repeat(40)}`, chainId: 84532,
+      fundingBlockNumber: "18446744073709551615", fundingBlockHash: publicWord(), ...change,
+    };
+    const journal = createJobJournal(dir, time);
+    await expect(journal.append(jobId, state, undefined, { funding } as JournalMetadata))
+      .rejects.toMatchObject({ code: "journal_invalid" });
+    expect(await journal.has(jobId)).toBe(false);
+    expect(await fs.readdir(journal.directory)).toEqual([".lock"]);
+    await fs.writeFile(journal.journalPath(jobId), `${JSON.stringify({ at, jobId, state, funding })}\n`, { mode: 0o600 });
+    await expect(journal.read(jobId)).rejects.toMatchObject({ code: "journal_invalid" });
+  });
 });
