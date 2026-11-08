@@ -47,6 +47,7 @@
       "default": "./dist/recheck/index.js"
     }
   },
+  "bin": { "pcc-settlement-recheck": "./dist/recheck/cli.js" },
   "files": [
     "dist",
     "README.md",
