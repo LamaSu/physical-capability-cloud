@@ -107,6 +107,8 @@ describe("host configuration", () => {
     ["port over 65535", "ipp://printer.example.test:65536/ipp/print"],
     ["canonical href over 1023 octets", `ipp://printer.example.test/${"a".repeat(1000)}`],
     ["encoded path over 1023 octets", `ipp://printer.example.test/${"\u00e9".repeat(167)}`],
+    ["path-less canonical href of 1024 octets", `ipp://${"a".repeat(1017)}`],
+    ["canonical href of 1024 octets", `ipp://printer.example.test/${"a".repeat(997)}`],
     ["userinfo", "ipp://private-user:private-password@printer.example.test/ipp/print"],
     ["empty userinfo", "ipp://@printer.example.test/ipp/print"],
     ["no host", "ipp:///ipp/print"],

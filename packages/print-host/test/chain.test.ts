@@ -21,6 +21,7 @@ const bytes32 = (): Hex => `0x${randomBytes(32).toString("hex")}`;
 const errorAbi = parseAbi([
   "error EvidenceNotCommitted()", "error UnitNotFound()", "error NotActive()",
   "error OnlyOperator()", "error TooLateForEvidence()", "error EvidenceAlreadyCommitted()",
+  "error ZeroEvidenceDigest()", "error Reentrancy()",
 ]);
 const functions = parseAbi([
   "function unitTerms(bytes32 unitId) view returns (uint256 milestoneIndex_, bytes32 stepId_, uint8 requestedTier_, uint256 reclaimAt_, bytes32 payoutConfigHash_, uint16 compositionSchemaVersion_, bool evidenceCommitted_)",
@@ -64,7 +65,8 @@ type FakeOptions = {
   commitment?: Hex;
   afterSendCommitment?: Hex | null;
   estimateRevert?: "NotActive" | "OnlyOperator" | "TooLateForEvidence" | "EvidenceAlreadyCommitted";
-  sendRevert?: "NotActive" | "EvidenceAlreadyCommitted" | "unknown_revert";
+  sendRevert?: "NotActive" | "OnlyOperator" | "TooLateForEvidence" | "EvidenceAlreadyCommitted"
+    | "EvidenceNotCommitted" | "ZeroEvidenceDigest" | "UnitNotFound" | "Reentrancy" | "unknown_revert";
   sendTransportError?: boolean;
   readRevert?: "UnitNotFound";
   postSendReadRevert?: "UnitNotFound";
@@ -591,7 +593,7 @@ describe("submitEvidence broadcaster", () => {
     setup.expectRedacted(result);
   });
 
-  it.each((["NotActive", "EvidenceAlreadyCommitted", "unknown_revert"] as const).flatMap((reason) =>
+  it.each((["NotActive", "OnlyOperator", "TooLateForEvidence", "EvidenceAlreadyCommitted", "unknown_revert"] as const).flatMap((reason) =>
     (["ours", "different", "uncommitted", "transport", "revert"] as const).map((state) => ({ reason, state }))))(
     "a send-time $reason revert reconciles the $state escrow outcome", async ({ reason, state }) => {
       const setup = await fixture({}, { sendRevert: reason, postSendReadFailure: state === "transport",
@@ -608,7 +610,7 @@ describe("submitEvidence broadcaster", () => {
       setup.expectRedacted(result);
     });
 
-  it.each((["NotActive", "EvidenceAlreadyCommitted"] as const).flatMap((reason) =>
+  it.each((["NotActive", "OnlyOperator", "TooLateForEvidence", "EvidenceAlreadyCommitted"] as const).flatMap((reason) =>
     (["ours", "different", "uncommitted", "transport", "revert"] as const).map((state) => ({ reason, state }))))(
     "a decoded send-time $reason releases its nonce for both rules after $state read-back and keeps its unit latched", async ({ reason, state }) => {
       const setup = await fixture({}, { sendRevert: reason, postSendReadFailure: state === "transport",
@@ -673,6 +675,36 @@ describe("submitEvidence broadcaster", () => {
       && (params as [Hex, string])[1] === "latest")).toHaveLength(1);
     setup.expectRedacted(first);
   });
+
+  it.each((["EvidenceNotCommitted", "ZeroEvidenceDigest", "UnitNotFound", "Reentrancy"] as const).flatMap((reason) =>
+    (["ours", "different", "uncommitted", "transport", "revert"] as const).map((state) => ({ reason, state }))))(
+    "RV4-S5 a send-time $reason revert is not a send-time refusal: it reconciles the $state escrow outcome and keeps its nonce hold", async ({ reason, state }) => {
+      const setup = await fixture({}, { sendRevert: reason, postSendReadFailure: state === "transport",
+        postSendReadRevert: state === "revert" ? "UnitNotFound" : undefined });
+      setup.fake.afterSendCommitment = state === "ours" ? contractCommitment(setup.input)
+        : state === "different" ? bytes32() : null;
+      const first = await setup.broadcaster.submit(setup.input);
+      const firstHash = setup.hash;
+      expect(first).toEqual(state === "ours" ? { code: "already_committed" }
+        : state === "different" ? { code: "conflict" }
+        : { code: "indeterminate", transactionHash: firstHash });
+      setup.expectPostSendRead("eth_sendRawTransaction");
+      const boundary = setup.calls.length;
+      expect(await setup.broadcaster.submit(setup.input)).toEqual({ code: "indeterminate", transactionHash: firstHash });
+      expect(setup.calls).toHaveLength(boundary);
+      setup.fake.sendRevert = undefined;
+      setup.fake.postSendReadFailure = false;
+      setup.fake.postSendReadRevert = undefined;
+      setup.fake.afterSendCommitment = undefined;
+      const held = setup.calls.length;
+      expect(await setup.broadcaster.submit(setup.addUnit(4n)))
+        .toEqual({ code: "refused", reason: "unreconciled_transaction" });
+      expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
+      expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
+      expect(setup.calls.slice(held).filter(({ method }) => method === "eth_getTransactionCount")
+        .map(({ params }) => params)).toEqual([[setup.signer.address, "latest"]]);
+      setup.expectRedacted(first);
+    });
 
   it("a successful receipt with unavailable read-back remains indeterminate", async () => {
     const setup = await fixture({}, { postSendReadFailure: true });
@@ -870,6 +902,24 @@ describe("submitEvidence broadcaster", () => {
       chainId: setup.chain.chainId, type: "legacy", to: value.escrow,
       data: encodeFunctionData({ abi: functions, functionName: "submitEvidence", args: [value.unitId, value.packageDigest] }),
       nonce: Number(value.nonce), gas: BigInt(value.gas), gasPrice: BigInt(value.maxFeePerGas), value: 0n,
+    }));
+    expect(await setup.broadcaster.submit(setup.input)).toEqual({ code: "refused", reason: "signing_failed" });
+    expect(setup.calls.some(({ method }) => method === "eth_sendRawTransaction")).toBe(false);
+    expect(await setup.broadcaster.submit(setup.input)).toEqual({ code: "submitted", transactionHash: setup.hash });
+    expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(2);
+    expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
+  });
+
+  it("RV4-S4 a type-4 (EIP-7702) transaction with identical fields is refused before any send", async () => {
+    const setup = await fixture();
+    const authorization = await setup.account.signAuthorization({
+      address: getAddress("0x2222222222222222222222222222222222222222"), chainId: setup.chain.chainId, nonce: 0,
+    });
+    setup.signer.signSubmitEvidenceTx.mockImplementationOnce((value) => setup.account.signTransaction({
+      chainId: setup.chain.chainId, type: "eip7702", to: value.escrow,
+      data: encodeFunctionData({ abi: functions, functionName: "submitEvidence", args: [value.unitId, value.packageDigest] }),
+      nonce: Number(value.nonce), gas: BigInt(value.gas), maxFeePerGas: BigInt(value.maxFeePerGas),
+      maxPriorityFeePerGas: BigInt(value.maxPriorityFeePerGas), value: 0n, authorizationList: [authorization],
     }));
     expect(await setup.broadcaster.submit(setup.input)).toEqual({ code: "refused", reason: "signing_failed" });
     expect(setup.calls.some(({ method }) => method === "eth_sendRawTransaction")).toBe(false);

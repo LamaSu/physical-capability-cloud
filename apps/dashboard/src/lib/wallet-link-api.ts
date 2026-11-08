@@ -94,3 +94,60 @@ export async function decideWalletLink(
   }
   throw new Error("Invalid wallet link decision response");
 }
+
+export async function listWallets() {
+  const body = await send("/api/wallets", { method: "GET" });
+  if (!isRecord(body) || !Array.isArray(body.links)) throw new Error("Invalid wallets response");
+  return body.links.map((row: unknown) => {
+    if (
+      !isRecord(row) || typeof row.linkId !== "string" || !row.linkId.trim() ||
+      (row.role !== "agent" && row.role !== "device") ||
+      !((row.keyType === "secp256k1" && typeof row.address === "string") ||
+        (row.keyType === "ed25519" && typeof row.publicKey === "string")) ||
+      typeof row.label !== "string" || typeof row.chainId !== "number" || !Number.isInteger(row.chainId) ||
+      (row.status !== "active" && row.status !== "expired" && row.status !== "revoked") ||
+      typeof row.createdAt !== "string" ||
+      (row.expiresAt !== null && typeof row.expiresAt !== "string") ||
+      (row.revokedAt !== null && typeof row.revokedAt !== "string")
+    ) {
+      throw new Error("Invalid wallets response");
+    }
+    return {
+      linkId: row.linkId,
+      role: row.role,
+      ...(row.keyType === "secp256k1"
+        ? { keyType: "secp256k1" as const, address: row.address as string }
+        : { keyType: "ed25519" as const, publicKey: row.publicKey as string }),
+      label: row.label,
+      chainId: row.chainId,
+      status: row.status,
+      createdAt: row.createdAt,
+      expiresAt: row.expiresAt,
+      revokedAt: row.revokedAt,
+    };
+  });
+}
+
+export async function unlinkWallet(linkId: string) {
+  const body = await send(`/api/wallets/${encodeURIComponent(linkId)}/revoke`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!isRecord(body) || body.status !== "revoked" || typeof body.revokedAt !== "string" || !body.revokedAt.trim()) {
+    throw new Error("Invalid wallet unlink response");
+  }
+  return { status: "revoked", revokedAt: body.revokedAt } as const;
+}
+
+export function walletsErrorMessage(error: unknown, action: "load" | "unlink"): string {
+  if (error instanceof WalletLinkError && (error.status === 401 || error.status === 403)) return error.message;
+  if (action === "load") return "Couldn't load your wallets.";
+  if (error instanceof WalletLinkError && error.status === 404) {
+    return "PCC found no link to unlink with this sign-in, so nothing was unlinked.";
+  }
+  if (error instanceof WalletLinkError && error.status >= 400 && error.status < 500) {
+    return "PCC refused this request, so nothing was unlinked. Reload the page and try again.";
+  }
+  return "PCC did not confirm the unlink. Reload this page to see whether it is still linked.";
+}

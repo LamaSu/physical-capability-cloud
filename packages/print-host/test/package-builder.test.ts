@@ -306,6 +306,18 @@ describe("package construction and mandatory signatures", () => {
       .rejects.toMatchObject({ code: "bad_body" });
     expect(signD1).not.toHaveBeenCalled(); expect(signD2).not.toHaveBeenCalled();
   });
+  it.each(["milestoneIndex", "chainId"] as const)("RV4-B1 a %s outside uint256 is bad_body before either signature", async (field) => {
+    const f = await fixture(); const forged = structuredClone(f.built);
+    forged.body.unitBinding[field] = (1n << 256n).toString();
+    forged.packageBodyHash = computePackageBodyHash(forged.body);
+    const signD1 = vi.fn(f.operatorKey.signD1); const signD2 = vi.fn(f.deviceKey.signD2);
+    let caught: unknown;
+    try { await signMilestonePackage(forged, { ...f.operatorKey, signD1 }, { ...f.deviceKey, signD2 }); } catch (error) { caught = error; }
+    expect(caught).toMatchObject({ name: "PackageBuilderError", code: "bad_body" });
+    expect(caught).toBeInstanceOf(PackageBuilderError);
+    expect(String(caught)).not.toContain((1n << 256n).toString());
+    expect(signD1).not.toHaveBeenCalled(); expect(signD2).not.toHaveBeenCalled();
+  });
   it.each(["challenge nonce", "unit binding"] as const)("rejects a self-consistent block spliced from another %s before either signature", async (difference) => {
     const f = await fixture();
     const siblingContext = { ...f.context };
