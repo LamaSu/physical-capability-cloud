@@ -367,6 +367,39 @@ describe("kit binding writes", () => {
     const r = await bind(app, f.kitDigest);
     expect(r.statusCode).toBe(429); expect(r.json().error).toBe("bind_quota");
   });
+  it("R1 with no limit set, a wallet gets 50 new binds per rolling 24 hours, and a re-bind spends nothing", async () => {
+    vi.stubEnv("PCC_KIT_BIND_DAILY_LIMIT", ""); delete process.env.PCC_KIT_BIND_DAILY_LIMIT;
+    const f = await fixture(); const app = await appFor(f.registry); const start = now;
+    const cap = (i: number) => ({ ...body, capabilityId: `quota-cap-${i}` });
+    for (let i = 0; i <= 50; i++) capability(`quota-cap-${i}`, "kernel-a");
+    for (let i = 0; i < 50; i++) expect((await bind(app, f.kitDigest, cap(i))).statusCode).toBe(201);
+    const denied = await bind(app, f.kitDigest, cap(50));
+    expect(denied.statusCode).toBe(429);
+    expect(denied.json()).toEqual({ error: "bind_quota", message: "at most 50 new bindings per principal per 24 hours" });
+    const again = await bind(app, f.kitDigest, cap(0));
+    expect(again.statusCode).toBe(200); expect(again.json().created).toBe(false);
+    now = new Date(start.getTime() + 24 * 60 * 60 * 1000 - 1);
+    expect((await bind(app, f.kitDigest, cap(50))).statusCode).toBe(429);
+    now = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+    expect((await bind(app, f.kitDigest, cap(50))).statusCode).toBe(201);
+    expect(await fs.readdir(path.join(f.rootDir, "binding-quota", hash(OWNER)))).toHaveLength(51);
+  }, 60_000);
+  it("R2 one capability has its own binding for each kit version and each CSD, in both views", async () => {
+    const CSD2 = "pcc://capabilities/plate-reading/v1";
+    const f = await fixture(); const app = await appFor(f.registry);
+    const parent = (await f.registry.get(f.kitDigest))!.manifest;
+    const fork = (await f.registry.publish({ ...parent, version: "1.0.1", parentKitDigest: f.kitDigest,
+      capabilities: [...parent.capabilities, { csdUrl: CSD2, capabilityContractDigest: H("b") }] }, "publisher@kits.test", { forkOf: f.kitDigest })).kitDigest;
+    const made = [await bind(app, f.kitDigest), await bind(app, fork), await bind(app, fork, { ...body, csdUrl: CSD2 })];
+    expect(made.map((r) => r.statusCode)).toEqual([201, 201, 201]);
+    const [inParent, inFork, inForkCsd2] = made.map((r) => r.json().binding.bindingId as string);
+    expect(new Set([inParent, inFork, inForkCsd2]).size).toBe(3);
+    const ids = async (digest: string) => (await hosts(app, digest)).json().hosts.map((h: { bindingId: string }) => h.bindingId).sort();
+    expect(await ids(f.kitDigest)).toEqual([inParent]);
+    expect(await ids(fork)).toEqual([inFork, inForkCsd2].sort());
+    expect((await me(app)).json().bindings.map((b: { kitDigest: string; capabilityType: string }) => `${b.kitDigest} ${b.capabilityType}`).sort())
+      .toEqual([`${f.kitDigest} ${CSD}`, `${fork} ${CSD}`, `${fork} ${CSD2}`].sort());
+  });
   it("refuses writes in production without a durable configured root", async () => {
     const f = await fixture();
     vi.stubEnv("NODE_ENV", "production"); vi.stubEnv("PCC_KIT_REGISTRY_DIR", ""); vi.stubEnv("RAILWAY_VOLUME_MOUNT_PATH", "");
@@ -689,6 +722,14 @@ describe("binding file integrity and append-only storage", () => {
     await fs.symlink(outside, path.join(f.rootDir, "bindings"));
     await expect(seedBinding(f.registry, record(f.kitDigest))).rejects.toBeInstanceOf(KitIntegrityError);
     expect(await fs.readdir(outside)).toEqual([]);
+  });
+  it("R3 a symlinked bindings area is refused before it is listed", async () => {
+    const f = await fixture(); const outside = await fs.mkdtemp(path.join(os.tmpdir(), "kit-bindings-outside-")); roots.push(outside);
+    await fs.mkdir(path.join(outside, "ab"));
+    await fs.symlink(outside, path.join(f.rootDir, "bindings"));
+    await expect(f.registry.listBindings()).rejects.toBeInstanceOf(KitIntegrityError);
+    const r = await hosts(await appFor(f.registry), f.kitDigest);
+    expect(r.statusCode).toBe(500); expect(r.json().error).toBe("kit_integrity_failure");
   });
   it("applies durability and filesystem guards to every binding write", async () => {
     const f = await fixture(); const r = record(f.kitDigest);
