@@ -1,6 +1,7 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import { eq, schema, sql } from "@pcc/store";
-import { zeroHash } from "viem";
+import { zeroAddress, zeroHash } from "viem";
+import { compileVNextPolicy, buildUnitConfig } from "@pcc/contracts/vnext";
 import { verifyBuyerFunding, BUYER_FUNDING_VERIFY_CODES, markBuyerFunded } from "../services/buyer-funding-verifier.js";
 import { buyerFundedEscrowRefusal, findEscrowRowByAddress, isBuyerFundedEscrowRow } from "../services/buyer-funded-escrow.js";
 import { __setFundingRecordStoreForTest } from "../services/funding-record-port.js";
@@ -205,5 +206,30 @@ describe("buyer funding finalized verifier", () => {
   it("T4: scope revoked before commit writes nothing", async () => { const j = await buyerFundingJob(f); lastRead(j, () => scope(j, { status: "revoked" })); await refuses(j, "scope_not_awaiting_funding"); });
   it("T5: racing identical record is duplicate without row moves", async () => { const j = await buyerFundingJob(f); lastRead(j, () => plant(j));
     const reconcile = vi.fn(); expect(await run(j, { reconcile })).toEqual({ kind: "duplicate", record: j.record }); expect(fundingCount()).toBe(1); expect(escrowRow(j).status).toBe("created"); expect(milestoneRows(j).every(m => m.status === "pending")).toBe(true); expect(reconcile).not.toHaveBeenCalled();
+  });
+  it("T6: the scope's window lapsing between the reads and the commit writes nothing", async () => {
+    const j = await buyerFundingJob(f); lastRead(j, () => scope(j, { expiresAt: new Date(T0).toISOString() }));
+    await refuses(j, "scope_not_awaiting_funding");
+  });
+  it("V13b: chainId() throwing before B is chain_read_failed and reads no block", async () => {
+    const j = await buyerFundingJob(f); vi.mocked(j.reads.chainId).mockRejectedValueOnce(new Error("private"));
+    await refuses(j, "chain_read_failed"); expect(j.calls.some(c => c.method === "finalizedBlock")).toBe(false);
+  });
+  it("V20b: a prepare whose job_id_hash is not jobIdHashOf(job_id) refuses, though the chain agrees with the prepare", async () => {
+    const other = compileVNextPolicy({
+      chainId: 84532n, factory: RECORD.factory, implementation: RECORD.implementation, token: RECORD.usdc,
+      payer: BUYER, operator: "0x1111111111111111111111111111111111111111", jobIdHash: hash(77),
+      termsHash: hash(10), policyNonce: 1n, acceptedPolicyDigest: hash(11), expiry: BigInt(T0 / 1000 + 900), fundingTime: BigInt(T0 / 1000),
+      units: [0, 1].map(i => buildUnitConfig({ milestoneIndex: BigInt(i), stepId: hash(20 + i), requiredTier: 0,
+        g: 5_000_000n, feeBps: 0, feeRecipient: zeroAddress, reclaimAt: BigInt(T0 / 1000 + 10000), compositionSchemaVersion: 1, compositionRoot: zeroHash,
+        payouts: [{ recipient: "0x1111111111111111111111111111111111111111", amount: 5_000_000n }] })),
+    });
+    const j = await buyerFundingJob(f, { prepare: { jobIdHash: other.identity.jobIdHash, escrow: other.escrow.toLowerCase(),
+      prePolicyRoot: other.prePolicyRoot, configs: wire(other.configs), unitIds: wire(other.unitIds), typedDataDigest: other.digest } });
+    Object.assign(j.values, { predictEscrow: other.escrow, fundedEscrowOf: other.escrow, jobIdHash: other.identity.jobIdHash,
+      policy: [other.identity.operator, 1n, other.prePolicyRoot, other.jobPolicyHash, other.identity.acceptedPolicyDigest] });
+    vi.mocked(j.reads.unitConfigs).mockResolvedValue({ ok: true, chainId: 84532, escrow: other.escrow, blockNumber: B.number, blockHash: B.hash,
+      prePolicyRoot: other.prePolicyRoot, units: other.unitIds.map((unitId, i) => ({ unitId, config: other.configs[i]! })), checks: [] });
+    await refuses(j, "escrow_identity_mismatch");
   });
 });
