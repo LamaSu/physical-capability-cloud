@@ -291,13 +291,13 @@ describe("POST /api/job-offers — generic surface", () => {
   });
 
   it("returns 400 source_verify_failed when sourceVerifyUrl returns 404", async () => {
-    verifyResponses.set("https://upstream/missing", "fail-404");
+    verifyResponses.set("https://upstream.example.com/missing", "fail-404");
     const app = await buildApp();
     try {
       const res = await app.inject({
         method: "POST",
         url: "/api/job-offers",
-        payload: { ...courierOffer(), sourceVerifyUrl: "https://upstream/missing" },
+        payload: { ...courierOffer(), sourceVerifyUrl: "https://upstream.example.com/missing" },
       });
       expect(res.statusCode).toBe(400);
       const body = res.json();

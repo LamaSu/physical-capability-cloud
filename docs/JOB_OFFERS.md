@@ -31,7 +31,7 @@ work in a specific capability_type. The shape is:
 | `deadline` | no | Optional hard deadline (ISO timestamp). Used by scheduled categories |
 | `assuranceTier` | no | 0..3 — per PCC's tier model (see CLAUDE.md §7) |
 | `evidenceRequirements` | no | Per-category evidence model: `{ events_required, photos_required, raw_data_required, chain_of_custody, tier_required, ... }`. From categorization doc Part C |
-| `sourceVerifyUrl` | no | URL the gateway re-fetches periodically; non-2xx or `placed:false` body auto-cancels the offer |
+| `sourceVerifyUrl` | no | Public `https` URL the gateway GETs at creation and re-fetches periodically; non-2xx or a `placed:false`/`valid:false` body auto-cancels the offer. Loopback, private, link-local and internal hosts, credentials in the URL and other schemes are refused up front with `400 invalid_source_verify_url` (nothing is fetched or stored). Redirects are not followed (give the final URL). Failures return the source's HTTP status only, never its response body |
 | `requireHeartbeat` | no | If true, poster must `POST /:id/heartbeat` within 5min or the offer auto-expires |
 | `idempotencyKey` | no | Standard idempotency pattern. Second post with same key returns the original offer with `note:"already posted"` |
 | `posterKernelId` | no | Set when the poster is a kernel rebroadcasting demand (not the typical user-agent path) |
@@ -374,7 +374,10 @@ The old `courier_jobs` / `courier_job_events` tables also still exist
 2. For `requireHeartbeat: true` offers, marks as `expired` if no
    heartbeat has landed in 5min.
 3. Re-verifies `sourceVerifyUrl` (every 60s during the first 10min
-   post-create, every 5min after). Failing re-verify auto-cancels.
+   post-create, every 5min after). Failing re-verify auto-cancels. A stored
+   row whose URL no longer passes the URL check (for example one stored before
+   the check existed) is not fetched: it is marked unverified and cancelled
+   like any other failed verify, with `verifyReason: invalid_source_verify_url`.
 
 The sweeper is wired in `server.ts` boot sequence and uses the
 `setInterval(...).unref()` pattern so tests don't hang. Sweeps cover ALL

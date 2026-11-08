@@ -49,6 +49,29 @@ import { getAggregatorRegistry, getX402GateConfig } from "./index.js";
 import { getRepos } from "../../db.js";
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex } from "@noble/hashes/utils";
+import { checkOutboundUrl, guardedFetch, OutboundError } from "../../services/outbound-url-guard.js";
+
+/**
+ * SSRF: tool.upstreamUrl is copied from third-party catalog content at ingest
+ * (OpenAPI servers[] / path keys, AGNTCY locators), so it is never trusted. Every
+ * upstream call goes through the outbound guard: refused destinations are never
+ * dialled, DNS is resolved once and pinned, redirects are not followed.
+ * A tool call is a proxy to a third-party API, so it gets room (30 s, 2 MiB) but
+ * not unbounded room: this used to be a bare fetch() with neither limit.
+ */
+const UPSTREAM_TIMEOUT_MS = 30_000;
+const UPSTREAM_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+
+/** The upstream's answer as the caller gets it: JSON when it parses, else the text, else null. */
+function parseUpstreamBody(body: Buffer | undefined): unknown {
+  if (!body || body.length === 0) return null;
+  const text = body.toString("utf8");
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
+  }
+}
 
 interface InvokeBody {
   /** Args forwarded to the upstream tool. Forwarded as-is. */
@@ -126,6 +149,16 @@ export async function invokeRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(403).send({
         error: "tool_quarantined",
         message: `Tool ${tool.id} is QUARANTINED and cannot be invoked.`,
+      });
+    }
+    // An upstream that is not an allowed destination (loopback, private, link-local or
+    // internal name, userinfo, bad scheme) ends the call here, before any payment is
+    // challenged. This is a pure function of registry data, so it reveals nothing about
+    // the gateway's network; the DNS-level decision is made again inside guardedFetch.
+    if (!checkOutboundUrl(tool.upstreamUrl).ok) {
+      return reply.status(403).send({
+        error: "tool_upstream_blocked",
+        message: `Tool ${tool.id} has an upstream URL that is not an allowed destination.`,
       });
     }
 
@@ -227,23 +260,39 @@ export async function invokeRoutes(app: FastifyInstance): Promise<void> {
     let upstreamResult: unknown = null;
     let status = 0;
     try {
-      const response = await fetch(tool.upstreamUrl, {
-        method: tool.actionClass === "read" ? "GET" : "POST",
-        headers: { "Content-Type": "application/json" },
-        body:
-          tool.actionClass === "read" ? undefined : JSON.stringify(args),
+      const method = tool.actionClass === "read" ? "GET" : "POST";
+      const response = await guardedFetch(tool.upstreamUrl, {
+        method,
+        headers: { "Content-Type": "application/json", "user-agent": "pcc-gateway" },
+        body: method === "GET" ? undefined : JSON.stringify(args),
+        timeoutMs: UPSTREAM_TIMEOUT_MS,
+        maxResponseBytes: UPSTREAM_MAX_RESPONSE_BYTES,
+        // The documented contract of this route is to relay the tool's result, and the
+        // destination was validated above, so the (capped) body is returned in `result`.
+        captureBody: true,
       });
-      status = response.status;
-      try {
-        upstreamResult = await response.json();
-      } catch {
-        upstreamResult = await response.text();
+      if (response.truncated) {
+        // A cut-off body would be hashed into a signed receipt as if it were the answer.
+        return reply.status(502).send({
+          error: "upstream_response_truncated",
+          message: "the upstream response was larger than the gateway reads, or was cut short",
+        });
       }
+      status = response.status;
+      upstreamResult = parseUpstreamBody(response.body);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      if (err instanceof OutboundError && err.code === "redirect_not_followed") {
+        return reply.status(502).send({
+          error: "upstream_redirect_not_followed",
+          message: `the upstream answered HTTP ${err.status ?? "3xx"}; redirects are never followed`,
+        });
+      }
+      // Generic on purpose. A refused address, a failed lookup, a refused connection and a
+      // timeout are indistinguishable to the caller, so this route cannot be used to probe
+      // the gateway's network or internal names, and no system error text is reflected.
       return reply.status(502).send({
         error: "upstream_unreachable",
-        message: msg,
+        message: "the upstream request could not be completed",
       });
     }
 
