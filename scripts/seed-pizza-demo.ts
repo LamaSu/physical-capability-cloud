@@ -156,7 +156,7 @@ async function registerComposeCandidate(p: ProviderSpec): Promise<void> {
 }
 
 async function registerGraphNode(p: ProviderSpec): Promise<void> {
-  await api("POST", "/api/graph-search/_dev/register-node", {
+  await api("POST", "/api/capabilities/graph/_dev/register-node", {
     capabilityId: `cap_${p.slug}`,
     capabilityType: p.capabilityType,
     kernelId: `k_${p.slug}`,
@@ -171,7 +171,7 @@ async function registerGraphNode(p: ProviderSpec): Promise<void> {
 }
 
 async function registerGraphEdge(from: string, to: string): Promise<void> {
-  await api("POST", "/api/graph-search/_dev/register-edge", {
+  await api("POST", "/api/capabilities/graph/_dev/register-edge", {
     fromCapabilityId: `cap_${from}`,
     toCapabilityId: `cap_${to}`,
     capabilityTypeFlow: "pizza",

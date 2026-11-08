@@ -339,7 +339,7 @@ function renderCond(){
   const c=$("#cond"); if(!c)return; let h="";
   if(S.policyMode==="auto"){
     h=`<div class="row">
-      <div class="field" style="margin:0"><label>Price floor <span class="hint">USDC, won't sell below</span></label><input type="number" min="0" step="1" data-f="priceFloor" value="${S.priceFloor}"></div>
+      <div class="field" style="margin:0"><label>Price floor <span class="hint">USDC</span></label><input type="number" min="0" step="1" data-f="priceFloor" value="${S.priceFloor}"></div>
       <div class="field" style="margin:0"><label>Max concurrent orders</label><input type="number" min="1" step="1" data-f="maxConcurrent" value="${S.maxConcurrent}"></div></div>`;
   }else if(S.policyMode==="negotiate"){
     h=`<div class="row">
@@ -449,7 +449,6 @@ $("#backBtn").onclick=()=>go(S.step-1);
 let liveStarted=false;
 async function runLive(){
   if(liveStarted)return; liveStarted=true;
-  if(!S.slug)S.slug=slugify(S.name)+"-"+rid();
   const base=apiBase(), log=$("#liveLog");
   const ctx={key:S.apiKey||null,kernelId:null,caps:[]};
   const auth=()=>ctx.key?{authorization:"Bearer "+ctx.key}:{};
@@ -493,7 +492,7 @@ async function runLive(){
         await step("  ↳ capability graph: node "+it.name,()=>post("/api/capabilities/graph/_dev/register-node",
           {capabilityId:cap.id,capabilityType:"pizza",kernelId:ctx.kernelId,operatorAddress:S.email,
            estimatedPriceUSD:+it.price,estimatedDurationMs:(+it.eta)*60000,assuranceTier:1,
-           location:{lat:+S.lat,lng:+S.lng},available:true,inputTypes:["pizza-order"],outputTypes:["pizza"]}));
+           location:{lat:+S.lat,lng:+S.lng},available:true,inputTypes:[],outputTypes:["pizza"]}));
       }
     }
 
@@ -515,7 +514,7 @@ async function runLive(){
 }
 
 function showLiveSuccess(){
-  const url=PROD+"/operator.html?shop="+encodeURIComponent(S.slug);
+  const url=PROD+"/operator.html?shop="+encodeURIComponent(S.kernelId);
   $("#liveTitle").textContent="You're live.";
   $("#liveSub").style.display="none";
   const items=S.menu.filter(m=>m.name.trim()&&+m.price>0);
@@ -529,7 +528,7 @@ function showLiveSuccess(){
         <div class="meta">
           <span>menu · <b>${items.length} pizza${items.length===1?'':'s'}</b> published</span>
           <span>policy · <b>not saved</b></span>
-          <span>slug · <b>${esc(S.slug)}</b></span>
+          <span>slug · <b>${esc(S.kernelId)}</b></span>
         </div>
       </div>
       <div class="qr-card"><div id="qr"></div><div class="qr-cap">scan → your operator dashboard</div></div>
