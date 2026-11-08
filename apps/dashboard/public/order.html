@@ -53,6 +53,9 @@ input:focus,textarea:focus{border-color:var(--lime);box-shadow:0 0 0 3px color-m
 .status-card{background:linear-gradient(180deg,rgba(198,242,78,.04),transparent);border:1px solid var(--line2);border-radius:14px;padding:22px;text-align:center}
 .status-card .label{font-family:var(--mono);font-size:11px;letter-spacing:.2em;color:var(--faint);text-transform:uppercase}
 .status-card .big{font-family:var(--display);font-weight:800;font-size:22px;margin:8px 0;color:var(--lime)}
+/* a rejected order must not read as success; an unrecognised status is neutral, never lime */
+.status-card .big[data-tone="bad"]{color:var(--danger)}
+.status-card .big[data-tone="unknown"]{color:var(--muted)}
 .status-card .meta{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
 .timeline{margin-top:18px;border-top:1px solid var(--line);padding-top:14px;font-family:var(--mono);font-size:11.5px}
 .timeline .ev{display:flex;gap:10px;padding:6px 0;color:var(--muted)}
@@ -79,16 +82,16 @@ input:focus,textarea:focus{border-color:var(--lime);box-shadow:0 0 0 3px color-m
   </div>
 
   <div id="step1" class="panel">
-    <div class="field"><label>Who are you? <span class="hint">— used as your agent id</span></label>
+    <div class="field"><label for="userId">Who are you? <span class="hint">— used as your agent id</span></label>
       <input type="text" id="userId" placeholder="alex@vibecode" value=""></div>
-    <div class="field"><label>What pizza?</label>
+    <div class="field"><label for="desc">What pizza?</label>
       <textarea id="desc" placeholder="1 large pepperoni, extra cheese">1 pepperoni pizza</textarea></div>
-    <div class="field"><label>Deliver to</label>
+    <div class="field"><label for="addr">Deliver to</label>
       <input type="text" id="addr" placeholder="123 Main St, San Francisco" value="vibecodenights venue"></div>
     <div class="row">
-      <div class="field"><label>Max price <span class="hint">USDC</span></label>
+      <div class="field"><label for="maxPrice">Max price <span class="hint">USDC</span></label>
         <input type="number" id="maxPrice" min="10" step="1" value="30"></div>
-      <div class="field"><label>Max time <span class="hint">minutes</span></label>
+      <div class="field"><label for="maxTime">Max time <span class="hint">minutes</span></label>
         <input type="number" id="maxTime" min="15" step="5" value="45"></div>
     </div>
     <button class="btn primary" id="planBtn">Plan composition →</button>
@@ -107,7 +110,7 @@ input:focus,textarea:focus{border-color:var(--lime);box-shadow:0 0 0 3px color-m
 
   <div id="step3" class="panel status-card" style="display:none">
     <div class="label" id="statusLabel">awaiting shop</div>
-    <div class="big" id="statusTitle">Your order is being made</div>
+    <div class="big" id="statusTitle" aria-live="polite">Your order is being made</div>
     <div class="meta" id="statusMeta">—</div>
     <div class="timeline" id="timeline"></div>
   </div>
@@ -164,9 +167,10 @@ $("#confirmBtn").onclick=async()=>{
   }catch(e){toast(e.message,1); $("#confirmBtn").disabled=false;}
 };
 
-function setStatus(label,title,meta){
+function setStatus(label,title,meta,tone){
   $("#statusLabel").textContent=label;
   $("#statusTitle").textContent=title;
+  $("#statusTitle").dataset.tone=tone||"";
   $("#statusMeta").textContent=meta||"";
 }
 function connectSse(){
@@ -188,7 +192,7 @@ function connectSse(){
         rejected:["rejected","Order rejected",o.rejectionReason||""],
       };
       const m=map[o.status]||[o.status,"...",""];
-      setStatus(m[0],m[1],m[2]);
+      setStatus(m[0],m[1],m[2],o.status==="rejected"?"bad":map[o.status]?"":"unknown");
       pushTl(`status → ${o.status}`,true);
     } else if(e.type==="job_accepted"){pushTl(`${e.job.type} job accepted by ${e.job.assigneeSlug}`,true)}
       else if(e.type==="job_pickup"){pushTl(`driver picked up the pizza`,true)}
