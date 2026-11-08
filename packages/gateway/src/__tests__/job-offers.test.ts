@@ -634,6 +634,8 @@ describe("POST /api/job-offers/:id/events", () => {
     const app = await buildApp();
     try {
       await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-ev") });
+      // N81: progress needs a claim first (an unclaimed offer is refused, 409).
+      await app.inject({ method: "POST", url: "/api/job-offers/c-ev/claim", payload: { kernelId: "kernel-driver-1" } });
       const r1 = await app.inject({
         method: "POST", url: "/api/job-offers/c-ev/events",
         payload: { event: "in_progress", by: "kernel-driver-1" },
