@@ -49,6 +49,7 @@ const plainConfig: TextSinkConfig = {
     "for", // Associates a label with its generated input id.
     "data-theme", // Selects the closed dark/light theme.
     "data-mode", // Records the kit's transport mode for styling.
+    "data-source", // Records the provenance class the kit derives; never manifest text.
   ],
   pinnedCallers: [{ callee: "requestValueText", caller: "realRequestNode" }],
   // appendChild is Node-only; this kit has no string-capable insertion allowance.
