@@ -36,7 +36,7 @@ export const HOST_LOG_CODES = [
   "interrupted", "simulated_refused", "no_bundle", "journal_failed", "host_shutdown",
   "reader_unavailable", "stopped", "absent", "malformed", "poll_failed", "session_failed",
   "package_built", "receipt_stored", "data_dir_locked", "receipt_exists", "receipt_signer_unavailable", "submit_attempted", "submitted", "already_committed", "conflict", "refused", "submit_indeterminate",
-  "device_identity_mismatch", "compromised_device", "adapter_simulated", "unit_already_used",
+  "device_identity_mismatch", "compromised_device", "adapter_simulated", "unit_already_used", "unit_expired",
   "package_challenge_refused", "package_registry_refused", "package_operator_refused", "receipt_storage_unavailable",
   "session_key_minted", "session_key_failed", "session_key_expired", "unexpected_status", "sign_in_refused", "session_refused", "too_many_keys", "address_mismatch", "signer_failed",
   ...FUNDING_CODES, ...gatewayCodes, ...JOB_INPUT_CODES, ...SUBMIT_CODES,
@@ -150,8 +150,8 @@ export function createHost(deps: HostDeps): {
     } catch { identityFailure = "device_identity_mismatch"; }
   }
   const retries = new Map<string, { failures: number; until: number; code: HostLogCode }>();
-  const fundingLogged = new Map<string, FundingCode>();
-  function logFunding(jobId: string, code: FundingCode): void {
+  const fundingLogged = new Map<string, FundingCode | "unit_expired">();
+  function logFunding(jobId: string, code: FundingCode | "unit_expired"): void {
     if (fundingLogged.get(jobId) !== code) { log(code); fundingLogged.set(jobId, code); }
   }
   let stopped = deps.stopSignal?.aborted === true;
@@ -513,6 +513,10 @@ export function createHost(deps: HostDeps): {
           return { kind: "idle", waitMs: 5_000 };
         }
         const unit = input.value.unit;
+        if (Math.floor(now() / 1_000) >= unit.reclaimAt) {
+          logFunding(job.jobId, "unit_expired");
+          continue;
+        }
         if (gatewayFunding) {
           const facts = verified!;
           const code: FundingCode | undefined = facts.operator !== deps.operatorAddress?.toLowerCase() ? "funding_operator_mismatch"

@@ -366,6 +366,10 @@ remain parked.
   from the poll's verified funding. Every sending run needs this mode.
   `--poll-only` is refused (`gateway_refuses_poll_only`).
 
+In both modes, the host refuses a unit when
+`Math.floor(now() / 1_000) >= unit.reclaimAt`, logging `unit_expired` once per
+job. It moves on to the next job without reserving, journaling or reporting it.
+
 In gateway mode the host claims a queued job only when its `funding` reads
 `"ok"` and exactly one entry has state `funded_verified` with a verification,
 selected by state (a cancelled, expired or unknown scope never counts). That

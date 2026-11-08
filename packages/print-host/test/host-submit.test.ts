@@ -1673,6 +1673,7 @@ describe("CODE #41 gateway funding (D2-D6, D4, A1)", () => {
     ["fundedAt at 2^32", "funding_bad_time"],
     ["fundedAt equal to reclaimAt", "funding_bad_time"],
     ["fundedAt ahead of the host clock", "funding_bad_time"],
+    ["reclaimAt at or before the host clock", "unit_expired"],
     ["manifest fundedAt", "funding_mismatch"],
   ] as const)("a verified funding whose %s does not match claims nothing and reserves no unit", async (field, code) => {
     const setup = await fixture();
@@ -1692,6 +1693,10 @@ describe("CODE #41 gateway funding (D2-D6, D4, A1)", () => {
       delete inputs.unit.fundedAt;
       expect(funding.fundedAt).toBeLessThan(inputs.unit.reclaimAt);
     }
+    else if (field === "reclaimAt at or before the host clock") {
+      inputs.unit.reclaimAt = Math.floor(setup.deps.clock!() / 1_000);
+      expect(funding.fundedAt).toBeLessThan(inputs.unit.reclaimAt);
+    }
     else inputs.unit.fundedAt = setup.funding.fundedAt - 1;
     setup.inputSource.mockResolvedValue({ ok: true, value: inputs });
     setup.gateway.pollJobs.mockResolvedValue({ ok: true, value: { stop: { proceed: true },
@@ -1702,6 +1707,14 @@ describe("CODE #41 gateway funding (D2-D6, D4, A1)", () => {
     expect(setup.gateway.reportInProgress).not.toHaveBeenCalled();
     expect(await setup.journal.has(jobId)).toBe(false);
     expect(setup.logs.filter((entry) => entry === code)).toHaveLength(1);
+    if (field === "reclaimAt at or before the host clock") {
+      setup.advance(999);
+      expect(await setup.host.runOnce()).toEqual({ kind: "idle", waitMs: 5_000 });
+      expect(reserve).not.toHaveBeenCalled();
+      expect(setup.gateway.reportInProgress).not.toHaveBeenCalled();
+      expect(await setup.journal.has(jobId)).toBe(false);
+      expect(setup.logs.filter((entry) => entry === code)).toHaveLength(1);
+    }
     if (field === "fundedAt ahead of the host clock") {
       setup.advance(3_599_999);
       expect(await setup.host.runOnce()).toEqual({ kind: "idle", waitMs: 5_000 });
@@ -1754,6 +1767,28 @@ describe("CODE #41 gateway funding (D2-D6, D4, A1)", () => {
     expect(setup.gateway.pollJobs).toHaveBeenCalledTimes(7);
     expect(setup.logs.filter((code) => code === "funding_read_failed")).toHaveLength(1);
     expect(setup.inputSource).not.toHaveBeenCalled();
+  });
+
+  it("manifest mode: reclaimAt at or before the host clock claims nothing and reserves no unit", async () => {
+    const setup = await fixture({ fundingSource: "manifest" });
+    setup.host = createHost({ ...setup.deps, noSubmit: true });
+    const inputs = { ...setup.inputs, unit: { ...setup.inputs.unit,
+      reclaimAt: Math.floor(setup.deps.clock!() / 1_000) } };
+    expect(inputs.unit.fundedAt).toBeDefined();
+    expect(inputs.unit.fundedAt!).toBeLessThan(inputs.unit.reclaimAt);
+    setup.inputSource.mockResolvedValue({ ok: true, value: inputs });
+    const reserve = vi.spyOn(setup.journal, "reserveUnit");
+    expect(await setup.host.runOnce()).toEqual({ kind: "idle", waitMs: 5_000 });
+    expect(reserve).not.toHaveBeenCalled();
+    expect(setup.gateway.reportInProgress).not.toHaveBeenCalled();
+    expect(await setup.journal.has(jobId)).toBe(false);
+    expect(setup.logs.filter((code) => code === "unit_expired")).toHaveLength(1);
+    setup.advance(999);
+    expect(await setup.host.runOnce()).toEqual({ kind: "idle", waitMs: 5_000 });
+    expect(reserve).not.toHaveBeenCalled();
+    expect(setup.gateway.reportInProgress).not.toHaveBeenCalled();
+    expect(await setup.journal.has(jobId)).toBe(false);
+    expect(setup.logs.filter((code) => code === "unit_expired")).toHaveLength(1);
   });
 
   it("manifest mode journals source manifest and never reads the poll's funding", async () => {
