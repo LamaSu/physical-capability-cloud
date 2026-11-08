@@ -139,6 +139,7 @@ describe("N221 registry entity replies", () => {
       const res = await app.inject({ method: "GET", url: `/api/registry/entities/${agent.id}` });
       expect(res.statusCode).toBe(200);
       expect(res.json().entity).toMatchObject(expected);
+      expect(res.json().reputation).toEqual({ entityId: agent.id, count: Number(agent.summary.count), summaryValue: agent.summary.summaryValue.toString(), summaryValueDecimals: agent.summary.summaryValueDecimals, source: "onchain" });
     }
     const leaderboard = await app.inject({ method: "GET", url: "/api/registry/reputation/leaderboard" });
     expect(leaderboard.statusCode).toBe(200);
