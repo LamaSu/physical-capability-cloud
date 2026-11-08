@@ -381,7 +381,7 @@ function ProtocolCard({ data }: { data: ProtocolData }) {
         <div className="flex items-start justify-between gap-3">
           <div>
             <h3 className="text-sm font-bold text-white/90 tracking-wide">PCCProtocol</h3>
-              <p className="text-[11px] text-white/35 mt-0.5">Root escrow</p>
+            <p className="text-[11px] text-white/35 mt-0.5">Root escrow</p>
           </div>
           <StatusBadge status={data.status} />
         </div>

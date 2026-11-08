@@ -131,7 +131,7 @@
       "path": "/api/rewards",
       "description": "DePIN reward statistics — soulbound certificates, epoch rewards, claim status",
       "params": {},
-        "tags": ["depin", "rewards"]
+      "tags": ["depin", "rewards"]
     },
     {
       "id": "get-subnet-status",

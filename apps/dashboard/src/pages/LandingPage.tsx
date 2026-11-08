@@ -1341,7 +1341,7 @@ const PHASES = [
     phase: "BID",
     title: "Auction pricing. No floor.",
     description:
-        "Operators set maximum prices. Agents bid downward. Queue depth and reputation drive discounts. No broker markup, no minimum contract.",
+      "Operators set maximum prices. Agents bid downward. Queue depth and reputation drive discounts. No broker markup, no minimum contract.",
     tech: "Reverse auction. Queue-depth discounting. Reputation-weighted scoring.",
   },
   {
@@ -1705,7 +1705,7 @@ const STEPS = [
   {
     step: "4",
     title: "Earn",
-      text: "Capabilities announced. Jobs arrive. Escrow releases to your wallet on verified evidence.",
+    text: "Capabilities announced. Jobs arrive. Escrow releases to your wallet on verified evidence.",
     badge: "ongoing",
   },
 ];
