@@ -187,6 +187,16 @@ export interface BackendRunResult {
   opCount: number;
   /** Wall-clock duration (ms) */
   durationMs: number;
+  /**
+   * How the ops ran: "hardware" (a real instrument — never asserted by Phase 1;
+   * no hardware-identity provenance check exists yet, R39 CRIT1 / D1 #19),
+   * "simulated" (PLR's chatterbox), "unverified" (a hardware-capable backend,
+   * e.g. ot2, whose physical execution hasn't been proven) or "stub". Anything
+   * but an exact "hardware" is normalized to "unverified" by the adapter (see
+   * `normalizeExecutionMode` in `adapter.ts`) and marked mock: true in the
+   * evidence, so it can never count as a physical run.
+   */
+  executionMode?: "hardware" | "simulated" | "unverified" | "stub" | (string & {});
   /** Any per-op summary the sidecar wants to surface */
   summary?: Record<string, unknown>;
 }

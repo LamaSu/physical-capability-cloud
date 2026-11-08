@@ -4,24 +4,112 @@ Maps PCC's ``plrBackend`` string to a concrete PLR Machine instance, holding
 exclusive access while the adapter session is active.
 
 Phase 1 supports two backends:
-  - ``chatterbox`` — PLR's ChatterboxBackend (in-memory mock, always available)
-  - ``ot2`` — Opentrons OT-2 via PLR's OpentronsBackend (requires ``pylabrobot``
-    + optional ``opentrons`` extra)
+  - ``chatterbox`` — PLR's ``LiquidHandlerChatterboxBackend`` (in-memory digital
+    twin; part of core pylabrobot)
+  - ``ot2`` — Opentrons OT-2 via PLR's ``OpentronsOT2Backend`` (requires the
+    ``pylabrobot[opentrons]`` extra)
+
+Both PLR backends need a declared deck: ``backendConfig.deckLayout`` (a
+serialized PLR deck, as produced by ``deck.serialize()``) or
+``backendConfig.deckLayoutPath`` (a JSON file holding one). Without a layout the
+backend refuses to load, because an empty deck cannot run a protocol (status
+board row R39). The layout is data, and it is checked as data BEFORE PLR builds
+anything from it (:func:`checked_layout`):
+
+- the root must be the expected deck type, and every typed object in the tree
+  must be one of ``LAYOUT_TYPES``;
+- serialized functions are never deserialized. On ``ot2`` a function-bearing
+  layout is refused outright (R39 MED7 — stripping would silently change what
+  PLR builds); on the simulator stripping may stand, logged. It is then
+  loaded with ``Resource.deserialize(..., allow_marshal=False)`` on both paths;
+- size, depth, key and number limits apply, and every resource (recursively,
+  including nested holders/adapters/plates-in-carriers) must lie inside its
+  immediate parent and inside the deck in x, y AND z, with no rotation
+  (rotated footprints are refused, not computed); deck-level siblings may not
+  overlap another.
+
+``deckLayoutPath`` is operator configuration, never job input, and it must name
+a ``.json`` file inside ``PCC_PLR_LAYOUT_DIR``.
+
+PLR's tip and volume tracking are switched on for every PLR backend, so a missing
+tip, a well without enough liquid or an overfilled well fails inside PLR before
+it becomes a physical action. ``backendConfig.initialLiquids`` declares what the
+operator loaded (``{"src": {"A1": 200}}``, in uL). On the simulator, tracking can
+be switched off explicitly with ``backendConfig.tracking``; on hardware it can't.
 
 Each backend is loaded lazily via inline imports so an operator can install
 just the extras they need (``pip install pcc-plr-sidecar[ot2]``).
 
-A small ``stub`` backend is also registered for test environments where PLR
-is not installed — it implements the same surface (setup / run / stop /
-status / dispose) with synthetic responses.
+An ``ot2`` device names the robot it drives by ``backendConfig.robotSerial``
+(operator-provisioned). Before anything is built, the sidecar takes the host's
+lock for that serial and the robot at the configured address must report that
+very serial, so no two devices or sidecars on a host can drive one robot,
+whatever address spelling, alias or interface each uses (R39 r6).
+
+The boundary (R39 r7, DECISIONS 10:24): this guarantees exclusivity among
+HONEST sidecars on one host, against accidental double control
+(misconfiguration, aliases, restarts). Hostile local users and network
+attackers are kept out by deployment (queue item 124). The install provides
+the robot-lock directory (``/var/lib/pcc-plr/robot-locks``: the sidecars'
+dedicated service user, mode 0700, bind-mounted into every sidecar container);
+the OT-2 sits on an isolated segment at a static address with no proxy or DNS
+name in between; and there is one PCC host per OT-2.
+
+A small ``stub`` backend exists for tests. It is used only when ``plrBackend``
+is ``"stub"``, never as a fallback, and every result it gives says
+``executionMode: "stub"``.
 """
 
 from __future__ import annotations
+import asyncio
+import hashlib
+import http.client
+import json
 import logging
+import math
+import os
+import re
+import stat
+import sys
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 log = logging.getLogger("pcc_plr_sidecar.backend_loader")
+
+# R39 CRIT1: the backend NAME never establishes physical execution. "simulated"
+# covers chatterbox and every known simulator backend. Every hardware-capable
+# backend (ot2, and any future one) is "unverified" — never "hardware" — until a
+# hardware-identity provenance check exists (D1, queue item 19, out of scope
+# here). ``.get(..., "unverified")`` in :meth:`BackendLoader.load` is the same
+# fail-safe default: a backend added to ``_create_machine`` without an entry
+# here is "unverified", never a silent ``None`` that could read as "hardware".
+EXECUTION_MODES = {"chatterbox": "simulated", "chatter": "simulated", "ot2": "unverified", "stub": "stub"}
+DEFAULT_MAX_VOLUME_UL = 1000.0  # the OT-2's largest pipette; backendConfig.maxVolumeUL may lower it
+
+# Every object with a "type" in a deck layout must be one of these PLR resource
+# (or geometry) classes. Anything else, including a serialized function, never
+# reaches PLR's deserializer. Written from PLR's resource class names; the
+# genuine-library test (test_plr_real.py) checks it once operator decision D1
+# allows installing pylabrobot.
+LAYOUT_TYPES = frozenset({
+    "Deck", "OTDeck", "Resource", "Container", "Well", "Plate", "Lid", "TipRack", "TipSpot",
+    "Tip", "HamiltonTip", "Trash", "Tube", "TubeRack", "Trough", "ResourceHolder",
+    "ResourceStack", "PlateAdapter", "Coordinate", "Rotation",
+})
+MAX_LAYOUT_BYTES = 5 * 1024 * 1024
+MAX_LAYOUT_DEPTH = 32
+MAX_LAYOUT_NODES = 100_000
+MAX_LAYOUT_STRING = 4096
+_GEOMETRY_TOLERANCE_MM = 0.5
+
+
+def _already_set_event() -> asyncio.Event:
+    """An ``asyncio.Event`` that starts set (device idle, no run holds it)."""
+    event = asyncio.Event()
+    event.set()
+    return event
 
 
 @dataclass
@@ -39,6 +127,306 @@ class BackendHandle:
     backend_config: dict[str, Any] = field(default_factory=dict)
     setup_done: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+    # "simulated" (PLR's chatterbox), "unverified" (ot2 or any other
+    # hardware-capable backend — R39 CRIT1: never "hardware" without a
+    # hardware-identity provenance check) or "stub". Every run result and
+    # every evidence record carries it.
+    execution_mode: str = "stub"
+    # The largest volume one aspirate or dispense may move, in uL.
+    max_volume_ul: float = DEFAULT_MAX_VOLUME_UL
+    # R39 CRIT3: true for ot2 and any future non-simulator backend. PLR's tip
+    # and volume tracking switches are process-global, so this flag is how the
+    # loader knows, across every OTHER handle it holds, whether weakening
+    # tracking is safe right now (see BackendLoader.load / _configure_tracking).
+    hardware_capable: bool = False
+    # R39 CRIT2: one per-device execution lease. ``busy`` + ``busy_job_id`` are
+    # the fast synchronous gate `backend.run` and `evidence.startRecording`
+    # check before touching anything; ``idle`` is the coordination primitive
+    # `BackendLoader.unload` awaits so shutdown never races a holder's actuation.
+    busy: bool = False
+    busy_job_id: Optional[str] = None
+    idle: asyncio.Event = field(default_factory=lambda: _already_set_event())
+    # Set by BackendLoader.unload: no new run may start, and the handle stays
+    # registered until its machine is stopped (R39 r3 review).
+    closing: bool = False
+    # R39 r4: the backend's setup() is under the same lease as a run. While it
+    # is in flight no run starts, no second setup starts, and shutdown waits.
+    setting_up: bool = False
+    # R39 r4: the OS lock on the physical endpoint this handle drives (ot2), or
+    # None for a simulator or the stub. Released when the handle is unloaded.
+    endpoint_lock: Any = None
+
+    def try_acquire(self, job_id: str) -> bool:
+        """Take the lease for ``job_id``. False (no state changed) if busy, setting up or closing."""
+        if self.busy or self.closing or self.setting_up:
+            return False
+        self.busy = True
+        self.busy_job_id = job_id
+        self.idle.clear()
+        return True
+
+    def release(self) -> None:
+        """Release the lease. Safe to call even if never acquired."""
+        self.busy = False
+        self.busy_job_id = None
+        if not self.setting_up:
+            self.idle.set()
+
+    def begin_setup(self) -> bool:
+        """Hold the lease for setup(). False (no state changed) if anything else holds it."""
+        if self.busy or self.closing or self.setting_up:
+            return False
+        self.setting_up = True
+        self.idle.clear()
+        return True
+
+    def end_setup(self) -> None:
+        self.setting_up = False
+        if not self.busy:
+            self.idle.set()
+
+
+class DeviceBusy(Exception):
+    """A load refused because the device is being built, set up, shut down, or
+    its physical endpoint is already driven elsewhere."""
+
+
+def _ot2_address(config: dict[str, Any]) -> tuple[str, int]:
+    """The OT-2 a config names, as (host, port): ``ot2Url``, else ``host``, else
+    ``url``. The ONE resolution both _create_ot2 (what is driven) and the
+    endpoint lock (what is locked) use, so no accepted spelling can drive a
+    robot without locking it (R39 r5)."""
+    ot2_url = config.get("ot2Url") or config.get("host") or config.get("url")
+    if not ot2_url or not isinstance(ot2_url, str):
+        raise ValueError(
+            "OT-2 backendConfig must include 'ot2Url' (e.g. 'http://192.168.1.50:31950')",
+        )
+    return _parse_ot2_url(ot2_url)
+
+
+# ── R39 r6: the lock is the robot itself ────────────────────────────────────
+# A network locator is only a spelling: a hostname and its IP, or the OT-2's
+# Wi-Fi and USB addresses, reach one robot. So an OT-2 device must name the
+# robot it drives by its serial number (``backendConfig.robotSerial``,
+# operator-provisioned), the lock is keyed by that serial, and before anything
+# is built the robot at the locator must report that very serial. A device
+# configured with another serial for the same robot is refused by the robot's
+# own answer, so every configuration of one robot meets at one lock.
+
+ROBOT_SERIAL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+ROBOT_IDENTITY_TIMEOUT_S = 5.0  # each socket operation of the identity check
+ROBOT_IDENTITY_DEADLINE_S = 10.0  # the whole identity check
+ROBOT_IDENTITY_MAX_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class RobotIdentity:
+    """The physical robot an OT-2 device drives: its operator-provisioned serial,
+    and where it is reached."""
+
+    serial: str
+    host: str
+    port: int
+
+    @property
+    def lock_key(self) -> str:
+        return f"ot2-serial:{self.serial.casefold()}"
+
+
+def _hardware_identity(plr_backend: str, config: dict[str, Any]) -> Optional[RobotIdentity]:
+    """The robot a hardware-capable backend drives, or None for a simulator or
+    the stub. Raises ValueError, before anything is locked, asked or built, when
+    the config names no OT-2 or no valid ``robotSerial``."""
+    if plr_backend.strip().lower() != "ot2":
+        return None
+    host, port = _ot2_address(config)
+    serial = config.get("robotSerial")
+    if not isinstance(serial, str) or not ROBOT_SERIAL_RE.fullmatch(serial):
+        raise ValueError(
+            "OT-2 backendConfig must include 'robotSerial': the serial number of the robot this "
+            "device drives, as its robot-server reports it (GET http://<robot>:31950/health, "
+            "robot_serial)",
+        )
+    return RobotIdentity(serial=serial, host=host, port=port)
+
+
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect could hand the identity question to another machine: refuse it
+    (urllib then raises HTTPError for the 3xx itself)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        return None
+
+
+def _robot_json(opener: urllib.request.OpenerDirector, url: str) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers={"Opentrons-Version": "*", "Accept": "application/json"})
+    try:
+        with opener.open(request, timeout=ROBOT_IDENTITY_TIMEOUT_S) as response:
+            raw = response.read(ROBOT_IDENTITY_MAX_BYTES + 1)
+    except urllib.error.HTTPError as e:
+        raise ValueError(f"the OT-2 identity check at {url} answered HTTP {e.code}") from e
+    except (OSError, http.client.HTTPException) as e:  # URLError, timeouts, resets
+        raise ValueError(f"the OT-2 identity check at {url} failed ({type(e).__name__})") from e
+    if len(raw) > ROBOT_IDENTITY_MAX_BYTES:
+        raise ValueError(f"the OT-2 identity check at {url} answered more than {ROBOT_IDENTITY_MAX_BYTES} bytes")
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except ValueError as e:  # bad UTF-8 or bad JSON
+        raise ValueError(f"the OT-2 identity check at {url} did not answer JSON") from e
+    if not isinstance(body, dict):
+        raise ValueError(f"the OT-2 identity check at {url} did not answer a JSON object")
+    return body
+
+
+def _robot_serial(host: str, port: int) -> str:
+    """The serial number the OT-2 at ``host:port`` reports about itself (blocking).
+
+    The robot-server's ``GET /health`` carries ``robot_serial``; where that is
+    null, its update server's ``GET /server/update/health`` carries
+    ``serialNumber`` (the robot-server's documented fallback). One direct
+    request per endpoint: no proxy from the environment, no redirect, bounded
+    time and size. Any failure, or no well-formed serial, raises ValueError.
+    """
+    netloc = f"[{host}]" if ":" in host else host
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _RefuseRedirects())
+    for path, field_name in (("/health", "robot_serial"), ("/server/update/health", "serialNumber")):
+        reported = _robot_json(opener, f"http://{netloc}:{port}{path}").get(field_name)
+        if reported is None:
+            continue
+        if not isinstance(reported, str) or not ROBOT_SERIAL_RE.fullmatch(reported):
+            raise ValueError(f"the OT-2 at {host}:{port} reports a malformed serial number; refusing to drive it")
+        return reported
+    raise ValueError(f"the OT-2 at {host}:{port} reports no serial number; refusing to drive it")
+
+
+async def _confirm_robot(identity: RobotIdentity) -> str:
+    """The robot at the configured locator must be the configured robot."""
+    try:
+        reported = await asyncio.wait_for(
+            asyncio.to_thread(_robot_serial, identity.host, identity.port), ROBOT_IDENTITY_DEADLINE_S,
+        )
+    except asyncio.TimeoutError as e:
+        raise ValueError(
+            f"the OT-2 at {identity.host}:{identity.port} did not report its serial number within "
+            f"{ROBOT_IDENTITY_DEADLINE_S:g} s; refusing to drive it",
+        ) from e
+    if reported.casefold() != identity.serial.casefold():
+        raise ValueError(
+            f"the OT-2 at {identity.host}:{identity.port} reports serial number {reported!r}, not the "
+            f"configured robotSerial {identity.serial!r}; refusing to drive it",
+        )
+    return reported
+
+
+# R39 r6/r7: ONE robot-lock directory per host, provided by the INSTALL (operator
+# rule, queue item 124; DECISIONS 10:24). The installer creates it, owned by the
+# sidecars' dedicated service user with mode 0700 (never 1777), and bind-mounts
+# it into every sidecar container. No sidecar creates, moves or loosens it, and
+# no environment variable or temp-dir setting changes where it is. A sidecar
+# that finds it missing, not a directory, a symlink, owned by another user, or
+# any mode but exactly 0700 refuses to drive hardware.
+_LOCK_NAMESPACE = "/var/lib/pcc-plr/robot-locks"
+
+
+def _lock_file_name(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32] + ".lock"
+
+
+def _open_lock_namespace(path: str) -> int:
+    """Open the install-provided robot-lock directory, returning its fd. Raises
+    OSError when it is missing or isn't exactly what the install promises: a
+    real directory (not a symlink), owned by this service user, mode exactly
+    0700."""
+    parent, leaf = os.path.split(path)
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        dir_fd = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+    try:
+        info = os.fstat(dir_fd)
+        if not stat.S_ISDIR(info.st_mode):
+            raise OSError(f"{path} is not a directory")
+        if info.st_uid != os.geteuid():
+            raise OSError(f"{path} is not owned by this sidecar's service user")
+        mode = stat.S_IMODE(info.st_mode)
+        if mode != 0o700:  # exactly the install's mode (astra r7 MEDIUM): no other bit, sticky included
+            raise OSError(f"{path} is mode {mode:04o}, not the install's 0700")
+    except BaseException:
+        os.close(dir_fd)
+        raise
+    return dir_fd
+
+
+class EndpointLock:
+    """An exclusive OS lock on one physical robot, held for a handle's life
+    (R39 r4; keyed by the robot's serial since r6). ``flock`` locks belong to an
+    open file description, so a second device id in this sidecar, or any other
+    sidecar on this host, cannot take it while it is held, and a crashed
+    process releases it with its fds. Lock files live in the install-provided
+    robot-lock directory (``_LOCK_NAMESPACE``). A sidecar creates one on first
+    use (0600, its own) and never deletes it, so a lock is always one inode.
+
+    The boundary (R39 r7, DECISIONS 10:24): this guarantees exclusivity among
+    HONEST sidecars on one host, against accidental double control
+    (misconfiguration, aliases, restarts). Hostile local users and network
+    attackers are kept out by deployment (queue item 124): the service user's
+    0700 lock directory, the OT-2 on an isolated segment at a static address
+    with no proxy or DNS name in between, and one PCC host per OT-2."""
+
+    def __init__(self, fd: int, key: str) -> None:
+        self._fd: Optional[int] = fd
+        self.key = key
+
+    @classmethod
+    def acquire(cls, key: str) -> "EndpointLock":
+        try:
+            import fcntl
+        except ImportError as e:  # Windows: no flock -> refuse to drive hardware
+            raise DeviceBusy(f"this platform cannot lock {key}; refusing to drive it") from e
+        try:
+            dir_fd = _open_lock_namespace(_LOCK_NAMESPACE)
+        except (OSError, NotImplementedError) as e:
+            raise DeviceBusy(
+                f"the robot-lock directory {_LOCK_NAMESPACE} is unusable ({e}); it comes from the "
+                "install (service user, mode 0700): refusing to drive hardware",
+            ) from e
+        try:
+            # O_RDONLY is enough for flock; O_NONBLOCK so a FIFO in its place
+            # can't hang the open; created 0600, the service user's alone.
+            fd = os.open(
+                _lock_file_name(key), os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600,
+                dir_fd=dir_fd,
+            )
+        except OSError as e:
+            raise DeviceBusy(f"cannot lock {key} ({e.strerror}); refusing to drive it") from e
+        finally:
+            os.close(dir_fd)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise DeviceBusy(f"the lock file for {key} is not a regular file; refusing to drive it")
+            if info.st_uid != os.geteuid():
+                raise DeviceBusy(f"the lock file for {key} is not this service user's; refusing to drive it")
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except DeviceBusy:
+            os.close(fd)
+            raise
+        except OSError as e:
+            os.close(fd)
+            raise DeviceBusy(f"{key} is already driven by another device or sidecar") from e
+        return cls(fd, key)
+
+    def release(self) -> None:
+        if self._fd is None:
+            return
+        fd, self._fd = self._fd, None
+        try:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 class BackendLoader:
@@ -50,6 +438,9 @@ class BackendLoader:
 
     def __init__(self) -> None:
         self._handles: dict[str, BackendHandle] = {}
+        # Device ids whose machine is being built right now (R39 r3 review): a
+        # second load of the same id waits for nothing and builds nothing.
+        self._loading: set[str] = set()
 
     def has(self, device_id: str) -> bool:
         return device_id in self._handles
@@ -70,101 +461,601 @@ class BackendLoader:
         backend_config: dict[str, Any],
     ) -> BackendHandle:
         """Instantiate the backend + return a handle. Idempotent per deviceId."""
+        handle, _created = await self._load(plr_backend, device_id, backend_config, hold_for_setup=False)
+        return handle
+
+    async def load_for_init(
+        self,
+        plr_backend: str,
+        device_id: str,
+        backend_config: dict[str, Any],
+    ) -> tuple[BackendHandle, bool]:
+        """Like load, for backend.init: returns (handle, created). A handle this
+        call created is registered already holding its setup lease (R39 r4), so
+        no run, init or shutdown can slip in before setup() starts."""
+        return await self._load(plr_backend, device_id, backend_config, hold_for_setup=True)
+
+    async def _load(
+        self,
+        plr_backend: str,
+        device_id: str,
+        backend_config: dict[str, Any],
+        *,
+        hold_for_setup: bool,
+    ) -> tuple[BackendHandle, bool]:
+        """Never two machines for one device: a load while that device is being
+        built, or while its shutdown waits for a run, is refused (R39 r3 review);
+        and never two handles for one physical robot (R39 r4, r6)."""
+        if device_id in self._loading:
+            raise DeviceBusy(f"deviceId {device_id} is being loaded")
         if device_id in self._handles:
             existing = self._handles[device_id]
+            if existing.closing:
+                raise DeviceBusy(f"deviceId {device_id} is shutting down")
             if existing.plr_backend != plr_backend:
                 raise ValueError(
                     f"deviceId {device_id} already registered as {existing.plr_backend}; "
                     f"requested {plr_backend}",
                 )
-            return existing
+            return existing, False
 
         log.info("loading backend %s for device %s", plr_backend, device_id)
-        machine = await _create_machine(plr_backend, backend_config)
+        mode = EXECUTION_MODES.get(plr_backend.strip().lower(), "unverified")
+        # R39 CRIT3: does any OTHER handle already in this process make tracking
+        # hardware-sensitive? If so, this load may not weaken it.
+        other_hardware_loaded = any(h.hardware_capable for h in self._handles.values())
+        identity = _hardware_identity(plr_backend, backend_config)
+        self._loading.add(device_id)
+        lock: Optional[EndpointLock] = None
+        try:
+            robot_serial: Optional[str] = None
+            if identity is not None:
+                # R39 r4/r6: the robot first, before anything is built for it:
+                # its lock, then its own confirmation that it is that robot.
+                lock = EndpointLock.acquire(identity.lock_key)
+                robot_serial = await _confirm_robot(identity)
+            machine, metadata, hardware_capable = await _create_machine(
+                plr_backend, backend_config, other_hardware_loaded,
+            )
+            if robot_serial is not None:
+                metadata = {**metadata, "robotSerial": robot_serial}
+        except BaseException:
+            if lock is not None:
+                lock.release()
+            raise
+        finally:
+            self._loading.discard(device_id)
         handle = BackendHandle(
             plr_backend=plr_backend,
             device_id=device_id,
+            hardware_capable=hardware_capable,
             machine=machine,
             backend_config=dict(backend_config),
-            metadata={"loaded_via": "BackendLoader.load"},
+            metadata={"loaded_via": "BackendLoader.load", "executionMode": mode, **metadata},
+            execution_mode=mode,
+            max_volume_ul=_max_volume(backend_config),
+            endpoint_lock=lock,
         )
+        if hold_for_setup:
+            handle.begin_setup()
         self._handles[device_id] = handle
-        return handle
+        return handle, True
 
     async def unload(self, device_id: str) -> None:
-        h = self._handles.pop(device_id, None)
+        h = self._handles.get(device_id)
         if h is None:
             return
-        # PLR backends typically expose .stop() (async). Stub doesn't.
-        stop_fn = getattr(h.machine, "stop", None)
-        if stop_fn:
-            try:
-                result = stop_fn()
-                if hasattr(result, "__await__"):
-                    await result
-            except Exception as e:  # noqa: BLE001
-                log.warning("backend.stop raised on unload: %s", e)
+        # R39 CRIT2: shutdown waits for the lease holder cleanly rather than
+        # racing its actuation. ``closing`` refuses new runs at once, and the
+        # handle stays registered until its machine is stopped, so a concurrent
+        # load cannot build a second handle to the same hardware (r3 review).
+        if h.closing:
+            await h.idle.wait()  # another shutdown is already stopping it
+            return
+        h.closing = True
+        try:
+            await h.idle.wait()
+            # PLR backends typically expose .stop() (async). Stub doesn't.
+            stop_fn = getattr(h.machine, "stop", None)
+            if stop_fn:
+                try:
+                    result = stop_fn()
+                    if hasattr(result, "__await__"):
+                        await result
+                except Exception as e:  # noqa: BLE001
+                    log.warning("backend.stop raised on unload: %s", e)
+        finally:
+            if h.endpoint_lock is not None:
+                h.endpoint_lock.release()
+            if self._handles.get(device_id) is h:
+                del self._handles[device_id]
 
 
 # ── private — backend instantiation ────────────────────────────────────────
 
-async def _create_machine(plr_backend: str, config: dict[str, Any]) -> Any:
+async def _create_machine(
+    plr_backend: str, config: dict[str, Any], other_hardware_loaded: bool,
+) -> tuple[Any, dict[str, Any], bool]:
     """Dispatch on ``plr_backend`` to a concrete PLR Machine constructor.
 
-    Imports are inline + per-branch so the operator only needs the vendor
-    extras they actually use.
+    Returns the machine, what the loader learned while building it (for the
+    handle's metadata), and whether this backend is hardware-capable (R39
+    CRIT3 — a non-simulator; drives ``BackendHandle.hardware_capable``, which
+    gates weakening PLR's process-global tracking switches and whether a run
+    re-asserts them). Imports are inline + per-branch so the operator only
+    needs the vendor extras they actually use.
     """
     plr_backend = plr_backend.strip().lower()
 
     if plr_backend in ("chatterbox", "chatter"):
-        return _create_chatterbox(config)
+        machine, metadata = _create_chatterbox(config, other_hardware_loaded)
+        return machine, metadata, False
 
     if plr_backend == "stub":
-        return _create_stub(config)
+        return _create_stub(config), {}, False
 
     if plr_backend == "ot2":
-        return await _create_ot2(config)
+        machine, metadata = await _create_ot2(config, other_hardware_loaded)
+        return machine, metadata, True
 
     raise ValueError(
         f"unknown plrBackend: {plr_backend!r}. Phase 1 supports: chatterbox, ot2, stub",
     )
 
 
-def _create_chatterbox(config: dict[str, Any]) -> Any:
-    """ChatterboxBackend — PLR's in-memory mock liquid handler.
+def _max_volume(config: dict[str, Any]) -> float:
+    value = config.get("maxVolumeUL", DEFAULT_MAX_VOLUME_UL)
+    if (
+        isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+        or not 0 < value <= DEFAULT_MAX_VOLUME_UL
+    ):
+        raise ValueError(f"backendConfig.maxVolumeUL must be a number in (0, {DEFAULT_MAX_VOLUME_UL:g}] uL")
+    return float(value)
 
-    Imports PLR; ChatterboxBackend is part of the core distribution.
+
+def _open_inside(base: str, real: str) -> int:
+    """Open ``real`` for reading by walking from ``/`` one component at a time,
+    each opened relative to the directory above it with ``O_NOFOLLOW`` (R39
+    r4/r5, MED8). ``real`` and ``base`` are both resolved, so a legitimate path
+    has no symlink on it: a component swapped for a symlink after the boundary
+    check, at ANY depth, the layout root and its own parents included, fails the
+    walk instead of leading it outside ``PCC_PLR_LAYOUT_DIR``, on any POSIX
+    system, with no reliance on ``/proc``. A platform that cannot open relative
+    to a directory fd (Windows) refuses layout files: pass ``deckLayout`` inline.
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory is None or os.open not in os.supports_dir_fd:
+        raise ValueError("deckLayoutPath is not supported on this platform; pass deckLayout inline")
+    if not os.path.isabs(real) or os.path.commonpath([base, real]) != base or real == base:
+        raise ValueError("deckLayoutPath must name a file inside PCC_PLR_LAYOUT_DIR")
+    parts = [part for part in real.split(os.sep) if part not in ("", ".")]
+    if not parts or ".." in parts:
+        raise ValueError("deckLayoutPath must name a file inside PCC_PLR_LAYOUT_DIR")
+    try:
+        dir_fd = os.open(os.sep, os.O_RDONLY | directory)
+    except OSError as e:
+        raise ValueError("deckLayoutPath could not be opened") from e
+    try:
+        for name in parts[:-1]:
+            try:
+                next_fd = os.open(name, os.O_RDONLY | directory | nofollow, dir_fd=dir_fd)
+            except FileNotFoundError as e:
+                raise ValueError("deckLayoutPath must name an existing .json file") from e
+            except OSError as e:
+                raise ValueError("deckLayoutPath changed between check and read; refusing") from e
+            os.close(dir_fd)
+            dir_fd = next_fd
+        try:
+            return os.open(parts[-1], os.O_RDONLY | nofollow, dir_fd=dir_fd)
+        except FileNotFoundError as e:
+            raise ValueError("deckLayoutPath must name an existing .json file") from e
+        except OSError as e:
+            raise ValueError("deckLayoutPath changed between check and read; refusing") from e
+    finally:
+        os.close(dir_fd)
+
+
+def _read_layout_file(path: Any) -> Any:
+    """Read ``deckLayoutPath``: a .json file inside PCC_PLR_LAYOUT_DIR, at most 5 MB.
+
+    R39 MED8: the path is resolved and boundary-checked, then opened exactly
+    once by walking from ``/`` one component at a time with ``O_NOFOLLOW``
+    (:func:`_open_inside`), so a symlink swapped in at any depth after the
+    check, the layout root included, is refused rather than followed outside
+    ``PCC_PLR_LAYOUT_DIR``. Everything is read from that one fd, never a second
+    open of the path.
+    """
+    if not isinstance(path, str) or not path:
+        raise ValueError("deckLayoutPath must be a non-empty string")
+    root = os.environ.get("PCC_PLR_LAYOUT_DIR")
+    if not root:
+        raise ValueError(
+            "deckLayoutPath needs PCC_PLR_LAYOUT_DIR, the directory the operator keeps deck layouts in",
+        )
+    base = os.path.realpath(root)
+    real = os.path.realpath(path if os.path.isabs(path) else os.path.join(base, path))
+    if os.path.commonpath([base, real]) != base:
+        raise ValueError("deckLayoutPath must name a file inside PCC_PLR_LAYOUT_DIR")
+    if not real.endswith(".json"):
+        raise ValueError("deckLayoutPath must name an existing .json file")
+
+    fd = _open_inside(base, real)
+    try:
+        fd_stat = os.fstat(fd)
+        if not stat.S_ISREG(fd_stat.st_mode):
+            raise ValueError("deckLayoutPath must name a regular file")
+        chunks: list[bytes] = []
+        remaining = MAX_LAYOUT_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 1024 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_LAYOUT_BYTES:
+        raise ValueError(f"deck layout file is larger than {MAX_LAYOUT_BYTES} bytes")
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as e:
+        raise ValueError(f"deck layout file is not JSON: {e}") from e
+
+
+def checked_layout(layout: Any, root_types: frozenset) -> tuple[dict[str, Any], int]:
+    """Check a serialized deck as data before anything is built from it.
+
+    Returns a cleaned copy and the number of serialized functions stripped from it
+    (a function is code, so it is replaced by None and never deserialized).
+    Raises ValueError for anything outside the rules in the module docstring.
+    """
+    if not isinstance(layout, dict) or layout.get("type") not in root_types:
+        found = layout.get("type") if isinstance(layout, dict) else type(layout).__name__
+        raise ValueError(f"deck layout is a {found!r}, expected {' or '.join(sorted(root_types))}")
+    counts = {"nodes": 0, "stripped": 0}
+
+    def walk(value: Any, depth: int) -> Any:
+        counts["nodes"] += 1
+        if counts["nodes"] > MAX_LAYOUT_NODES:
+            raise ValueError(f"deck layout has more than {MAX_LAYOUT_NODES} values")
+        if depth > MAX_LAYOUT_DEPTH:
+            raise ValueError(f"deck layout is nested deeper than {MAX_LAYOUT_DEPTH} levels")
+        if isinstance(value, dict):
+            if value.get("type") == "function":
+                counts["stripped"] += 1
+                return None
+            if "type" in value and value["type"] not in LAYOUT_TYPES:
+                raise ValueError(f"deck layout holds a {value['type']!r}, which is not an allowed resource type")
+            cleaned = {}
+            for key, item in value.items():
+                if not isinstance(key, str) or key.startswith("__"):
+                    raise ValueError(f"deck layout key {key!r} is not allowed")
+                cleaned[key] = walk(item, depth + 1)
+            return cleaned
+        if isinstance(value, list):
+            return [walk(item, depth + 1) for item in value]
+        if isinstance(value, str):
+            if len(value) > MAX_LAYOUT_STRING:
+                raise ValueError(f"deck layout holds a string longer than {MAX_LAYOUT_STRING} characters")
+            return value
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("deck layout holds a non-finite number")
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        raise ValueError(f"deck layout holds a {type(value).__name__}, which is not JSON data")
+
+    cleaned = walk(layout, 0)
+    _check_deck_geometry(cleaned)
+    return cleaned, counts["stripped"]
+
+
+def _box(resource: dict[str, Any], what: str) -> tuple[float, float, float]:
+    dims = []
+    for axis in ("size_x", "size_y", "size_z"):
+        v = resource.get(axis)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 0:
+            raise ValueError(f"{what} needs a positive {axis} to be placed on the deck")
+        dims.append(float(v))
+    return dims[0], dims[1], dims[2]
+
+
+def _check_no_rotation(resource: dict[str, Any], name: str) -> None:
+    """R39 CRIT4: rotated footprints are not computed, so any resource carrying
+    a non-identity ``rotation`` is refused outright, with a clear error, rather
+    than silently checked against its unrotated box. A resource with no
+    ``rotation`` key, or one whose x/y/z angles are all exactly 0, is fine.
+    """
+    rotation = resource.get("rotation")
+    if rotation is None:
+        return
+    if isinstance(rotation, dict):
+        angles = [rotation.get(a, 0) for a in ("x", "y", "z")]
+        if all(isinstance(a, (int, float)) and not isinstance(a, bool) and a == 0 for a in angles):
+            return
+    raise ValueError(f"{name} has a nonzero rotation; rotated footprints are not supported yet")
+
+
+def _check_resource_geometry(
+    resource: dict[str, Any],
+    *,
+    parent_label: str,
+    parent_origin: tuple[float, float, float],
+    parent_size: tuple[float, float, float],
+    deck_box: tuple[float, float, float, float, float, float],
+) -> tuple[float, float, float, float, float, float]:
+    """Check one resource against its immediate parent and against the deck, in
+    x, y AND z (R39 CRIT4), refuse any rotation, and recurse into its own
+    nested children (holders, adapters, plates in carriers) with THIS
+    resource as their new parent. Returns the resource's absolute
+    ``(x0, x1, y0, y1, z0, z1)`` box, for the caller's own overlap checks.
+    """
+    name = resource.get("name") if isinstance(resource.get("name"), str) else "a deck child"
+    _check_no_rotation(resource, name)
+    loc = resource.get("location")
+    if not isinstance(loc, dict) or not all(
+        isinstance(loc.get(a), (int, float)) and not isinstance(loc.get(a), bool) for a in ("x", "y", "z")
+    ):
+        raise ValueError(f"{name} needs a location with numeric x, y and z")
+    sx, sy, sz = _box(resource, name)
+    tol = _GEOMETRY_TOLERANCE_MM
+    # location is relative to the immediate parent's own frame (PLR convention).
+    lx, ly, lz = float(loc["x"]), float(loc["y"]), float(loc["z"])
+    parent_sx, parent_sy, parent_sz = parent_size
+    if (
+        lx < -tol or ly < -tol or lz < -tol
+        or lx + sx > parent_sx + tol or ly + sy > parent_sy + tol or lz + sz > parent_sz + tol
+    ):
+        raise ValueError(f"{name} does not fit inside {parent_label}")
+    ax, ay, az = parent_origin[0] + lx, parent_origin[1] + ly, parent_origin[2] + lz
+    dx0, dx1, dy0, dy1, dz0, dz1 = deck_box
+    if ax < dx0 - tol or ay < dy0 - tol or az < dz0 - tol or ax + sx > dx1 + tol or ay + sy > dy1 + tol or az + sz > dz1 + tol:
+        raise ValueError(f"{name} does not fit on the deck")
+    box = (ax, ax + sx, ay, ay + sy, az, az + sz)
+    for nested in resource.get("children") or []:
+        if nested is None:
+            continue
+        if not isinstance(nested, dict):
+            raise ValueError(f"every child of {name} must be a serialized resource")
+        _check_resource_geometry(
+            nested, parent_label=name, parent_origin=(ax, ay, az),
+            parent_size=(sx, sy, sz), deck_box=deck_box,
+        )
+    return box
+
+
+def _check_deck_geometry(deck: dict[str, Any]) -> None:
+    """Every resource in the tree lies inside its immediate parent AND inside
+    the deck, in x, y and z (R39 CRIT4); no resource carries a rotation; deck-
+    level siblings (the work surface) may not overlap each other. Nested
+    siblings aren't cross-checked for overlap -- that's PLR's own placement
+    concern once a resource is actually assigned, out of scope here.
+    """
+    deck_x, deck_y, deck_z = _box(deck, "the deck")
+    _check_no_rotation(deck, "the deck")
+    tol = _GEOMETRY_TOLERANCE_MM
+    deck_box = (0.0, deck_x, 0.0, deck_y, 0.0, deck_z)
+    placed: list[tuple[str, tuple[float, ...]]] = []
+    for child in deck.get("children") or []:
+        if child is None:
+            continue
+        if not isinstance(child, dict):
+            raise ValueError("every deck child must be a serialized resource")
+        name = child.get("name") if isinstance(child.get("name"), str) else "a deck child"
+        box = _check_resource_geometry(
+            child, parent_label="the deck", parent_origin=(0.0, 0.0, 0.0),
+            parent_size=(deck_x, deck_y, deck_z), deck_box=deck_box,
+        )
+        for other, obox in placed:
+            if all(box[2 * i] < obox[2 * i + 1] - tol and obox[2 * i] < box[2 * i + 1] - tol for i in range(3)):
+                raise ValueError(f"{name} overlaps {other} on the deck")
+        placed.append((name, box))
+
+
+def _load_deck(
+    config: dict[str, Any], expected_cls: type, root_types: frozenset, *, hardware: bool,
+) -> tuple[Any, int]:
+    """Load the declared deck (R39). Raises ValueError, never returns an empty deck.
+
+    ``deckLayout`` is a serialized PLR resource tree; ``deckLayoutPath`` names a
+    JSON file holding one. Both go through :func:`checked_layout` and then the
+    same ``Resource.deserialize(..., allow_marshal=False)``. PLR's loader resolves
+    each child by ``type`` and assigns it to its parent, so the loaded deck is the
+    populated deck. Returns the deck and the number of functions stripped.
+
+    R39 MED7: a stripped function silently changes what PLR actually builds
+    from the declared layout. On a hardware-capable backend that silent
+    change is refused outright -- the layout is never mutated and then
+    initialized. On a simulator the strip may stand (dry-run only), but it's
+    logged.
+    """
+    from pylabrobot.resources import Resource
+
+    layout = config.get("deckLayout")
+    path = config.get("deckLayoutPath")
+    if layout is not None and path is not None:
+        raise ValueError("backendConfig takes deckLayout or deckLayoutPath, not both")
+    if layout is None and path is None:
+        raise ValueError(
+            "backendConfig.deckLayout (a serialized PLR deck) or deckLayoutPath is required: "
+            "an empty deck cannot run a protocol",
+        )
+    if layout is not None and not isinstance(layout, dict):
+        raise ValueError("deckLayout must be a serialized PLR resource object")
+    data = layout if layout is not None else _read_layout_file(path)
+    cleaned, stripped = checked_layout(data, root_types)
+    if stripped:
+        if hardware:
+            raise ValueError(
+                f"deck layout carries {stripped} serialized function(s); refusing on a "
+                "hardware-capable backend rather than silently changing the declared layout",
+            )
+        log.warning(
+            "deck layout for a simulator backend had %d serialized function(s) stripped "
+            "(replaced with null) before loading", stripped,
+        )
+    try:
+        # allow_marshal stays False: a layout is data and can never carry code.
+        deck = Resource.deserialize(cleaned, allow_marshal=False)
+    except Exception as e:  # noqa: BLE001 — any loader failure is an invalid layout
+        raise ValueError(f"invalid deck layout: {type(e).__name__}: {e}") from e
+    if not isinstance(deck, expected_cls):
+        raise ValueError(
+            f"deck layout loaded as {type(deck).__name__}, expected {expected_cls.__name__}",
+        )
+    return deck, stripped
+
+
+def _configure_tracking(
+    config: dict[str, Any], hardware: bool, other_hardware_loaded: bool,
+) -> dict[str, bool]:
+    """Switch on PLR's tip and volume tracking (process-wide; one sidecar per device).
+
+    On hardware both are required. On the simulator either may be switched off
+    explicitly with ``backendConfig.tracking = {"tips": false}`` and the like --
+    but never while another hardware-capable handle is already loaded in this
+    process (R39 CRIT3): the switches are process-global, so a simulator
+    weakening them would also weaken them for that other handle's hardware.
+    """
+    from pylabrobot.resources import set_tip_tracking, set_volume_tracking
+
+    requested = config.get("tracking") or {}
+    if not isinstance(requested, dict) or set(requested) - {"tips", "volume"} or not all(
+        isinstance(v, bool) for v in requested.values()
+    ):
+        raise ValueError('backendConfig.tracking must look like {"tips": true, "volume": true}')
+    tracking = {"tips": requested.get("tips", True), "volume": requested.get("volume", True)}
+    if hardware and not all(tracking.values()):
+        raise ValueError("tip and volume tracking cannot be switched off on a hardware backend")
+    if not all(tracking.values()) and other_hardware_loaded:
+        raise ValueError(
+            "tip and volume tracking cannot be weakened while a hardware-capable "
+            "backend is already loaded in this process",
+        )
+    set_tip_tracking(tracking["tips"])
+    set_volume_tracking(tracking["volume"])
+    return tracking
+
+
+def reassert_tracking(handle: "BackendHandle") -> None:
+    """R39 CRIT3: immediately before every non-simulated run, re-establish PLR's
+    tip and volume tracking ON and read it back. PLR's tracking switches are
+    process-global, so a simulator loaded (or reloaded) after this handle could
+    have weakened them; re-asserting before every hardware-capable run closes
+    that window instead of trusting state set once at load time. If tracking
+    can't be verified ON, the run is refused rather than proceeding unverified.
+    No-op for simulators and the stub (``hardware_capable`` is False for both).
+    """
+    if not handle.hardware_capable:
+        return
+    from pylabrobot.resources import (
+        does_tip_tracking,
+        does_volume_tracking,
+        set_tip_tracking,
+        set_volume_tracking,
+    )
+
+    set_tip_tracking(True)
+    set_volume_tracking(True)
+    if not (does_tip_tracking() and does_volume_tracking()):
+        raise RuntimeError(
+            "PLR tip/volume tracking could not be verified ON immediately before "
+            "a hardware-capable run; refusing to proceed unverified",
+        )
+
+
+def _declare_liquids(deck: Any, config: dict[str, Any]) -> int:
+    """Apply ``backendConfig.initialLiquids``: {resource: {well: uL}}, what the operator loaded."""
+    declared = config.get("initialLiquids") or {}
+    if not isinstance(declared, dict):
+        raise ValueError("backendConfig.initialLiquids must map a resource to {well: uL}")
+    count = 0
+    for resource_name, wells in declared.items():
+        if not isinstance(wells, dict):
+            raise ValueError(f"initialLiquids[{resource_name!r}] must map a well to uL")
+        try:
+            resource = deck.get_resource(resource_name)
+        except Exception as e:  # noqa: BLE001 — a missing resource is an invalid declaration
+            raise ValueError(f"initialLiquids names {resource_name!r}, which is not on the deck") from e
+        for well_name, volume in wells.items():
+            if isinstance(volume, bool) or not isinstance(volume, (int, float)) or not math.isfinite(volume) or volume < 0:
+                raise ValueError(f"initialLiquids[{resource_name!r}][{well_name!r}] must be a finite volume >= 0")
+            try:
+                items = resource[well_name]
+            except Exception as e:  # noqa: BLE001
+                raise ValueError(f"initialLiquids names {well_name!r}, which is not in {resource_name!r}") from e
+            items = items if isinstance(items, list) else [items]
+            if len(items) != 1 or getattr(items[0], "tracker", None) is None:
+                raise ValueError(f"initialLiquids[{resource_name!r}][{well_name!r}] is not one well")
+            items[0].tracker.set_liquids([(None, float(volume))])
+            count += 1
+    return count
+
+
+def _create_chatterbox(config: dict[str, Any], other_hardware_loaded: bool) -> tuple[Any, dict[str, Any]]:
+    """PLR's ``LiquidHandlerChatterboxBackend`` over the declared deck.
+
+    ``ChatterboxBackend`` does not exist in pylabrobot 0.2.2, and
+    ``ChatterBoxBackend`` raises NotImplementedError there (deprecated), so the
+    only correct class is ``LiquidHandlerChatterboxBackend``.
     """
     from pylabrobot.liquid_handling import LiquidHandler
-    from pylabrobot.liquid_handling.backends import ChatterboxBackend
+    from pylabrobot.liquid_handling.backends import LiquidHandlerChatterboxBackend
     from pylabrobot.resources import Deck
 
-    deck = Deck()
-    return LiquidHandler(backend=ChatterboxBackend(), deck=deck)
+    num_channels = config.get("numChannels", 8)
+    if not isinstance(num_channels, int) or isinstance(num_channels, bool) or not 1 <= num_channels <= 96:
+        raise ValueError("backendConfig.numChannels must be an integer from 1 to 96")
+    _max_volume(config)
+    tracking = _configure_tracking(config, hardware=False, other_hardware_loaded=other_hardware_loaded)
+    deck, stripped = _load_deck(config, Deck, frozenset({"Deck", "OTDeck"}), hardware=False)
+    liquids = _declare_liquids(deck, config)
+    machine = LiquidHandler(backend=LiquidHandlerChatterboxBackend(num_channels=num_channels), deck=deck)
+    return machine, {"tracking": tracking, "strippedFunctions": stripped, "declaredWells": liquids}
 
 
-async def _create_ot2(config: dict[str, Any]) -> Any:
-    """Opentrons OT-2 via PLR's OpentronsBackend.
+def _parse_ot2_url(url: str) -> tuple[str, int]:
+    """``http://10.0.0.5:31950`` or ``10.0.0.5`` -> (host, port)."""
+    from urllib.parse import urlparse
 
-    Requires ``backend_config`` with at minimum ``ot2Url`` (typically
-    ``http://192.168.1.50:31950``). Optional ``ot2ApiKey``.
+    parsed = urlparse(url if "://" in url else f"http://{url}")
+    host = parsed.hostname
+    if not host:
+        raise ValueError(f"ot2Url has no host: {url!r}")
+    try:
+        port = parsed.port or 31950
+    except ValueError as e:
+        raise ValueError(f"ot2Url has an invalid port: {url!r}") from e
+    return host, port
+
+
+async def _create_ot2(config: dict[str, Any], other_hardware_loaded: bool) -> tuple[Any, dict[str, Any]]:
+    """Opentrons OT-2 via PLR's ``OpentronsOT2Backend(host, port)``.
+
+    Requires ``ot2Url`` (for example ``http://192.168.1.50:31950``), the
+    robot's ``robotSerial`` (checked and locked by ``BackendLoader`` before this
+    runs) and a declared ``OTDeck`` layout. ``OpentronsBackend`` does not exist in
+    pylabrobot 0.2.2, and the backend takes no API key.
     """
     from pylabrobot.liquid_handling import LiquidHandler
-    from pylabrobot.liquid_handling.backends import OpentronsBackend
+    from pylabrobot.liquid_handling.backends import OpentronsOT2Backend
     from pylabrobot.resources.opentrons import OTDeck
 
-    ot2_url = config.get("ot2Url") or config.get("host") or config.get("url")
-    if not ot2_url:
-        raise ValueError(
-            "OT-2 backendConfig must include 'ot2Url' (e.g. 'http://192.168.1.50:31950')",
-        )
-    api_key = config.get("ot2ApiKey") or config.get("apiKey")
-    backend_kwargs: dict[str, Any] = {"host": ot2_url}
-    if api_key:
-        backend_kwargs["api_key"] = api_key
+    host, port = _ot2_address(config)
+    if config.get("ot2ApiKey") or config.get("apiKey"):
+        log.warning("ot2ApiKey is not used: OpentronsOT2Backend takes no API key")
+    _max_volume(config)
+    tracking = _configure_tracking(config, hardware=True, other_hardware_loaded=other_hardware_loaded)
+    deck, stripped = _load_deck(config, OTDeck, frozenset({"OTDeck"}), hardware=True)
+    liquids = _declare_liquids(deck, config)
+    machine = LiquidHandler(backend=OpentronsOT2Backend(host=host, port=port), deck=deck)
+    return machine, {"tracking": tracking, "strippedFunctions": stripped, "declaredWells": liquids}
 
-    backend = OpentronsBackend(**backend_kwargs)
-    return LiquidHandler(backend=backend, deck=OTDeck())
+
+def is_stub_machine(machine: Any) -> bool:
+    """True for the no-PLR stub; everything else is a PLR LiquidHandler."""
+    return isinstance(machine, _StubMachine)
 
 
 def _create_stub(config: dict[str, Any]) -> "_StubMachine":
@@ -175,8 +1066,9 @@ def _create_stub(config: dict[str, Any]) -> "_StubMachine":
 class _StubMachine:
     """A fake PLR Machine — same surface, synthetic behavior.
 
-    Used by tests that don't want a pylabrobot dependency, and as the
-    default backend when ``import pylabrobot`` fails.
+    Used only when ``plrBackend`` is ``"stub"`` (tests that don't want a
+    pylabrobot dependency). Nothing falls back to it: a missing pylabrobot fails
+    ``backend.init``.
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
