@@ -2319,7 +2319,7 @@ describe("R12 r2b X-2 (lane review N1, LOW): a non-settlement record's receipt p
         const at = `${String(status)} (${mode})`;
         expect(document.querySelector(".pcc-win-title")!.textContent, at).toBe("Record");
         expect(pill().textContent, at).toBe(want);
-        expect(pill().className, at).toBe("pcc-pill st-unknown");
+        expect(pill().className.replace(/ pcc-src-\S+/g, ""), at).toBe("pcc-pill st-unknown");
       }
     }
   });
@@ -2720,7 +2720,7 @@ describe("R12 r2d g1 (lane review, MEDIUM): on money data 'pending' and 'expired
         const at = w + " " + mode;
         expect(r2dTexts(".pcc-win-title"), "record title " + at).toEqual(["Record"]);
         expect(r2dTexts(".pcc-receipt-rail .pcc-pill"), "record pill " + at).toEqual([repStatus(w)]);
-        expect((document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className, "record pill class " + at).toBe("pcc-pill st-unknown");
+        expect((document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className.replace(/ pcc-src-\S+/g, ""), "record pill class " + at).toBe("pcc-pill st-unknown");
       }
     }
   });
@@ -2843,7 +2843,7 @@ describe("R12 r2e NF-1: nested money in the run window", () => {
         ? "bound record reports: completed - settlement not confirmed (not confirmed on chain)" : repStatus(status)]);
       await paint(mode, record);
       expect.soft(r2dTexts(".pcc-win-head .pcc-pill"), "run == list " + status).toEqual(listText);
-      expect.soft(document.querySelector(".pcc-win-head .pcc-pill")?.className, status + " class").toBe("pcc-pill st-unknown");
+      expect.soft(document.querySelector(".pcc-win-head .pcc-pill")?.className.replace(/ pcc-src-\S+/g, ""), status + " class").toBe("pcc-pill st-unknown");
       expect.soft(r2dTexts(".pcc-run-latest"), status + " latest").toEqual([repStatus(status)]);
     }
   });
@@ -2852,7 +2852,7 @@ describe("R12 r2e NF-1: nested money in the run window", () => {
     await paint(mode, body("completed"), { statusFrom: "status", latestFrom: "payment.amount" });
     expect(r2dTexts(".pcc-run-latest")).toEqual([r2dRep("250")]);
     expect(r2dTexts(".pcc-win-head .pcc-pill")).toEqual(["running"]);
-    expect(document.querySelector(".pcc-win-head .pcc-pill")?.className).toBe("pcc-pill st-running");
+    expect(document.querySelector(".pcc-win-head .pcc-pill")?.className.replace(/ pcc-src-\S+/g, "")).toBe("pcc-pill st-running");
   });
 
   it.each(MODES)("NF-1 feed (%s): timeline and event labels use the nested money judgment, including the snapshot's last-event latest", async (mode) => {
@@ -2865,7 +2865,7 @@ describe("R12 r2e NF-1: nested money in the run window", () => {
     await paint(mode, { ...body("completed"), status: "completed", message: "Printing layer 3", type: "completed", timeline: [{ type: "completed" }] },
       { statusFrom: "status", latestFrom: "message" });
     expect(r2dTexts(".pcc-win-head .pcc-pill")).toEqual(["completed"]);
-    expect(document.querySelector(".pcc-win-head .pcc-pill")?.className).toBe("pcc-pill st-ack");
+    expect(document.querySelector(".pcc-win-head .pcc-pill")?.className.replace(/ pcc-src-\S+/g, "")).toBe("pcc-pill st-ack");
     expect(r2dTexts(".pcc-run-latest")).toEqual([mode === "snapshot" ? "completed" : "reported: Printing layer 3"]);
     expect(r2dTexts(".pcc-feed-line")).toEqual(["completed"]);
   });
