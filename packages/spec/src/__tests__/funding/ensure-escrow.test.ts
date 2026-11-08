@@ -161,4 +161,28 @@ describe("ensureEscrow", () => {
     expect(prepared.identity).toEqual(identity);
     expect(predictEscrow(fx.factory, IMPLEMENTATION, policySalt(prepared.identity)).toLowerCase()).toBe(prepared.escrow.toLowerCase());
   });
+
+  it.each(["success", "none"] as const)("T28 the code after the send is read at the receipt's block if mined, else at a fresh latest block (%s)", async plan => {
+    const { fx, chain, args } = await setup();
+    const pinned = chain.state.block.hash;
+    const key = createKey(fx.factory);
+    const simulate = chain.state.handlers.get(key)!;
+    // The latest block moves between the pre-send pin and the send, and again after the send.
+    chain.state.handlers.set(key, data => { const out = simulate(data); chain.advanceBlock(); return out; });
+    chain.state.receipts = [plan];
+    chain.state.afterSend = () => chain.advanceBlock();
+    const result = await ensureEscrow({ ...args, receiptTimeoutMs: 200 });
+    const mined = chain.state.sent[0]!.block.hash;
+    expect(new Set([pinned, mined, chain.state.block.hash]).size).toBe(3);
+    const want = plan === "success" ? mined : chain.state.block.hash;
+    expect(result).toMatchObject({ outcome: plan === "success" ? "ready" : "indeterminate", code: { blockHash: want } });
+    expect(chain.state.log.filter(x => x.method === "eth_getCode").at(-1)!.params[1]).toEqual({ blockHash: want, requireCanonical: true });
+  });
+
+  it("T29 with the clone there it answers ready, even while a payer transaction is pending", async () => {
+    const { chain, args } = await setup({}, true);
+    chain.state.mempool = 1;
+    expect(await ensureEscrow(args)).toMatchObject({ outcome: "ready" });
+    expect(chain.sends()).toEqual([]);
+  });
 });
