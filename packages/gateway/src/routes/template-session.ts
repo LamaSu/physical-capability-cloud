@@ -39,8 +39,20 @@
 // require Bearer auth by default.
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { auditService } from "../services/audit-service.js";
+
+/**
+ * The audit log's name for a session. Audit reads are not tenant-scoped, so every
+ * audit record names a session by this 128-bit digest of its id, and none holds
+ * the id itself, its name or a URL (verdicts 75 and 75b). Nor does any record hold
+ * the caller's actor, IP or user-agent (verdict 75c): a request chooses its own
+ * User-Agent, so it could carry the session id or a URL into a record any tenant
+ * reads. They return once the audit readers are tenant-scoped.
+ */
+function auditId(sessionId: string): string {
+  return createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
+}
 
 /**
  * Generic activity event written to a session's log. The chat console reads
@@ -93,8 +105,8 @@ export interface TemplateSession {
   };
   /** Event log for /live-data. Capped at 200 entries to bound memory. */
   events: TemplateSessionEvent[];
-  /** Tenant identity captured when the session was created (for cross-tenant
-   *  read prevention in Wave 4). T1.9 plumbing. */
+  /** Tenant identity captured when the session was created. Only this tenant
+   *  may use the session's `:id` routes (ownedSession, N58). */
   tenant_id: string | null;
   created_at: number;
   updated_at: number;
@@ -178,6 +190,26 @@ const sessionStore = new Map<string, TemplateSession>();
 /** Test-only — clear the in-memory session store between tests. */
 export function _resetSessionsForTests(): void {
   sessionStore.clear();
+}
+
+/**
+ * The session `id` names, if the caller may act on it; otherwise null (N58).
+ *
+ * A session belongs to the tenant that started it (`tenant_id`, stored by
+ * POST /start from `req.tenantId`). Every `:id` route answers 404 unless the
+ * caller's tenant is that tenant: the same answer as an unknown id, so a
+ * leaked id tells another tenant nothing, not even that it exists. Fails
+ * closed on a missing actor: a caller with no tenant never matches, not even
+ * a session that was stored with a null tenant. The mounts share one store, so
+ * a session also answers only on the mount (template) that started it
+ * (verdict 75).
+ */
+function ownedSession(id: string, tenantId: string | null | undefined, template: string): TemplateSession | null {
+  const session = sessionStore.get(id);
+  if (!session || session.template !== template) return null;
+  if (typeof tenantId !== "string" || tenantId.length === 0) return null;
+  // A non-empty tenant can equal neither a null nor an empty stored tenant.
+  return session.tenant_id === tenantId ? session : null;
 }
 
 /**
@@ -295,13 +327,10 @@ export async function templateSessionRoutes(
 
       auditService.log({
         eventType: `${template}.session_started`,
-        actor: req.operatorId ?? req.apiKeyId ?? undefined,
         resourceType: "template_session",
-        resourceId: sessionId,
+        resourceId: auditId(sessionId),
         action: "create",
-        metadata: { template, name, url },
-        ip: req.ip,
-        userAgent: req.headers["user-agent"],
+        metadata: { template },
       });
 
       return { session_id: sessionId, state: session.state };
@@ -315,7 +344,7 @@ export async function templateSessionRoutes(
   app.post<{ Params: { id: string }; Body: { url?: unknown } }>(
     `${prefix}/:id/scrape`,
     async (req, reply) => {
-      const session = sessionStore.get(req.params.id);
+      const session = ownedSession(req.params.id, req.tenantId, template);
       if (!session) return reply.status(404).send({ error: "session_not_found" });
       const body = req.body ?? {};
       const url = typeof body.url === "string" ? body.url.trim() : "";
@@ -360,13 +389,10 @@ export async function templateSessionRoutes(
 
       auditService.log({
         eventType: `${template}.scrape`,
-        actor: req.operatorId ?? req.apiKeyId ?? undefined,
         resourceType: "template_session",
-        resourceId: session.id,
+        resourceId: auditId(session.id),
         action: "scrape",
-        metadata: { template, url },
-        ip: req.ip,
-        userAgent: req.headers["user-agent"],
+        metadata: { template },
       });
 
       return { ok: true, scraped };
@@ -379,7 +405,7 @@ export async function templateSessionRoutes(
   app.post<{ Params: { id: string }; Body: { doc_urls?: unknown } }>(
     `${prefix}/:id/ingest-docs`,
     async (req, reply) => {
-      const session = sessionStore.get(req.params.id);
+      const session = ownedSession(req.params.id, req.tenantId, template);
       if (!session) return reply.status(404).send({ error: "session_not_found" });
       const body = req.body ?? {};
       const docUrls = Array.isArray(body.doc_urls)
@@ -418,13 +444,10 @@ export async function templateSessionRoutes(
 
       auditService.log({
         eventType: `${template}.ingest_docs`,
-        actor: req.operatorId ?? req.apiKeyId ?? undefined,
         resourceType: "template_session",
-        resourceId: session.id,
+        resourceId: auditId(session.id),
         action: "ingest_docs",
         metadata: { template, doc_count: docUrls.length },
-        ip: req.ip,
-        userAgent: req.headers["user-agent"],
       });
 
       return { ok: true, ingested: session.ingested_count };
@@ -437,7 +460,7 @@ export async function templateSessionRoutes(
   app.post<{ Params: { id: string } }>(
     `${prefix}/:id/build-agent`,
     async (req, reply) => {
-      const session = sessionStore.get(req.params.id);
+      const session = ownedSession(req.params.id, req.tenantId, template);
       if (!session) return reply.status(404).send({ error: "session_not_found" });
 
       session.state = "building";
@@ -466,13 +489,10 @@ export async function templateSessionRoutes(
 
         auditService.log({
           eventType: `${template}.build_complete`,
-          actor: req.operatorId ?? req.apiKeyId ?? undefined,
           resourceType: "template_session",
-          resourceId: session.id,
+          resourceId: auditId(session.id),
           action: "build",
-          metadata: { template, capability_count: result.capabilities.length, discovery_url: result.discovery_url },
-          ip: req.ip,
-          userAgent: req.headers["user-agent"],
+          metadata: { template, capability_count: result.capabilities.length },
         });
 
         return {
@@ -507,7 +527,7 @@ export async function templateSessionRoutes(
   app.get<{ Params: { id: string } }>(
     `${prefix}/:id/status`,
     async (req, reply) => {
-      const session = sessionStore.get(req.params.id);
+      const session = ownedSession(req.params.id, req.tenantId, template);
       if (!session) return reply.status(404).send({ error: "session_not_found" });
       const lastEvent = session.events[session.events.length - 1];
       return {
@@ -532,7 +552,7 @@ export async function templateSessionRoutes(
   app.get<{ Params: { id: string }; Querystring: { since?: string } }>(
     `${prefix}/:id/live-data`,
     async (req, reply) => {
-      const session = sessionStore.get(req.params.id);
+      const session = ownedSession(req.params.id, req.tenantId, template);
       if (!session) return reply.status(404).send({ error: "session_not_found" });
       const sinceRaw = req.query?.since;
       const since = sinceRaw ? Number.parseInt(sinceRaw, 10) : 0;
