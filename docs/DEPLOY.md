@@ -315,6 +315,11 @@ it along with `PCC_VNEXT_RECORD_NETWORK`, `PCC_VNEXT_ALLOW_TESTNET_RECORD` and
 `PCC_VNEXT_FUNDING_SWEEP_INTERVAL_SEC` is optional: a decimal integer from 60 to 180 seconds,
 default 60. The `escrows.version` value `vnext-buyer` marks a buyer-funded V-next row.
 
+For a `vnext-buyer` row, `POST /api/escrow/chain/:address/fund` answers HTTP 409
+`escrow_buyer_funded`, and the settlement crank answers `blocked` with that reason.
+The EAS release and attestation routes also answer HTTP 409 `escrow_buyer_funded` for these rows.
+An unrecognized escrow version answers HTTP 409 `escrow_version_unknown` on those EAS routes.
+
 ## What this does NOT yet include
 
 - **Canary / weighted rollout** — would require Cloudflare Workers or a Railway replica layer to split traffic. Skipped until capability.network has enough traffic to warrant it.
