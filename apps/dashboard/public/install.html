@@ -136,10 +136,9 @@
             <p style="margin-top:18px;color:#9aa3b2">It will:</p>
             <ol>
               <li>Check for python3 / pip / git</li>
-              <li>Ask you for the instrument URL + credentials</li>
               <li>Ask you for a PCC API key (it doesn't create one: <a href="/auth.md">how to get one</a>)</li>
-              <li>Install <code>pcc-node</code> from source (covers all current adapters)</li>
-              <li>Generate a KERNEL_CONFIG and start the kernel daemon</li>
+              <li>Install <code>pcc-node</code> from source, at a fixed commit</li>
+              <li>Start <code>pcc-node</code>, which finds the devices it can detect and registers your kernel</li>
             </ol>
             <p style="margin-top:18px;color:#9aa3b2">When done, the node has registered your kernel using your PCC API key. The node keeps your kernel online and does not take jobs: your devices run only through your operating agent's typed operations.</p>
           </div>
@@ -198,7 +197,7 @@
 // Smart device resolver: free-text + optional photo → /api/onboard/identify-device
 // (Claude vision). Known adapters auto-fill the curl command. Unknown devices
 // get a prompt-handoff card pointing the user's LLM at the SDK + agent-package.
-const KNOWN_ADAPTERS = new Set(['hamilton','opentrons','octoprint','sila','modbus','opcua','mock']);
+const KNOWN_ADAPTERS = new Set(['hamilton','opentrons','octoprint','sila','mock']);
 const deviceTextEl = document.getElementById('device-text');
 const photoFileEl  = document.getElementById('device-photo');
 const photoBtn     = document.getElementById('photo-btn');
