@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+echo "shimmed: no network in test" >&2
+exit 1
