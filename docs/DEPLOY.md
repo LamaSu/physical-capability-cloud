@@ -295,6 +295,26 @@ not a regular file or directory.
 The `escrow_funding` and `funding_prepares` tables start empty. **Nothing activates** via this
 path until both S1.1 (prepared TTL terms) and S1.2 (the production funding-store wiring) land.
 
+### Buyer-funding verifier sweep (S1.2)
+
+One run first retries activation for finalized funding records whose scopes are awaiting funding
+inside their window. It then verifies eligible served or expired prepares, oldest first, at a
+finalized chain block. Each pass handles at most 25 rows. Funding evidence, the escrow's funded
+status and its milestones commit together; activation runs after that commit and is retried if
+it fails while the window remains open.
+
+The sweep starts only outside tests, when the deployment record resolves through the record
+opt-ins and the RPC URL is valid. With the record variables unset (the production default), it
+starts nothing, reads nothing and writes nothing.
+
+`PCC_VNEXT_RPC_URL` has no default. Use HTTPS, or HTTP on `127.0.0.1`, `[::1]` or `localhost`.
+Credentials in the user part and any `#` are refused. This is the window's fourth setting: unset
+it along with `PCC_VNEXT_RECORD_NETWORK`, `PCC_VNEXT_ALLOW_TESTNET_RECORD` and
+`PCC_VNEXT_TESTNET_BUYERS` after the window.
+
+`PCC_VNEXT_FUNDING_SWEEP_INTERVAL_SEC` is optional: a decimal integer from 60 to 180 seconds,
+default 60. The `escrows.version` value `vnext-buyer` marks a buyer-funded V-next row.
+
 ## What this does NOT yet include
 
 - **Canary / weighted rollout** — would require Cloudflare Workers or a Railway replica layer to split traffic. Skipped until capability.network has enough traffic to warrant it.
