@@ -26,6 +26,7 @@ import { capabilityRoutes } from "./routes/capabilities.js";
 import { graphSearchRoutes } from "./routes/graph-search.js";
 import { buildRoutes } from "./routes/build.js";
 import { jobRoutes } from "./routes/jobs.js";
+import { jobFundingRoutes } from "./routes/job-funding.js";
 import { kernelRoutes } from "./routes/kernels.js";
 import { escrowRoutes } from "./routes/escrow.js";
 import { settlementReadRoutes } from "./routes/settlement-read.js";
@@ -675,6 +676,7 @@ export async function createGateway(port = 3200) {
   await app.register(graphSearchRoutes);
   await app.register(buildRoutes);
   await app.register(jobRoutes);
+  await app.register(jobFundingRoutes);
   await app.register(kernelRoutes);
   await app.register(escrowRoutes);
   // Settlement READ routes (#573) — receipt/lifecycle/provenance to gen-UI

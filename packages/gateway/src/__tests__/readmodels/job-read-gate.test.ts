@@ -65,6 +65,7 @@ const FAMILY: Array<[string, (id: string) => string]> = [
   ["GET /api/jobs/:jobId/drift-alerts", (id) => `/api/jobs/${id}/drift-alerts`],
   ["GET /api/settlement/:jobId", (id) => `/api/settlement/${id}`],
   ["GET /api/evidence/:jobId", (id) => `/api/evidence/${id}`],
+  ["GET /api/jobs/:jobId/funding", (id) => `/api/jobs/${id}/funding`],
 ];
 
 describe("F3: the job read family is object-authorized", () => {
@@ -98,6 +99,7 @@ describe("F3: the job read family is object-authorized", () => {
     const { complianceRoutes } = await import("../../routes/compliance.js");
     const { paidJobFlowRoutes } = await import("../../routes/paid-job-flow.js");
     const { settlementRoutes } = await import("../../routes/settlement.js");
+    const { jobFundingRoutes } = await import("../../routes/job-funding.js");
     app = Fastify({ logger: false });
     // Stand-in for the API gate: the key's operatorId, and (WP-A) the proven wallet.
     app.addHook("onRequest", async (req) => {
@@ -113,6 +115,7 @@ describe("F3: the job read family is object-authorized", () => {
     await app.register(complianceRoutes);
     await app.register(paidJobFlowRoutes);
     await app.register(settlementRoutes);
+    await app.register(jobFundingRoutes);
     await app.ready();
   });
 
