@@ -230,6 +230,14 @@ describe("N267 dispatch decision table", () => {
     expect(canDispatchJobLocally(K, K, true)).toBe(true);
   });
 
+  it("K9 row 14: NODE_ENV unset keeps today's answer with the test signer", () => {
+    vi.stubEnv("NODE_ENV", "");
+    delete process.env.NODE_ENV;
+    vi.stubEnv("PCC_JOB_SUBMIT_QUEUE_ONLY", "false");
+    expect(process.env.NODE_ENV).toBeUndefined();
+    expect(localJobDispatchDecision(K, K, true, undefined, true)).toEqual({ ok: true });
+  });
+
   it("K10: pins every production dispatch decision call", () => {
     const ts = createRequire(import.meta.url)("typescript") as typeof import("typescript");
     const root = resolve(__dirname, "..");
