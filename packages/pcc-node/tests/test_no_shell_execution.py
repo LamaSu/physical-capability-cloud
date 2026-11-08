@@ -27,9 +27,11 @@ refuses:
    ``shell``; and a starter bound to another name or passed as a value
    (verdict 68d, finding 2).
 2. ``os.system/popen/exec*/spawn*/posix_spawn*``, ``pty.spawn``,
-   ``subprocess.getoutput/getstatusoutput`` and
-   ``asyncio.create_subprocess_shell``, called by attribute, by an imported
-   alias (``from os import system``) or through ``getattr``.
+   ``subprocess.getoutput/getstatusoutput``,
+   ``asyncio.create_subprocess_shell`` and ``fcntl.ioctl/fcntl`` (#553: they
+   act on any descriptor, and TIOCSTI can type into a terminal; ``flock``,
+   ``lockf`` and the constants stay usable), called by attribute, by an
+   imported alias (``from os import system``) or through ``getattr``.
 3. ``eval``, ``exec``, ``compile``, ``__import__``, ``importlib.import_module``,
    ``runpy``, ``pickle``/``marshal`` loads and ``yaml.load``: forms that load
    code or objects from data.
@@ -106,7 +108,7 @@ REFUSED = {
     "sys": {"modules", "_getframe", "_current_frames"},
     "operator": {"attrgetter", "methodcaller"},
     "logging": {"config"},  # dictConfig/fileConfig build any callable named by a string
-    "fcntl": {"ioctl", "fcntl"},  # flock only: ioctl/fcntl reach any descriptor (TIOCSTI can type into a terminal)
+    "fcntl": {"ioctl", "fcntl"},  # flock and lockf only: ioctl/fcntl reach any descriptor (TIOCSTI can type into a terminal)
 }
 # Modules with no business in pcc-node: each can run code or start processes.
 REFUSED_IMPORTS = {"ctypes", "cffi", "multiprocessing", "webbrowser", "posix", "nt", "_posixsubprocess",
@@ -781,11 +783,15 @@ EVASIONS = {
     "a star import of a tracked module": "from os import *\nsystem('id')",
     "a star import of an untracked module": "from shutil import *\nos.system('id')",
     "a star import of the package's own module": "from .bridge import *\nrun(remote_argv, shell=True)",
+    # #553: fcntl joins the census; ioctl and fcntl.fcntl stay refused however they are reached
+    # (subprocess binds fcntl on Python 3.10+, so it is reachable through subprocess's attribute).
     "fcntl.ioctl": "import fcntl\nfcntl.ioctl(0, 0)",
     "from fcntl import ioctl": "from fcntl import ioctl",
     "aliased fcntl.fcntl": "import fcntl as f\nf.fcntl(0, 0)",
     "from fcntl import fcntl": "from fcntl import fcntl",
     "fcntl.ioctl as a value": "import fcntl\ng = fcntl.ioctl",
+    "fcntl through subprocess's attribute": "import subprocess\nf = subprocess.fcntl\nf.ioctl(0, 0)",
+    "fcntl from subprocess, passed on": "from subprocess import fcntl\nrun_with(fcntl)",
 }
 # Rule 8 at the package level: modules outside ALLOWED_IMPORTS, each refused by import_violations().
 IMPORT_EVASIONS = {
@@ -834,6 +840,7 @@ SAFE = {
     "a package-private helper": "from .crypto import _refuse_legacy\n_refuse_legacy(path)",
     # #563: a starter's own from import stays usable, judged at the call.
     "an imported starter with a fixed argv": "from subprocess import run\nrun(['arp', '-a'], capture_output=True)",
+    # #553: devicelock's host lock (flock and the LOCK_* constants), and lockf, stay usable.
     "fcntl.flock": "import fcntl\nfcntl.flock(3, fcntl.LOCK_EX | fcntl.LOCK_NB)",
     "fcntl.lockf": "import fcntl\nfcntl.lockf(3, fcntl.LOCK_UN)",
 }
