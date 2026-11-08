@@ -5,6 +5,8 @@ import { KIT_VERSION, recheckKitDescriptor } from "./descriptor.js";
 import { ALLOCATED_STATES, FINAL_STATE_BY_STATE, PHASE_BY_STATE, SETTLEMENT_RECHECK_MAPS, TERMINAL_STATES } from "./map.js";
 import type { RecheckDeployment, RecheckField, RecheckRoute } from "./types.js";
 import type { RecheckRpc } from "./rpc.js";
+export { httpRpc, RecheckRpcError } from "./rpc.js";
+export type { RecheckRpc } from "./rpc.js";
 
 export type RecheckVerdict = "MATCH" | "MISMATCH" | "UNVERIFIED" | "NOT_CHAIN_CHECKABLE" | "NOT_CLAIMED";
 export interface RecheckBlock { number: string; hash: string }
@@ -65,6 +67,8 @@ const at = (o: any, pointer: string): any => {
 const object = (v: unknown): v is Reply => v !== null && typeof v === "object" && !Array.isArray(v);
 const shape = (got: unknown, expected: unknown): boolean => expected === null ? got === null : object(got) && object(expected) && same(Object.keys(got).sort(), Object.keys(expected).sort());
 const reasonOf = (e: unknown) => pruned.test(String((e as Error)?.message ?? e)) ? "PIN_STATE_UNAVAILABLE" : "RPC read unavailable";
+const logReasons = new Set(["not scanned", "log scan budget exceeded", "log scan refused by the RPC", "log scan unavailable", "noncanonical or malformed logs", "logs outside scan range", "noncanonical logs", "no witness in the scanned log range"]);
+const logReasonOf = (e: unknown) => reasonOf(e) === "PIN_STATE_UNAVAILABLE" ? "PIN_STATE_UNAVAILABLE" : e instanceof Error && logReasons.has(e.message) ? e.message : "log scan unavailable";
 function infer(reply: Reply): RecheckRoute {
   if ("unitState" in reply) return "lifecycle";
   if ("economics" in reply || "network" in reply) return "receipt";
@@ -79,7 +83,7 @@ function normalize(input: unknown): { route: RecheckRoute; reply: Reply }[] {
       || !object(reply.deployment) || !Number.isSafeInteger(reply.deployment.chainId) || !address.test(reply.deployment.factory) || !address.test(reply.deployment.implementation)
       || typeof reply.deployment.recordSha256 !== "string" || !/^[0-9a-fA-F]{64}$/.test(reply.deployment.recordSha256)
       || typeof reply.asOfBlock !== "string" || !decimal.test(reply.asOfBlock) || !hash.test(reply.asOfBlockHash)
-      || typeof reply.finality !== "string" || !["complete", "partial", "unknown"].includes(reply.logCompleteness)) throw new Error("invalid reply shape");
+      || typeof reply.finality !== "string" || !["complete", "incomplete", "unknown"].includes(reply.logCompleteness)) throw new Error("invalid reply shape");
     const r = route ?? infer(reply);
     if (!["lifecycle", "receipt", "provenance"].includes(r)) throw new Error("invalid reply route");
     const required = r === "lifecycle" ? ["unitState", "phase", "finalState", "isTerminal", "isAllocated", "windowEndsAt"] : r === "receipt" ? ["phase", "finalState", "isAllocated", "network", "assetReality", "economics", "refundReason", "finalizedBlock"] : ["provenanceAvailability"];
@@ -291,7 +295,11 @@ export async function recheckSettlementReplies(options: RecheckOptions): Promise
         const logs = await logResult;
         const state = await settlementState(reads);
         const base = p.startsWith("/refundReason") ? "/refundReason" : "/finalizedBlock";
-        const value = base === "/refundReason" ? ([7, 9].includes(state) ? logs.refund : null) : (TERMINAL_STATES.includes(state) ? logs.finalized : null);
+        const required = base === "/refundReason" ? [7, 9].includes(state) : TERMINAL_STATES.includes(state);
+        const found = base === "/refundReason" ? logs.refund : logs.finalized;
+        // Every refund and settlement path emits a witness; absence means the scan is incomplete.
+        if (required && found === null) throw new Error("no witness in the scanned log range");
+        const value = required ? found : null;
         const envelope = value === null ? null : { value, source: "log", chain: `eip155:${d.chainId}`, contractOrRegistryId: reply.escrow, blockNumber: reply.asOfBlock, blockHash: reply.asOfBlockHash, finality: reply.finality, completeness: reply.logCompleteness };
         if (p === base) return result(envelope, shape(got, envelope));
         return result(envelope?.[p.slice(base.length + 1) as keyof typeof envelope] ?? null);
@@ -327,7 +335,7 @@ export async function recheckSettlementReplies(options: RecheckOptions): Promise
         v.verdict = e.nc ? "NOT_CHAIN_CHECKABLE" : (e.matches ?? same(got, e.value)) ? "MATCH" : "MISMATCH";
       } catch (e) {
         const logRow = ["refundReason", "finalizedBlock"].includes(parent);
-        v.reason = logRow && e instanceof Error && !pruned.test(e.message) ? e.message : reasonOf(e);
+        v.reason = logRow ? logReasonOf(e) : reasonOf(e);
         if (v.reason === "PIN_STATE_UNAVAILABLE" && options.laterBlockForTerminal && reply.finalState !== null && reply.finalState !== undefined && later && (frozen.has(p) || p.startsWith("/economics/"))) {
           try { const e = await expected(field, later); v.expected = e.value; v.block = later.block; v.verdict = (e.matches ?? same(got, e.value)) ? "MATCH" : "MISMATCH"; delete v.reason; } catch { /* Original pin remains unavailable. */ }
         }

@@ -1,11 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { decodeFunctionData, encodeFunctionResult, keccak256, parseAbi, zeroHash, zeroAddress } from "viem";
+import { spawn, type SpawnOptionsWithoutStdio } from "node:child_process";
+import { closeSync, cpSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { decodeFunctionData, encodeFunctionResult, encodeEventTopics, encodeAbiParameters, keccak256, parseAbi, zeroHash, zeroAddress } from "viem";
 import { KIT_ABI } from "../recheck/abi.js";
 import { KNOWN_DEPLOYMENTS } from "../recheck/deployments.js";
 import { KIT_VERSION, recheckKitDescriptor } from "../recheck/descriptor.js";
 import { httpRpc } from "../recheck/rpc.js";
 import { runCli } from "../recheck/cli.js";
 const H = `0x${"ab".repeat(32)}`, U = `0x${"cd".repeat(32)}`, E = `0x${"ab".repeat(20)}`;
+const SPEC = fileURLToPath(new URL("../..", import.meta.url));
+const STATEMENT = "Chain agreement does not establish brokerage or current state.";
+const scratch = () => mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "n266-recheck-"));
+const spawnChild = async (command: string, args: string[], options: SpawnOptionsWithoutStdio = {}) => {
+  // File descriptors also work in sandboxes that cannot capture child stdio through sockets.
+  const dir = scratch(), stdout = join(dir, "stdout"), stderr = join(dir, "stderr");
+  const out = openSync(stdout, "w"), err = openSync(stderr, "w");
+  try {
+    const status = await new Promise<number | null>((resolve, reject) => {
+      const child = spawn(command, args, { timeout: 10_000, ...options, stdio: ["ignore", out, err] });
+      child.on("error", reject); child.on("close", resolve);
+    });
+    return { status, stdout: readFileSync(stdout, "utf8"), stderr: readFileSync(stderr, "utf8") };
+  } finally { closeSync(out); closeSync(err); rmSync(dir, { recursive: true, force: true }); }
+};
 function harness() {
   const d = { ...KNOWN_DEPLOYMENTS[0]!, implementationCodehash: keccak256("0x1234"), recordBlockNumber: 50000000 };
   const reply: any = { chainId: d.chainId, escrow: E, unitId: U, deployment: { chainId: d.chainId, factory: d.factory, implementation: d.implementation, recordSha256: d.recordSha256 }, asOfBlock: "50000000", asOfBlockHash: H, finality: "finalized", logCompleteness: "complete", unitState: 1, phase: "active", finalState: null, isTerminal: false, isAllocated: false, windowEndsAt: null };
@@ -62,4 +82,109 @@ describe("recheck CLI and HTTP RPC", () => {
     f = harness(); f.receipt.escrow = `0x${"12".repeat(20)}`; expect(await f.run()).toBe(3); expect(f.requests).toEqual([]);
   });
   it("input errors issue no RPC requests", async () => { const f = harness(); for (const args of [[...f.args, "--log-window", "0"], [...f.args, "--max-log-requests", "x"], [...f.args, "--wat"]]) expect(await f.run(args)).toBe(3); expect(f.requests).toEqual([]); });
+  it.each(["direct", "symlink", "symlinked directory", "pnpm bin shim"])("R35 MR7 built CLI through %s runs main and exits 3", async kind => {
+    const dir = scratch();
+    try {
+      const cli = join(SPEC, "dist/recheck/cli.js");
+      let command = process.execPath, args = [cli];
+      if (kind === "symlink") { const link = join(dir, "cli.js"); symlinkSync(cli, link); args = [link]; }
+      if (kind === "symlinked directory") { symlinkSync(SPEC, join(dir, "spec"), "dir"); args = [join(dir, "spec/dist/recheck/cli.js")]; }
+      if (kind === "pnpm bin shim") {
+        const modules = join(dir, "node_modules"), bin = join(modules, ".bin");
+        mkdirSync(bin, { recursive: true }); mkdirSync(join(modules, "@pcc"));
+        symlinkSync(SPEC, join(modules, "@pcc/spec"), "dir");
+        command = join(bin, "pcc-settlement-recheck");
+        writeFileSync(command, '#!/bin/sh\nbasedir=$(dirname "$0")\nexec "$PCC_TEST_NODE" "$basedir/../@pcc/spec/dist/recheck/cli.js" "$@"\n', { mode: 0o755 });
+        args = [];
+      }
+      const child = await spawnChild(command, args, { env: { ...process.env, PCC_TEST_NODE: process.execPath } });
+      expect(child.status).toBe(3);
+      expect(child.stderr).toContain("Invalid usage or input. Usage: pcc-settlement-recheck");
+      expect(child.stdout).toBe("");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+  it("R36 the built data kit imports with viem unresolvable", async () => {
+    const dir = scratch();
+    try {
+      const installed = join(dir, "node_modules/@pcc/spec");
+      mkdirSync(join(installed, "dist"), { recursive: true });
+      cpSync(join(SPEC, "package.json"), join(installed, "package.json"));
+      cpSync(join(SPEC, "dist/recheck"), join(installed, "dist/recheck"), { recursive: true });
+      mkdirSync(join(dir, "node_modules/@noble"), { recursive: true });
+      symlinkSync(realpathSync(join(SPEC, "node_modules/@noble/hashes")), join(dir, "node_modules/@noble/hashes"), "dir");
+      symlinkSync(realpathSync(join(SPEC, "node_modules/zod")), join(dir, "node_modules/zod"), "dir");
+      writeFileSync(join(dir, "import.mjs"), `
+        import assert from "node:assert/strict";
+        await assert.rejects(import("viem"), { code: "ERR_MODULE_NOT_FOUND" });
+        const kit = await import("@pcc/spec/recheck");
+        assert.equal(typeof kit.recheckKitDescriptor, "function");
+        assert.equal(kit.recheckSettlementReplies, undefined);
+        console.log(JSON.stringify(kit.recheckKitDescriptor()));
+      `);
+      const child = await spawnChild(process.execPath, [join(dir, "import.mjs")]);
+      expect(child.stderr).toBe("");
+      expect(child.status).toBe(0);
+      expect(JSON.parse(child.stdout)).toEqual(recheckKitDescriptor());
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+  it("R37 the built replay subpath exports replay and HTTP RPC without running the CLI", async () => {
+    const child = await spawnChild(process.execPath, ["--input-type=module", "-e", `
+      import assert from "node:assert/strict";
+      const replay = await import("@pcc/spec/recheck/replay");
+      assert.equal(typeof replay.recheckSettlementReplies, "function");
+      assert.equal(typeof replay.httpRpc, "function");
+      await import("./dist/recheck/cli.js");
+    `], { cwd: SPEC });
+    expect(child.status).toBe(0);
+    expect(child.stderr).toBe("");
+    expect(child.stdout).toBe("");
+  });
+  it.each(["json", "text"])("R38 %s output names only the RPC origin and includes the fixed statement", async mode => {
+    const f = harness();
+    const args = f.args.filter(x => x !== "--json");
+    args[args.indexOf("--rpc") + 1] = "https://rpc.test:8443/v2/provider-path-secret?apiKey=provider-query-secret#provider-fragment-secret";
+    if (mode === "json") args.push("--json");
+    expect(await f.run(args)).toBe(0);
+    const { out, err } = f.output();
+    expect(err).toBe("");
+    expect(out).toContain("https://rpc.test:8443");
+    expect(out).toContain(STATEMENT);
+    for (const secret of ["provider-path-secret", "provider-query-secret", "provider-fragment-secret", "/v2/", "apiKey="]) expect(out).not.toContain(secret);
+    if (mode === "json") expect(JSON.parse(out)).toMatchObject({ rpc: { origin: "https://rpc.test:8443" }, statement: STATEMENT });
+    else expect(out).toContain("RPC https://rpc.test:8443\n");
+  });
+  it.each(["json", "text"])("R39 %s output suppresses remote log-header errors and control characters", async mode => {
+    const f = harness();
+    const fetcher = f.deps.fetch;
+    let scanned = false;
+    const abi = parseAbi(KIT_ABI.escrow);
+    const item = abi.find(x => x.type === "event" && x.name === "Finalized") as any;
+    const values: any = { unitId: U, released: false, reason: 4 };
+    const inputs = item.inputs.filter((x: any) => !x.indexed);
+    f.deps.fetch = async (url, init = {}) => {
+      const body = JSON.parse(init.body as string);
+      if (body.method === "eth_getLogs") {
+        scanned = true;
+        return new Response(JSON.stringify({ id: body.id, result: [{ address: E, topics: encodeEventTopics({ abi, eventName: "Finalized", args: values }), data: encodeAbiParameters(inputs, inputs.map((x: any) => values[x.name])), blockNumber: "0x2faf080", blockHash: H, logIndex: "0x0", removed: false }] }));
+      }
+      if (scanned && body.method === "eth_getBlockByNumber" && body.params[0] !== "finalized") return new Response(JSON.stringify({ id: body.id, error: { code: -32000, message: "NODE-TEXT \u001b[2J\u001b[1;1HALL_MATCH\u0085" } }));
+      return fetcher(url, init);
+    };
+    const args = f.args.filter(x => x !== "--json");
+    if (mode === "json") args.push("--json");
+    expect(await f.run(args)).toBe(2);
+    const { out } = f.output();
+    expect(out).not.toContain("NODE-TEXT");
+    expect(out).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
+    if (mode === "json") expect(JSON.parse(out).verdicts.find((v: any) => v.pointer === "/refundReason").reason).toBe("log scan unavailable");
+    else expect(out).toContain("receipt /refundReason: UNVERIFIED (log scan unavailable)");
+  });
+  it("R40 JSON strips C0/C1 controls from echoed reply fields", async () => {
+    const f = harness();
+    f.receipt.assetReality = { value: "test\u0000\t\n\r\u001b\u007f\u0085\u009b", source: "registry", attests: "identity-not-liveness" };
+    expect(await f.run()).toBe(0);
+    const report = JSON.parse(f.output().out);
+    expect(report.verdicts.find((v: any) => v.pointer === "/assetReality/value").got).toBe("test");
+    expect(report.verdicts.find((v: any) => v.pointer === "/assetReality").got.value).toBe("test");
+  });
 });

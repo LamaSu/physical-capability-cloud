@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { recheckKitDescriptor } from "./descriptor.js";
 import { KNOWN_DEPLOYMENTS } from "./deployments.js";
 import { httpRpc } from "./rpc.js";
@@ -96,14 +96,24 @@ export async function runCli(args: readonly string[], io: RecheckCliIO = {}): Pr
     } catch { err("Could not fetch gateway replies.\n"); return 3; }
   }
   const report = await recheckSettlementReplies({ replies, rpc: httpRpc(rpcUrl.href, { fetch: fetcher }), knownDeployments, logs: flags.has("--no-logs") ? false : { fromBlock, window, maxRequests }, laterBlockForTerminal: flags.has("--later-block-for-terminal"), allowMixedPins: flags.has("--allow-mixed-pins") });
+  const output = { ...report, rpc: { origin: rpcUrl.origin }, statement: "Chain agreement does not establish brokerage or current state." };
+  // Strip controls from field values before serialization, preserving only our own output newlines.
+  const printable: typeof output = JSON.parse(JSON.stringify(output, (_key, value) => typeof value === "string" ? value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "") : value));
   // Never echo node/gateway error strings: they may contain authorization data supplied by a remote server.
-  if (flags.has("--json")) out(`${JSON.stringify(report)}\n`);
+  if (flags.has("--json")) out(`${JSON.stringify(printable)}\n`);
   else {
-    out(`${report.outcome} (${report.deploymentStatus}); pin ${report.pin.status}; kit ${report.kitVersion} ${report.kitSha256}\n`);
-    for (const v of report.verdicts) out(`${v.route} ${v.pointer}: ${v.verdict}${v.reason ? ` (${v.reason})` : ""}\n`);
+    out(`${printable.outcome} (${printable.deploymentStatus}); pin ${printable.pin.status}; kit ${printable.kitVersion} ${printable.kitSha256}\n`);
+    out(`RPC ${printable.rpc.origin}\n${printable.statement}\n`);
+    for (const v of printable.verdicts) out(`${v.route} ${v.pointer}: ${v.verdict}${v.reason ? ` (${v.reason})` : ""}\n`);
   }
   return report.exitCode;
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+function isDirectRun(): boolean {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  try { return realpathSync(argv1) === realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; }
+}
+if (isDirectRun()) {
   runCli(process.argv.slice(2)).then(code => { process.exitCode = code; }).catch(() => { process.stderr.write("Replay failed.\n"); process.exitCode = 2; });
 }

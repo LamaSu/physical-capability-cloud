@@ -104,4 +104,102 @@ describe("settlement replay stub cells", () => {
   it("R24 multi-leg economics cannot be claimed", async () => { const f = fixture(); f.set({ payoutCount: 2n }); expect(row(await f.run(), "/economics")).toMatchObject({ verdict: "MISMATCH", knownDrift: "E2" }); f.receipt.economics = null; const r = await f.run(); expect(row(r, "/economics").verdict).toBe("NOT_CLAIMED"); expect(row(r, "/economics/amount").verdict).toBe("NOT_CLAIMED"); });
   it("R25 provenance checks anchoring and root, never leaves", async () => { const f = fixture(); f.set({ schema: 0 }); expect(row(await f.run(), "/provenanceAvailability").verdict).toBe("MISMATCH"); f.set({ schema: 1 }); f.provenance.provenanceAvailability = "WITHHELD"; expect(row(await f.run(), "/provenanceAvailability").verdict).toBe("NOT_CHAIN_CHECKABLE"); f.provenance.provenanceAvailability = "AVAILABLE"; f.provenance.compositionRoot = hash(555); const r = await f.run(); expect(row(r, "/compositionRoot").verdict).toBe("MISMATCH"); expect(row(r, "/leaves").verdict).toBe("NOT_CHAIN_CHECKABLE"); });
   it("R26 amount is the recipient's net, never gross", async () => { const f = fixture(); expect(row(await f.run(), "/economics/amount").verdict).toBe("MATCH"); f.receipt.economics.amount = "1020000"; expect(row(await f.run(), "/economics/amount")).toMatchObject({ verdict: "MISMATCH", expected: "1000000", label: "the recipient's amount (net of the fee)" }); });
+  it.each([95, 101])("R27 missing required witnesses from block %i stay unverified", async fromBlock => {
+    const f = fixture();
+    const r = await f.run({ logs: { fromBlock } });
+    for (const pointer of ["/refundReason", "/refundReason/value", "/finalizedBlock", "/finalizedBlock/value"]) {
+      expect(row(r, pointer)).toMatchObject({ verdict: "UNVERIFIED", reason: "no witness in the scanned log range" });
+    }
+    expect(r.verdicts.filter(v => v.verdict === "MISMATCH")).toEqual([]);
+    expect(r.outcome).toBe("UNVERIFIED");
+    expect(r.exitCode).toBe(2);
+  });
+  it.each(["complete", "incomplete", "unknown"])("R28 accepts gateway log completeness %s and UNKNOWN claims", async completeness => {
+    const f = fixture();
+    f.replies.forEach(reply => { reply.logCompleteness = completeness; });
+    f.receipt.refundReason = f.receipt.finalizedBlock = "UNKNOWN";
+    const r = await f.run();
+    expect(r.status).toBe("CHECKED");
+    for (const pointer of ["/refundReason", "/refundReason/value", "/finalizedBlock", "/finalizedBlock/value"]) expect(row(r, pointer).verdict).toBe("NOT_CLAIMED");
+    expect(row(r, "/economics/amount").verdict).toBe("MATCH");
+    expect(r.exitCode).toBe(0);
+    expect(f.requests.length).toBeGreaterThan(0);
+  });
+  it("R28 rejects the non-gateway partial completeness before RPC", async () => {
+    const f = fixture();
+    f.replies.forEach(reply => { reply.logCompleteness = "partial"; });
+    expect(await f.run()).toMatchObject({ status: "INVALID_INPUT", exitCode: 3, verdicts: [] });
+    expect(f.requests).toEqual([]);
+  });
+  it.each(["header", "state"])("R29 log-row %s errors use fixed reasons", async failure => {
+    const f = fixture();
+    const request = f.rpc.request;
+    f.rpc.request = async (method, params = []) => {
+      if ((failure === "header" && method === "eth_getBlockByNumber" && params[0] === "0x5a")
+        || (failure === "state" && method === "eth_call" && params[0].to.toLowerCase() === ESCROW.toLowerCase() && decodeFunctionData({ abi, data: params[0].data }).functionName === "settlement")) {
+        throw new Error("NODE-TEXT \u001b[2J\u001b[1;1HALL_MATCH\u0085");
+      }
+      return request(method, params);
+    };
+    const r = await f.run();
+    expect(row(r, "/refundReason")).toMatchObject({ verdict: "UNVERIFIED", reason: "log scan unavailable" });
+    expect(row(r, "/finalizedBlock")).toMatchObject({ verdict: "UNVERIFIED", reason: "log scan unavailable" });
+    expect(JSON.stringify(r)).not.toContain("NODE-TEXT");
+    expect(r.exitCode).toBe(2);
+  });
+  it("R30 MR8 rejects a log hash that differs from the canonical header", async () => {
+    const f = fixture();
+    const finalized = f.event("Finalized", { unitId: UNIT, released: false, reason: 4 }, 90);
+    finalized.blockHash = hash(999);
+    f.set({ logs: [finalized, f.event("RefundAllocated", { unitId: UNIT, claimCount: 0n }, 90, 1)] });
+    const r = await f.run();
+    expect(row(r, "/refundReason")).toMatchObject({ verdict: "UNVERIFIED", reason: "noncanonical logs" });
+    expect(r.verdicts.some(v => v.verdict === "MISMATCH")).toBe(false);
+    expect(r.exitCode).toBe(2);
+  });
+  it("R31 MR9 rejects a removed Finalized log", async () => {
+    const f = fixture();
+    const finalized = f.event("Finalized", { unitId: UNIT, released: false, reason: 4 }, 90);
+    finalized.removed = true;
+    f.set({ logs: [finalized, f.event("RefundAllocated", { unitId: UNIT, claimCount: 0n }, 90, 1)] });
+    const r = await f.run();
+    expect(row(r, "/refundReason")).toMatchObject({ verdict: "UNVERIFIED", reason: "noncanonical or malformed logs" });
+    expect(r.verdicts.some(v => v.verdict === "MISMATCH")).toBe(false);
+    expect(r.exitCode).toBe(2);
+  });
+  it("R32 MR12 refuses a log cap below the 50-block floor", async () => {
+    const f = fixture();
+    f.set({ maxWindow: 49 });
+    const r = await f.run({ logs: { fromBlock: 0, window: 200, maxRequests: 10 } });
+    for (const pointer of ["/refundReason", "/finalizedBlock"]) expect(row(r, pointer)).toMatchObject({ verdict: "UNVERIFIED", reason: "log scan refused by the RPC" });
+    const ranges = f.requests.filter(x => x.method === "eth_getLogs");
+    expect(ranges).toHaveLength(3);
+    expect(ranges.map(x => BigInt(x.params[0].toBlock) - BigInt(x.params[0].fromBlock) + 1n)).toEqual([101n, 100n, 50n]);
+    expect(r.verdicts.some(v => v.verdict === "MISMATCH")).toBe(false);
+    expect(r.exitCode).toBe(2);
+  });
+  it("R33 MR15 checks the known factory when the reply and escrow agree", async () => {
+    const f = fixture();
+    const alien = address(77);
+    f.replies.forEach(reply => { reply.deployment.factory = alien; });
+    f.set({ factory: alien });
+    const r = await f.run();
+    expect(row(r, "/escrow").verdict).toBe("MATCH");
+    expect(row(r, "/deployment/factory")).toMatchObject({ verdict: "MISMATCH", expected: getAddress(alien), got: alien });
+    expect(r.exitCode).toBe(1);
+  });
+  it("R34 MR16 checks the known implementation when the reply and factory agree", async () => {
+    const f = fixture();
+    const alien = address(77);
+    f.replies.forEach(reply => { reply.deployment.implementation = alien; });
+    const request = f.rpc.request;
+    f.rpc.request = async (method, params = []) => {
+      if (method === "eth_call" && params[0].to.toLowerCase() === f.deployment.factory) return encodeFunctionResult({ abi: factoryAbi, functionName: "implementation", result: alien });
+      return request(method, params);
+    };
+    const r = await f.run();
+    expect(row(r, "/escrow").verdict).toBe("MATCH");
+    expect(row(r, "/deployment/implementation")).toMatchObject({ verdict: "MISMATCH", expected: getAddress(alien), got: alien });
+    expect(r.exitCode).toBe(1);
+  });
 });

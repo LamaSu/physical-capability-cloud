@@ -16,7 +16,8 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPublicClient, createTestClient, createWalletClient, decodeEventLog, decodeFunctionResult, encodeFunctionData, http, keccak256, parseAbi, stringToHex, toEventSelector, zeroHash, type Abi, type Address, type Chain, type Hex, type PrivateKeyAccount, type TransactionReceipt } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { KIT_ABI, httpRpc, recheckSettlementReplies, type RecheckDeployment, type RecheckReport } from "@pcc/spec/recheck";
+import { KIT_ABI, type RecheckDeployment } from "@pcc/spec/recheck";
+import { httpRpc, recheckSettlementReplies, type RecheckReport } from "@pcc/spec/recheck/replay";
 import { VNextSettlementEscrowABI, VNextSettlementEscrowFactoryABI, buildUnitConfig, compileVNextPolicy, jobIdHashOf, type CompiledVNextPolicy } from "../vnext/index.js";
 
 const RUN = process.env.VNEXT_ANVIL_E2E === "1";
