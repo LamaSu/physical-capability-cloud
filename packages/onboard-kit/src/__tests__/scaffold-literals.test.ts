@@ -36,9 +36,9 @@ const WINDOWS_DEVICE_NAMES = [
   "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];
 const API_KEY_STEMS = [
-  "AIRBYTE", "AISA", "ANTHROPIC", "CARTESIA", "CDP", "COHERE", "DEEPGRAM", "DEEPSEEK", "EASYPOST", "ETHERSCAN", "GEMINI", "GOOGLE",
-  "GROQ", "LIT", "LOB", "MISTRAL", "OPENAI", "OPENROUTER", "PCC", "PCC_DECOMPOSE", "PCC_REVOKE", "PCC_SMITHERY", "POSTHOG",
-  "POSTHOG_PERSONAL", "XAI", "YELLOWCARD",
+  "AIRBYTE", "AISA", "ANTHROPIC", "CARTESIA", "CDP", "COHERE", "COINBASE", "DEEPGRAM", "DEEPSEEK", "EASYPOST", "ETHERSCAN", "GEMINI",
+  "GOOGLE", "GROQ", "INSFORGE", "LIT", "LOB", "MISTRAL", "OPENAI", "OPENROUTER", "PCC", "PCC_DECOMPOSE", "PCC_REVOKE", "PCC_SMITHERY",
+  "POSTHOG", "POSTHOG_PERSONAL", "RESEND", "XAI", "YELLOWCARD",
 ];
 const kebab = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/([A-Z])([A-Z][a-z])/g, "$1-$2").toLowerCase();
 const camel = (s: string) => s.replace(/[-_](.)/g, (_, c) => c.toUpperCase());
@@ -607,7 +607,7 @@ describe("N303 scaffold literals and identifier rules", () => {
     });
   }
   it("SL5d walletPrivateKeyEnvVar is an environment variable name", () => {
-    for (const value of ["NODE_OPTIONS=--require ./x.js #", "prefixEXTRA=1", "", "9KEY", "KEY-NAME", "KEY NAME", "KEY.NAME", "KÉY", 7, true, {}, ["KERNEL_PRIVATE_KEY"]]) {
+    for (const value of ["NODE_OPTIONS=--require ./x.js #", "prefixEXTRA=1", "", "9KEY", "KEY-NAME", "KEY NAME", "KEY.NAME", "KÉY", 7, true, {}, { toString: 1 }, ["KERNEL_PRIVATE_KEY"]]) {
       const config = example(); config.kernel.walletPrivateKeyEnvVar = value as never;
       refusal(config, "kernel.walletPrivateKeyEnvVar", r9);
     }

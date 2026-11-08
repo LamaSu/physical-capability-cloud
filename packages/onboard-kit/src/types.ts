@@ -108,7 +108,7 @@ export interface KernelConfig {
   name: string;
   /** Physical location */
   location: { lat: number; lng: number };
-  /** Operator wallet private key env var name; if present and non-null, must be a string matching ^[A-Za-z_][A-Za-z0-9_]*$ (R9). */
+  /** Operator wallet private key env var name: a letter or "_", then letters, digits or "_"; absent or null is not checked. */
   walletPrivateKeyEnvVar: string;
   /** Gateway URL to connect to */
   gatewayUrl: string;

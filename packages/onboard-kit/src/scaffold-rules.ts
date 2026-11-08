@@ -42,9 +42,9 @@ const WINDOWS_DEVICE_NAMES = new Set([
 ]);
 // Stems of API key variables other software already reads; this interim list cannot be complete.
 const API_KEY_STEMS = new Set([
-  "AIRBYTE", "AISA", "ANTHROPIC", "CARTESIA", "CDP", "COHERE", "DEEPGRAM", "DEEPSEEK", "EASYPOST", "ETHERSCAN", "GEMINI", "GOOGLE",
-  "GROQ", "LIT", "LOB", "MISTRAL", "OPENAI", "OPENROUTER", "PCC", "PCC_DECOMPOSE", "PCC_REVOKE", "PCC_SMITHERY", "POSTHOG",
-  "POSTHOG_PERSONAL", "XAI", "YELLOWCARD",
+  "AIRBYTE", "AISA", "ANTHROPIC", "CARTESIA", "CDP", "COHERE", "COINBASE", "DEEPGRAM", "DEEPSEEK", "EASYPOST", "ETHERSCAN", "GEMINI",
+  "GOOGLE", "GROQ", "INSFORGE", "LIT", "LOB", "MISTRAL", "OPENAI", "OPENROUTER", "PCC", "PCC_DECOMPOSE", "PCC_REVOKE", "PCC_SMITHERY",
+  "POSTHOG", "POSTHOG_PERSONAL", "RESEND", "XAI", "YELLOWCARD",
 ]);
 const CLASS_NAME = /^[A-Z][A-Za-z0-9]{0,63}$/;
 const ADAPTER_ID = /^[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*$/;
