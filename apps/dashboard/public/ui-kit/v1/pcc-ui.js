@@ -1723,7 +1723,7 @@
       var foot = el('div', 'pcc-win-foot pcc-foot-meta');
       if (why !== undefined) foot.appendChild(readNoteNode(read, why));
       if (stale) foot.appendChild(el('span', 'pcc-foot-stale', kitText('snapshot')));
-      if (trace.t) foot.appendChild(why !== undefined ? stampSource(el('span', 'pcc-mono pcc-foot-trace', trace), sourceOf(read)) : el('span', 'pcc-mono pcc-foot-trace', trace));
+      if (trace.t) foot.appendChild(el('span', 'pcc-mono pcc-foot-trace', trace));
       wrap.appendChild(foot);
     };
     return wrap;
@@ -1995,7 +1995,7 @@
       input.id = fieldId;
       if (spec['default'] != null && kind !== 'boolean') setValue(input, fieldDefaultText(spec.type, spec['default']));
       if (spec['default'] === true && kind === 'boolean') input.checked = true;
-        stampSource(input, spec['default'] != null ? 'proposed' : 'ephemeral');
+      stampSource(input, spec['default'] != null ? 'proposed' : 'ephemeral');
       row.appendChild(input);
       var errLine = el('div', 'pcc-field-err'); errLine.hidden = true;
       row.appendChild(errLine);
@@ -2088,8 +2088,7 @@
     var held = { latest: null, feed: null };
     function paintLatest(verified) {
       var h = held.latest;
-      if (h) setText(latest, h.isStatus ? statusPillText(h.raw, verified, h.money) : reportedText(h.raw, false, h.money));
-      stampSource(latest, sourceOf(runRead));
+      if (h) { setText(latest, h.isStatus ? statusPillText(h.raw, verified, h.money) : reportedText(h.raw, false, h.money)); stampSource(latest, sourceOf(runRead)); }
     }
     function paintFeed(verified) {
       var f = held.feed;
@@ -2161,8 +2160,7 @@
         for (var ti = 0; ti < tl.length; ti++) feedLine(joinText(dataAt(tl, ti).timestamp ? joinText(fmtTs(dataAt(tl, ti).timestamp), kitText(' \u00b7 ')) : kitText(''), statusPillText(dataAt(tl, ti).type || '', false, snapMoney)));
         var lastType = dataAt(tl, tl.length - 1).type; // last event = latest truth
         var snapLatestMoney = isMoneyData(w.binding.path, snap) || selectsMoney(w.binding.path, snap, w.latestFrom);
-        if (lastType != null && lastType !== '') setText(latest, statusPillText(lastType, false, snapMoney || snapLatestMoney));
-      stampSource(latest, sourceOf(runRead));
+        if (lastType != null && lastType !== '') { setText(latest, statusPillText(lastType, false, snapMoney || snapLatestMoney)); stampSource(latest, sourceOf(runRead)); }
       }
       wrap._setFoot(null, true, runRead, runWhy);
       clearInterval(tick); setText(elapsed, kitText(''));

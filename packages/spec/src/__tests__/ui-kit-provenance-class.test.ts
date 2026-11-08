@@ -125,9 +125,13 @@ describe("the kit stamps a provenance class on what it paints", () => {
     expect(calls).toHaveLength(4);
     expect(calls.every((c) => c.method === "GET" && new URL(c.url).origin === PCC)).toBe(true);
     stamped(".pcc-wrap, .pcc-section, .pcc-win, .pcc-note-p", "proposed");
-    stamped(".pcc-metric-amount, .pcc-cap-title, .pcc-cap-meta, .pcc-cap-desc, .pcc-cap-assurance, .pcc-list, .pcc-list-row, .pcc-run-latest, .pcc-feed-line", "authoritative");
+    stamped(".pcc-metric-amount, .pcc-cap-title, .pcc-cap-meta, .pcc-cap-desc, .pcc-cap-assurance, .pcc-list, .pcc-list-row, .pcc-run-latest, .pcc-feed-line, .pcc-win-head .pcc-pill", "authoritative");
     notes("PCC read", 4);
     expect(document.querySelector('[data-source="unconfirmed"]')).toBeNull();
+    installFetch(() => ({ status: 200, body: { status: "pending", amount: "250", currency: "USDC", payee: PAYEE } }));
+    boot(man([{ kind: "receipt", binding: { path: "/api/jobs/j1" } }]));
+    await flush();
+    stamped(".pcc-receipt-rail .pcc-pill:not(.pcc-asset-badge)", "authoritative");
   });
 
   it("a saved copy is never authoritative", async () => {
@@ -143,6 +147,11 @@ describe("the kit stamps a provenance class on what it paints", () => {
       notes("couldn't confirm the source: a saved copy, not a live read");
       stamped(".pcc-foot-source", "unconfirmed");
     }
+    boot(man([{ kind: "receipt", binding: { path: "/api/jobs/j1" } }]), {
+      "/api/jobs/j1": { status: "pending", amount: "250", currency: "USDC", payee: PAYEE },
+    });
+    await flush();
+    stamped(".pcc-receipt-rail .pcc-pill:not(.pcc-asset-badge)", "unconfirmed");
     expect(calls).toHaveLength(0);
   });
 
@@ -170,17 +179,20 @@ describe("the kit stamps a provenance class on what it paints", () => {
   it("an unregistered route, a near miss or an extra query key is not a registered read", async () => {
     installFetch((c) => ({ status: 200, body: new URL(c.url).pathname === "/api/escrow/e1"
       ? { escrowId: "e1", amount: 50, totalAmount: 50, status: "settled" }
-      : new URL(c.url).pathname === "/api/capabilities/search" ? snapshot["/api/capabilities/cap-1"] : snapshot["/api/jobs"] }));
+      : new URL(c.url).pathname === "/api/capabilities/search" ? snapshot["/api/capabilities/cap-1"]
+      : new URL(c.url).pathname === receiptPath ? pinnedReceipt() : snapshot["/api/jobs"] }));
     boot(man([
       { kind: "metric", select: "amount", binding: { path: "/api/escrow/e1" } },
       { kind: "list", binding: { path: "/api/jobsx" }, item: { title: "id" } },
       { kind: "capability", binding: { path: "/api/capabilities/search" } },
       { kind: "list", binding: { path: "/api/jobs", query: { sort: "x" } }, item: { title: "id" } },
       { kind: "receipt", binding: { path: "/api/escrow/e1" } },
+      { kind: "receipt", binding: { path: receiptPath, query: { asOf: "1" } } },
     ]));
     await flush();
-    stamped(".pcc-metric-amount, .pcc-list, .pcc-list-row, .pcc-cap-title, .pcc-receipt-num", "unconfirmed");
-    notes("couldn't confirm the source: not a registered read", 5);
+    stamped(".pcc-metric-amount, .pcc-list, .pcc-list-row, .pcc-cap-title, .pcc-receipt-num:not(.pcc-muted)", "unconfirmed");
+    notes("couldn't confirm the source: not a registered read", 6);
+    expect(document.querySelector('[data-source="authoritative"]')).toBeNull();
     expect(document.querySelector(".pcc-receipt-rail")!.textContent).toContain("PCC escrow service reports: ");
   });
 
@@ -190,7 +202,8 @@ describe("the kit stamps a provenance class on what it paints", () => {
       boot(man([{ kind: "receipt", binding: { path: receiptPath } }]));
       await flush();
       if (finality) {
-        stamped(".pcc-receipt-num, .pcc-pin-ref, .pcc-pin-details", "authoritative");
+        stamped(".pcc-receipt-num, .pcc-pin-ref, .pcc-pin-details, .pcc-receipt-rail .pcc-pill:not(.pcc-asset-badge)", "authoritative");
+        expect(document.querySelector(".pcc-asset-badge")!.hasAttribute("data-source")).toBe(false);
       } else {
         const refusal = document.querySelector(".pcc-receipt-num")!;
         expect(refusal.textContent).toBe("amount pending - not confirmed at a finalized block");
@@ -226,6 +239,12 @@ describe("the kit stamps a provenance class on what it paints", () => {
     expect(inputs[0].getAttribute("data-source")).toBe("proposed");
     expect(inputs[1].getAttribute("data-source")).toBe("ephemeral");
     await flush();
+    installFetch(() => ({ status: 200, body: { status: "running" } }));
+    boot(man([{ ...windows[4], latestFrom: "message" }]));
+    await flush();
+    notes("PCC read", 1);
+    expect(document.querySelector(".pcc-run-latest")!.textContent).toBe("Waiting for the first update…");
+    stamped(".pcc-run-latest", "ephemeral");
   });
 
   it("no manifest field chooses a class", async () => {
