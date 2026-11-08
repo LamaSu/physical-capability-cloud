@@ -164,6 +164,7 @@ async function registerGraphNode(p: ProviderSpec): Promise<void> {
     estimatedDurationMs: p.etaMs,
     assuranceTier: p.tier,
     reputation: p.reputation,
+    location: p.location,
     available: true,
     inputTypes: p.inputTypes,
     outputTypes: p.outputTypes,

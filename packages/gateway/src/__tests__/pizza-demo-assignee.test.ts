@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -145,10 +145,48 @@ describe("pizza demo job routing", () => {
     ]);
   });
 
+  it("assigns a kernel id with an inner k_ to its own queue", async () => {
+    seed("cap-kernel_t1_ab12-pizza", "kernel_t1k_ab12", "skill_00000000-0000-4000-8000-000000000001", "dana-ab12");
+    const job = await confirmOrder();
+    expect((await queue("kernel_t1k_ab12")).active).toEqual([
+      expect.objectContaining({ jobId: job.jobId, type: "make-pizza", assigneeSlug: "kernel_t1k_ab12" }),
+    ]);
+  });
+
+  it("a seeded shop gets its jobs on its seeded slug", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init: { method: "POST"; headers: Record<string, string>; body?: string }) => {
+      const response = await app.inject({
+        method: init.method,
+        url: new URL(url).pathname,
+        headers: init.headers,
+        payload: init.body,
+      });
+      return new Response(response.body, { status: response.statusCode });
+    }));
+    try {
+      await import(resolve(__dirname, "../../../../scripts/seed-pizza-demo.ts"));
+      await vi.waitFor(() => {
+        expect(log).toHaveBeenCalledWith("✓ seeded 3/3 shops, 4/4 drivers, 12 graph edges");
+      });
+      expect(exit).not.toHaveBeenCalled();
+      const job = await confirmOrder();
+      expect((await queue("shop-slice-heaven")).active).toEqual([
+        expect.objectContaining({ jobId: job.jobId, type: "make-pizza", assigneeSlug: "shop-slice-heaven" }),
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+      log.mockRestore();
+      exit.mockRestore();
+    }
+  });
+
   it("every path the seed script posts to is a registered route", () => {
     const source = readFileSync(resolve(__dirname, "../../../../scripts/seed-pizza-demo.ts"), "utf8");
-    const paths = [...source.matchAll(/api\("POST",\s*"([^"]+)"/g)].map((match) => match[1]);
-    expect(paths.length).toBeGreaterThan(0);
+    const paths = [...source.matchAll(/api\("POST",\s*(["'`])([^"'`]+)\1/g)].map((match) => match[2]);
+    expect(paths).toHaveLength(3);
+    expect(paths).toHaveLength([...source.matchAll(/api\("POST",/g)].length);
     for (const path of paths) expect.soft(registeredRoutes.has(`POST ${path}`)).toBe(true);
   });
 });
