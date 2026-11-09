@@ -242,12 +242,6 @@ Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
 | GET | `/agent-package.json` | 218-tool agent package for any LLM (PUBLIC). |
 | GET/POST | `/api/sensors/*` | Sensor channels, readings, anomalies. |
 | GET/POST | `/api/zk/*` | ZK proof creation and verification. |
-| GET/POST | `/api/logistics/*` | Shipments, bookings, installations. |
-| GET/POST | `/api/spaces/*` | Equipment hosting spaces. |
-| GET/POST | `/api/marketplace/*` | Capability marketplace listings. |
-| GET/POST | `/api/discover/*` | Device discovery (mDNS/IPP) + auto-onboarding. |
-| GET/POST | `/api/protocols/*` | Protocol templates (DAG workflows). |
-| GET/POST | `/api/orchestrator/*` | Multi-instrument transfer graphs. |
 | GET/POST | `/api/batches/*` | Batch manifests (HPLC, multi-sample). |
 
 ---

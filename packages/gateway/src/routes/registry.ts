@@ -7,6 +7,7 @@ import {
   REGISTRY_ADDRESSES,
 } from "@pcc/identity-8004";
 import { getRepos } from "../db.js";
+import { gateDemoRoutes, notAvailable } from "../config/demo-routes.js";
 
 /**
  * ERC-8004 Identity/Reputation/Validation Registry routes.
@@ -17,8 +18,12 @@ import { getRepos } from "../db.js";
  * agentIds we have a reliable list of without an indexer).
  *
  * Attestation / Validation reads remain mocked (the validation-registry
- * surface needs a per-requestHash key path, not a flat list) — they're
- * tagged `source: "mock"` until the indexer or a typed reader lands.
+ * surface needs a per-requestHash key path, not a flat list). Both attestation
+ * routes answer 501 not_available unless the demo flag is on (N34,
+ * demoRoutesEnabled); with it, they serve the mock, tagged `source: "mock"`.
+ * Until the indexer or a typed reader lands, the summary reports
+ * `attestations: "not_read"` with null counts, and an entity's
+ * `attestations` is a not_available state.
  *
  * Env vars (resolved lazily):
  *   IDENTITY_REGISTRY_CHAIN_ID — default 84532 (Base Sepolia)
@@ -104,10 +109,6 @@ export function resetRegistryClientsForTest(): void {
 
 interface DbKnownAgent {
   agentId: bigint;
-  apiKeyId: string;
-  operatorId: string;
-  name: string | null;
-  registeredAt: string | null;
 }
 
 function dbKnownAgents(): DbKnownAgent[] {
@@ -121,18 +122,18 @@ function dbKnownAgents(): DbKnownAgent[] {
     ) {
       out.push({
         agentId: BigInt(row.onchainAgentId),
-        apiKeyId: row.id,
-        operatorId: row.operatorId,
-        name: row.name ?? null,
-        registeredAt: row.onchainAttemptedAt ?? row.createdAt,
       });
     }
   }
   return out;
 }
 
-async function readEntity(agentId: bigint, dbHint?: DbKnownAgent) {
-  const client = getIdentityClient();
+const REGISTRY_NOT_CONFIGURED = {
+  error: "registry_not_configured",
+  message: "No ERC-8004 identity registry is known for this gateway's chain, so no entity was read.",
+} as const;
+
+async function readEntity(client: IdentityRegistryClient, agentId: bigint) {
   try {
     const [owner, agentURI] = await Promise.all([
       client.ownerOf(agentId),
@@ -147,8 +148,6 @@ async function readEntity(agentId: bigint, dbHint?: DbKnownAgent) {
       metadataHash: null as string | null,
       status: 0,
       statusName: "Active",
-      registeredAt: dbHint?.registeredAt ?? null,
-      name: dbHint?.name ?? null,
       role: "agent",
       source: "onchain" as const,
     };
@@ -180,17 +179,36 @@ const mockAttestations = [
 // Routes
 // ---------------------------------------------------------------------------
 
+const REGISTRY_ATTESTATIONS_NOT_AVAILABLE = notAvailable(
+  "Registry attestations are not read on this gateway.",
+  "Only a built-in example exists, and it is not served.",
+  [],
+);
+
+export const REGISTRY_ATTESTATION_ROUTES = [
+  "GET /api/registry/attestations",
+  "GET /api/registry/attestations/:attestationId",
+] as const;
+
 export async function registryRoutes(app: FastifyInstance) {
+  gateDemoRoutes(app, REGISTRY_ATTESTATIONS_NOT_AVAILABLE, { only: REGISTRY_ATTESTATION_ROUTES });
   // ── Identity ────────────────────────────────────────────────────────
 
   app.get<{ Querystring: { type?: string; owner?: string } }>(
     "/api/registry/entities",
-    async (req) => {
+    async (req, reply) => {
       // We don't have a server-side indexer; list from DB-known minted agents.
       const known = dbKnownAgents();
+      if (known.length === 0) return { entities: [], total: 0 };
+      let client: IdentityRegistryClient;
+      try {
+        client = getIdentityClient();
+      } catch {
+        return reply.code(503).send(REGISTRY_NOT_CONFIGURED);
+      }
       const entities = (
         await Promise.all(
-          known.map((k) => readEntity(k.agentId, k)),
+          known.map((k) => readEntity(client, k.agentId)),
         )
       ).filter((e): e is NonNullable<typeof e> => e !== null);
 
@@ -218,9 +236,13 @@ export async function registryRoutes(app: FastifyInstance) {
           .send({ error: "Entity ID must be a positive integer" });
       }
       const agentId = BigInt(raw);
-      // DB hint provides off-chain context (name, operator, registeredAt).
-      const dbHint = dbKnownAgents().find((k) => k.agentId === agentId);
-      const entity = await readEntity(agentId, dbHint);
+      let client: IdentityRegistryClient;
+      try {
+        client = getIdentityClient();
+      } catch {
+        return reply.code(503).send(REGISTRY_NOT_CONFIGURED);
+      }
+      const entity = await readEntity(client, agentId);
       if (!entity) {
         return reply.status(404).send({ error: "Entity not found on-chain" });
       }
@@ -251,9 +273,7 @@ export async function registryRoutes(app: FastifyInstance) {
         // Reputation read failure is non-fatal — entity may have no feedback yet.
       }
 
-      const attestations = mockAttestations.filter(
-        (a) => a.subjectId === Number(agentId),
-      );
+      const attestations = { state: "not_available", reason: "no_validation_registry_reader" } as const;
 
       return { entity, reputation, attestations };
     },
@@ -310,7 +330,6 @@ export async function registryRoutes(app: FastifyInstance) {
           const summary = await rep.getSummary(k.agentId, clients);
           return {
             entityId: Number(k.agentId),
-            name: k.name,
             count: Number(summary.count),
             summaryValue: summary.summaryValue.toString(),
             summaryValueDecimals: summary.summaryValueDecimals,
@@ -369,14 +388,11 @@ export async function registryRoutes(app: FastifyInstance) {
       totalEntities: known.length,
       byType: {
         agents: known.length, // Only Agents on the IdentityRegistry surface.
-        machines: 0,
-        operators: 0,
-        verifiers: 0,
       },
-      totalAttestations: mockAttestations.length,
-      activeAttestations: mockAttestations.filter((a) => !a.revoked).length,
+      totalAttestations: null,
+      activeAttestations: null,
       averageReputation: null as number | null, // requires per-agent summary fetch
-      source: { entities: "db+onchain", attestations: "mock" } as const,
+      source: { entities: "db", attestations: "not_read" } as const,
     };
   });
 }

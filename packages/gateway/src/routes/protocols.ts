@@ -11,6 +11,7 @@ import type {
   AutomationStatus,
   TransferAgent,
 } from "@pcc/spec";
+import { gateDemoRoutes, notAvailable } from "../config/demo-routes.js";
 
 // ---------------------------------------------------------------------------
 // Mock Data — Protocol system
@@ -456,7 +457,14 @@ const mockTransferAgents: TransferAgent[] = [
 // Routes
 // ---------------------------------------------------------------------------
 
+const PROTOCOLS_NOT_AVAILABLE = notAvailable(
+  "Protocol templates, forks, runs, automation status and transfer agents are not recorded on this gateway, and no run is sent to any kernel.",
+  "Only built-in examples exist, and they are not served.",
+  [],
+);
+
 export async function protocolRoutes(app: FastifyInstance) {
+  gateDemoRoutes(app, PROTOCOLS_NOT_AVAILABLE);
   // ── Protocol Templates ──────────────────────────────────────────
 
   app.get<{ Querystring: { tags?: string; capabilities?: string; search?: string; status?: string } }>(
