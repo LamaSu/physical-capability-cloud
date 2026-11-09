@@ -84,6 +84,7 @@ import { wellKnownAeoRoutes } from "./routes/well-known-aeo.js";
 import { appsHttpMcpRoutes, httpMcpRoutes } from "./mcp/http-mcp-server.js";
 import { docsHttpMcpRoutes } from "./mcp/docs-mcp-server.js";
 import { jwksRoutes } from "./routes/jwks.js";
+import { settlementRecheckKitRoutes } from "./routes/settlement-recheck-kit.js";
 import { initSigningKey } from "./signing-key.js";
 import { feedbackRoutes } from "./routes/feedback.js";
 import { identifyDeviceRoutes } from "./routes/identify-device.js";
@@ -489,6 +490,7 @@ export async function createGateway(port = 3200) {
   // A2A v1.0 JWKS endpoint (public, before auth, serves the verification
   // key for the agent card's JWS signature)
   await app.register(jwksRoutes);
+  await app.register(settlementRecheckKitRoutes);
   // Agent context pack (public, before auth — this is the primary product)
   await app.register(contextPackRoutes);
   // Bug reports / feedback (public, before auth)
