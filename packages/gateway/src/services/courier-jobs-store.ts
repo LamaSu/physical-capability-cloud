@@ -285,7 +285,7 @@ export class CourierJobsStore {
       capabilityType: COURIER_CAPABILITY_TYPE,
       requirements,
       pricing: {
-        amount: typeof input.feeUSD === "number" ? input.feeUSD : 0,
+        amount: typeof input.feeUSD === "number" ? input.feeUSD : null,
         currency: "USD",
         model: "fixed",
       },
@@ -384,7 +384,7 @@ export class CourierJobsStore {
     const result = store.patch(id, poster, {
       ...(patch.feeUSD !== undefined ? {
         pricing: {
-          amount: patch.feeUSD ?? 0,
+          amount: typeof patch.feeUSD === "number" ? patch.feeUSD : null,
           currency: "USD",
           model: "fixed",
         },
