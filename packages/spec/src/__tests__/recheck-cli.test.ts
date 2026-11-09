@@ -129,6 +129,16 @@ describe("recheck CLI and HTTP RPC", () => {
       expect(child.stdout).toBe("");
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+  it.each(["cli.js", "cli"])("R35c built CLI under --preserve-symlinks-main through a symlinked directory (%s) runs main and exits 3", async name => {
+    const dir = scratch();
+    try {
+      symlinkSync(SPEC, join(dir, "spec"), "dir");
+      const child = await spawnChild(process.execPath, ["--preserve-symlinks-main", join(dir, "spec/dist/recheck", name)]);
+      expect(child.status).toBe(3);
+      expect(child.stderr).toContain("Invalid usage or input. Usage: pcc-settlement-recheck");
+      expect(child.stdout).toBe("");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
   it("R36 the built data kit imports with viem unresolvable", async () => {
     const dir = scratch();
     try {
