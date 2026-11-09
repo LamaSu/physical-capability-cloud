@@ -1,6 +1,6 @@
 /**
- * Copied verbatim from routes/operator-relay.ts fundingForListedJob (N268-4).
- * Until N296 (gateway's fold) lands, any change to either copy changes both in the same PR; F3c in n268-4-job-funding.test.ts pins their exact parity.
+ * The one source of a job's buyer funding for both routes: GET /api/operator/jobs (operator-relay.ts)
+ * and GET /api/jobs/:jobId/funding (routes/job-funding.ts). N296 folded the relay's copy onto it; F3c pins equal replies.
  */
 import { and, asc, eq, schema } from "@pcc/store";
 import { getStore } from "../db.js";
