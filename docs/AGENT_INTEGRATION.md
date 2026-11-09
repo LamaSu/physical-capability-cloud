@@ -1150,7 +1150,7 @@ if (!lint.valid) throw new Error(lint.errors.join(", "));
 
 The Trilobio adapter implementation itself lives in `@pcc/kernel` — this helper package is configuration helpers + a published, stable shape for operator config.
 
-The same four helpers are surfaced as agent-package tools (see §8) so external LLMs can discover them: `pcc_trilobio_build_config`, `pcc_trilobio_validate_options`, `pcc_trilobio_validate_script`, `pcc_trilobio_capability_template`.
+The agent package carries none of these helpers as tools: no gateway route serves them yet.
 
 #### Trilobio API specifics
 

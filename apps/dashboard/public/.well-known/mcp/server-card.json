@@ -106,7 +106,7 @@
     },
     {
       "name": "pcc_get_reputation",
-      "description": "Get reputation scores for a PCC kernel or agent — assurance tier, quality rating, uptime, response time, and evidence completeness."
+      "description": "Get the composition reputation PCC records for an agent or kernel: its score and its most recent changes. An id PCC has never seen reads as neutral."
     },
     {
       "name": "pcc_list_sensors",
@@ -150,7 +150,7 @@
     },
     {
       "name": "pcc_setup_test_job",
-      "description": "Submit a test job to verify the full PCC pipeline works end-to-end: job submission → adapter execution → evidence collection → (optional) settlement. Returns job result with evidence bundle ID."
+      "description": "Submit a test job for one device on a kernel (Step 4 of onboarding). The gateway runs it only for a kernel it operates in-process; for any other kernel it refuses and runs nothing. Every reply says whether the job ran and passed."
     },
     {
       "name": "pcc_setup_generate_env",
@@ -182,23 +182,23 @@
     },
     {
       "name": "pcc_ip_register_capability",
-      "description": "Register a PCC Capability StructureDefinition (CSD) as a Story Protocol IP Asset. Returns an ipId, nftTokenId, licenseTermsId, and transaction hash. The IP Asset enables programmable royalties for all future jobs using this capability."
+      "description": "Record a PCC Capability StructureDefinition (CSD) as an IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. Any ipId, nftTokenId, licenseTermsId or transaction hash it returns is a placeholder, and no royalty is paid."
     },
     {
       "name": "pcc_ip_revenue_snapshot",
-      "description": "Get the current revenue snapshot for a Story Protocol IP Asset — total accumulated revenue, unclaimed balance, and per-holder claimable amounts. Use this to check how much an IP Royalty Vault has accumulated."
+      "description": "Get the revenue PCC has recorded for an IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. No revenue has been paid: any figure it returns is a placeholder."
     },
     {
       "name": "pcc_ip_claim",
-      "description": "Claim accumulated revenue from a Story Protocol IP Royalty Vault. Returns a transaction hash and the amount claimed. Optionally specify which Royalty Token IDs to claim; omit to claim all."
+      "description": "Claim an IP asset's recorded revenue. Optionally specify which Royalty Token IDs to claim; omit to claim all. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. Nothing is paid out: any amount or transaction hash it returns is a placeholder."
     },
     {
       "name": "pcc_ip_lineage",
-      "description": "Get the full IP lineage chain for a Story Protocol IP Asset — ancestors (parent CSDs this was derived from) and descendants (job evidence bundles and derivative CSDs). Shows the provenance graph of physical manufacturing work."
+      "description": "Get the IP lineage PCC has recorded for an IP asset: ancestors (parent CSDs) and descendants (job evidence records and derivative CSDs). Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain."
     },
     {
       "name": "pcc_ip_set_splits",
-      "description": "Configure revenue splits (Royalty Token distribution) for a Story Protocol IP Asset.\nSplits must sum to 100. Each collaborator's role determines their share of all future revenue from this IP.\n\nContributorRole taxonomy (ADR-12 §4 — see role responsibility table):\n  • operator             — runs the physical machine; residual share (typically 80-95% after others)\n  • verifier             — evaluates evidence, signs attestations; slashable (1-5%)\n  • insurer              — underwrites job failure coverage; opt-in (0-3%)\n  • integrator           — authored the machine-type adapter (OctoPrint, Bambu, ROS); 0-100 bps\n  • protocol-author      — authored the capability schema (CSD) + test vectors; 0-50 bps\n  • model-author         — trained the AI model invoked at execution time; 0-80 bps\n  • dataset-contributor  — pilot who collected training demonstrations; resolved via TrainingManifest\n  • curator              — organizes/audits a collection of contributions; 0-5%\n  • assembler            — composed multiple capabilities into a workflow; 0-50 bps\n\nLegacy aliases kept for backward decoding only — prefer the canonical names above:\n  • `designer` → use `protocol-author` / `assembler` / `integrator` depending on CSD kind\n  • `network`  → use `network-treasury`\n\nRecommended starting splits:\n  • Standard job (no AI):   operator 93, verifier 3, protocol-author 2, integrator 2\n  • Job with AI model:      operator 89, verifier 3, protocol-author 2, integrator 2, model-author 4\n\n"
+      "description": "Configure revenue splits (Royalty Token distribution) for an IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain.\nSplits must sum to 100. No revenue is paid from them today.\n\nContributorRole taxonomy (ADR-12 §4 — see role responsibility table):\n  • operator             — runs the physical machine; residual share (typically 80-95% after others)\n  • verifier             — evaluates evidence, signs attestations; slashable (1-5%)\n  • insurer              — underwrites job failure coverage; opt-in (0-3%)\n  • integrator           — authored the machine-type adapter (OctoPrint, Bambu, ROS); 0-100 bps\n  • protocol-author      — authored the capability schema (CSD) + test vectors; 0-50 bps\n  • model-author         — trained the AI model invoked at execution time; 0-80 bps\n  • dataset-contributor  — pilot who collected training demonstrations; resolved via TrainingManifest\n  • curator              — organizes/audits a collection of contributions; 0-5%\n  • assembler            — composed multiple capabilities into a workflow; 0-50 bps\n\nLegacy aliases kept for backward decoding only — prefer the canonical names above:\n  • `designer` → use `protocol-author` / `assembler` / `integrator` depending on CSD kind\n  • `network`  → no name above replaces it; leave it out of new splits\n\nRecommended starting splits:\n  • Standard job (no AI):   operator 93, verifier 3, protocol-author 2, integrator 2\n  • Job with AI model:      operator 89, verifier 3, protocol-author 2, integrator 2, model-author 4\n\n"
     },
     {
       "name": "pcc_swf_summary",

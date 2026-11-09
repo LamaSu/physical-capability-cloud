@@ -2,7 +2,7 @@
 
 **Goal:** the emergency stop reads correctly, and the device stops on its own command. The test job waits: no current gateway can queue one without possibly starting it first (section 2). **Ask the human** (class C) once: "May I run one emergency-stop drill on the device?"
 
-Don't use `POST /api/setup/test-job` as proof. On the current gateway it runs on a built-in mock device, not yours (board N59; the fix is #450).
+Don't use `POST /api/setup/test-job` as proof. On the current gateway it refuses any kernel the gateway doesn't operate in-process, yours included, and runs nothing (board N59).
 
 ```bash
 BASE=$(cat .pcc/base); KID=$(cat .pcc/kernel-id); DEV=http://127.0.0.1:8765

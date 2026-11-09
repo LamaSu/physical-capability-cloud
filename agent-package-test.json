@@ -92,7 +92,7 @@
     },
     {
       "name": "setup_test_job",
-      "description": "Submit a test job to verify the full pipeline works end-to-end (Step 4 of onboarding). Returns job ID and result.",
+      "description": "Submit a test job for one device on a kernel (Step 4 of onboarding). The gateway runs it only for a kernel it operates in-process; for any other kernel it refuses and runs nothing. Every reply says whether the job ran and passed.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -750,7 +750,7 @@
 
     {
       "name": "register_capability_ip",
-      "description": "Register a capability as a Story Protocol IP Asset. Returns an ipId and NFT token. The designer earns royalties whenever this capability is used.",
+      "description": "Record a capability as an IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. Any ipId, NFT token id or transaction hash in the reply is a placeholder, and no royalty is paid.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -777,7 +777,7 @@
     },
     {
       "name": "register_job_evidence_ip",
-      "description": "Register job evidence as a derivative IP asset on Story Protocol, linking it to the parent capability's IP. Operators earn royalties from derivative use.",
+      "description": "Record job evidence as a derivative of a capability's IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. Any id or transaction hash in the reply is a placeholder, and no royalty is paid.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -794,7 +794,7 @@
     },
     {
       "name": "distribute_royalties",
-      "description": "Set revenue splits for an IP asset among stakeholders (designer, operator, verifier, assembler, curator). Splits must sum to 100.",
+      "description": "Set revenue splits for an IP asset among stakeholders (designer, operator, verifier, assembler, curator). Splits must sum to 100. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. No revenue is paid from these splits.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -820,7 +820,7 @@
     },
     {
       "name": "pay_ip_royalty",
-      "description": "Pay royalties to an IP asset vault. The payer sends tokens that flow to stakeholders via the royalty splits.",
+      "description": "Record a royalty payment to an IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. No tokens move, and any transaction hash in the reply is a placeholder.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -834,7 +834,7 @@
     },
     {
       "name": "claim_ip_revenue",
-      "description": "Claim earned revenue from an IP asset vault. Returns the claimed amount and transaction hash.",
+      "description": "Claim an IP asset's recorded revenue. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. Nothing is paid out: any amount or transaction hash in the reply is a placeholder.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -847,7 +847,7 @@
     },
     {
       "name": "get_ip_revenue",
-      "description": "Get a revenue snapshot for an IP asset — total earned, pending claims, and recent payments.",
+      "description": "Get the revenue PCC has recorded for an IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. No revenue has been paid: any figure in the reply is a placeholder.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -859,7 +859,7 @@
     },
     {
       "name": "get_ip_lineage",
-      "description": "Get the full IP lineage chain for an asset — parent capabilities and all derivative job registrations.",
+      "description": "Get the IP lineage PCC has recorded for an asset: parent capabilities and derivative job records. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -871,7 +871,7 @@
     },
     {
       "name": "get_capability_ip",
-      "description": "Get the Story Protocol IP registration for a capability by its capability ID.",
+      "description": "Get the IP record PCC holds for a capability by its capability ID. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. Any id or transaction hash in it is a placeholder.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -883,7 +883,7 @@
     },
     {
       "name": "raise_ip_dispute",
-      "description": "Raise a Story Protocol IP dispute against an asset. Provide evidence hash and reason.",
+      "description": "Record an IP dispute against an asset. Provide evidence hash and reason. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1491,7 +1491,7 @@
 
     {
       "name": "submit_demand",
-      "description": "Signal that you want a capability that doesn't exist on the network yet. Creates a demand signal and may auto-create a bounty if enough demand accumulates.",
+      "description": "Record that you want a capability no operator offers yet. The gateway keeps the signal in memory, publishes no demand yet, and creates no bounty.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1508,7 +1508,7 @@
     },
     {
       "name": "list_bounties",
-      "description": "List open bounties for capabilities the network needs. Operators can claim these to earn rewards by onboarding new capabilities.",
+      "description": "List bounties. No gateway route creates a bounty and none is funded, so expect an empty list; no bounty pays anything.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1521,7 +1521,7 @@
     },
     {
       "name": "claim_bounty",
-      "description": "Claim a bounty to onboard a new capability. The operator commits to registering the capability and completing verification.",
+      "description": "Ask to take on a bounty as the authenticated operator. No gateway route creates a bounty, so the request finds none (409); no bounty is funded or pays anything.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1534,7 +1534,7 @@
     },
     {
       "name": "verify_bounty",
-      "description": "Verify bounty completion by scoring the delivered capability against requirements.",
+      "description": "Retired: the gateway answers 410 and changes no state. No caller can mark a bounty verified.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1548,7 +1548,7 @@
     },
     {
       "name": "get_top_demand",
-      "description": "Get top demand signals aggregated by capability type. Shows which capabilities are most wanted on the network.",
+      "description": "Get demand aggregated by capability type. The gateway doesn't publish demand yet: it answers an empty list marked `suppressed`.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1560,7 +1560,7 @@
     },
     {
       "name": "get_bounty_leaderboard",
-      "description": "Get the bounty hunter leaderboard showing top operators by bounties claimed and verified.",
+      "description": "Get the bounty leaderboard. No gateway route creates or verifies a bounty, so expect an empty list.",
       "input_schema": {
         "type": "object",
         "properties": {
