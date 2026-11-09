@@ -225,6 +225,8 @@ describe("Streamable HTTP MCP server", () => {
       expect(contents).toHaveLength(1);
       expect.soft(contents[0].text).toContain(statusLine);
       expect.soft(contents[0].text).not.toContain('<p id="pcc-kit-status">');
+      expect.soft(contents[0].text.match(/data-source=/g)).toHaveLength(1);
+      expect.soft(contents[0].text.match(/id="pcc-kit-status"/g)).toHaveLength(1);
     }
   });
 
