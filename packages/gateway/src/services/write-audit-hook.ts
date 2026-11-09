@@ -12,6 +12,13 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { auditableUrl, isTelemetrySinkRequest, isWalletRequest } from "./telemetry-privacy.js";
 
+declare module "fastify" {
+  interface FastifyContextConfig {
+    /** The audit omits this route's client IP and user agent. */
+    auditOmitsClient?: boolean;
+  }
+}
+
 export async function writeAuditHook(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   const method = request.method;
   if (method !== "POST" && method !== "PUT" && method !== "DELETE" && method !== "PATCH") return;
@@ -35,7 +42,7 @@ export async function writeAuditHook(request: FastifyRequest, reply: FastifyRepl
   const actor = (request as any).operatorId ?? (request as any).apiKeyId ?? (
     request.headers.authorization ? "authenticated" : "anonymous"
   );
-  const omitClient = isTelemetrySinkRequest(request.url);
+  const omitClient = request.routeOptions?.config?.auditOmitsClient === true || isTelemetrySinkRequest(request.url);
   const routeUrl = request.routeOptions?.url || undefined;
 
   try {

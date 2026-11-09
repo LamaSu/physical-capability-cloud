@@ -87,6 +87,7 @@ export function initSentry(): void {
     // 100 % sample rate for the hackathon demo; reduce in production
     tracesSampleRate: 1.0,
     profilesSampleRate: 0.1,
+    integrations: [Sentry.httpIntegration({ maxIncomingRequestBodySize: "none" })],
     beforeSend: walletSafeSentryEvent,
     beforeSendTransaction: walletSafeSentryEvent,
     beforeBreadcrumb(breadcrumb) {
