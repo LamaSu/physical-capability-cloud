@@ -198,6 +198,7 @@ export const PUBLISHED_SURFACES: readonly string[] = [
   "apps/dashboard/public/whitepaper.md",
   "apps/dashboard/public/visualizer.js",
   "apps/dashboard/public/install.html",
+  "apps/dashboard/public/install.sh",
   "apps/dashboard/public/onboard.html",
   "apps/dashboard/public/docs/index.html",
   "apps/dashboard/public/skills/pcc.md",

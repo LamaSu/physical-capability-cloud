@@ -11,7 +11,7 @@
 #   --url=<URL>          instrument URL on the LAN (default: prompt)
 #   --user=<USERNAME>    instrument username/api-key (default: prompt; type-dependent)
 #   --pass=<PASSWORD>    instrument password (default: prompt; only Hamilton needs this)
-#   --key=<PCC_API_KEY>  pre-issued PCC API key (default: auto-provision)
+#   --key=<PCC_API_KEY>  your PCC API key (default: prompt; this installer creates none)
 #   --kernel-id=<ID>     custom kernel ID (default: kernel_<hostname>_<timestamp>)
 #   --no-start           generate config + register but don't start the daemon
 #   --no-prompt          fail rather than prompt — for fully-automated runs
@@ -60,29 +60,47 @@ cyan "
 "
 
 # ── prompt helpers ─────────────────────────────────────────────────────────
+prompt_flag() {
+  case "$1" in
+    VENDOR)     printf '%s' '--vendor=<TYPE>' ;;
+    INSTR_URL)  printf '%s' '--url=<URL>' ;;
+    INSTR_USER) printf '%s' '--user=<USERNAME>' ;;
+    INSTR_PASS) printf '%s' '--pass=<PASSWORD>' ;;
+    PCC_KEY)    printf '%s' '--key=<PCC_API_KEY>' ;;
+  esac
+}
+
 prompt() {
-  local var_name="$1"; local prompt_text="$2"; local default="${3:-}"
+  local var_name="$1"; local prompt_text="$2"; local default="${3:-}"; local value
   if [ -n "${!var_name}" ]; then return; fi
   if [ "$NO_PROMPT" = "1" ]; then
     red "missing $var_name and --no-prompt set; aborting"; exit 2
   fi
+  if ! (exec </dev/tty) 2>/dev/null; then
+    red "No terminal to ask: $prompt_text. Pass $(prompt_flag "$var_name") and run again. Nothing was installed."
+    exit 2
+  fi
   if [ -n "$default" ]; then
-    read -r -p "$prompt_text [$default]: " value
-    eval "$var_name=\"\${value:-\$default}\""
+    IFS= read -r -p "$prompt_text [$default]: " value </dev/tty
+    printf -v "$var_name" '%s' "${value:-$default}"
   else
-    read -r -p "$prompt_text: " value
-    eval "$var_name=\"\$value\""
+    IFS= read -r -p "$prompt_text: " value </dev/tty
+    printf -v "$var_name" '%s' "$value"
   fi
 }
 
 prompt_password() {
-  local var_name="$1"; local prompt_text="$2"
+  local var_name="$1"; local prompt_text="$2"; local value
   if [ -n "${!var_name}" ]; then return; fi
   if [ "$NO_PROMPT" = "1" ]; then
     red "missing $var_name and --no-prompt set; aborting"; exit 2
   fi
-  read -r -s -p "$prompt_text: " value; echo
-  eval "$var_name=\"\$value\""
+  if ! (exec </dev/tty) 2>/dev/null; then
+    red "No terminal to ask: $prompt_text. Run it in a terminal to type it hidden, or pass $(prompt_flag "$var_name") (a flag shows in the process list and your shell history). Nothing was installed."
+    exit 2
+  fi
+  IFS= read -r -s -p "$prompt_text: " value </dev/tty; echo
+  printf -v "$var_name" '%s' "$value"
 }
 
 # ── 1. dependencies ────────────────────────────────────────────────────────
@@ -108,7 +126,7 @@ case "$VENDOR" in
     ;;
   octoprint)
     prompt INSTR_URL  "OctoPrint URL (e.g. http://192.168.1.52:5000)"
-    prompt INSTR_USER "OctoPrint API key (X-Api-Key)"
+    prompt_password INSTR_USER "OctoPrint API key (X-Api-Key)"
     ;;
   sila)
     prompt INSTR_URL  "SiLA server URL (e.g. https://192.168.1.53:50051)"
@@ -123,16 +141,12 @@ green "  ✓ vendor=$VENDOR url=$INSTR_URL"
 # ── 3. PCC API key ─────────────────────────────────────────────────────────
 cyan "[3/6] PCC API key"
 if [ -z "$PCC_KEY" ]; then
-  HOST=$(hostname 2>/dev/null || echo "operator")
-  RESP=$(curl -fsS -X POST "$GATEWAY/api/auth/provision" \
-    -H "Content-Type: application/json" \
-    -d "{\"name\":\"$HOST-installer\"}" || true)
-  PCC_KEY=$(echo "$RESP" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('api_key',''))" 2>/dev/null || true)
-  if [ -z "$PCC_KEY" ]; then
-    yellow "  could not auto-provision (rate-limited or network)."
-    yellow "  response: $RESP"
-    prompt PCC_KEY "Paste a PCC API key (pcc_live_*)"
-  fi
+  echo "  This installer doesn't create PCC API keys. How to get one: https://capability.network/auth.md"
+  prompt_password PCC_KEY "Paste a PCC API key (pcc_live_*)"
+fi
+if [ -z "$PCC_KEY" ]; then
+  red "No PCC API key given. Nothing was installed."
+  exit 2
 fi
 green "  ✓ PCC_API_KEY ready"
 
@@ -148,39 +162,53 @@ cyan "[5/6] generating KERNEL_CONFIG"
 KERNEL_ID="${KERNEL_ID:-kernel_$(hostname 2>/dev/null || echo op)_$(date +%s)}"
 case "$VENDOR" in
   hamilton)
-    DEVICE_CONFIG=$(python3 -c "import json;print(json.dumps({'url':'$INSTR_URL','username':'$INSTR_USER','password':'$INSTR_PASS','kernelId':'$KERNEL_ID','mockMode':False,'pollIntervalMs':3000}))")
     DEVICE_TYPE="machine"; ADAPTER_TYPE="hamilton"; CAPS='["liquid-handler","liquid-handling-prep"]'
     ;;
   opentrons)
-    DEVICE_CONFIG=$(python3 -c "import json;print(json.dumps({'url':'$INSTR_URL','apiVersion':'2.18','kernelId':'$KERNEL_ID','mockMode':False}))")
     DEVICE_TYPE="machine"; ADAPTER_TYPE="opentrons"; CAPS='["liquid-handler"]'
     ;;
   octoprint)
-    DEVICE_CONFIG=$(python3 -c "import json;print(json.dumps({'url':'$INSTR_URL','apiKey':'$INSTR_USER','kernelId':'$KERNEL_ID','mockMode':False}))")
     DEVICE_TYPE="machine"; ADAPTER_TYPE="octoprint"; CAPS='["fdm"]'
     ;;
   sila)
-    DEVICE_CONFIG=$(python3 -c "import json;print(json.dumps({'url':'$INSTR_URL','kernelId':'$KERNEL_ID'}))")
     DEVICE_TYPE="sensor"; ADAPTER_TYPE="sila"; CAPS='["assay"]'
     ;;
   mock)
-    DEVICE_CONFIG=$(python3 -c "import json;print(json.dumps({'kernelId':'$KERNEL_ID','mockMode':True}))")
     DEVICE_TYPE="machine"; ADAPTER_TYPE="mock"; CAPS='["fdm"]'
     ;;
 esac
 
-KERNEL_CONFIG=$(python3 -c "
+KERNEL_CONFIG=$(VENDOR="$VENDOR" INSTR_URL="$INSTR_URL" INSTR_USER="$INSTR_USER" \
+  INSTR_PASS="$INSTR_PASS" KERNEL_ID="$KERNEL_ID" DEVICE_TYPE="$DEVICE_TYPE" \
+  ADAPTER_TYPE="$ADAPTER_TYPE" python3 -c '
 import json
+import os
+
+vendor = os.environ["VENDOR"]
+kernel_id = os.environ["KERNEL_ID"]
+config = {"kernelId": kernel_id}
+if vendor != "mock":
+    config["url"] = os.environ["INSTR_URL"]
+if vendor == "hamilton":
+    config.update(username=os.environ["INSTR_USER"], password=os.environ["INSTR_PASS"],
+                  mockMode=False, pollIntervalMs=3000)
+elif vendor == "opentrons":
+    config.update(apiVersion="2.18", mockMode=False)
+elif vendor == "octoprint":
+    config.update(apiKey=os.environ["INSTR_USER"], mockMode=False)
+elif vendor == "mock":
+    config["mockMode"] = True
+
 print(json.dumps({
-  'kernelId': '$KERNEL_ID',
-  'devices': [{
-    'id': 'dev_${VENDOR}_01',
-    'type': '$DEVICE_TYPE',
-    'adapterType': '$ADAPTER_TYPE',
-    'config': $DEVICE_CONFIG,
+  "kernelId": kernel_id,
+  "devices": [{
+    "id": "dev_" + vendor + "_01",
+    "type": os.environ["DEVICE_TYPE"],
+    "adapterType": os.environ["ADAPTER_TYPE"],
+    "config": config,
   }],
 }))
-")
+')
 green "  ✓ kernelId=$KERNEL_ID adapterType=$ADAPTER_TYPE"
 
 # ── 6. start daemon ────────────────────────────────────────────────────────
@@ -195,9 +223,6 @@ echo "  kernelId:   $KERNEL_ID"
 echo "  api-key:    ${PCC_KEY:0:14}…"
 echo "  capability: $CAPS"
 echo
-green "Operator dashboard will appear at:"
-echo "  $GATEWAY/operator/$KERNEL_ID"
-echo
 
 if [ "$NO_START" = "1" ]; then
   yellow "--no-start specified; environment exported but daemon NOT started."
@@ -206,4 +231,16 @@ if [ "$NO_START" = "1" ]; then
 fi
 
 cyan "running: pcc-node start  (Ctrl-C to stop)"
-exec "$HOME/.local/bin/pcc-node" start || exec pcc-node start
+if [ -x "$HOME/.local/bin/pcc-node" ]; then
+  NODE_BIN="$HOME/.local/bin/pcc-node"
+elif NODE_BIN=$(command -v pcc-node); then
+  :
+else
+  red "pcc-node is installed but not on your PATH. Add pip's user scripts directory to PATH, then run: pcc-node start"
+  exit 1
+fi
+NODE_STDIN=/dev/null
+if (exec </dev/tty) 2>/dev/null; then
+  NODE_STDIN=/dev/tty
+fi
+exec "$NODE_BIN" start <"$NODE_STDIN"
