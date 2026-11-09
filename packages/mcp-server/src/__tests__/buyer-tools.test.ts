@@ -196,6 +196,16 @@ describe("buyer preconditions", () => {
     expectRefusal(await h.call("pcc_buyer_order_status", { jobId: "job-1" }), "BUYER_NOT_SIGNED_IN", NO_SESSION);
     zeroWork();
   });
+  it.each([
+    ["BUYER_SIGNER_MISSING", { PCC_BUYER_PRIVATE_KEY: undefined }],
+    ["BUYER_SIGNER_AMBIGUOUS", { PCC_BUYER_ADDRESS: "0x" + "1".repeat(40) }],
+    ["BUYER_SIGNER_INVALID", { PCC_BUYER_PRIVATE_KEY: "0x" + "0".repeat(64) }],
+    ["BUYER_CHAIN_REFUSED", {}],
+  ] as const)("P1-P5 order: %s is reported before a refused chain and an insecure gateway", async (error, extra) => {
+    const h = await harness(config({ ...extra, PCC_BUYER_CHAIN_ID: "8453", PCC_URL: "http://example.com" }));
+    expectRefusal(await h.call("pcc_buyer_sign_in"), error, buyer.BUYER_ERROR_TEXTS[error]);
+    zeroWork();
+  });
 });
 
 describe("buyer session", () => {
@@ -355,6 +365,29 @@ describe("buyer session", () => {
     expect((calls[1].body as { message: string }).message).toContain("Chain ID: 31337");
     secureRequests();
   });
+  it("S4 simultaneous sign-ins run in order: the second logs out the first session before its nonce", async () => {
+    const h = await harness();
+    const tokens = [randomUUID(), randomUUID()];
+    let verified = 0;
+    routeOverride = call => call.url.endsWith("/api/auth/verify") ? json({ token: tokens[verified++], address: account.address, expiresAt }) : undefined;
+    const replies = await Promise.all([h.call("pcc_buyer_sign_in"), h.call("pcc_buyer_sign_in")]);
+    expect(replies.map(reply => reply.data.signedIn)).toEqual([true, true]);
+    expect(calls.map(c => new URL(c.url).pathname)).toEqual([
+      "/api/auth/nonce", "/api/auth/verify", "/api/auth/session-key",
+      "/api/auth/logout", "/api/auth/nonce", "/api/auth/verify", "/api/auth/session-key",
+    ]);
+    expect(calls[3].headers).toEqual({ authorization: `Bearer ${tokens[0]}` });
+    secureRequests();
+  });
+  it("S2 a signer answering 500 is asked exactly once and verify is never sent", async () => {
+    const signerUrl = "http://localhost:8545";
+    routeOverride = call => new URL(call.url).origin === signerUrl ? json({ jsonrpc: "2.0", id: 1, error: { code: -32603, message: "internal" } }, 500) : undefined;
+    const h = await harness(config({ PCC_BUYER_PRIVATE_KEY: undefined, PCC_BUYER_SIGNER_URL: signerUrl, PCC_BUYER_ADDRESS: account.address }));
+    const reply = await h.call("pcc_buyer_sign_in");
+    expect(reply.data).toEqual({ error: "BUYER_SIGN_IN_FAILED", step: "sign", status: 500, message: "Sign-in failed at the sign step (HTTP 500). No session was kept." });
+    expect(calls.filter(c => new URL(c.url).origin === signerUrl)).toHaveLength(1);
+    expect(calls.some(c => c.url.endsWith("/api/auth/verify"))).toBe(false);
+  });
 });
 
 function dto(patch: Record<string, unknown> = {}) {
@@ -463,6 +496,16 @@ describe("buyer status", () => {
       expect(calls.at(-1)).toMatchObject({ url: GATEWAY + `/api/jobs/${encodeURIComponent(jobId)}/funding`, method: "GET", headers: { authorization: `Bearer ${bearer}`, accept: "application/json" }, body: undefined });
       secureRequests();
     }
+  });
+  it.each([
+    ["another job", { jobId: "job-2", scopes: [dto()] }],
+    ["a scope with no scopeId", { jobId: "job-1", scopes: [dto(), { state: "funded_verified" }] }],
+    ["a numeric scopeId", { jobId: "job-1", scopes: [dto({ scopeId: 7 })] }],
+  ] as const)("O12 a 200 naming %s is a malformed reply", async (_row, body) => {
+    routeOverride = c => c.url.endsWith("/funding") ? json(body) : undefined;
+    const h = await harness();
+    await h.call("pcc_buyer_sign_in");
+    expectRefusal(await h.call("pcc_buyer_order_status", { jobId: "job-1" }), "BUYER_STATUS_FAILED", "The funding read failed (malformed reply).");
   });
 });
 
