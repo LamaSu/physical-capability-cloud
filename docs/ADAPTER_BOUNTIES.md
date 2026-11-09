@@ -2,17 +2,16 @@
 
 **Date**: 2026-04-29
 **Branch**: `feat/contributor-economics`
-**Status**: Open. Bounties are claimable today.
+**Status**: Not funded. Nothing in this document can be claimed or paid today: no route claims, verifies or pays a bounty, and the amounts below are a proposal, not an offer.
 
 ---
 
 ## TLDR
 
-We are paying **$2,000 to $10,000 USD** flat **plus a 250bp lifetime royalty**
-on every job that uses your adapter, for the first 50 priority machine-type
-adapters listed in §4. The royalty is on-chain, immutable, content-addressed,
-and routed through `MilestoneEscrow.splitPayout()`. Apache-2.0 licensed,
-public source repo, you keep ownership of the `ContributorNFT`.
+No bounty is funded, so nothing below is paid today, and no royalty is routed
+to anyone. The program would cover the priority machine-type adapters listed
+in §4. Adapters are Apache-2.0 licensed, in a public source repo, and you
+keep ownership of your work.
 
 **Cross-link**: see [`docs/CONTRIBUTOR_ECONOMICS.md`](./CONTRIBUTOR_ECONOMICS.md)
 for the underlying economic primitives, and

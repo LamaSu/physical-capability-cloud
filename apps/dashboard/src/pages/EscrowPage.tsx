@@ -3,8 +3,9 @@ import { classifySettlementRead, statusPillText } from "@pcc/spec";
 import { DataCell, EmptyState, GlassPanel, GlowBadge, LoadingShell } from "@pcc/ui";
 import { useEscrows } from "../api/hooks/use-pcc-data.js";
 import { EscrowAmount } from "../components/EscrowAmount.js";
-import { StaleNotice, UnavailableState } from "../components/ReadState.js";
+import { SKIPPED_ESCROWS_NOTICE, StaleNotice, UnavailableState } from "../components/ReadState.js";
 import { DisputeModal } from "../components/escrow/DisputeModal.js";
+import { formatCount } from "../lib/live-list.js";
 import { moneyToneColor } from "../lib/money-badge.js";
 import { useUIStore } from "../stores/ui-store.js";
 
@@ -14,7 +15,8 @@ export function EscrowPage() {
   const query = useEscrows();
   const [selected, setSelected] = React.useState<string | null>(null);
   const [dispute, setDispute] = React.useState<string | null>(null);
-  const escrows = query.data;
+  const escrows = query.data?.items;
+  const skipped = query.data?.skipped ?? 0;
   const milestoneTotal = escrows?.every((escrow) => typeof escrow.milestoneCount === "number")
     ? escrows.reduce((sum, escrow) => sum + escrow.milestoneCount, 0)
     : undefined;
@@ -27,12 +29,13 @@ export function EscrowPage() {
       ) : (
         <>
           {query.isError && <StaleNotice what="escrows" updatedAt={query.dataUpdatedAt} onRetry={() => void query.refetch()} />}
+          {skipped > 0 && <p role="status" className="text-xs text-amber-200/70">{SKIPPED_ESCROWS_NOTICE(skipped)}</p>}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <GlassPanel padding="md"><DataCell label="Escrows" value={escrows.length} sub="all states" mono /></GlassPanel>
-            <GlassPanel padding="md"><DataCell label="Active Escrows" value={escrows.filter((escrow) => escrow.status === "active").length} sub={`of ${escrows.length} total`} mono /></GlassPanel>
-            <GlassPanel padding="md"><DataCell label="Milestones" value={milestoneTotal ?? "—"} sub={milestoneTotal === undefined ? "unavailable" : "across all escrows"} mono /></GlassPanel>
+            <GlassPanel padding="md"><DataCell label="Escrows" value={formatCount(escrows.length, skipped > 0)} sub="all states" mono /></GlassPanel>
+            <GlassPanel padding="md"><DataCell label="Active Escrows" value={formatCount(escrows.filter((escrow) => escrow.status === "active").length, skipped > 0)} sub={`of ${formatCount(escrows.length, skipped > 0)} total`} mono /></GlassPanel>
+            <GlassPanel padding="md"><DataCell label="Milestones" value={milestoneTotal === undefined ? "—" : formatCount(milestoneTotal, skipped > 0)} sub={milestoneTotal === undefined ? "unavailable" : "across all escrows"} mono /></GlassPanel>
           </div>
-          {escrows.length === 0 ? (
+          {escrows.length === 0 && skipped === 0 ? (
             <GlassPanel padding="lg"><EmptyState title="No escrows yet" description="Escrows are created automatically when jobs are submitted with milestone-based payment. Each milestone has its own evidence requirements and release conditions." /></GlassPanel>
           ) : (
             <div className="space-y-3">

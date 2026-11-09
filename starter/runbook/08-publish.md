@@ -25,7 +25,7 @@ The kit is what you built:
 
 Secrets live in `.pcc/`, except the node's signing key at the selected key location: default `~/.pcc-node/keys.json` or `PCC_NODE_KEY_PATH` outside every checkout. Never publish the `.pcc/` directory, its secret files (`api-key`, `auth.header`, `buyer.header`, `node-keys.json`, `provision.json`), the selected node signing-key file, or anything copied from those secrets. Publish only the public kit files listed above.
 
-**Coming:** the kit registry (kits, #397) and the split helper (economics' `computeKitSplit`, #492) will turn this into one publish call, with the exact split shown before you confirm. The rate is the License's `requires.payments[0].rule.bps`, and test mode is `kitRoyaltyMode: preview`. Until they land, record the human's decision exactly:
+**Coming:** one publish call that shows the exact split before you confirm. The kit registry (kits, #511) and the split helper (economics' `computeKitSplit`, #492) are both merged, but no publish route uses the helper yet. The rate is the License's `requires.payments[0].rule.bps`, and test mode is `kitRoyaltyMode: preview`. Until that call lands, record the human's decision exactly:
 ```bash
 LICENSE_BPS=…   # the number the human chose, 0 to 100; never pick one
 python3 -c "import json,sys; bps = int(sys.argv[1]); assert 0 <= bps <= 100; json.dump({'publish': True, 'licenseBps': bps, 'decidedBy': 'operator (asked in chat)'}, open('.pcc/publish.json', 'w'))" "$LICENSE_BPS"

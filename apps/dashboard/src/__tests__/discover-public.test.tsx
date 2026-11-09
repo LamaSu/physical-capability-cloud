@@ -164,14 +164,14 @@ describe("public Discover", () => {
     await expectDiscover();
     expect(button("Disconnect")).toBeUndefined();
     expect(button("? Tour")).toBeUndefined();
-    expect(container.textContent).not.toContain("Welcome to PCCP Command Center");
+    expect(container.textContent).not.toContain("Welcome to the PCC dashboard");
     expect(button("Connect Wallet")).toBeDefined();
     expect([...container.querySelectorAll("aside *")].some((node) => node.textContent === "Discover")).toBe(true);
     await act(async () => useAuthStore.setState({ isAuthenticated: true, sessionToken: null }));
     await expectDiscover();
     expect(button("Disconnect")).toBeDefined();
     expect(button("? Tour")).toBeDefined();
-    expect(container.textContent).toContain("Welcome to PCCP Command Center");
+    expect(container.textContent).toContain("Welcome to the PCC dashboard");
   });
 
   it("V7: a restored wallet session is not a visitor", async () => {

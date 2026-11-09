@@ -40,7 +40,7 @@ function scanLoopbackTrust(root: string, files: readonly string[]): Finding[] {
     ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.EqualsEqualsToken,
     ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken,
   ]);
-  const isIp = (node: ts.Expression): boolean => {
+  const isIpMember = (node: ts.Expression): boolean => {
     const expr = unwrap(node);
     if (ts.isPropertyAccessExpression(expr)) return expr.name.text === "ip" || expr.name.text === "remoteAddress";
     return ts.isElementAccessExpression(expr) && !!expr.argumentExpression && ts.isStringLiteralLike(expr.argumentExpression)
@@ -50,7 +50,7 @@ function scanLoopbackTrust(root: string, files: readonly string[]): Finding[] {
     const expr = unwrap(node);
     return ts.isStringLiteralLike(expr) && loopbacks.has(expr.text);
   };
-  const holdsLoopback = (operand: ts.Expression): boolean => {
+  const throughBindings = (operand: ts.Expression, matches: (node: ts.Expression) => boolean, descend = true): boolean => {
     // A synthetic projection has a fresh node identity on an uncached lookup.
     // Keep whole-query visits and identify bindings by name + declaration too.
     const visited = new Set<ts.Node>();
@@ -61,7 +61,7 @@ function scanLoopbackTrust(root: string, files: readonly string[]): Finding[] {
       if (visited.has(node)) return false;
       if (depth > 64 || ++visits > 4096) { incomplete = true; return false; }
       visited.add(node);
-      if (isLoopback(node)) return true;
+      if (matches(node)) return true;
       if (ts.isIdentifier(node)) {
         const name = node.text;
         const reference = node.parent && node.pos >= 0 ? node : at;
@@ -74,6 +74,7 @@ function scanLoopbackTrust(root: string, files: readonly string[]): Finding[] {
           return !!value.expression && walk(value.expression, declaration, depth + 1);
         });
       }
+      if (!descend) return false;
       let hit = false;
       ts.forEachChild(node, child => { if (!incomplete && ts.isExpression(child) && walk(child, at, depth + 1)) hit = true; });
       return hit;
@@ -82,6 +83,12 @@ function scanLoopbackTrust(root: string, files: readonly string[]): Finding[] {
     if (incomplete) findings.push({ rule: "E4a-R2", file: operand.getSourceFile().fileName, enclosing: enclosingName(operand), expression: printNode(operand), detail: "loopback operand cannot be inspected: depth or visit bound exceeded" });
     return hit;
   };
+  const isIp = (operand: ts.Expression): boolean => throughBindings(operand, isIpMember, false);
+  const holdsLoopback = (operand: ts.Expression): boolean => throughBindings(operand, isLoopback);
+  const holdsPrefix = (operand: ts.Expression): boolean => throughBindings(operand,
+    node => ts.isStringLiteralLike(node) && /^(?:127\.|::ffff:127\.)/.test(node.text));
+  const holdsRegex = (operand: ts.Expression): boolean => throughBindings(operand,
+    node => ts.isRegularExpressionLiteral(node) && node.text.includes("127"));
   for (const file of files) {
     if (!isRuntimeFile(file) || !file.startsWith("packages/gateway/src/")) continue;
     const source = readFileSync(join(root, file), "utf8");
@@ -92,8 +99,8 @@ function scanLoopbackTrust(root: string, files: readonly string[]): Finding[] {
       const receiver = callee && (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) ? callee.expression : undefined;
       const member = callee && calleeName(callee);
       const collectionTrust = ts.isCallExpression(node) && receiver && ["has", "includes", "indexOf"].includes(member ?? "") && node.arguments.some(isIp) && holdsLoopback(receiver);
-      const prefixTrust = ts.isCallExpression(node) && receiver && member === "startsWith" && isIp(receiver) && node.arguments.some(arg => ts.isStringLiteralLike(unwrap(arg)) && /^(?:127\.|::ffff:127\.)/.test((unwrap(arg) as ts.StringLiteralLike).text));
-      const regexTrust = ts.isCallExpression(node) && receiver && member === "test" && ts.isRegularExpressionLiteral(unwrap(receiver)) && (unwrap(receiver) as ts.RegularExpressionLiteral).text.includes("127") && node.arguments.some(isIp);
+      const prefixTrust = ts.isCallExpression(node) && receiver && member === "startsWith" && isIp(receiver) && node.arguments.some(holdsPrefix);
+      const regexTrust = ts.isCallExpression(node) && receiver && member === "test" && holdsRegex(receiver) && node.arguments.some(isIp);
       const switchTrust = ts.isCaseClause(node) && ts.isCaseBlock(node.parent) && ts.isSwitchStatement(node.parent.parent) && isIp(node.parent.parent.expression) && holdsLoopback(node.expression);
       if (collectionTrust || prefixTrust || regexTrust || switchTrust || (ts.isBinaryExpression(node) && comparisons.has(node.operatorToken.kind)
         && ((isIp(node.left) && holdsLoopback(node.right)) || (isIp(node.right) && holdsLoopback(node.left))))
@@ -348,6 +355,23 @@ describe("f2b bounded loopback resolution", () => {
       const hits = scanLoopbackTrust(root, [file]);
       expect(hits).toHaveLength(1);
       expect(hits[0]).toMatchObject({ rule: "E4a-R2", detail: expect.stringContaining("cannot be inspected") });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("N258 W5 bounded loopback aliases", () => {
+  for (const [name, source, count] of [
+    ["A-alias-ip", 'export function trust(req) { const ip = req.ip; return ip === "127.0.0.1"; }', 1],
+    ["A-prefixconst", 'const P = "127."; export function trust(req) { return req.ip.startsWith(P); }', 1],
+    ["A-regexconst", 'const RE = /^127\\./; export function trust(req) { return RE.test(req.ip); }', 1],
+    ["safe aliases", 'const P = "198.51."; const RE = /^198\\./; export function trust(req) { const ip = req.ip; return ip === "198.51.100.1" || ip.startsWith(P) || RE.test(ip); }', 0],
+  ] as const) it(`N258 W5 ${name}: aliases keep the bounded operand rules`, () => {
+    const root = mkdtempSync(join(tmpdir(), "pcc-loopback-n258-"));
+    const file = "packages/gateway/src/routes/planted.ts";
+    try {
+      mkdirSync(dirname(join(root, file)), { recursive: true });
+      writeFileSync(join(root, file), source);
+      expect(scanLoopbackTrust(root, [file])).toHaveLength(count);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

@@ -63,8 +63,8 @@ conversation.
 accept?*
 
 **Backed by**: Capability StructureDefinitions (CSDs). FHIR-inspired,
-inheritable via `baseDefinition`, versioned. Five base CSDs ship today
-(FDM, SLA, CNC 3-axis, laser cut, 2D print); the top-50 catalog is seeded.
+inheritable via `baseDefinition`, versioned. Built-in CSDs ship today
+(FDM, SLA, CNC 3-axis, laser cut and 2D print among them); no wider catalog is seeded.
 Anyone can register a new CSD via `POST /api/csd`; the registry talks back
 during onboarding via the `pcc-suggest-templates` A2A skill.
 

@@ -1,7 +1,7 @@
 /**
  * The append-only SQLite funding record store. Callers supply their transaction or read handle;
  * this store opens no transaction, so its writes share the caller's commit or rollback/savepoint.
- * Production wiring remains with S1.2; fundingRecordStore() still exposes only test-installed stores.
+ * Outside a test process, fundingRecordStore() answers this store.
  */
 import { and, eq, schema } from "@pcc/store";
 import {

@@ -59,7 +59,7 @@ const optional = (v: unknown, ok: (v: unknown) => boolean) => v === undefined ||
 const jobRowOk = (row: Record<string, unknown>) =>
   isText(row.id) && isText(row.status) && KNOWN_JOB_STATUSES.has(row.status);
 
-/** Read the whole escrow list only when every displayed amount and status is readable. */
+/** Show an escrow row only when every displayed amount and status is readable. */
 const escrowRowOk = (row: Record<string, unknown>) => {
   if (!isText(row.id) || !isText(row.status) || !KNOWN_ESCROW_STATUSES.has(row.status) ||
     !isCanonicalAmount(row.totalAmount) || typeof row.currency !== "string" || !ESCROW_CURRENCIES.has(row.currency)) return false;
@@ -350,18 +350,20 @@ export function useKernel(kernelId: string | undefined) {
 /**
  * List escrows with milestone counts.
  * Route: GET /api/escrow → { escrows: EscrowSummaryDTO[] } (backward-compat envelope).
- * Returns EscrowSummaryDTO[] — envelope is unwrapped here so callers see a flat array.
+ * Returns { items, skipped }: the readable rows, and how many listed rows couldn't be read and were left out.
  *
  * Backward-compat note: EscrowSummaryDTO does NOT include a milestones[] array.
  * Pages that rendered milestone lists must switch to milestoneCount / releasedCount /
  * disputedCount fields instead.
  */
 export function useEscrows(params?: { status?: string }) {
-  return useQuery<EscrowSummaryDTO[]>({
+  return useQuery<{ items: EscrowSummaryDTO[]; skipped: number }>({
     queryKey: ["escrows", params],
     queryFn: async () => {
       const res = await api.getEscrows(params);
-      return rowsOrThrow<EscrowSummaryDTO>(res?.escrows, "/api/escrow", escrowRowOk);
+      if (!Array.isArray(res?.escrows)) throw new Error("unexpected response shape from /api/escrow");
+      const items = res.escrows.filter((row) => isRecord(row) && escrowRowOk(row)) as EscrowSummaryDTO[];
+      return { items, skipped: res.escrows.length - items.length };
     },
     retry: 1,
     staleTime: 10_000,

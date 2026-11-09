@@ -590,7 +590,7 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     const { scopeId } = await paidScope(f);
     __setFundingRecordStoreForTest(null);
     expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("funding_record_store_unavailable"));
-    // The store is checked before the activation terms (production, which has no store, answers this).
+    // The store is checked before the activation terms (a test process with no installed store answers this).
     expect(reconcilePaidScope(scopeId, verification(scopeId), { expectedChainId: null, postActivationTtlMs: null, testnetOnly: false })).toEqual(
       refused("funding_record_store_unavailable"),
     );
@@ -601,23 +601,32 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     const { scopeId } = await paidScope(f);
     const saved = { NODE_ENV: process.env.NODE_ENV, VITEST: process.env.VITEST };
     const set = (k: string, v: string | undefined) => (v === undefined ? delete process.env[k] : (process.env[k] = v));
+    store.plant(verification(scopeId));
     try {
       for (const [nodeEnv, vitest] of [["production", "true"], ["development", "true"], [undefined, "true"], ["test", undefined]] as const) {
         set("NODE_ENV", nodeEnv);
         set("VITEST", vitest);
         const label = `NODE_ENV=${nodeEnv} VITEST=${vitest}`;
-        expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS), label).toEqual(refused("funding_record_store_unavailable"));
+        const productionStore = fundingRecordStore();
+        expect(productionStore, label).not.toBeNull();
+        expect(productionStore!.findByScope(db(), scopeId), label).toBeNull();
+        expect(productionStore!.findByEscrow(db(), 84532, ESCROW_A), label).toBeNull();
         expect(reconcilePaidScope(scopeId, verification(scopeId), { expectedChainId: null, postActivationTtlMs: null, testnetOnly: false }), label).toEqual(
-          refused("funding_record_store_unavailable"),
+          refused("expected_chain_unavailable"),
         );
         expect(() => __setFundingRecordStoreForTest(store), label).toThrow();
       }
+      expect(scopeRow(scopeId).status).toBe("awaiting_funding");
+      set("NODE_ENV", "production");
+      set("VITEST", "true");
+      expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS).kind).toBe("activated");
+      expect(fundingRecordStore()!.findByScope(db(), scopeId)).toEqual(verification(scopeId));
     } finally {
       set("NODE_ENV", saved.NODE_ENV);
       set("VITEST", saved.VITEST);
     }
-    expect(scopeRow(scopeId).status).toBe("awaiting_funding");
-    expect(store.count()).toBe(0);
+    expect(scopeRow(scopeId).status).toBe("active");
+    expect(store.count()).toBe(1);
   });
 
   it("(neg-cas) a compare-and-set that changes no row rolls the record insert back", async () => {

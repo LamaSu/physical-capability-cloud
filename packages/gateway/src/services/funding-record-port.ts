@@ -12,15 +12,13 @@
  * activates the scope, so the record and the activation commit together or not at all. (The Stage-1
  * verifier may store one first; reconcilePaidScope then inserts nothing and only activates.)
  *
- * Production wiring: NONE. Q9 supplies the escrow_funding table and SQLite store, but S1.2 wires
- * the production writer later: fundingRecordStore() answers
- * null there, and every reader fails closed. buyerFundingVerdict refuses every real escrow
- * (escrow_not_buyer_funded, exactly as before), and reconcilePaidScope refuses with
- * funding_record_store_unavailable. A test process may install a store; one installed is never
- * consulted outside a test process.
+ * Production wiring: outside a test process, fundingRecordStore() answers the SQLite store
+ * (sqlite-funding-record-store.ts), constructed lazily on first use. A test process answers only
+ * an installed store, or null. An installed test store is never consulted outside a test process.
  */
 import type { StoreDB } from "@pcc/store";
 import { isTestProcess } from "./settlement-mode.js";
+import { SqliteFundingRecordStore } from "./sqlite-funding-record-store.js";
 
 /** The caller's open transaction (the callback argument of StoreDB.transaction). */
 export type FundingTx = Parameters<Parameters<StoreDB["transaction"]>[0]>[0];
@@ -88,6 +86,7 @@ export interface FundingRecordStore {
 }
 
 let testStore: FundingRecordStore | null = null;
+let productionStore: FundingRecordStore | null = null;
 
 /**
  * The key a store keeps and finds a funding record by: its chain and its escrow address, folded to
@@ -118,17 +117,17 @@ function normalised(store: FundingRecordStore): FundingRecordStore {
 }
 
 /**
- * The store records are read from and written to, or null when there is none. Outside a test
- * process there is none (production wiring follows in S1.2), whatever was installed. Every insert and escrow lookup
- * through it is normalised (fundingEscrowKey).
+ * Outside a test process, the lazily constructed SQLite singleton; in a test process, only an
+ * installed store, or null. Every insert and escrow lookup is normalised (fundingEscrowKey).
  */
 export function fundingRecordStore(): FundingRecordStore | null {
-  return isTestProcess() && testStore ? normalised(testStore) : null;
+  if (isTestProcess()) return testStore ? normalised(testStore) : null;
+  return productionStore ??= normalised(new SqliteFundingRecordStore());
 }
 
 /**
  * Installs (or, with null, removes) the store a TEST process reads and writes. Throws in any other
- * process, so production keeps no store.
+ * process, so production uses only its SQLite store.
  */
 export function __setFundingRecordStoreForTest(store: FundingRecordStore | null): void {
   if (!isTestProcess()) throw new Error("funding record store: test processes only");

@@ -4,7 +4,7 @@ import { classifySettlementRead, statusPillText } from "@pcc/spec";
 import { AmountDisplay, DataCell, EmptyState, GlassPanel, GlowBadge, LoadingShell, ProgressArc, StatusChip } from "@pcc/ui";
 import { useEscrows, useGatewayHealth, useJobs, useKernels, useProductHome } from "../api/hooks/use-pcc-data.js";
 import { EscrowAmount } from "../components/EscrowAmount.js";
-import { UnavailableState } from "../components/ReadState.js";
+import { SKIPPED_ESCROWS_NOTICE, UnavailableState } from "../components/ReadState.js";
 import { formatCount, isActiveJob, isKernelOnline, JOBS_PAGE_SIZE, mayBeTruncated } from "../lib/live-list.js";
 import { moneyToneColor } from "../lib/money-badge.js";
 import { useUIStore } from "../stores/ui-store.js";
@@ -65,7 +65,8 @@ export function DashboardPage() {
 
   const jobs = jobsQuery.isError ? undefined : jobsQuery.data;
   const kernels = kernelsQuery.isError ? undefined : kernelsQuery.data;
-  const escrows = escrowsQuery.isError ? undefined : escrowsQuery.data;
+  const escrows = escrowsQuery.isError ? undefined : escrowsQuery.data?.items;
+  const skipped = escrowsQuery.data?.skipped ?? 0;
   const retry = () => { void jobsQuery.refetch(); void kernelsQuery.refetch(); void escrowsQuery.refetch(); };
   if (!jobs && !kernels && !escrows) {
     return <GlassPanel padding="lg"><UnavailableState what="the Command Center" error={jobsQuery.error ?? kernelsQuery.error ?? escrowsQuery.error} onRetry={retry} /></GlassPanel>;
@@ -75,7 +76,7 @@ export function DashboardPage() {
   const online = kernels?.filter(isKernelOnline).length;
   const activeJobs = jobs?.filter(isActiveJob);
   const truncated = jobs ? mayBeTruncated(jobs) : false;
-  const empty = jobsQuery.isSuccess && kernelsQuery.isSuccess && escrowsQuery.isSuccess && !jobs?.length && !kernels?.length && !escrows?.length;
+  const empty = jobsQuery.isSuccess && kernelsQuery.isSuccess && escrowsQuery.isSuccess && !jobs?.length && !kernels?.length && !escrows?.length && skipped === 0;
 
   return (
     <div className="space-y-6">
@@ -88,13 +89,16 @@ export function DashboardPage() {
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <GlassPanel padding="lg" hover glow={activeJobs?.length ? "green" : undefined} onClick={() => navigate("/jobs")}>
           <DataCell label="Active Jobs" value={activeJobs ? formatCount(activeJobs.length, truncated) : <UnavailableFigure />} sub={jobs ? jobs.length ? `${formatCount(jobs.filter((job) => job.status === "completed").length, truncated)} completed` : "none yet" : "unavailable"} mono />
+          <p className="text-xs text-white/30">Your account's jobs, as the gateway records them.</p>
         </GlassPanel>
         <GlassPanel padding="lg" hover glow={online ? "green" : undefined} onClick={() => navigate("/kernels")}>
           <DataCell label="Kernels Online" value={kernels ? `${online}/${kernels.length}` : <UnavailableFigure />} sub={kernels ? kernels.length ? `${online} with a fresh heartbeat` : "none registered" : "unavailable"} mono />
+          <p className="text-xs text-white/30">Every account's kernels, as the gateway records them.</p>
         </GlassPanel>
         <HeldInEscrow />
         <GlassPanel padding="lg" hover onClick={() => navigate("/escrow")}>
-          <DataCell label="Escrows" value={escrows ? escrows.length : <UnavailableFigure />} sub={escrows ? "open the list for each escrow's state" : "unavailable"} mono />
+          <DataCell label="Escrows" value={escrows ? formatCount(escrows.length, skipped > 0) : <UnavailableFigure />} sub={escrows ? "open the list for each escrow's state" : "unavailable"} mono />
+          <p className="text-xs text-white/30">Every account's escrows, as the gateway records them.</p>
         </GlassPanel>
       </div>
       {empty ? (
@@ -130,7 +134,8 @@ export function DashboardPage() {
               <h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider">Escrows</h2>
               <button className="text-xs text-teal-400/60 hover:text-teal-400/90" onClick={() => navigate("/escrow")}>View all</button>
             </div>
-            {!escrows ? <UnavailableState what="escrows" error={escrowsQuery.error} onRetry={() => void escrowsQuery.refetch()} /> : escrows.length === 0 ? (
+            {escrows && skipped > 0 && <p role="status" className="text-xs text-amber-200/70">{SKIPPED_ESCROWS_NOTICE(skipped)}</p>}
+            {!escrows ? <UnavailableState what="escrows" error={escrowsQuery.error} onRetry={() => void escrowsQuery.refetch()} /> : escrows.length === 0 && skipped === 0 ? (
               <EmptyState title="No escrows" description="Escrows are created when jobs are submitted with milestone-based payment." />
             ) : (
               <div className="space-y-1">

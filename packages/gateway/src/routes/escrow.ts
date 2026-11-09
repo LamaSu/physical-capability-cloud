@@ -22,6 +22,7 @@ import {
   encodeApproveAndReleaseV3,
 } from "../contracts/escrow-client.js";
 import { getRepos } from "../db.js";
+import { isBuyerFundedEscrowRow, ESCROW_BUYER_FUNDED } from "../services/buyer-funded-escrow.js";
 
 /**
  * Look up an escrow row by its on-chain contract address. The single DB query
@@ -49,14 +50,17 @@ function findEscrowRow(contractAddress: string) {
 }
 
 /**
- * Determine the dispatch target (V2 or V3 write helpers) for an escrow.
- * Returns "v2" by default when the row is missing (pre-migration rows had no
- * version column and default to v2).
+ * Dispatch known rows to V2 or V3; buyer-funded and unknown versions refuse writes.
+ * Missing rows and unavailable lookups retain the existing V2 fallback. A null version means V2.
  */
-function resolveEscrowVersion(contractAddress: string): "v2" | "v3" {
+function resolveEscrowVersion(contractAddress: string): "v2" | "v3" | "buyer_funded" | "unknown" {
   try {
     const row = findEscrowRow(contractAddress);
-    return (row?.version as "v2" | "v3" | null | undefined) === "v3" ? "v3" : "v2";
+    if (!row) return "v2";
+    if (row.version === "v3") return "v3";
+    if (row.version === "v2" || row.version === null) return "v2";
+    if (isBuyerFundedEscrowRow(row)) return "buyer_funded";
+    return "unknown";
   } catch {
     return "v2";
   }
@@ -287,6 +291,12 @@ export async function escrowRoutes(app: FastifyInstance) {
             "Funding is limited to protocol-created escrows.",
         });
       }
+      if (isBuyerFundedEscrowRow(escrowRow)) {
+        return reply.status(409).send({
+          error: ESCROW_BUYER_FUNDED,
+          message: "Buyer-funded escrows must be funded by their buyer's wallet.",
+        });
+      }
       const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
       const activityResult = await fundEscrowActivity.invoke({
         workflowRunId: `escrow:${address}`,
@@ -369,6 +379,12 @@ export async function escrowRoutes(app: FastifyInstance) {
         }
         try {
           const version = resolveEscrowVersion(address);
+          if (version === "buyer_funded") {
+            return reply.status(409).send({ error: ESCROW_BUYER_FUNDED, message: "Buyer-funded escrows do not use gateway-key settlement writes." });
+          }
+          if (version === "unknown") {
+            return reply.status(409).send({ error: "escrow_version_unknown", message: "The escrow version is not supported for gateway-key settlement writes." });
+          }
           const result =
             version === "v3"
               ? await releaseMilestoneV3(idx, address as Address)
@@ -572,6 +588,12 @@ export async function escrowRoutes(app: FastifyInstance) {
         }
         try {
           const version = resolveEscrowVersion(address);
+          if (version === "buyer_funded") {
+            return reply.status(409).send({ error: ESCROW_BUYER_FUNDED, message: "Buyer-funded escrows do not use gateway-key settlement writes." });
+          }
+          if (version === "unknown") {
+            return reply.status(409).send({ error: "escrow_version_unknown", message: "The escrow version is not supported for gateway-key settlement writes." });
+          }
           const result =
             version === "v3"
               ? await submitAttestationV3(idx, easUid as `0x${string}`, address as Address)

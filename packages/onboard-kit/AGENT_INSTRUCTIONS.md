@@ -86,7 +86,7 @@ You are creating a **Shop Kernel** — the PCC equivalent of an AWS Availability
 
 ### Install PCC packages
 ```bash
-pnpm add @pcc/spec @pcc/kernel @pcc/a2a @pcc/agent-runtime @pcc/agent-kernel @pcc/contract-builder @pcc/onboard-kit
+# These packages are not on npm: build them in a clone of the PCC repo (pnpm install && pnpm build) and link them into your project.
 ```
 
 ### Environment
@@ -1046,7 +1046,7 @@ For production, agents connect via the Gateway's WebSocket relay:
 import { NetworkTransport } from "@pcc/a2a";
 
 const transport = new NetworkTransport({
-  relayUrl: "http://gateway.pcc.network:3200",  // PCC Gateway URL
+  relayUrl: process.env.PCC_GATEWAY_URL!,  // the PCC gateway URL you were given
   agentId: kernelAgent.id,
   reconnectInterval: 3000,   // auto-reconnect every 3s
 });
@@ -1534,16 +1534,9 @@ describe("E2E Agent Flow", () => {
 
 ```bash
 # Run the onboard-kit validation
-npx pcc-onboard validate --kernel-config ./kernel-config.json
+pcc-onboard validate --config ./kernel-config.json   # from a built clone of the PCC repo: the package is not on npm
 
-# This checks:
-# ✓ All adapters implement required interfaces
-# ✓ Capabilities have valid types, materials, pricing
-# ✓ Evidence emitter produces valid bundles
-# ✓ Bundle hashes are correct (canonical JSON SHA-256)
-# ✓ Machine profiles match capability templates
-# ✓ Wallet can sign messages
-# ✓ Kernel agent registers and responds to intents
+# This checks the config file's fields only. It runs no adapter, evidence emitter, wallet or agent.
 ```
 
 ---
