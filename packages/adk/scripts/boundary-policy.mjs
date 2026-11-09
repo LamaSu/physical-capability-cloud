@@ -1,3 +1,6 @@
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
+
 /**
  * The boundary policy of the clean external install check (ledger R4 D1;
  * verdict 101 F6). Pure functions with no side effects on import, so the unit
@@ -6,15 +9,21 @@
  * - manifestProblems: one packed package.json. Every dependency spec is
  *   resolved to the registry package it installs (an `npm:` alias counts as
  *   its target), and anything that is not a registry range is refused.
- * - installedProblems: every package actually installed in the consumer
- *   project, by its real name, so a transitive dependency is checked too.
+ * - installedPackages: every package installed in the consumer project, by
+ *   the name in its own package.json, including any package bundled inside
+ *   another (a nested node_modules), at any depth (verdict 101b).
+ * - installedProblems: every installed package, so a transitive dependency
+ *   is checked too, and a bundled one is refused: it is in no dependency list.
  * - ALLOWED_OPTIONAL_PEERS: package-specific exceptions with reasons.
  *   manifestProblems allows a listed chain client only as an optional peer,
  *   refuses other optional peers, and installedPeerProblems rejects a listed
  *   peer if it is installed.
- * - payloadProblems: the tarball's file list against an allowlist. Only
- *   package.json, README, LICENSE and build output under dist/ that has a
- *   source file under src/ may ship, so a stale or stray file fails.
+ * - payloadProblems: the tarball's file list. Only package.json, README,
+ *   LICENSE and build output under dist/ may ship; each dist/ file needs a
+ *   source under src/ (so stale output fails) AND a pattern in the package's
+ *   publication manifest (scripts/publication-manifest.json), so a file
+ *   ships because the package chose to publish it, not because a source
+ *   happens to exist (verdict 101b).
  * - contentProblems: each payload file's text against secret patterns.
  */
 
@@ -131,14 +140,179 @@ export function manifestProblems(name, pj, { packed, privateNames }) {
   return problems;
 }
 
-/** Problems with the packages installed in the consumer project: `[{ name, version, dir }]`, by real name. */
+/** Every entry in a store's node_modules, expanding real scope directories but not symlinked ones. */
+function packageDirs(modules) {
+  /** @type {Array<[import("node:fs").Dirent, string]>} */
+  const out = [];
+  for (const child of readdirSync(modules, { withFileTypes: true })) {
+    const dir = join(modules, child.name);
+    if (child.name.startsWith("@") && child.isDirectory()) {
+      for (const scoped of readdirSync(dir, { withFileTypes: true })) out.push([scoped, join(dir, scoped.name)]);
+    } else {
+      out.push([child, dir]);
+    }
+  }
+  return out;
+}
+
+function readPackage(dir, project) {
+  const pj = join(dir, "package.json");
+  if (!existsSync(pj)) return null;
+  const { name, version } = JSON.parse(readFileSync(pj, "utf8"));
+  return { name, version, dir: relative(project, dir) };
+}
+
+/** Whether `path` is a directory, following a symlink to its target. */
+function isDirectory(path) {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Entries in a bundled package's node_modules, with scopes expanded. Only a real .bin directory
+ * of regular command shims is harmless metadata. Any other dot-name or opaque entry is checked,
+ * including a symlinked .bin, directories hidden inside it, and .pnpm or .modules.yaml entries.
+ */
+function moduleEntries(modules) {
+  const out = [];
+  for (const child of readdirSync(modules, { withFileTypes: true })) {
+    const dir = join(modules, child.name);
+    if (child.name === ".bin" && child.isDirectory()) {
+      const shims = readdirSync(dir, { withFileTypes: true });
+      if (shims.every((shim) => shim.isFile() && shim.name !== "package.json")) continue;
+    }
+    if (child.name.startsWith("@") && isDirectory(dir)) {
+      // Inside a scope every entry, even a dot-prefixed entry, is a package candidate.
+      for (const scoped of readdirSync(dir, { withFileTypes: true })) {
+        out.push([`${child.name}/${scoped.name}`, join(dir, scoped.name)]);
+      }
+    } else {
+      out.push([child.name, dir]);
+    }
+  }
+  return out;
+}
+
+/**
+ * @typedef {{ name: any, version: any, dir: string, bundledIn?: string, opaque?: never }} PackageEntry
+ * @typedef {{ opaque: string, dir: string, bundledIn?: string, name?: never, version?: never }} OpaqueEntry
+ * @typedef {PackageEntry | OpaqueEntry} InstalledEntry
+ */
+
+/**
+ * Packages bundled inside `dir` (its own node_modules), at any depth (verdict 101c). A published
+ * package's own node_modules holds only what shipped with it, so every entry is accounted for: a
+ * readable package is recorded with `bundledIn`, and anything else -- a directory with no
+ * package.json, or a symlink that will not resolve -- is an opaque entry the policy fails closed
+ * on, never a silent skip. Symlinks are canonicalized against `seen`, so a cycle can neither spin
+ * nor hide a target the walk already passed; there is no depth limit (the README's "at any depth").
+ * @param {InstalledEntry[]} found
+ */
+function bundledPackages(dir, owner, project, found, seen) {
+  const modules = join(dir, "node_modules");
+  if (!existsSync(modules)) return;
+  for (const [name, child] of moduleEntries(modules)) {
+    let real;
+    try {
+      real = realpathSync(child);
+    } catch {
+      found.push({ opaque: `${name} is a symlink that does not resolve`, dir: relative(project, child), bundledIn: owner });
+      continue;
+    }
+    if (seen.has(real)) continue;
+    seen.add(real);
+    const pkg = readPackage(child, project);
+    if (!pkg) {
+      found.push({ opaque: `${name} has no package.json`, dir: relative(project, child), bundledIn: owner });
+      continue;
+    }
+    found.push({ ...pkg, bundledIn: owner });
+    bundledPackages(child, owner, project, found, seen);
+  }
+}
+
+/**
+ * Every package installed in a pnpm consumer project, by the name in its own package.json:
+ * `[{ name, version, dir, bundledIn? }]`. A package's own directory is a real directory under
+ * .pnpm/<id>/node_modules (its dependencies there are symlinks); anything inside the package's
+ * own node_modules was bundled with it, and carries `bundledIn`.
+ * @returns {InstalledEntry[]}
+ */
+export function installedPackages(project) {
+  const store = join(project, "node_modules", ".pnpm");
+  if (!existsSync(store)) throw new Error(`${store} is missing; the consumer was not installed by pnpm`);
+  /** @type {InstalledEntry[]} */
+  const found = [];
+  const seen = new Set();
+  const entries = [];
+  const recordedDirectories = new Set();
+
+  // Inventory real packages first: dependency links can point into store entries visited later.
+  for (const entry of readdirSync(store, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === "node_modules") continue;
+    const modules = join(store, entry.name, "node_modules");
+    if (!existsSync(modules)) continue;
+    for (const [dirent, dir] of packageDirs(modules)) {
+      // No dot-name or symlinked scope is a legitimate store package.
+      const realPackage = dirent.isDirectory() && !dirent.name.startsWith(".") && !dirent.name.startsWith("@");
+      const pkg = realPackage ? readPackage(dir, project) : null;
+      if (pkg) recordedDirectories.add(realpathSync(dir));
+      entries.push({ dirent, dir, pkg });
+    }
+  }
+
+  for (const { dirent, dir, pkg } of entries) {
+    if (pkg) {
+      found.push(pkg);
+      bundledPackages(dir, pkg.name, project, found, seen);
+      continue;
+    }
+    if (dirent.isSymbolicLink() && !dirent.name.startsWith(".") && !dirent.name.startsWith("@")) {
+      let target;
+      try {
+        target = realpathSync(dir);
+      } catch {
+        // Broken links are reported as opaque, not silently skipped.
+      }
+      if (target && recordedDirectories.has(target)) continue;
+    }
+    const reason = dirent.name.startsWith(".")
+      ? "is a dot-prefixed entry"
+      : dirent.name.startsWith("@")
+        ? "is not a real scope directory"
+        : dirent.isSymbolicLink()
+          ? "does not link to a recorded package directory"
+          : dirent.isDirectory()
+            ? "has no package.json"
+            : "is not a package directory";
+    found.push({ opaque: `${dirent.name} ${reason}`, dir: relative(project, dir) });
+  }
+  return found;
+}
+
+/** Problems with the packages installed in the consumer project: `[{ name, version, dir, bundledIn? }]`. */
 export function installedProblems(installed, { packed }) {
   const problems = [];
-  for (const { name, version, dir } of installed) {
+  for (const entry of installed) {
+    if (entry.opaque) {
+      // The walk could not read into an entry under a package's own node_modules. Fail closed:
+      // the public kit must not ship something the graph check cannot see into (verdict 101c).
+      if (entry.bundledIn) {
+        problems.push(`installed graph has an opaque entry at ${entry.dir}, bundled inside ${entry.bundledIn}: ${entry.opaque}`);
+      } else {
+        problems.push(`installed graph has an opaque store entry at ${entry.dir}: ${entry.opaque}`);
+      }
+      continue;
+    }
+    const { name, version, dir, bundledIn } = entry;
     const where = `${name}@${version} (${dir})`;
     if (typeof name !== "string" || name === "") problems.push(`installed package without a name at ${dir}`);
     else if (isChainClient(name)) problems.push(`installed graph contains chain client ${where}`);
     else if (name.startsWith("@pcc/") && !packed.has(name)) problems.push(`installed graph contains ${where}, which is not part of the public kit`);
+    if (bundledIn) problems.push(`installed graph contains ${where}, bundled inside ${bundledIn}: a bundled package is in no dependency list`);
   }
   return problems;
 }
@@ -165,12 +339,31 @@ const OUTPUTS = [
 ];
 const SAFE_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
 
+/** A glob as a RegExp: `**` spans directories, `*` stays within one segment. */
+function globRegExp(glob) {
+  let out = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*" && glob[i + 1] === "*") {
+      out += glob[i + 2] === "/" ? "(?:[^/]+/)*" : ".*";
+      i += glob[i + 2] === "/" ? 2 : 1;
+    } else if (c === "*") {
+      out += "[^/]*";
+    } else {
+      out += /[\\^$.|?+()[\]{}]/.test(c) ? `\\${c}` : c;
+    }
+  }
+  return new RegExp(`^${out}$`);
+}
+
 /**
  * Problems with one tarball's file list (paths inside the tarball, without
  * the leading "package/"). `hasSource(path)` says whether the package's own
- * directory has that file.
+ * directory has that file; `allowed` is the package's publication manifest
+ * (globs). A dist/ file must have both.
  */
-export function payloadProblems(name, files, { hasSource }) {
+export function payloadProblems(name, files, { hasSource, allowed = [] }) {
+  const published = allowed.map(globRegExp);
   const problems = [];
   for (const file of files) {
     if (TOP_LEVEL_FILES.test(file)) continue;
@@ -190,6 +383,7 @@ export function payloadProblems(name, files, { hasSource }) {
     }
     const source = `src/${file.slice("dist/".length, file.length - output[0].length)}${output[1]}`;
     if (!hasSource(source)) problems.push(`${name}: ${file} has no source ${source}; stale build output?`);
+    else if (!published.some((re) => re.test(file))) problems.push(`${name}: ${file} is not in the package's publication manifest`);
   }
   return problems;
 }
