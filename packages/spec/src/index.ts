@@ -38,3 +38,4 @@ export * from "./money/money-status.js";
 export * from "./readmodels/job-execution.js";
 export * from "./readmodels/operator-work.js";
 export * from "./readmodels/product-home.js";
+export * from "./readmodels/capability-observations.js";
