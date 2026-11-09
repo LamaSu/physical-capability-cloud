@@ -9,7 +9,7 @@ import {
   type FundingRefusalCode, type ReclaimUnitsArgs, type SendResult,
 } from "../../funding/index.js";
 import { ESCROW_ABI } from "../../funding/vnext.js";
-import { NOW, OTHER, buildFixture, makeChain, revertWith, testPins, type FixtureOptions } from "./fixture.js";
+import { NOW, OTHER, buildFixture, cloneRuntime, makeChain, revertWith, testPins, type FixtureOptions } from "./fixture.js";
 
 // Copied from the Solidity declarations, independently of the SDK ABI used to make the calls.
 const CONTRACT_ABI = parseAbi([
@@ -149,7 +149,7 @@ describe("buyer reclaim and unit reads", () => {
   it.each([
     ["another payer", "PAYER_NOT_SIGNER"], ["no code", "ESCROW_NOT_CREATED"],
     ["other code", "DEPLOYMENT_MISMATCH"], ["no factory pin", "FACTORY_NOT_PINNED"],
-    ["accountless wallet", "PAYER_NOT_SIGNER"],
+    ["accountless wallet", "PAYER_NOT_SIGNER"], ["a clone of another implementation", "DEPLOYMENT_MISMATCH"],
   ] as const)("R7 hostile target: %s", async (row, code) => {
     const { args, chain, fx } = await setup();
     if (row === "another payer") chain.on(fx.escrow, CONTRACT_ABI, "payer", () => OTHER);
@@ -157,6 +157,7 @@ describe("buyer reclaim and unit reads", () => {
     if (row === "other code") chain.state.code.set(fx.escrow.toLowerCase(), "0x6080");
     if (row === "no factory pin") args.pins = undefined;
     if (row === "accountless wallet") args.wallet = chain.accountless();
+    if (row === "a clone of another implementation") chain.state.code.set(fx.escrow.toLowerCase(), cloneRuntime(OTHER));
     await refusal(reclaimUnits(args), code);
     expect(chain.sends()).toHaveLength(0);
   });
@@ -243,6 +244,55 @@ describe("buyer reclaim and unit reads", () => {
     expect(chain.sends()).toHaveLength(1);
   });
 
+  it("R9 a local refusal before broadcast stops later sends", async () => {
+    const { args, chain } = await setup();
+    chain.state.fillChainId = 1;
+    const result = await reclaimUnits(args);
+    expect(result.results[0]).toMatchObject({ outcome: "unchanged", refunded: false, send: { kind: "not_sent" } });
+    expect(result.results[1]).toMatchObject({ outcome: "unchanged", send: { kind: "not_sent",
+      reason: "not sent: an earlier reclaim in this call is unresolved" } });
+    expect(chain.state.log.filter((x) => x.method === "eth_fillTransaction")).toHaveLength(1);
+    expect(chain.sends()).toHaveLength(0);
+  });
+
+  it("R9 a send that throws is unknown, never not_sent, and stops later sends", async () => {
+    const { args, chain } = await setup();
+    chain.state.failSend = true;
+    const result = await reclaimUnits(args);
+    expect(result.results[0]).toMatchObject({ outcome: "indeterminate", refunded: false, send: { kind: "unknown" }, readBack: { state: 1 } });
+    expect(result.results[1]).toMatchObject({ outcome: "unchanged", send: { kind: "not_sent",
+      reason: "not sent: an earlier reclaim in this call is unresolved" } });
+    expect(chain.sends()).toHaveLength(1);
+  });
+
+  it("R9 an unresolved send reads back at the latest block, not the pinned one", async () => {
+    const { args, chain } = await setup();
+    const pin = chain.state.block.hash;
+    chain.state.receipts = ["none"];
+    chain.state.afterSend = () => { chain.advanceBlock(); };
+    const result = await reclaimUnits(args);
+    for (const unit of result.results) expect(unit.readBack.blockHash).toBe(chain.state.block.hash);
+    expect(chain.state.block.hash).not.toBe(pin);
+  });
+
+  it("R9 a wallet chain switch after the simulations refuses before the first send", async () => {
+    const { args, chain, fx } = await setup();
+    let simulations = 0;
+    chain.on(fx.escrow, CONTRACT_ABI, "reclaimAfterDeadline", () => { if (++simulations === 2) chain.state.walletChainId++; return undefined; });
+    await refusal(reclaimUnits(args), "CHAIN_MISMATCH");
+    expect(simulations).toBe(2);
+    expect(chain.sends()).toHaveLength(0);
+  });
+
+  it("R8 MAX_UNITS is inclusive: 16 units are read, reclaimed and sent", async () => {
+    const { args, chain, settle } = await setup({ reclaimAt: Array.from({ length: 16 }, () => NOW - 1n) });
+    settle();
+    const result = await reclaimUnits(args);
+    expect(result.results).toHaveLength(16);
+    for (const unit of result.results) expect(unit).toMatchObject({ outcome: "reclaimed", refunded: true });
+    expect(chain.sends()).toHaveLength(16);
+  }, 60_000);
+
   it("R11 an allocated claim is reclaimed but not yet refunded", async () => {
     const { args, settle } = await setup({ reclaimAt: [NOW - 1n] });
     settle(7);
@@ -266,6 +316,9 @@ describe("buyer reclaim and unit reads", () => {
     ["reverted", 2, "indeterminate"], ["reverted", "unreadable", "indeterminate"],
   ] as const)("R12 classify %s + %s -> %s", (send, state, outcome) => {
     expect(classifyReclaim(sends[send]!, state)).toBe(outcome);
+  });
+  it.each(Object.keys(sends))("R12 classify %s + a release-side or unknown state -> indeterminate", (send) => {
+    for (const state of [0, 3, 4, 5, 6, 8, 12]) expect(classifyReclaim(sends[send]!, state)).toBe("indeterminate");
   });
 
   it("R13 reads every unit and its deadline at one hash, including unknown states", async () => {
