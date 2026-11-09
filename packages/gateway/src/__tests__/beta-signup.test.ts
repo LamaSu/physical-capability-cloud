@@ -35,6 +35,7 @@ beforeEach(async () => {
   resetLimits?.();
   vi.stubEnv("WAITLIST_ADMIN_TOKEN", ADMIN_TOKEN);
   app = Fastify({ logger: false });
+  app.addHook("onSend", async (_request, _reply, payload) => { await new Promise(resolve => setImmediate(resolve)); return payload; });
   await app.register(waitlistRoutes);
   await app.ready();
 });
@@ -159,6 +160,10 @@ describe("the beta signup", () => {
     ["a name with U+2066", { ...D, name: `Ann${String.fromCharCode(0x2066)}` }, "application/json"],
     ["a name with U+0085", { ...D, name: `Ann${String.fromCharCode(0x85)}` }, "application/json"],
     ["a name with U+200F", { ...D, name: `Ann${String.fromCharCode(0x200f)}` }, "application/json"],
+    ["a name with U+061C", { ...D, name: `Ann${String.fromCharCode(0x061c)}` }, "application/json"],
+    ["a name with U+200E", { ...D, name: `Ann${String.fromCharCode(0x200e)}` }, "application/json"],
+    ["a name with U+007F", { ...D, name: `Ann${String.fromCharCode(0x7f)}` }, "application/json"],
+    ["a name with U+009F", { ...D, name: `Ann${String.fromCharCode(0x9f)}` }, "application/json"],
     ['role "admin"', { ...D, role: "admin" }, "application/json"],
     ['role ["buyer"]', { ...D, role: ["buyer"] }, "application/json"],
     ["no role", { name: D.name, email: D.email }, "application/json"],
