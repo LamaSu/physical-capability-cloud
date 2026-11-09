@@ -140,3 +140,52 @@ it("the driver dashboard shows an order and its addresses as text", async () => 
   expectText("#queue .from", name);
   expectText("#queue .to", value);
 });
+
+it("the operator status page shows agent card links and error replies as text", async () => {
+  fetchMock.mockResolvedValueOnce(new Response(name, { status: 502 }));
+  boot("operator-status.html", "?slug=x");
+  await vi.waitFor(() => expect(page.document.querySelector("#out .error")).not.toBeNull());
+  expectText("#out", name);
+  const url = 'https://x/" onmouseover="window.__hit=1';
+  fetchMock.mockResolvedValueOnce(Response.json({
+    operatorSlug: "x",
+    status: "ready",
+    totals: {
+      kernelCount: 0,
+      capabilityCount: 0,
+      channelCount: 0,
+      enabledChannelCount: 0,
+      humanLaneCount: 0,
+      machineLaneCount: 0,
+    },
+    kernels: [],
+    capabilities: [],
+    channels: [],
+    agentCardUrls: [url],
+  }));
+  page.document.querySelector("#form")!.dispatchEvent(new page.Event("submit", { cancelable: true }));
+  await vi.waitFor(() => expect(page.document.querySelector("#out .acard-link")).not.toBeNull());
+  expectText("#out", url);
+  expect.soft(page.document.querySelector("[onmouseover]")).toBeNull();
+  expect.soft(page.document.querySelector("#out .acard-link")!.getAttribute("href")).toBe(url);
+});
+
+it("the observability board shows a delivery location as text", async () => {
+  const deliveryLocation = { lat: name, lng: value };
+  fetchMock.mockResolvedValueOnce(Response.json({
+    orders: [{
+      ...order().order,
+      status: "delivered",
+      deliveryLocation,
+      timeline: [{
+        step: "pizza_delivered",
+        at: "2026-01-01T12:00:00.000Z",
+        detail: { gps: deliveryLocation },
+      }],
+    }],
+  }));
+  boot("pizza-observability.html");
+  await vi.waitFor(() => expect(page.document.querySelector("#orders .ocard")).not.toBeNull());
+  (page.document.querySelector('#orders [data-step="pizza_delivered"]') as HTMLButtonElement).click();
+  expectText("#orders .ocard", name, value);
+});
