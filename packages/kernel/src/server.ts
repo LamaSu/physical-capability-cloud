@@ -240,7 +240,7 @@ if (isMain) {
     app.listen({ port: PORT, host: "0.0.0.0" }).then(() => {
       console.log(`Shop Kernel listening on port ${PORT}`);
     });
-  }).catch(console.error);
+  }).catch((err) => { console.error(err); process.exitCode = 1; });
 }
 
 export { buildServer };

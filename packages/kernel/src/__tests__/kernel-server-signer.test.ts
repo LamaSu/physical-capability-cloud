@@ -1,3 +1,6 @@
+import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import * as Sentry from "@sentry/node";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -49,6 +52,19 @@ describe("N267 kernel server signer admission", () => {
     const { buildServer } = await imported;
     await expect(buildServer()).rejects.toThrow("Failed to parse KERNEL_CONFIG env var as JSON:");
   });
+
+  it("the kernel server exits non-zero when its config can't be parsed", () => {
+    const result = spawnSync(process.execPath, [createRequire(import.meta.url).resolve("tsx/cli"), "src/server.ts"], {
+      cwd: fileURLToPath(new URL("../../", import.meta.url)),
+      env: { KERNEL_CONFIG: "{not json", TMPDIR: process.env.TMPDIR },
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("Failed to parse KERNEL_CONFIG env var as JSON:");
+  }, 15_000);
 
   it("J10 execute outside production starts the runner", async () => {
     vi.stubEnv("NODE_ENV", "test");

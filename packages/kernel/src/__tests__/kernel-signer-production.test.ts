@@ -7,7 +7,7 @@ import nacl from "tweetnacl";
 import ts from "typescript";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IppAdapter } from "../adapters/ipp-adapter.js";
-import { EvidenceEmitter } from "../evidence-emitter.js";
+import { EvidenceEmitter, EvidenceSignerRequiredError } from "../evidence-emitter.js";
 import type { EvidenceStorageService } from "../evidence-storage.js";
 import { JobRunner } from "../job-runner.js";
 import { createIppPrintKernel, makeKernelEd25519Signer, runPrintJob } from "../printer-job.js";
@@ -80,6 +80,19 @@ describe("N267 production signer admission", () => {
     }
   });
 
+  it("production JobRunner refuses the test signer before conflicting input hashes", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const emitter = new EvidenceEmitter("k");
+    const device = new FakeDevice("signer-device", "k", { declaredCommands: ["load_gcode", "start", "stop", "status"] });
+    try {
+      await expect(new JobRunner(device, [], null, emitter).run({ ...job, inputHash: job.gcodeHash })).resolves.toEqual({
+        success: false, error: requiredMessage, durationMs: expect.any(Number),
+      });
+    } finally {
+      await device.dispose();
+    }
+  });
+
   it("J2 refuses runPrintJob before start or step registration", async () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.useFakeTimers();
@@ -123,6 +136,12 @@ describe("N267 production signer admission", () => {
     expect(listener).not.toHaveBeenCalled();
     expect(archiveBundle).not.toHaveBeenCalled();
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("production finalizeBundle refuses the test signer before looking up an unregistered step", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const emitter = new EvidenceEmitter("k");
+    await expect(emitter.finalizeBundle(job.jobId, job.stepId)).rejects.toBeInstanceOf(EvidenceSignerRequiredError);
   });
 
   it("J5 construction and the barrel import stay safe in production", async () => {
