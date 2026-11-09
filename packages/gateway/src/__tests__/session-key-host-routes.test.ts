@@ -1,3 +1,4 @@
+import { signInWithIssuedMessage } from "./helpers/siwe-sign-in.js";
 import { createPrivateKey, createPublicKey, randomBytes, randomUUID, sign, verify } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
@@ -51,18 +52,7 @@ function ed25519Key(seed = randomBytes(32).toString("hex")) {
 }
 
 async function sessionKey(app: FastifyInstance, account: ReturnType<typeof wallet>) {
-  const host = "localhost";
-  const nonce = await app.inject({ method: "GET", url: "/api/auth/nonce", headers: { host } });
-  expect(nonce.statusCode).toBe(200);
-  const message = [
-    `${host} wants you to sign in with your Ethereum account:`, account.address,
-    "", "Sign in to PCC.", "", `URI: http://${host}`, "Version: 1", "Chain ID: 8453",
-    `Nonce: ${nonce.json().nonce}`, `Issued At: ${new Date().toISOString()}`,
-  ].join("\n");
-  const verified = await app.inject({
-    method: "POST", url: "/api/auth/verify", headers: { host },
-    payload: { message, signature: await account.signMessage({ message }) },
-  });
+  const verified = await signInWithIssuedMessage(app, account, account.address, { headers: { host: "localhost" } });
   expect(verified.statusCode).toBe(200);
   const minted = await app.inject({
     method: "POST", url: "/api/auth/session-key", headers: bearer(verified.json().token),

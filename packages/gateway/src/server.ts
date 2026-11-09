@@ -21,6 +21,7 @@ import { createOperationIdTransform } from "./openapi/operation-id.js";
 import websocket from "@fastify/websocket";
 import { initStore, closeStore, getRepos, getStore } from "./db.js";
 import { resolveListenHost } from "./config/listen-host.js";
+import { assertPublicOriginConfigured } from "./services/wallet-links/config.js";
 import { shouldSeedDemoData, warnInvalidSeedDataOverride } from "./config/seed-policy.js";
 import { capabilityRoutes } from "./routes/capabilities.js";
 import { graphSearchRoutes } from "./routes/graph-search.js";
@@ -191,6 +192,7 @@ import { jobSubmitQueueOnly, localJobDispatchDecision } from "./services/local-j
 
 export async function createGateway(port = 3200) {
   const host = resolveListenHost(process.env.PCC_LISTEN_HOST);
+  assertPublicOriginConfigured();
   warnInvalidSeedDataOverride(process.env.PCC_SEED_DATA, process.env.NODE_ENV);
   // Seed outside production by default; exact true/false overrides always win.
   initStore({ seed: shouldSeedDemoData(process.env.PCC_SEED_DATA, process.env.NODE_ENV) });

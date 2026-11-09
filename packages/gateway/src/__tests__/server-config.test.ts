@@ -116,6 +116,7 @@ describe("gateway startup configuration", () => {
 
   it("production with PCC_SEED_DATA unset seeds nothing", async () => {
     vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("PCC_PUBLIC_URL", "https://capability.network");
     vi.stubEnv("PCC_SEED_DATA", "");
     delete process.env.PCC_SEED_DATA;
     gateway = await createGateway(0);
@@ -142,4 +143,34 @@ describe("gateway startup configuration", () => {
     await expect(createGateway(0)).rejects.toThrow('Invalid PCC_LISTEN_HOST "http://localhost"');
     expect(existsSync(join(directory, "pcc.sqlite"))).toBe(false);
   }, 120_000);
+  it("T24 production refuses an unset public origin before opening the store", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("PCC_PUBLIC_URL", "");
+    delete process.env.PCC_PUBLIC_URL;
+    await expect(createGateway(0).then(created => { gateway = created; })).rejects.toThrow(
+      "PCC_PUBLIC_URL must be set to this deployment's https public origin when NODE_ENV=production",
+    );
+    expect(existsSync(join(directory, "pcc.sqlite"))).toBe(false);
+  }, 120_000);
+
+  it("T25 deployed staging refuses an unset public origin before opening the store", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("RAILWAY_ENVIRONMENT_NAME", "staging");
+    vi.stubEnv("PCC_PUBLIC_URL", "");
+    delete process.env.PCC_PUBLIC_URL;
+    await expect(createGateway(0).then(created => { gateway = created; })).rejects.toThrow(
+      "PCC_PUBLIC_URL must be set to this deployment's https public origin when NODE_ENV=production",
+    );
+    expect(existsSync(join(directory, "pcc.sqlite"))).toBe(false);
+  }, 120_000);
+
+  it.each(["development", "test"])("T26 %s boots with an unset public origin", async environment => {
+    vi.stubEnv("NODE_ENV", environment);
+    vi.stubEnv("PCC_PUBLIC_URL", "");
+    delete process.env.PCC_PUBLIC_URL;
+    gateway = await createGateway(0);
+    expect(gateway.app).toBeDefined();
+    expect(existsSync(join(directory, "pcc.sqlite"))).toBe(true);
+  }, 120_000);
+
 });

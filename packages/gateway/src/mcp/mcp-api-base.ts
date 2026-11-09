@@ -27,7 +27,7 @@ export const PCC_PRODUCTION_ORIGIN = "https://capability.network";
 export const MCP_API_BASE_ENV = "PCC_API_BASE_URL";
 
 /** True in a deployed environment (staging/production) — NOT local/test. */
-function isDeployed(): boolean {
+export function isDeployed(): boolean {
   return process.env.NODE_ENV === "production";
 }
 
