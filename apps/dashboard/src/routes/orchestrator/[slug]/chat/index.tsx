@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, Navigate } from "react-router-dom";
 import { useUIStore } from "../../../../stores/ui-store.js";
 import { authorizedFetch } from "../../../../lib/authorized-fetch.js";
+import { isNotAvailable, readNotAvailable, type NotAvailableReply } from "../../../../lib/not-available.js";
+import { NotAvailablePanel } from "../../../../components/NotAvailablePanel.js";
 import { ChatThread, type ChatMessage } from "../../../../components/onboard/ChatThread.js";
 import { ActivityFeed } from "../../../../components/onboard/ActivityFeed.js";
 import type { OnboardEvent } from "../../../../components/onboard/activity-feed-logic.js";
@@ -43,6 +45,7 @@ export function OrchestratorChatPage() {
   ]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [notAvailable, setNotAvailable] = useState<NotAvailableReply | null>(null);
   const lastEventTs = useRef(0);
   const [events, setEvents] = useState<OnboardEvent[]>([]);
 
@@ -80,6 +83,11 @@ export function OrchestratorChatPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
       });
+      const reply = await readNotAvailable(res);
+      if (reply) {
+        setNotAvailable(reply);
+        throw reply;
+      }
       if (!res.ok) throw new Error(`${path} failed: ${res.status}`);
       return res.json();
     },
@@ -150,7 +158,7 @@ export function OrchestratorChatPage() {
             append({ role: "bot", text: `Noted. Drop a URL or say "build" when ready.` });
         }
       } catch (e) {
-        append({ role: "bot", text: `error: ${e instanceof Error ? e.message : String(e)}` });
+        if (!isNotAvailable(e)) append({ role: "bot", text: `error: ${e instanceof Error ? e.message : String(e)}` });
       } finally {
         setBusy(false);
       }
@@ -174,6 +182,16 @@ export function OrchestratorChatPage() {
   // Hooks must run before any conditional return; redirect after they're set up.
   if (!template) {
     return <Navigate to="/orchestrator" replace />;
+  }
+
+  if (notAvailable) {
+    return (
+      <NotAvailablePanel
+        reply={notAvailable}
+        heading="This template is not available on this gateway"
+        fallback="This gateway does not run this template, so nothing can be started here."
+      />
+    );
   }
 
   return (
