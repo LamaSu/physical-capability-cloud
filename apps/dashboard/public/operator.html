@@ -92,6 +92,7 @@ main{position:relative;z-index:1;max-width:560px;margin:0 auto;padding:20px 18px
 <div class="toast" id="toast"></div>
 <script>
 const $=s=>document.querySelector(s);
+const esc=v=>String(v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const params=new URLSearchParams(location.search);
 const slug=params.get("shop")||"shop-roma";
 const BASE=location.origin;
@@ -117,7 +118,7 @@ function render(){
   $("#earnings").textContent="$"+S.earnings.toFixed(0);
   const q=$("#queue");
   if(active.length===0){
-    q.innerHTML=`<div class="empty"><span class="blink">▣</span> idle — waiting for the next job to come in via PCC.<br><br>(SSE topic: operator:${slug})</div>`;
+    q.innerHTML=`<div class="empty"><span class="blink">▣</span> idle — waiting for the next job to come in via PCC.<br><br>(SSE topic: operator:${esc(slug)})</div>`;
     return;
   }
   q.innerHTML=active.map(j=>{
@@ -125,19 +126,19 @@ function render(){
     return `<div class="job ${isAcc?'accepted':''}">
       <div class="job-head">
         <div><span class="pill ${isAcc?'lime':''}">${isAcc?'IN PROGRESS':'NEW ORDER'}</span>
-          <div class="t" style="margin-top:6px">${j.details.description}</div>
+          <div class="t" style="margin-top:6px">${esc(j.details.description)}</div>
         </div>
-        <div class="p">$${j.details.priceUSD}</div>
+        <div class="p">$${esc(j.details.priceUSD)}</div>
       </div>
       <div class="job-meta">
-        <span>deadline · <b>${fmtSec(j.details.deadlineSec)}</b></span>
-        <span>job · <b>${j.jobId}</b></span>
+        <span>deadline · <b>${esc(fmtSec(j.details.deadlineSec))}</b></span>
+        <span>job · <b>${esc(j.jobId)}</b></span>
       </div>
       <div class="job-actions">
         ${isAcc
-          ? `<button class="btn primary" data-act="complete" data-id="${j.jobId}">Mark done (with photo) →</button>`
-          : `<button class="btn danger" data-act="reject" data-id="${j.jobId}">Reject</button>
-             <button class="btn primary" data-act="accept" data-id="${j.jobId}">Accept →</button>`}
+          ? `<button class="btn primary" data-act="complete" data-id="${esc(j.jobId)}">Mark done (with photo) →</button>`
+          : `<button class="btn danger" data-act="reject" data-id="${esc(j.jobId)}">Reject</button>
+             <button class="btn primary" data-act="accept" data-id="${esc(j.jobId)}">Accept →</button>`}
       </div>
     </div>`;
   }).join("");
