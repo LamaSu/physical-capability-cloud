@@ -9,7 +9,7 @@
  *   GET /api/settlement/:jobId        GET /api/evidence/:jobId (the job-id form)
  *   GET /api/batches/by-job/:jobId    GET /api/telemetry/pipeline/:jobId
  *   GET /api/telemetry/logs?jobId=    GET /api/sensors/readings/:channel?jobId=
- *   GET /sse/stream/job/:jobId
+ *   GET /sse/stream/job/:jobId        GET /api/jobs/:jobId/funding
  *   GET /api/compliance/evidence/:bundleId and its /tier-compliance, on the bundle's job
  *
  * (GET /api/print-and-mail/:jobId names a courier job, not a PCC job: it runs the same
