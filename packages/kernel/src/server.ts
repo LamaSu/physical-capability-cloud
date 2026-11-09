@@ -6,7 +6,7 @@
  *   GET  /capabilities     — List capabilities
  *   POST /quote            — Get a price quote for a job
  *   POST /reserve          — Reserve a capability slot
- *   POST /execute          — Start a job on a reserved slot
+ *   POST /execute          — Start a job on a reserved slot (503 in production: kernel_signer_required)
  *   GET  /jobs/:id         — Get job status
  *   GET  /jobs/:id/evidence — Get evidence bundle for a completed job
  *   POST /handoff          — Initiate custody handoff
@@ -16,87 +16,87 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import type { Capability, CapabilitySlot, KernelJob, CustodyEvent, EvidenceBundle } from "@pcc/spec";
 import { ids } from "@pcc/spec";
-import { EvidenceEmitter } from "./evidence-emitter.js";
+import { EvidenceEmitter, refusesTestSigner } from "./evidence-emitter.js";
 import { JobRunner } from "./job-runner.js";
 import { loadKernelConfig } from "./kernel-config.js";
 import { createAdaptersFromConfig } from "./adapter-factory.js";
 
 const PORT = parseInt(process.env.PORT ?? "3100", 10);
 
-// ---- Load kernel configuration (env → file → mock defaults) ----
-const kernelConfig = loadKernelConfig();
-const KERNEL_ID = kernelConfig.kernelId;
-
-// ---- Instantiate adapters from config ----
-const { machines, sensors, cameras } = createAdaptersFromConfig(kernelConfig);
-
-// Pick primary machine, sensors and camera (first of each type for now)
-const fdm = machines[0];
-const powerMonitor = sensors[0];
-const camera = cameras[0] ?? null;
-const evidenceEmitter = new EvidenceEmitter(KERNEL_ID);
-
-// Log what was instantiated
-console.log(
-  `[kernel] ${KERNEL_ID} — adapters: ` +
-  `machines=[${machines.map((m) => `${m.id}(${m.constructor.name})`).join(", ")}] ` +
-  `sensors=[${sensors.map((s) => `${s.id}(${s.constructor.name})`).join(", ")}] ` +
-  `cameras=[${cameras.map((c) => `${c.id}(${c.constructor.name})`).join(", ")}]`,
-);
-
-// ---- State (in-memory for v1; swap to SQLite/Postgres later) ----
-const capabilities: Capability[] = [];
-const jobs: Map<string, KernelJob> = new Map();
-const bundles: Map<string, EvidenceBundle> = new Map();
-const custodyEvents: Map<string, CustodyEvent[]> = new Map();
-
-// Register a mock capability
-capabilities.push({
-  id: ids.capability(),
-  kernelId: KERNEL_ID,
-  type: "fdm",
-  name: "Mock Prusa MK4 FDM Printer",
-  description: "Simulated FDM printer for development",
-  materials: ["pla", "petg", "abs", "tpu"],
-  tolerances: { linear: "±0.1mm", surface: "Ra 12.5" },
-  envelope: { x: 250, y: 210, z: 210, unit: "mm" },
-  assuranceTiers: [0, 1, 2],
-  pricing: {
-    currency: "USDC",
-    baseCost: "2.00",
-    perMinute: "0.05",
-    perGram: "0.03",
-    minimum: "5.00",
-  },
-  availability: {
-    timezone: "America/New_York",
-    windows: {
-      "1": [{ start: "2026-01-01T08:00:00Z", end: "2026-01-01T22:00:00Z" }],
-      "2": [{ start: "2026-01-01T08:00:00Z", end: "2026-01-01T22:00:00Z" }],
-      "3": [{ start: "2026-01-01T08:00:00Z", end: "2026-01-01T22:00:00Z" }],
-      "4": [{ start: "2026-01-01T08:00:00Z", end: "2026-01-01T22:00:00Z" }],
-      "5": [{ start: "2026-01-01T08:00:00Z", end: "2026-01-01T22:00:00Z" }],
-    },
-  },
-  location: { lat: 40.7128, lng: -74.006 },
-  queueDepth: 0,
-  tags: ["fdm", "prototyping", "pla"],
-});
-
-// Listen for finalized bundles
-evidenceEmitter.onBundle((bundle) => {
-  bundles.set(bundle.jobId, bundle);
-  const job = jobs.get(bundle.jobId);
-  if (job) {
-    job.evidenceBundleId = bundle.id;
-    job.status = "awaiting_pickup";
-    job.completedAt = new Date().toISOString();
-    job.progress = 100;
-  }
-});
-
 // ---- Server ----
 async function buildServer() {
+  // ---- Load kernel configuration (env → file → mock defaults) ----
+  const kernelConfig = loadKernelConfig();
+  const KERNEL_ID = kernelConfig.kernelId;
+
+  // ---- Instantiate adapters from config ----
+  const { machines, sensors, cameras } = createAdaptersFromConfig(kernelConfig);
+
+  // Pick primary machine, sensors and camera (first of each type for now)
+  const fdm = machines[0];
+  const powerMonitor = sensors[0];
+  const camera = cameras[0] ?? null;
+  const evidenceEmitter = new EvidenceEmitter(KERNEL_ID);
+
+  // Log what was instantiated
+  console.log(
+    `[kernel] ${KERNEL_ID} — adapters: ` +
+    `machines=[${machines.map((m) => `${m.id}(${m.constructor.name})`).join(", ")}] ` +
+    `sensors=[${sensors.map((s) => `${s.id}(${s.constructor.name})`).join(", ")}] ` +
+    `cameras=[${cameras.map((c) => `${c.id}(${c.constructor.name})`).join(", ")}]`,
+  );
+
+  // ---- State (in-memory for v1; swap to SQLite/Postgres later) ----
+  const capabilities: Capability[] = [];
+  const jobs: Map<string, KernelJob> = new Map();
+  const bundles: Map<string, EvidenceBundle> = new Map();
+  const custodyEvents: Map<string, CustodyEvent[]> = new Map();
+
+  // Register a mock capability
+  capabilities.push({
+    id: ids.capability(),
+    kernelId: KERNEL_ID,
+    type: "fdm",
+    name: "Mock Prusa MK4 FDM Printer",
+    description: "Simulated FDM printer for development",
+    materials: ["pla", "petg", "abs", "tpu"],
+    tolerances: { linear: "±0.1mm", surface: "Ra 12.5" },
+    envelope: { x: 250, y: 210, z: 210, unit: "mm" },
+    assuranceTiers: [0, 1, 2],
+    pricing: {
+      currency: "USDC",
+      baseCost: "2.00",
+      perMinute: "0.05",
+      perGram: "0.03",
+      minimum: "5.00",
+    },
+    availability: {
+      timezone: "America/New_York",
+      windows: {
+        "1": [{ start: "2026-01-01T08:00:00Z", end: "2026-01-01T22:00:00Z" }],
+        "2": [{ start: "2026-01-01T08:00:00Z", end: "2026-01-01T22:00:00Z" }],
+        "3": [{ start: "2026-01-01T08:00:00Z", end: "2026-01-01T22:00:00Z" }],
+        "4": [{ start: "2026-01-01T08:00:00Z", end: "2026-01-01T22:00:00Z" }],
+        "5": [{ start: "2026-01-01T08:00:00Z", end: "2026-01-01T22:00:00Z" }],
+      },
+    },
+    location: { lat: 40.7128, lng: -74.006 },
+    queueDepth: 0,
+    tags: ["fdm", "prototyping", "pla"],
+  });
+
+  // Listen for finalized bundles
+  evidenceEmitter.onBundle((bundle) => {
+    bundles.set(bundle.jobId, bundle);
+    const job = jobs.get(bundle.jobId);
+    if (job) {
+      job.evidenceBundleId = bundle.id;
+      job.status = "awaiting_pickup";
+      job.completedAt = new Date().toISOString();
+      job.progress = 100;
+    }
+  });
+
   const app = Fastify({ logger: true });
   await app.register(cors, { origin: true });
 
@@ -138,7 +138,8 @@ async function buildServer() {
 
   app.post<{ Body: { capabilityId: string; jobId: string; stepId: string; cwmId: string; gcodeHash: string; assuranceTier: number } }>(
     "/execute",
-    async (request) => {
+    async (request, reply) => {
+      if (refusesTestSigner(evidenceEmitter)) return reply.code(503).send({ error: "kernel_signer_required", message: "This kernel server has no signing key, so in production it runs no job." });
       const { capabilityId, jobId, stepId, cwmId, gcodeHash, assuranceTier } = request.body;
 
       if (!fdm) return { error: "No machine adapter available" };
@@ -237,7 +238,7 @@ const isMain = process.argv[1] === fileURLToPath(import.meta.url);
 if (isMain) {
   buildServer().then((app) => {
     app.listen({ port: PORT, host: "0.0.0.0" }).then(() => {
-      console.log(`Shop Kernel ${KERNEL_ID} listening on port ${PORT}`);
+      console.log(`Shop Kernel listening on port ${PORT}`);
     });
   }).catch(console.error);
 }
