@@ -79,6 +79,20 @@ describe("the agent pack tells agents only true things", () => {
     }
   });
 
+  it("describes the gateway's live verification oracles and agent bridge without Bittensor claims", () => {
+    const testPack = JSON.parse(readFileSync(join(REPO, "agent-package-test.json"), "utf8")) as {
+      tools: Array<{ name: string; description: string }>;
+    };
+    for (const [file, tools] of [
+      ["agent-package.json", pkg.tools],
+      ["agent-package-test.json", testPack.tools],
+    ] as const) {
+      for (const tool of tools) {
+        expect(tool.description, `${file}: ${tool.name}`).not.toMatch(/Bittensor/i);
+      }
+    }
+  });
+
   it("does not sell kernel_announce_capabilities as registration (N75)", () => {
     const announce = pkg.tools.find((t) => t.name === "kernel_announce_capabilities");
     expect(announce).toBeDefined();

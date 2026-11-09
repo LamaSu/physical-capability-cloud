@@ -11,7 +11,7 @@ API call. Start by fetching the agent package, provision a key, then discover an
 
 ## Start here (fetch these first)
 
-- [Agent package — 254 tools for any LLM](https://capability.network/agent-package.json): Single JSON file with every tool's name, description, input_schema, and endpoint. Load it, present tools to your model, call the mapped endpoint. The `system_prompt` field contains the self-onboarding flow.
+- [Agent package — 180+ tools for any LLM](https://capability.network/agent-package.json): Single JSON file with every tool's name, description, input_schema, and endpoint. Load it, present tools to your model, call the mapped endpoint. The `system_prompt` field contains the self-onboarding flow.
 - [ERC-8004 Agent Registration](https://capability.network/.well-known/agent-registration.json): On-chain identity / discovery file (public).
 - [Capability types](https://capability.network/api/capabilities/types): The list of capability type strings (public).
 - MCP server (Streamable HTTP): https://capability.network/mcp
@@ -81,7 +81,7 @@ CLI alternative: `pip install pcc-node && pcc-node start` auto-detects hardware,
 
 - Authentication: hiring and other protected operations require `Authorization: Bearer <key>`. Public discovery includes `POST /ask`, capability types, well-known catalogs/cards, the agent package, and the MCP transport endpoint.
 - Settlement isn't wired to job offers yet: no gateway route settles an offer or pays its operator, and a tier above 0 needs a committed evidence program that most capability types don't have.
-- The MCP server exposes 254 real tools over Streamable HTTP at `https://capability.network/mcp`. A stdio transport remains available by running `packages/mcp-server/dist/index.js` from a cloned, built repository with `PCC_URL=https://capability.network`.
+- The MCP server exposes 180+ real tools over Streamable HTTP at `https://capability.network/mcp`. A stdio transport remains available by running `packages/mcp-server/dist/index.js` from a cloned, built repository with `PCC_URL=https://capability.network`.
 - A second, read-only MCP surface at `https://capability.network/mcp/docs` serves PCC's documentation as MCP resources (`docs://pcc/agent-guide`, `docs://pcc/api`, `docs://pcc/quickstart`) plus a `search_docs` tool — use it to learn the API before calling the product server to act on it.
 - Full human + agent integration guide is served by the gateway; this file is the short index.
 

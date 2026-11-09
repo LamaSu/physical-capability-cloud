@@ -2,7 +2,7 @@
  * @pcc/tool-index — in-memory ToolIndex
  *
  * Phase 1 storage layer: in-memory linear-scan cosine search. Fine at
- * N≤10,000 tools (the 218-tool PCC catalog is two orders of magnitude
+ * N≤10,000 tools (the PCC catalog is two orders of magnitude
  * below that). Phase 3+ can swap in HNSW / disk-backed storage.
  *
  * Lifecycle:

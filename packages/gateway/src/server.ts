@@ -371,7 +371,7 @@ export async function createGateway(port = 3200) {
         version: process.env.npm_package_version ?? "0.1.0",
         description:
           "Agent-native API for discovering and invoking physical capabilities. " +
-          "See https://capability.network/agent-package.json for the 254-tool agent package.",
+          "See https://capability.network/agent-package.json for the agent package.",
       },
       servers: [{ url: gatewayUrlForOpenApi }],
       components: {

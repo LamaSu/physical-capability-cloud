@@ -249,24 +249,6 @@
     },
     {
       "source": "agent-package",
-      "tool": "release_milestone",
-      "params": [
-        "address"
-      ],
-      "class": "money",
-      "why": "Escrow target releases the milestone payment."
-    },
-    {
-      "source": "agent-package",
-      "tool": "submit_attestation",
-      "params": [
-        "address"
-      ],
-      "class": "money",
-      "why": "Escrow target records an attestation used to authorize settlement."
-    },
-    {
-      "source": "agent-package",
       "tool": "submit_evidence_hash",
       "params": [
         "address"
