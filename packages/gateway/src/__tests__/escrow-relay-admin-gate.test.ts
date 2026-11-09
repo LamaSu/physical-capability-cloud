@@ -130,9 +130,12 @@ function seedRows() {
     seedJob(`job-${id}`, `cwm-${id}`, `bundle-${id}`);
     seedBundle(`bundle-${id}`, `job-${id}`, hex);
   }
+  // Unpinned bundle rows of a job are never relayed: only the job's pinned bundle is.
+  seedBundle("bundle-v2-unpinned", "job-v2", "f2");
   seedSession("session-nojob", "job-missing", NOJOB, "cwm-nojob");
   seedSession("session-notpinned", "job-notpinned", NOTPINNED, "cwm-notpinned");
   seedJob("job-notpinned", "cwm-notpinned", null);
+  seedBundle("bundle-notpinned-unpinned", "job-notpinned", "a2");
   seedSession("session-pinmissing", "job-pinmissing", PINMISSING, "cwm-pinmissing");
   seedJob("job-pinmissing", "cwm-pinmissing", "bundle-missing");
   seedSession("session-two-a", "job-two-a", TWO, "cwm-two");
@@ -349,7 +352,7 @@ describe("escrow chain writes check the caller, the escrow and the submitted val
       }
   });
   it("H1 evidence refuses a hash that is not the escrow's pinned bundle, for the admin too, with no chain call", async () => {
-    for (const flag of flags) for (const hash of ["0x" + "ee".repeat(32), "sha256:" + "a2".repeat(32), "a2".repeat(32), "0x" + "a2".repeat(31)]) {
+    for (const flag of flags) for (const hash of ["0x" + "ee".repeat(32), "0x" + "f2".repeat(32), "sha256:" + "a2".repeat(32), "a2".repeat(32), "0x" + "a2".repeat(31)]) {
       fresh();
       const res = await call("evidence", V2, "admin", flag, { evidenceBundleHash: hash });
       expect(res.statusCode, context).toBe(409);
