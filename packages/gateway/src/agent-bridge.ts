@@ -19,6 +19,7 @@ import { A2AMessageRepository } from "@pcc/store";
 import { getStore } from "./db.js";
 import { AgentHeartbeatMonitor } from "./services/agent-heartbeat-monitor.js";
 import { getAgentFacade } from "./facades/index.js";
+import { demoSurfacesEnabled } from "./config/demo-surfaces.js";
 
 // ---------------------------------------------------------------------------
 // State
@@ -73,13 +74,16 @@ export async function initAgentBridge(): Promise<void> {
       queueDepth: 0,
     };
 
-    _kernelAgent = new KernelAgent(_bus, {
-      kernelId: "kernel-gateway",
-      name: "Gateway Kernel (Brooklyn)",
-      location: { lat: 40.6892, lng: -73.9857 },
-      capabilities: [defaultCap],
-      mockPrintDuration: 5000,
-    });
+    // N291: production starts the demo kernel agent only with the exact opt-in.
+    if (demoSurfacesEnabled()) {
+      _kernelAgent = new KernelAgent(_bus, {
+        kernelId: "kernel-gateway",
+        name: "Gateway Kernel (Brooklyn)",
+        location: { lat: 40.6892, lng: -73.9857 },
+        capabilities: [defaultCap],
+        mockPrintDuration: 5000,
+      });
+    }
 
     // Rehydrate from the last 7 days of persisted messages so conversations
     // are immediately available after restart without waiting for new traffic.
@@ -111,7 +115,9 @@ export async function initAgentBridge(): Promise<void> {
     _heartbeatMonitor.start();
 
     _initialized = true;
-    console.log("[agent-bridge] Agent swarm initialized: user, broker, kernel");
+    console.log(_kernelAgent
+      ? "[agent-bridge] Agent swarm initialized: user, broker, kernel"
+      : "[agent-bridge] Agent swarm initialized: user, broker");
   } catch (err) {
     console.warn("[agent-bridge] Failed to initialize agents, using mock fallbacks:", err);
   }

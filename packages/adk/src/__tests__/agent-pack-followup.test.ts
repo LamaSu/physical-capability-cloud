@@ -169,4 +169,36 @@ describe("CODE #53 agent pack follow-up", () => {
     if (pkg.dtos.JobOffer.composition_timing !== COMPOSITION_TIMING) problems.push("dtos.JobOffer.composition_timing is not the steward's wording");
     expect(problems).toEqual([]);
   });
+
+  it("FT8 every courier post in the system prompt and skill copies requires price confirmation before dispatchAt", () => {
+    const prompt = (JSON.parse(readFileSync(SOURCE, "utf8")) as { system_prompt: string }).system_prompt;
+    const texts: [string, string][] = [["system_prompt", prompt], ...SKILL_COPIES.map((file): [string, string] => [file, readFileSync(resolve(REPO, file), "utf8")])];
+    const problems: string[] = [];
+    for (const [file, text] of texts) {
+      const matches = [...text.matchAll(new RegExp(COURIER_POST.source, "gi"))];
+      if (file === "system_prompt") expect(matches.length).toBeGreaterThan(0);
+      if (/immediately post the courier/i.test(text)) problems.push(`${file}: immediately post the courier`);
+      for (const match of matches) {
+        const end = text.indexOf("dispatchAt", match.index);
+        const beforeDispatch = text.slice(match.index, end < 0 ? text.length : end);
+        if (end < 0 || !/\bprice\b/i.test(beforeDispatch) || !/\bconfirm/i.test(beforeDispatch)) {
+          problems.push(`${file}: courier post lacks price confirmation before dispatchAt: ${beforeDispatch}`);
+        }
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  it("FT9 the composition paragraphs in pcc.md and the system prompt are byte-identical", () => {
+    const heading = "## Composition (multi-capability orders)";
+    const paragraph = (text: string) => {
+      const start = text.indexOf(heading);
+      expect(start).toBeGreaterThanOrEqual(0);
+      const end = text.indexOf("\n## ", start + heading.length);
+      expect(end).toBeGreaterThan(start);
+      return text.slice(start, end);
+    };
+    const prompt = (JSON.parse(readFileSync(SOURCE, "utf8")) as { system_prompt: string }).system_prompt;
+    expect(paragraph(readFileSync(resolve(REPO, SKILL_COPIES[0]), "utf8"))).toBe(paragraph(prompt));
+  });
 });

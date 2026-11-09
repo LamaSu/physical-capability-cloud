@@ -375,7 +375,7 @@ function buildPlan(){
       b:{kernelId:kid,deviceId:dev,type:"machine",model:S.model||"device",adapterType:S.adapter,adapterConfig:S.endpoint?{url:S.endpoint}:{},capabilities:[S.type||"custom"]}});
     p.push({s:3,m:"POST",path:"/api/capabilities",lab:"publish the capability",
       b:{kernelId:kid,type:S.type||"custom",name:S.name||"capability",pricing:{currency:"USDC",baseCost:+S.price},location:{lat:S.lat,lng:S.lng},assuranceTiers:[S.tier]}});
-    p.push({s:4,m:"POST",path:"/api/setup/test-job",lab:"prove → your pcc-node picks the job up and runs it locally",
+    p.push({s:4,m:"POST",path:"/api/setup/test-job",lab:"test job: refused unless the gateway runs this kernel in-process",
       b:{kernelId:kid,deviceId:dev,assuranceTier:1}});
   }
   else if(S.lane==="human"){
@@ -400,7 +400,7 @@ function buildPlan(){
     if(S.mode==="scheduled")sk.slot={at:S.schedAt||"<datetime>",durationMin:+S.schedDur};
     if(S.mode==="recurring")sk.recurrence={every:S.recurEvery,at:S.recurAt};
     p.push({s:3,m:"POST",path:"/api/skills",lab:"publish the human-node skill (PR #90)",b:sk});
-    p.push({s:4,m:"POST",path:"/api/skills/${skillId}/verify",lab:"prove a job → photo + GPS → activate (Tier 1)",
+    p.push({s:4,m:"POST",path:"/api/skills/${skillId}/verify",lab:"photo + GPS evidence: no gateway route takes it yet",
       b:{evidence:{events:[{type:"execution_completed"}],deviceHealth:{status:"idle",model:"human-operator"},geo:S.proof.geo||"<lat,lng>",photoBase64:S.proof.photo?"<captured>":"<photo>"}}});
   }
   else if(S.lane==="asset"){
@@ -466,7 +466,7 @@ function renderStep(){
     <p class="sub">Three economic-agent shapes: a machine you operate, a human skill you offer, or an asset that bids for work on its own.</p>
     <div class="lanes" role="group" aria-labelledby="q0">
       <button type="button" class="lane m ${S.lane==='machine'?'sel':''}" data-lane="machine" aria-pressed="${S.lane==='machine'}" aria-labelledby="lane-m-t" aria-describedby="lane-m-d">
-        <span class="ico" aria-hidden="true">▣ MACHINE</span><span class="ttl" id="lane-m-t">A machine</span><span class="dsc" id="lane-m-d">Robot, printer, instrument, lab. Bound by an adapter; <code style="font-family:var(--mono);font-size:12px;color:var(--cyan)">pcc-node</code> polls for jobs and runs them locally.</span>
+        <span class="ico" aria-hidden="true">▣ MACHINE</span><span class="ttl" id="lane-m-t">A machine</span><span class="dsc" id="lane-m-d">Robot, printer, instrument, lab. Bound by an adapter; <code style="font-family:var(--mono);font-size:12px;color:var(--cyan)">pcc-node</code> keeps the kernel online and takes no jobs.</span>
         <span class="tag">Opentrons · Prusa · HPLC</span></button>
       <button type="button" class="lane h ${S.lane==='human'?'sel':''}" data-lane="human" aria-pressed="${S.lane==='human'}" aria-labelledby="lane-h-t" aria-describedby="lane-h-d">
         <span class="ico" aria-hidden="true">◐ HUMAN</span><span class="ttl" id="lane-h-t">A human skill</span><span class="dsc" id="lane-h-d">A person offering a skill. Gets pinged, accepts within a window, finishes by a deadline.</span>
@@ -541,20 +541,20 @@ function renderStep(){
   }
   else if(S.step===4){
     if(S.lane==='machine'){
-      h=`<div class="kick">Step 05 · prove</div><div class="q" tabindex="-1">Prove it works → go live.</div>
-      <p class="sub">PCC queues a test job. Your <code style="font-family:var(--mono);color:var(--cyan)">pcc-node</code> picks it up, runs it on the device, posts an evidence bundle. Clean run → auto-activate, no human approval.</p>
+      h=`<div class="kick">Step 05 · prove</div><div class="q" tabindex="-1">Prove it works.</div>
+      <p class="sub">The gateway runs a test job only for a kernel it operates in-process. For a kernel your <code style="font-family:var(--mono);color:var(--cyan)">pcc-node</code> keeps online it refuses and runs nothing, and a test job activates nothing.</p>
       <div class="prove-card"><div class="ico" style="font-family:var(--mono);color:var(--cyan)">▣ TEST JOB</div>
         <div class="big">${esc(S.model||S.name||'Your machine')}</div>
         <div class="evi"><button type="button" class="pill ${S.proof.test?'got':''}" data-ev="test">${S.proof.test?'✓ test job passed':'▸ queue test job'}</button></div>
-        <div class="meta">POST /api/setup/test-job · polls to completion · emits evidence bundle</div></div>`;
+        <div class="meta">POST /api/setup/test-job · runs only on a kernel the gateway operates in-process</div></div>`;
     } else if(S.lane==='human'){
-      h=`<div class="kick">Step 05 · prove</div><div class="q" tabindex="-1">Prove a job → go live.</div>
-      <p class="sub">Human skills activate on real evidence. Capture a photo + your GPS — that's a Tier 1 bundle.</p>
+      h=`<div class="kick">Step 05 · prove</div><div class="q" tabindex="-1">Prove a job.</div>
+      <p class="sub">No gateway route verifies a skill from its evidence yet, so this step activates nothing. Capture a photo + your GPS — that's a Tier 1 bundle.</p>
       <div class="prove-card"><div class="ico" style="font-family:var(--mono);color:var(--amber)">◐ EVIDENCE</div>
         <div class="big">${esc(S.name||'Your skill')}</div>
         <div class="evi"><button type="button" class="pill ${S.proof.photo?'got':''}" data-ev="photo">${S.proof.photo?'✓ photo':'▸ capture photo'}</button>
           <button type="button" class="pill ${S.proof.geo?'got':''}" data-ev="geo">${S.proof.geo?'✓ '+S.proof.geo:'▸ capture GPS'}</button></div>
-        <div class="meta">POST /api/skills/&lt;id&gt;/verify · ALCOA+ · auto-activates at Tier 1</div></div>`;
+        <div class="meta">POST /api/skills/&lt;id&gt;/verify · no gateway route serves this yet, so nothing activates here</div></div>`;
     } else if(S.lane==='asset'){
       h=`<div class="kick">Step 05 · prove</div><div class="q" tabindex="-1">Post a sample demand → see the engine plan.</div>
       <p class="sub">Your first outbound demand exercises the loop end-to-end: the compose engine plans (single- or multi-step via graph-search), the asset is now bidding for capabilities.</p>

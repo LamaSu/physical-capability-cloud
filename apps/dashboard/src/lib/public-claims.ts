@@ -176,16 +176,60 @@ export const GUARDED_CLAIMS: readonly GuardedClaim[] = [
   {
     id: "automatic-contributor-payout",
     pattern:
-      /\bsends your cut\b|\bpays you,? automatically\b|\bget paid every time your work is used\b|\bevery job that uses your work pays you\b/i,
+      /\bsends\s+your\s+cut\b|\bpays\s+you,?\s+automatically\b|\bget\s+paid\s+every\s+time\s+your\s+work\s+is\s+used\b|\bevery\s+job\s+that\s+uses\s+your\s+work\s+pays\s+you\b|\bwhere\s+you'll\s+get\s+paid\b|\bpays?\s+(you|contributors),?\s+automatically\b/i,
     status: "roadmap",
     requires:
       "A job settlement that pays published contributor rates to contributors' wallets. No settlement reads a published rate today.",
     example: "Every job that uses your work pays you, automatically.",
   },
+  {
+    id: "pcc-node-takes-jobs",
+    pattern: /polls for jobs and runs them|picks the job up and runs it|picks it up, runs it on the device/i,
+    status: "roadmap",
+    requires: "pcc-node's operating loop takes jobs (item 12, #553)",
+    example: "The `pcc-node` daemon polls for jobs and runs them locally",
+  },
+  {
+    id: "escrow-releases-on-evidence",
+    pattern: /funds release (?:only )?when (?:your )?evidence/i,
+    status: "roadmap",
+    requires: "Settlement wired to job offers, releasing on evidence (N145, N149)",
+    example: "funds release only when evidence meets the contracted assurance tier",
+  },
+  {
+    id: "sixty-second-onboarding",
+    pattern: /online[^\n]{0,60}\b60 seconds|60 seconds end-to-end/i,
+    status: "roadmap",
+    requires: "An install that brings a machine online and listed in about a minute (N209, N210)",
+    example: "Bring your hardware online on capability.network in about 60 seconds.",
+  },
+  {
+    id: "seeded-csd-catalog",
+    pattern: /top-50 catalog is seeded/i,
+    status: "roadmap",
+    requires: "A seeded catalog of the most-used capability types (N283)",
+    example: "the top-50 catalog is seeded.",
+  },
+  {
+    id: "onboarding-session-end-to-end",
+    pattern: /handles this end-to-end/i,
+    status: "roadmap",
+    requires: "An onboarding session that completes a registration (N83)",
+    example: "handles this end-to-end if available",
+  },
+  {
+    id: "story-onchain-ip",
+    pattern: /programmable royalties|claiming royalties/i,
+    status: "roadmap",
+    requires: "On-chain IP registration and a royalty payout (N239, N10b)",
+    example: "The IP Asset enables programmable royalties for all future jobs using this capability.",
+  },
 ];
 
 /** Repo-relative files that are served publicly or read by external agents. */
 export const PUBLISHED_SURFACES: readonly string[] = [
+  "apps/dashboard/src/components/OnboardingTour.tsx",
+  "apps/dashboard/src/pages/LoginPage.tsx",
   "apps/dashboard/src/pages/AgentChatPage.tsx",
   "README.md",
   "apps/dashboard/index.html",
@@ -198,6 +242,7 @@ export const PUBLISHED_SURFACES: readonly string[] = [
   "apps/dashboard/public/whitepaper.md",
   "apps/dashboard/public/visualizer.js",
   "apps/dashboard/public/install.html",
+  "apps/dashboard/public/install.sh",
   "apps/dashboard/public/onboard.html",
   "apps/dashboard/public/docs/index.html",
   "apps/dashboard/public/skills/pcc.md",
@@ -226,6 +271,16 @@ export const PUBLISHED_SURFACES: readonly string[] = [
   "docs/quickstart/claude-code.md",
   "docs/quickstart/claude-desktop.md",
   "docs/quickstart/claude-web.md",
+  "apps/dashboard/public/agent-package.json",
+  "skills/pcc/SKILL.md",
+  ".claude/skills/pcc/SKILL.md",
+  "apps/dashboard/public/screen.html",
+  "docs/FOUR_SLOTS.md",
+  "docs/MCP_INSTALL.md",
+  "docs/CAPABILITY_PROFILES.md",
+  "docs/ADAPTER_BOUNTIES.md",
+  "starter/runbook/06-verify.md",
+  "starter/runbook/08-publish.md",
 ];
 
 /**
@@ -235,8 +290,6 @@ export const PUBLISHED_SURFACES: readonly string[] = [
 export const UNCHECKED_SURFACES: Readonly<Record<string, string>> = {
   "apps/dashboard/src/pages/LandingPage.tsx":
     "Retiring: shell PR #354 makes in-app links to / load the static landing; aeo folds its agent entrypoints into landing.html",
-  "apps/dashboard/public/agent-package.json":
-    "aeo (R43, single system_prompt writer): the prompt names @pcc/evidence-judge and @pcc/operator-agent-runtime, which are not on npm",
   "packages/gateway/src/routes/snippet.ts":
     "adk (R4): the /onboard/snippet.json `npx` field names @pcc/onboard, which is not on npm; publish the package or drop the field",
   "packages/onboard-kit/AGENT_INSTRUCTIONS.md":

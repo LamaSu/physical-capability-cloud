@@ -288,7 +288,7 @@ export async function approveAndFund(args: ApproveAndFundArgs): Promise<FundingR
   } catch (e) {
     refuse("LIVE_CHECK_FAILED", `read the escrow's code: ${describeRevert(e)}`);
   }
-  if (code === "0x") refuse("ESCROW_NOT_CREATED", `no clone at ${prepared.escrow} yet: the gateway creates it (factory.createEscrow) before funding`);
+  if (code === "0x") refuse("ESCROW_NOT_CREATED", `no clone at ${prepared.escrow} yet: call ensureEscrow first, which sends factory.createEscrow(identity) from the payer`);
   // reviewer-charlie L5: the approve's spender must run the real escrow code, the EIP-1167 clone of the implementation
   // the pinned factory reported live at prepare (prepared.implementation; an immutable, FAC:34). Checked before the
   // funding state is read, so other code at this address can never short-circuit to "already funded".
@@ -422,4 +422,133 @@ export async function approveAndFund(args: ApproveAndFundArgs): Promise<FundingR
         ? `fund() ${fund.txHash} mined (${fund.status}); read back at its block: ${readBack.detail}`
         : `${fund.reason}; read back at the latest block: ${readBack.detail}`,
   };
+}
+
+import { decodeFunctionResult } from "viem";
+
+export type EscrowCodeKind = "clone" | "absent" | "other" | "unreadable";
+export type EscrowCreationOutcome = "ready" | "absent" | "indeterminate";
+
+export interface EnsureEscrowArgs {
+  prepared: PreparedFunding;
+  wallet: WalletClient;
+  publicClient: PublicClient;
+  marginSeconds?: bigint;
+  confirmations?: number;
+  receiptTimeoutMs?: number;
+}
+
+export interface EnsureEscrowResult {
+  outcome: EscrowCreationOutcome;
+  create?: SendResult;
+  createTx?: Hex;
+  code: { kind: EscrowCodeKind; blockNumber: bigint | null; blockHash: Hex | null };
+  detail: string;
+}
+
+export function classifyEscrowCreation(send: SendResult | undefined, code: EscrowCodeKind): EscrowCreationOutcome {
+  if (code === "clone") return "ready";
+  const refused = send === undefined || send.kind === "not_sent" || (send.kind === "mined" && send.status === "reverted");
+  return refused && code === "absent" ? "absent" : "indeterminate";
+}
+
+/**
+ * Create the clone from the payer only when the predicted address has no code. Creation is read from code at that
+ * address, never from a receipt, a log or a transaction hash. Throws only before its broadcast; after that it
+ * always returns a result. After indeterminate, resolve before retrying: a retry refuses PAYER_TX_PENDING while
+ * the payer's transaction is pending, and answers ready once the clone is there. After absent, a retry may send again.
+ */
+export async function ensureEscrow(args: EnsureEscrowArgs): Promise<EnsureEscrowResult> {
+  const prepared = assertPrepared(args.prepared);
+  const { wallet, publicClient } = args;
+  const margin = args.marginSeconds ?? DEFAULT_MARGIN_SECONDS;
+  if (typeof margin !== "bigint" || margin < 0n) throw new TypeError("marginSeconds must be a non-negative bigint");
+  const opts = { confirmations: args.confirmations ?? 1, timeout: args.receiptTimeoutMs ?? 120_000 };
+  const account = wallet.account;
+  if (!account) refuse("PAYER_NOT_SIGNER", "the wallet has no account to send with");
+  if (!same(account.address, prepared.payer)) refuse("PAYER_NOT_SIGNER", `the wallet is ${account.address}; the policy's payer is ${prepared.payer}`);
+  await assertChain(wallet, publicClient, prepared.chainId);
+
+  let block: PinnedBlock;
+  try {
+    block = await pinBlock(publicClient);
+  } catch (e) {
+    refuse("LIVE_CHECK_FAILED", `pin the latest block: ${describeRevert(e)}`);
+  }
+  const reader = pinnedReader(publicClient, block.hash);
+  let code: Hex;
+  try {
+    code = await reader.code(prepared.escrow);
+  } catch (e) {
+    refuse("LIVE_CHECK_FAILED", `read the escrow's code: ${describeRevert(e)}`);
+  }
+  if (same(code, cloneRuntimeCode(prepared.implementation))) {
+    return { outcome: "ready", code: { kind: "clone", blockNumber: block.number, blockHash: block.hash },
+      detail: "the predicted escrow already holds the clone of the pinned implementation" };
+  }
+  if (code !== "0x") {
+    refuse("DEPLOYMENT_MISMATCH", `the code at ${prepared.escrow} is not the EIP-1167 clone of the pinned implementation ${prepared.implementation}`);
+  }
+  checkTiming(prepared, block.timestamp, margin, prepared.chainId);
+  let fundedEscrow: Address;
+  try {
+    fundedEscrow = await reader.read<Address>(prepared.factory, FACTORY_ABI, "fundedEscrowOf", [prepared.policyKey]);
+  } catch (e) {
+    refuse("LIVE_CHECK_FAILED", `read factory.fundedEscrowOf: ${describeRevert(e)}`);
+  }
+  if (!same(fundedEscrow, zeroAddress)) {
+    refuse("ALREADY_FUNDED", `this job is already funded by escrow ${fundedEscrow} (factory.fundedEscrowOf); this escrow can never fund`);
+  }
+  let pendingNonce: number;
+  let latestNonce: number;
+  try {
+    pendingNonce = await publicClient.getTransactionCount({ address: prepared.payer, blockTag: "pending" });
+    latestNonce = await publicClient.getTransactionCount({ address: prepared.payer, blockTag: "latest" });
+  } catch (e) {
+    refuse("LIVE_CHECK_FAILED", `read the payer's nonce: ${describeRevert(e)}`);
+  }
+  if (pendingNonce > latestNonce) {
+    refuse(
+      "PAYER_TX_PENDING",
+      `the payer has ${pendingNonce - latestNonce} transaction(s) pending (nonce ${pendingNonce} at pending, ${latestNonce} at latest): resolve the earlier run with readFundedState, or wait for those transactions, before retrying`,
+    );
+  }
+  const data = encodeFunctionData({ abi: FACTORY_ABI, functionName: "createEscrow", args: [prepared.identity] });
+  let simulated: Hex;
+  try {
+    simulated = await publicClient.request({
+      method: "eth_call",
+      params: [
+        { from: prepared.payer, to: prepared.factory, data },
+        { blockHash: block.hash, requireCanonical: true },
+      ],
+    } as never) as Hex;
+  } catch (e) {
+    refuse("SIMULATION_REVERTED", `factory.createEscrow simulation: ${describeRevert(e)}`);
+  }
+  let predicted: Address;
+  try {
+    predicted = decodeFunctionResult({ abi: FACTORY_ABI, functionName: "createEscrow", data: simulated });
+  } catch (e) {
+    refuse("DEPLOYMENT_MISMATCH", `factory.createEscrow did not return an address: ${describeRevert(e)}`);
+  }
+  if (!same(predicted, prepared.escrow)) {
+    refuse("ESCROW_NOT_PREDICTED", `factory.createEscrow returned ${predicted}, not the predicted escrow ${prepared.escrow}`);
+  }
+  const chain = await chainForSend(wallet, prepared.chainId);
+  const create = await sendAndWait(wallet, publicClient, chain, prepared.chainId, prepared.factory, data, opts);
+  const createTx = create.kind === "not_sent" ? undefined : create.txHash;
+  let readBlock: PinnedBlock | undefined;
+  try {
+    readBlock = await pinBlock(publicClient, create.kind === "mined" ? create.blockHash : undefined);
+    const readCode = await pinnedReader(publicClient, readBlock.hash).code(prepared.escrow);
+    const kind: EscrowCodeKind = same(readCode, cloneRuntimeCode(prepared.implementation)) ? "clone" : readCode === "0x" ? "absent" : "other";
+    return { outcome: classifyEscrowCreation(create, kind), create, createTx,
+      code: { kind, blockNumber: readBlock.number, blockHash: readBlock.hash },
+      detail: `the code at the predicted escrow is ${kind} at block ${readBlock.number}` };
+  } catch (e) {
+    return { outcome: classifyEscrowCreation(create, "unreadable"), create, createTx,
+      code: { kind: "unreadable", blockNumber: readBlock?.number ?? null, blockHash: readBlock?.hash ?? null },
+      detail: `could not read the predicted escrow's code: ${describeRevert(e)}` };
+  }
 }

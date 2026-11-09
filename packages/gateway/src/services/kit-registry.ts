@@ -60,6 +60,7 @@ import { isValidRegistryDigest } from "./registry-snapshot-store.js";
 
 /** Largest canonical manifest the registry stores. */
 export const MAX_KIT_MANIFEST_BYTES = 256 * 1024;
+export const KIT_LIST_FULL_PASS_MS = 10 * 60 * 1000;
 /** Default number of NEW kits one publisher may create in a rolling 24 hours. */
 export const DEFAULT_KIT_PUBLISH_DAILY_LIMIT = 20;
 /** Default number of bindings one principal may create in a rolling 24 hours. */
@@ -243,6 +244,13 @@ interface IndexEntry {
   manifest: CapabilityKitManifestV1;
 }
 
+interface ListedKit {
+  fingerprint: string;
+  summary: KitSummary;
+  nameLower: string;
+  descriptionLower: string;
+}
+
 const CLAIM_NAME = /^(0|[1-9][0-9]{0,15})\.json$/;
 const ClaimSchema = z
   .object({ claimedAt: z.string().refine((s) => !Number.isNaN(Date.parse(s))), kitDigest: z.string().refine(isValidRegistryDigest) })
@@ -310,23 +318,27 @@ export class KitRegistry {
 
   /** Published kits matching every given filter, newest first (then by digest), read from the files now. */
   async list(filter: KitListFilter = {}): Promise<{ kits: KitSummary[]; total: number }> {
-    const entries = await this.scan();
+    const now = this.now().getTime();
+    const full = now - this.lastFullPassAt >= KIT_LIST_FULL_PASS_MS;
+    const entries = await this.scan(full);
+    this.listed = entries;
+    if (full) this.lastFullPassAt = now;
     const q = filter.q?.toLowerCase();
     const matching = [...entries.entries()]
-      .filter(([, { manifest: m }]) => {
-        if (filter.csdUrl !== undefined && !m.capabilities.some((c) => c.csdUrl === filter.csdUrl)) return false;
-        if (filter.deviceFamily !== undefined && !(m.compatibility?.deviceFamilies ?? []).includes(filter.deviceFamily)) return false;
-        if (filter.interface !== undefined && !(m.compatibility?.interfaces ?? []).includes(filter.interface)) return false;
-        if (q !== undefined && !m.name.toLowerCase().includes(q) && !(m.description ?? "").toLowerCase().includes(q)) return false;
+      .filter(([, { summary, nameLower, descriptionLower }]) => {
+        if (filter.csdUrl !== undefined && !summary.csdUrls.includes(filter.csdUrl)) return false;
+        if (filter.deviceFamily !== undefined && !(summary.compatibility?.deviceFamilies ?? []).includes(filter.deviceFamily)) return false;
+        if (filter.interface !== undefined && !(summary.compatibility?.interfaces ?? []).includes(filter.interface)) return false;
+        if (q !== undefined && !nameLower.includes(q) && !descriptionLower.includes(q)) return false;
         return true;
       })
       .sort(([da, a], [db, b]) => {
-        const byTime = Date.parse(b.record.publishedAt) - Date.parse(a.record.publishedAt);
+        const byTime = Date.parse(b.summary.publishedAt) - Date.parse(a.summary.publishedAt);
         return byTime !== 0 ? byTime : da < db ? -1 : da > db ? 1 : 0;
       });
     const offset = filter.offset ?? 0;
     const limit = filter.limit ?? 50;
-    return { kits: matching.slice(offset, offset + limit).map(([d, e]) => summarize(d, e)), total: matching.length };
+    return { kits: matching.slice(offset, offset + limit).map(([, e]) => structuredClone(e.summary)), total: matching.length };
   }
 
   /** The recorded publisher of a published digest. Server-side only (ownership checks, audits). */
@@ -764,9 +776,33 @@ export class KitRegistry {
     return { record, manifest };
   }
 
+  private listed: Map<string, ListedKit> = new Map();
+  private lastFullPassAt: number = Number.NEGATIVE_INFINITY;
+
+  private async fingerprint(kitDigest: string): Promise<string | null> {
+    const { shard, name } = KitRegistry.nameOf(kitDigest);
+    const parts: string[] = [];
+    for (const area of ["publications", "manifests"]) {
+      const dir = await this.dirFor(area, shard, false);
+      if (!dir) return null;
+      try {
+        const st = await fs.lstat(path.join(dir, name), { bigint: true });
+        if (!st.isFile()) return null;
+        parts.push([st.dev, st.ino, st.size, st.mtimeNs, st.ctimeNs].join(":"));
+      } catch (err) {
+        if (errnoOf(err) === "ENOENT") return null;
+        throw err;
+      }
+    }
+    return parts.join("|");
+  }
+
+  // Size, inode and timestamp changes at the filesystem's grain are seen on the next call.
+  // A same-size rewrite within one coarse timestamp tick waits for the 10-minute full pass
+  // or get(), which always verifies. Registry writes only link new files, never rewrite them.
   /** Every published kit that verifies, read from the files now; failures are skipped and remembered. */
-  private async scan(): Promise<Map<string, IndexEntry>> {
-    const entries = new Map<string, IndexEntry>();
+  private async scan(full: boolean): Promise<Map<string, ListedKit>> {
+    const entries = new Map<string, ListedKit>();
     const skipped: string[] = [];
     const root = await this.root();
     const area = path.join(root, "publications");
@@ -798,8 +834,20 @@ export class KitRegistry {
         if (!match || !match[1]!.startsWith(shard)) continue;
         const kitDigest = `sha256:${match[1]}`;
         try {
+          const fingerprint = await this.fingerprint(kitDigest);
+          const previous = this.listed.get(kitDigest);
+          if (!full && fingerprint !== null && previous?.fingerprint === fingerprint) {
+            entries.set(kitDigest, previous);
+            continue;
+          }
           const entry = await this.readVerified(kitDigest);
-          if (entry) entries.set(kitDigest, entry);
+          if (entry) entries.set(kitDigest, {
+            // A file appearing during verification has no reusable pre-read fingerprint.
+            fingerprint: fingerprint ?? "",
+            summary: summarize(kitDigest, entry),
+            nameLower: entry.manifest.name.toLowerCase(),
+            descriptionLower: (entry.manifest.description ?? "").toLowerCase(),
+          });
         } catch {
           skipped.push(kitDigest);
         }

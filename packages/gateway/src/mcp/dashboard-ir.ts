@@ -1158,20 +1158,24 @@ export function policyKeyOf(node: IrNode): string | null {
   return spec.bindKey;
 }
 
-/** Authority class of an IR node (PX-4), DERIVED from its structure and the server-owned
- *  bind registry, never read from the node or the manifest. Prose (manifest-authored
- *  words) is always `proposed`; a bindable node takes the class its route is registered
- *  with; PCC constants (the fixed approval sentence, the static receipt pointer, the
- *  withheld notice that replaces prose) and containers are not data and return null. A
- *  forged IR cannot carry a class of its own: validateIr rejects any node key outside the
- *  closed set, and a withheld slot carries no words. */
-export function sourceClassOf(node: IrNode): RenderSourceClass | null {
+/** Authority class of an IR node, DERIVED from its structure and the server-owned bind
+ *  registry, never read from the node or the manifest. Prose (manifest-authored words) is
+ *  `proposed`, and so is a container, whose children and order the manifest chose. A
+ *  bindable node takes the class its route is registered with. An unknown node type, or a
+ *  bindable node with no policy, is "unconfirmed". PCC constants (the fixed approval
+ *  sentence, the static receipt pointer, the composition plan) and the withheld notice that
+ *  replaces prose return null: they carry no class. A forged IR cannot carry a class of its
+ *  own: validateIr rejects any node key outside the closed set, and a withheld slot carries
+ *  no words. */
+export function sourceClassOf(node: IrNode): RenderSourceClass | "unconfirmed" | null {
+  if (!Object.prototype.hasOwnProperty.call(NODE_SCHEMA, node.type)) return "unconfirmed";
   const spec = NODE_SCHEMA[node.type as IrNodeType];
-  if (!spec) return null;
   if (spec.prose) return isWithheldProse(node) ? null : "proposed";
+  if (spec.parentOf !== undefined) return "proposed";
   const key = policyKeyOf(node);
-  const policy = key !== null && Object.prototype.hasOwnProperty.call(BIND_POLICY, key) ? BIND_POLICY[key] : undefined;
-  return policy ? policy.sourceClass : null;
+  if (key === null) return null;
+  const policy = Object.prototype.hasOwnProperty.call(BIND_POLICY, key) ? BIND_POLICY[key] : undefined;
+  return policy ? policy.sourceClass : "unconfirmed";
 }
 
 export interface BoundProvenance { sourceClass: BoundSourceClass; schemaId: string; maxAgeMs: number }

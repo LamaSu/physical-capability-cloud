@@ -68,6 +68,7 @@ import {
   milestoneStatusV2Name,
 } from "../contracts/escrow-client.js";
 import { withSignerLock } from "../contracts/signer-lock.js";
+import { buyerFundedEscrowRefusal } from "./buyer-funded-escrow.js";
 
 // ── Revert strings (verbatim from MilestoneEscrowV2.sol) ────────────────────
 // Each set is the revert(s) that, GIVEN we only attempt the step from its correct
@@ -292,6 +293,19 @@ export async function driveSettlement(
   const { evidenceBundleHash, easUid, skipFund = false } = options;
   const nowSeconds = options.nowSeconds ?? Math.floor(Date.now() / 1000);
   const steps: DriveStep[] = [];
+
+  const buyerFundingRefusal = buyerFundedEscrowRefusal(escrowAddress);
+  if (buyerFundingRefusal !== null) {
+    return {
+      escrowAddress,
+      milestoneIdx,
+      finalStatus: "Unfunded",
+      outcome: "blocked",
+      settled: false,
+      steps,
+      reason: buyerFundingRefusal,
+    };
+  }
 
   // Defensive: without a signer the crank cannot write. Degrade gracefully (the
   // caller keeps its recoverable state) rather than throwing deep in a sequence.

@@ -77,6 +77,7 @@ const OperatorMobilePage = lazy(() => import("./pages/OperatorMobilePage.js").th
 const EconomicAgreementsPage = lazy(() => import("./pages/EconomicAgreementsPage.js").then(m => ({ default: m.EconomicAgreementsPage })));
 const WalletPage = lazy(() => import("./pages/WalletPage.js").then(m => ({ default: m.WalletPage })));
 const WalletLinkPage = lazy(() => import("./pages/WalletLinkPage.js").then(m => ({ default: m.WalletLinkPage })));
+const WalletsPage = lazy(() => import("./pages/WalletsPage.js").then(m => ({ default: m.WalletsPage })));
 const WhitepaperPage = lazy(() => import("./pages/WhitepaperPage.js").then(m => ({ default: m.WhitepaperPage })));
 const BatchBoardPage = lazy(() => import("./pages/BatchBoardPage.js").then(m => ({ default: m.BatchBoardPage })));
 const NegotiationSessionPage = lazy(() => import("./pages/NegotiationSessionPage.js").then(m => ({ default: m.NegotiationSessionPage })));
@@ -321,6 +322,13 @@ function Shell() {
     return (
       <Suspense fallback={<PageLoader />}>
         <WalletLinkPage />
+      </Suspense>
+    );
+  }
+  if (location.pathname === "/wallets") {
+    return (
+      <Suspense fallback={<PageLoader />}>
+        <WalletsPage />
       </Suspense>
     );
   }
