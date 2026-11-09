@@ -256,4 +256,44 @@ describe("the job-complete and resume-settlement routes accept only the job's pa
     expect(res.statusCode).toBe(403);
     expect(res.json()).toEqual(EXPLICIT_CREDENTIAL_REQUIRED);
   });
+
+  it("R5 resume: a credential with no proven wallet is refused as unverified", async () => {
+    const jobId = await createJob(app);
+    const res = await resume(jobId, { "x-test-principal": STRANGER });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("identity_unverified");
+  });
+
+  it("R6 resume: a request with no identity is refused as unauthenticated", async () => {
+    const jobId = await createJob(app);
+    const res = await resume(jobId);
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error).toBe("unauthenticated");
+  });
+
+  it("R7 resume: a refusal leaves a resumable job's row exactly as it was", async () => {
+    const jobId = await createJob(app);
+    getStore().db.update(schema.jobs).set({ status: "evidence_submitted" }).where(eq(schema.jobs.id, jobId)).run();
+    const before = jobRow(jobId);
+    const res = await resume(jobId, proven(STRANGER));
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: "Job not found" });
+    expect(jobRow(jobId)).toEqual(before);
+  });
+
+  it("R8 resume: the kernel operator's sign-in cookie alone is refused", async () => {
+    const jobId = await createJob(app);
+    const res = await resume(jobId, proven(OPERATOR, "cookie"));
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual(EXPLICIT_CREDENTIAL_REQUIRED);
+  });
+
+  it("C11 the kernel operator's sign-in cookie alone is refused and changes nothing", async () => {
+    const jobId = await createJob(app);
+    const before = jobRow(jobId);
+    const res = await complete(jobId, proven(OPERATOR, "cookie"));
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual(EXPLICIT_CREDENTIAL_REQUIRED);
+    expect(jobRow(jobId)).toEqual(before);
+  });
 });
