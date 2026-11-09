@@ -17,7 +17,7 @@ import type {
   Address,
 } from "@pcc/spec";
 import { DEFAULT_TIER_REQUIREMENTS, KERNEL_PULL_CAPTURE_TYPES, isFabricated, kernelPullCaptureIssue } from "@pcc/spec";
-import { hashEvent, hashBundle } from "@pcc/spec";
+import { hashEvent, hashKernelWrittenEvent, hashBundle } from "@pcc/spec";
 import { ids } from "@pcc/spec";
 import { types } from "node:util";
 import type { EvidenceStorageService, ArchiveResult } from "./evidence-storage.js";
@@ -169,14 +169,51 @@ export class EvidenceEmitter {
   }
 
   /**
-   * Add an evidence event for a job step. The step's events are stored in the order this is
-   * called, whatever order their hashes finish in (N123). The promise settles once this event
-   * is stored, or rejects with the reason it was not.
+   * Add an adapter/device evidence event for a job step. Events are stored in
+   * call order, independent of hash completion order. Adapter events cannot
+   * claim the kernel's input proof, and their hashes retain the v1 algorithm.
    */
   async addEvent(
     jobId: string,
     stepId: string,
     rawEvent: Omit<EvidenceEvent, "id" | "hash">,
+  ): Promise<EvidenceEvent> {
+    return this.storeEvent(jobId, stepId, rawEvent, false);
+  }
+
+  /**
+   * Kernel-internal authoring path. JobRunner's validated prepare-path
+   * method_loaded is its only caller and the only event the kernel marks with
+   * source.writer. The marker is placed on a fresh source object; an adapter
+   * cannot set it through addEvent. This event uses event hash v2.
+   */
+  async addKernelWrittenEvent(
+    jobId: string,
+    stepId: string,
+    rawEvent: Omit<EvidenceEvent, "id" | "hash">,
+  ): Promise<EvidenceEvent> {
+    const { type, source, ...rest } = rawEvent;
+    if (type !== "method_loaded") {
+      throw new Error("only method_loaded may be kernel-written");
+    }
+    return this.storeEvent(
+      jobId,
+      stepId,
+      { ...rest, type, source: { ...source, writer: "kernel" } },
+      true,
+    );
+  }
+
+  /**
+   * Shared recording path: job/unit binding, concurrent hashing, ordered
+   * storage, failed-add latch, pending count and detach handling are identical
+   * for v1 adapter events and the one permitted v2 kernel event.
+   */
+  private async storeEvent(
+    jobId: string,
+    stepId: string,
+    rawEvent: Omit<EvidenceEvent, "id" | "hash">,
+    kernelWritten: boolean,
   ): Promise<EvidenceEvent> {
     const stepEv = this.step(jobId, stepId);
     if (!stepEv) {
@@ -208,12 +245,22 @@ export class EvidenceEmitter {
     }
     const bound = { ...rawEvent, payload } as Omit<EvidenceEvent, "id" | "hash">;
 
+    // Backstop for unmarked adapter input proofs, including queued mutations.
+    // A source with any own writer key must instead reach hashEvent's reserved-
+    // writer refusal, which takes a place and latches lost evidence (V2/EW5).
+    // An unmarked refusal takes no place and cannot poison the step (V3/EW6).
+    if (!kernelWritten && bound.type === "method_loaded" &&
+        Object.hasOwn(payload, "inputHash") &&
+        (bound.source == null || !Object.hasOwn(bound.source, "writer"))) {
+      throw new Error("a method_loaded carrying inputHash must be kernel-written");
+    }
+
     // Hashed now, from the event as called, and stored in call order (N123): an event waits for
     // the step's earlier events to be stored, or to fail, never for their hashes alone, so a slow
     // hash cannot put it after later events. The hashes still run concurrently. An event refused
     // above never takes a place.
     const id = ids.evidence();
-    const hashed = hashEvent(bound);
+    const hashed = kernelWritten ? hashKernelWrittenEvent(bound) : hashEvent(bound);
     void hashed.catch(() => undefined); // a failed hash is this call's to report, in its turn; never unhandled meanwhile
     stepEv.pending += 1;
     const stored = stepEv.stored.then(async () => {

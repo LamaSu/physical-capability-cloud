@@ -5,7 +5,7 @@
  */
 
 import type { EvidenceBundle, SHA256 } from "@pcc/spec";
-import { verifyBundleHash, hashEvent } from "@pcc/spec";
+import { verifyBundleHash, verifyEventHash } from "@pcc/spec";
 import { nanoid } from "nanoid";
 
 export interface AnomalyReport {
@@ -82,17 +82,16 @@ export class AnomalyDetector {
       });
     }
 
-    // 2. Verify each event hash
+    // 2. Verify each event hash with the spec's v1/v2 writer selection.
     for (const event of bundle.events) {
-      const computed = await hashEvent(event);
-      if (computed !== event.hash) {
+      if (!(await verifyEventHash(event))) {
         return this.emit({
           severity: "critical",
           category: "evidence_mismatch",
           description: `Event hash mismatch for event ${event.id} in bundle ${bundle.id}`,
           sourceId: bundle.kernelId,
           targetId: bundle.id,
-          evidence: { eventId: event.id, storedHash: event.hash, computedHash: computed },
+          evidence: { eventId: event.id, storedHash: event.hash },
         });
       }
     }
