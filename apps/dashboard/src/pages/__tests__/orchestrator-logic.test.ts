@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readOrchestratorResponse, workflowStepSegments } from "../orchestrator-logic.js";
+import { listFromRead, readOrchestratorResponse, workflowStepSegments, type OrchestratorRead } from "../orchestrator-logic.js";
 
 describe("workflowStepSegments", () => {
   it("uses completion to fill every segment and explain why", () => {
@@ -172,5 +172,32 @@ describe("readOrchestratorResponse", () => {
       status: 200,
       message: "Response body was not valid JSON",
     });
+  });
+});
+
+describe("listFromRead", () => {
+  it("returns the read's array without copying it, including an empty list", () => {
+    const graphs = [{ id: "transfer-1" }];
+    expect(listFromRead({ kind: "ok", data: { graphs } }, "graphs")).toBe(graphs);
+
+    const empty: typeof graphs = [];
+    expect(listFromRead({ kind: "ok", data: { graphs: empty } }, "graphs")).toBe(empty);
+  });
+
+  it.each([[null], [["a", "b"]], ["text"], [12], [false], [{}], [{ graphs: {} }], [{ graphs: "x" }], [{ graphs: null }]])(
+    "does not invent a list from an ok read with body %j",
+    async (body) => {
+      const read = await readOrchestratorResponse<{ graphs: string[] }>(jsonResponse(body));
+      expect(read.kind).toBe("ok");
+      expect(listFromRead(read, "graphs")).toBeUndefined();
+    },
+  );
+
+  it.each<OrchestratorRead<{ graphs: string[] }> | undefined>([
+    { kind: "not_available", status: 501, message: "Graphs are not recorded here.", see: [] },
+    { kind: "error", status: 500, message: "Graphs failed" },
+    undefined,
+  ])("returns no list when the read is not ok: %j", (read) => {
+    expect(listFromRead(read, "graphs")).toBeUndefined();
   });
 });

@@ -33,6 +33,15 @@ export type OrchestratorRead<T> =
   | { kind: "not_available"; status: 501; message: string; see: string[] }
   | { kind: "error"; status: number; message: string };
 
+export function listFromRead<T, K extends keyof T>(
+  read: OrchestratorRead<T> | undefined,
+  key: K,
+): Extract<T[K], unknown[]> | undefined {
+  if (read?.kind !== "ok" || read.data === null || typeof read.data !== "object") return undefined;
+  const list = read.data[key];
+  return Array.isArray(list) ? list as Extract<T[K], unknown[]> : undefined;
+}
+
 // Consume the body once. Malformed JSON is a read result, including on an
 // error response, so callers can explain the failure without losing its status.
 export async function readOrchestratorResponse<T = unknown>(response: Response): Promise<OrchestratorRead<T>> {
