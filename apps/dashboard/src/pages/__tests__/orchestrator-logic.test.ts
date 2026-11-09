@@ -200,4 +200,9 @@ describe("listFromRead", () => {
   ])("returns no list when the read is not ok: %j", (read) => {
     expect(listFromRead(read, "graphs")).toBeUndefined();
   });
+
+  it("returns no list from a read that is not ok, even if it carries one", () => {
+    const read = { kind: "error", status: 500, message: "Graphs failed", data: { graphs: ["stale"] } };
+    expect(listFromRead(read as OrchestratorRead<{ graphs: string[] }>, "graphs")).toBeUndefined();
+  });
 });
