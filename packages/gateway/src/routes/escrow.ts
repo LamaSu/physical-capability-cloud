@@ -1,7 +1,8 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getAddress, isAddress, type Address } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
+import { schema, eq, or } from "@pcc/store";
 import { getSettlementFacade } from "../facades/index.js";
 import type { DisputeInput } from "../facades/index.js";
 import {
@@ -21,21 +22,23 @@ import {
   isWriteEnabled as escrowWriteEnabled,
   encodeApproveAndReleaseV3,
 } from "../contracts/escrow-client.js";
-import { getRepos } from "../db.js";
+import { withSignerLock } from "../contracts/signer-lock.js";
+import { getRepos, getStore } from "../db.js";
 import { isBuyerFundedEscrowRow, ESCROW_BUYER_FUNDED } from "../services/buyer-funded-escrow.js";
+import { authorityOf } from "../auth/kernel-authority.js";
 
 /**
  * Look up an escrow row by its on-chain contract address. The single DB query
- * shape for this module's "do we know this escrow?" question — used both as the
- * V2/V3 dispatch hint (resolveEscrowVersion) and as the /fund provenance gate.
+ * shape for this module's "do we know this escrow?" question, asked by
+ * escrowRelayTarget before every escrow chain write.
  *
  * Address casing: rows are written with the checksummed address decoded from
  * the factory event (paid-job-flow.ts), while callers routinely send lowercase.
  * The lookup is retried against the checksummed and lowercased forms so a
  * legitimate escrow is never rejected over casing alone.
  *
- * Throws only when the escrow registry itself is unreadable. Callers decide
- * whether that degrades (version hint) or fails closed (funding gate).
+ * Throws only when the escrow registry itself is unreadable; escrowRelayTarget
+ * then fails closed.
  */
 function findEscrowRow(contractAddress: string) {
   const escrows = getRepos().escrows;
@@ -50,20 +53,58 @@ function findEscrowRow(contractAddress: string) {
 }
 
 /**
- * Dispatch known rows to V2 or V3; buyer-funded and unknown versions refuse writes.
- * Missing rows and unavailable lookups retain the existing V2 fallback. A null version means V2.
+ * The escrow chain routes check the caller, the escrow and the submitted value. Each of
+ * the six gateway-key escrow chain writes below runs this first, on both flag branches,
+ * before any activity, facade or chain call: the gateway admin secret (else 403), then a
+ * known escrow row (503 when the registry is unreadable, 404 when it is unknown), then not
+ * buyer-funded (409), then a supported version: "v3", or "v2" or null for V2 (anything
+ * else is 409). A missing row or an unreadable registry never falls back to V2.
  */
-function resolveEscrowVersion(contractAddress: string): "v2" | "v3" | "buyer_funded" | "unknown" {
-  try {
-    const row = findEscrowRow(contractAddress);
-    if (!row) return "v2";
-    if (row.version === "v3") return "v3";
-    if (row.version === "v2" || row.version === null) return "v2";
-    if (isBuyerFundedEscrowRow(row)) return "buyer_funded";
-    return "unknown";
-  } catch {
-    return "v2";
+function escrowRelayTarget(
+  req: FastifyRequest,
+  address: string,
+):
+  | { ok: true; row: NonNullable<ReturnType<typeof findEscrowRow>>; version: "v2" | "v3" }
+  | { ok: false; status: number; body: Record<string, string> } {
+  if (!authorityOf(req).admin) {
+    return {
+      ok: false,
+      status: 403,
+      body: { error: "forbidden", reason: "admin_required", message: "These escrow chain writes need the gateway admin secret." },
+    };
   }
+  let row: ReturnType<typeof findEscrowRow>;
+  try {
+    row = findEscrowRow(address);
+  } catch {
+    return {
+      ok: false,
+      status: 503,
+      body: {
+        error: "escrow_lookup_unavailable",
+        message:
+          "The escrow registry is unreadable; refusing to fund an address of unverified provenance.",
+      },
+    };
+  }
+  if (!row) {
+    return {
+      ok: false,
+      status: 404,
+      body: {
+        error: "escrow_not_found",
+        message:
+          "No escrow with this contract address is known to this gateway. " +
+          "Funding is limited to protocol-created escrows.",
+      },
+    };
+  }
+  if (isBuyerFundedEscrowRow(row)) {
+    return { ok: false, status: 409, body: { error: ESCROW_BUYER_FUNDED, message: "Buyer-funded escrows do not use gateway-key settlement writes." } };
+  }
+  if (row.version === "v3") return { ok: true, row, version: "v3" };
+  if (row.version === "v2" || row.version === null) return { ok: true, row, version: "v2" };
+  return { ok: false, status: 409, body: { error: "escrow_version_unknown", message: "The escrow version is not supported for gateway-key settlement writes." } };
 }
 
 /**
@@ -257,8 +298,8 @@ export async function escrowRoutes(app: FastifyInstance) {
    * caller-supplied address straight into fundEscrowActivity, so the gateway
    * signer could be pointed at an arbitrary contract and made to execute a
    * chain write there. The address must now resolve to an escrow row this
-   * gateway actually created (findEscrowRow — the same lookup the V2/V3
-   * version hint uses) before any on-chain action is attempted.
+   * gateway actually created (escrowRelayTarget, which every escrow chain
+   * write runs first) before any on-chain action is attempted.
    *
    * Unknown address -> 404 `escrow_not_found`: this is an existence question
    * about the `:address` path resource, and the input itself is well-formed, so
@@ -273,32 +314,10 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (!isAddress(address)) {
         return reply.status(400).send({ error: "Invalid address" });
       }
-      let escrowRow: ReturnType<typeof findEscrowRow>;
-      try {
-        escrowRow = findEscrowRow(address);
-      } catch {
-        return reply.status(503).send({
-          error: "escrow_lookup_unavailable",
-          message:
-            "The escrow registry is unreadable; refusing to fund an address of unverified provenance.",
-        });
-      }
-      if (!escrowRow) {
-        return reply.status(404).send({
-          error: "escrow_not_found",
-          message:
-            "No escrow with this contract address is known to this gateway. " +
-            "Funding is limited to protocol-created escrows.",
-        });
-      }
-      if (isBuyerFundedEscrowRow(escrowRow)) {
-        return reply.status(409).send({
-          error: ESCROW_BUYER_FUNDED,
-          message: "Buyer-funded escrows must be funded by their buyer's wallet.",
-        });
-      }
+      const target = escrowRelayTarget(req, address);
+      if (!target.ok) return reply.status(target.status).send(target.body);
       const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
-      const activityResult = await fundEscrowActivity.invoke({
+      const activityResult = await withSignerLock(async () => fundEscrowActivity.invoke({
         workflowRunId: `escrow:${address}`,
         activityId: `fund:${address}`,
         input: [address as Address, actorId, req.ip, req.headers["user-agent"]] as const,
@@ -306,7 +325,7 @@ export async function escrowRoutes(app: FastifyInstance) {
         clientKey: req.headers["idempotency-key"] as string | undefined,
         httpMethod: "POST",
         httpPath: `/api/escrow/chain/${address}/fund`,
-      });
+      }));
       if (!activityResult.ok) {
         return sendActivityError(reply, activityResult.error);
       }
@@ -369,6 +388,8 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
+      const target = escrowRelayTarget(req, address);
+      if (!target.ok) return reply.status(target.status).send(target.body);
       // V2 (EAS) path: release takes ONLY the milestone index — the binding
       // attestation was supplied at submitAttestation time (by UID), so no
       // attestation struct is re-passed here (unlike V1). Challenge window must
@@ -378,17 +399,12 @@ export async function escrowRoutes(app: FastifyInstance) {
           return reply.status(503).send({ error: "write_disabled", message: "Chain write not enabled (no gateway private key)." });
         }
         try {
-          const version = resolveEscrowVersion(address);
-          if (version === "buyer_funded") {
-            return reply.status(409).send({ error: ESCROW_BUYER_FUNDED, message: "Buyer-funded escrows do not use gateway-key settlement writes." });
-          }
-          if (version === "unknown") {
-            return reply.status(409).send({ error: "escrow_version_unknown", message: "The escrow version is not supported for gateway-key settlement writes." });
-          }
-          const result =
+          const version = target.version;
+          const result = await withSignerLock(async () =>
             version === "v3"
-              ? await releaseMilestoneV3(idx, address as Address)
-              : await releaseMilestoneV2(idx, address as Address);
+              ? releaseMilestoneV3(idx, address as Address)
+              : releaseMilestoneV2(idx, address as Address),
+          );
           return {
             ...result,
             action: "release",
@@ -408,14 +424,15 @@ export async function escrowRoutes(app: FastifyInstance) {
             "An oracle-signed attestation struct is required in the request body.",
         });
       }
+      const attestation = body.attestation;
       const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
-      const activityResult = await releaseMilestoneActivity.invoke({
+      const activityResult = await withSignerLock(async () => releaseMilestoneActivity.invoke({
         workflowRunId: `escrow:${address}`,
         activityId: `release:${address}:${idx}`,
         input: [
           address as Address,
           idx,
-          body.attestation,
+          attestation,
           actorId,
           req.ip,
           req.headers["user-agent"],
@@ -424,7 +441,7 @@ export async function escrowRoutes(app: FastifyInstance) {
         clientKey: req.headers["idempotency-key"] as string | undefined,
         httpMethod: "POST",
         httpPath: `/api/escrow/chain/${address}/release/${idx}`,
-      });
+      }));
       if (!activityResult.ok) {
         return sendActivityError(reply, activityResult.error);
       }
@@ -450,8 +467,10 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
+      const target = escrowRelayTarget(req, address);
+      if (!target.ok) return reply.status(target.status).send(target.body);
       const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
-      const activityResult = await fileDisputeActivity.invoke({
+      const activityResult = await withSignerLock(async () => fileDisputeActivity.invoke({
         workflowRunId: `escrow:${address}`,
         activityId: `dispute:${address}:${idx}`,
         input: [address as Address, idx, req.body, actorId, req.ip, req.headers["user-agent"]] as const,
@@ -459,7 +478,7 @@ export async function escrowRoutes(app: FastifyInstance) {
         clientKey: req.headers["idempotency-key"] as string | undefined,
         httpMethod: "POST",
         httpPath: `/api/escrow/chain/${address}/dispute/${idx}`,
-      });
+      }));
       if (!activityResult.ok) {
         return sendActivityError(reply, activityResult.error);
       }
@@ -482,8 +501,10 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
+      const target = escrowRelayTarget(req, address);
+      if (!target.ok) return reply.status(target.status).send(target.body);
       const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
-      const activityResult = await depositBondActivity.invoke({
+      const activityResult = await withSignerLock(async () => depositBondActivity.invoke({
         workflowRunId: `escrow:${address}`,
         activityId: `depositBond:${address}:${idx}`,
         input: [address as Address, idx, actorId, req.ip, req.headers["user-agent"]] as const,
@@ -491,7 +512,7 @@ export async function escrowRoutes(app: FastifyInstance) {
         clientKey: req.headers["idempotency-key"] as string | undefined,
         httpMethod: "POST",
         httpPath: `/api/escrow/chain/${address}/deposit-bond/${idx}`,
-      });
+      }));
       if (!activityResult.ok) {
         return sendActivityError(reply, activityResult.error);
       }
@@ -521,6 +542,33 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (!body?.evidenceBundleHash) {
         return reply.status(400).send({ error: "evidenceBundleHash is required" });
       }
+      const target = escrowRelayTarget(req, address);
+      if (!target.ok) return reply.status(target.status).send(target.body);
+      // Relay only the pinned evidence bundle of this escrow's one job (the hash its oracle
+      // attests), in the chain's 0x form. Its sessions name the job by address or CWM.
+      const { negotiationSessions } = schema;
+      const cwm = target.row.cwmId.trim() !== "" ? target.row.cwmId : null;
+      const naming = getStore().db
+        .select()
+        .from(negotiationSessions)
+        .where(
+          cwm
+            ? or(eq(negotiationSessions.escrowAddress, target.row.contractAddress), eq(negotiationSessions.cwmId, cwm))
+            : eq(negotiationSessions.escrowAddress, target.row.contractAddress),
+        )
+        .all() as Array<{ jobId: string | null }>;
+      const jobIds = [...new Set(naming.map((s) => s.jobId).filter((id): id is string => typeof id === "string" && id.trim() !== ""))];
+      const job = jobIds.length === 1 ? getRepos().jobs.findById(jobIds[0]) : undefined;
+      const pinned = job?.evidenceBundleId ? getRepos().evidence.findById(job.evidenceBundleId) : undefined;
+      if (!pinned) {
+        return reply.status(409).send({ error: "evidence_not_pinned", message: "This escrow's job has no pinned evidence bundle to relay." });
+      }
+      const chainHash = (
+        pinned.bundleHash.startsWith("sha256:") ? "0x" + pinned.bundleHash.slice(7) : pinned.bundleHash
+      ) as `0x${string}`;
+      if (!/^0x[0-9a-fA-F]{64}$/.test(body.evidenceBundleHash) || body.evidenceBundleHash.toLowerCase() !== chainHash.toLowerCase()) {
+        return reply.status(409).send({ error: "evidence_hash_mismatch", message: "The hash is not this escrow's pinned evidence bundle." });
+      }
       // V2 (EAS) path: submitEvidence has the SAME wire signature in V2, but must
       // be sent through the V2 ABI against a MilestoneEscrowV2 address.
       if (useEasV2()) {
@@ -528,22 +576,22 @@ export async function escrowRoutes(app: FastifyInstance) {
           return reply.status(503).send({ error: "write_disabled", message: "Chain write not enabled (no gateway private key)." });
         }
         try {
-          const result = await submitEvidenceV2(idx, body.evidenceBundleHash as `0x${string}`, address as Address);
+          const result = await withSignerLock(async () => submitEvidenceV2(idx, chainHash, address as Address));
           return { ...result, action: "submitEvidence", escrow: address, milestoneIndex: idx, path: "eas-v2" };
         } catch (err) {
           return reply.status(502).send({ error: "chain_write_failed", message: err instanceof Error ? err.message : String(err) });
         }
       }
       const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
-      const activityResult = await submitEvidenceActivity.invoke({
+      const activityResult = await withSignerLock(async () => submitEvidenceActivity.invoke({
         workflowRunId: `escrow:${address}`,
         activityId: `submitEvidence:${address}:${idx}`,
-        input: [address as Address, idx, body.evidenceBundleHash, actorId, req.ip, req.headers["user-agent"]] as const,
+        input: [address as Address, idx, chainHash, actorId, req.ip, req.headers["user-agent"]] as const,
         actorId,
         clientKey: req.headers["idempotency-key"] as string | undefined,
         httpMethod: "POST",
         httpPath: `/api/escrow/chain/${address}/evidence/${idx}`,
-      });
+      }));
       if (!activityResult.ok) {
         return sendActivityError(reply, activityResult.error);
       }
@@ -571,6 +619,8 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
+      const target = escrowRelayTarget(req, address);
+      if (!target.ok) return reply.status(target.status).send(target.body);
       // V2 (EAS) path: the body carries an EAS UID (bytes32) instead of the full
       // oracle attestation struct. The contract validates the UID against EAS
       // on-chain. Accept `easUid` (preferred) or legacy `attestationHash`.
@@ -587,17 +637,12 @@ export async function escrowRoutes(app: FastifyInstance) {
           return reply.status(503).send({ error: "write_disabled", message: "Chain write not enabled (no gateway private key)." });
         }
         try {
-          const version = resolveEscrowVersion(address);
-          if (version === "buyer_funded") {
-            return reply.status(409).send({ error: ESCROW_BUYER_FUNDED, message: "Buyer-funded escrows do not use gateway-key settlement writes." });
-          }
-          if (version === "unknown") {
-            return reply.status(409).send({ error: "escrow_version_unknown", message: "The escrow version is not supported for gateway-key settlement writes." });
-          }
-          const result =
+          const version = target.version;
+          const result = await withSignerLock(async () =>
             version === "v3"
-              ? await submitAttestationV3(idx, easUid as `0x${string}`, address as Address)
-              : await submitAttestationV2(idx, easUid as `0x${string}`, address as Address);
+              ? submitAttestationV3(idx, easUid as `0x${string}`, address as Address)
+              : submitAttestationV2(idx, easUid as `0x${string}`, address as Address),
+          );
           return {
             ...result,
             action: "submitAttestation",
@@ -618,15 +663,16 @@ export async function escrowRoutes(app: FastifyInstance) {
             "An oracle-signed attestation struct is required in the request body.",
         });
       }
+      const attestation = body.attestation;
       const actorId = (req as any).operatorId ?? (req as any).apiKeyId;
-      const result = await facade.submitAttestation(
+      const result = await withSignerLock(async () => facade.submitAttestation(
         address as Address,
         idx,
-        body.attestation,
+        attestation,
         actorId,
         req.ip,
         req.headers["user-agent"],
-      );
+      ));
       return sendResult(reply, result);
     },
   );
