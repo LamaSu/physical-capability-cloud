@@ -8,6 +8,8 @@ describe("N296 funding fold", () => {
     const relay = source("../routes/operator-relay.ts");
     expect(relay).not.toContain("function fundingForListedJob");
     expect(relay).not.toContain("NO_RECORD_ALLOWANCE");
+    // A re-added copy, under any name, would read these funding sources itself.
+    expect(relay).not.toMatch(/\b(?:projectFundingStatus|fundingRecordStore|escrowForJob|paidScopeActivationTerms|testnetBuyerAllowance)\b/);
     expect(relay).toContain('import { jobFundingOf } from "../readmodels/job-funding.js";');
     expect(relay).toContain("listedJobs.map((job) => ({ ...job, funding: jobFundingOf(");
   });
