@@ -22,6 +22,7 @@ import { z } from "zod";
 import { PCC_URL, pccFetch, pccFetchEach } from "./api.js";
 import { registerCaptureTools } from "./tools/capture.js";
 import { registerNegotiateTools } from "./tools/negotiate.js";
+import { buyerConfigFromEnv, registerBuyerTools } from "./tools/buyer.js";
 import { GET_EVIDENCE_DESCRIPTION, evidencePath } from "./tools/evidence.js";
 
 // ---------------------------------------------------------------------------
@@ -1762,6 +1763,7 @@ registerCaptureTools(server);
 // ---------------------------------------------------------------------------
 
 registerNegotiateTools(server);
+registerBuyerTools(server, buyerConfigFromEnv(process.env));
 
 // ---------------------------------------------------------------------------
 // Boot
