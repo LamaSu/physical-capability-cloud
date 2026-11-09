@@ -163,6 +163,12 @@ export class KernelService {
     return this.config.kernelId;
   }
 
+  /** True while this emitter signs with the TEST-ONLY zero-address key.
+   * The gateway holds no kernel key (N267, Q3), so production dispatch refuses every run here. */
+  get usesTestSigner(): boolean {
+    return this.emitter.isTestSigner();
+  }
+
   /**
    * Whether a machine runner for `deviceId` is loaded in this running service,
    * i.e. a job on that device would actually execute here rather than on a
@@ -337,13 +343,13 @@ export class KernelService {
     { jobId: string; deviceId: null; status: "refused"; reason: "device_not_runnable_here" }
   > {
     const { jobId, stepId, gcodeHash, assuranceTier = 0 } = params;
-    let decision = localJobDispatchDecision(this.config.kernelId, params.kernelId, this.hasExplicitConfig);
+    let decision = localJobDispatchDecision(this.config.kernelId, params.kernelId, this.hasExplicitConfig, undefined, this.usesTestSigner);
     const queued = () => {
       if (decision.ok) throw new Error("local_dispatch_not_blocked");
       return { jobId, deviceId: null, status: "queued" as const, reason: decision.reason };
     };
     const refreshDecision = () => {
-      decision = localJobDispatchDecision(this.config.kernelId, params.kernelId, this.hasExplicitConfig);
+      decision = localJobDispatchDecision(this.config.kernelId, params.kernelId, this.hasExplicitConfig, undefined, this.usesTestSigner);
       return decision.ok;
     };
     // A route cannot bypass local identity, the operator's queue-only switch,
