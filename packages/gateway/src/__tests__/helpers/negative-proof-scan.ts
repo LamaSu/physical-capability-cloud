@@ -217,6 +217,10 @@ function findBinding(name: string, at: ts.Node): Binding[] {
 }
 /** Shared lexical initializer lookup for schema inspection; still exactly one hop. */
 export function resolveBinding(name: string, at: ts.Node): Binding[] { return binding(name, at); }
+function staticPropertyName(name: ts.PropertyName): string | undefined {
+  return ts.isIdentifier(name) || ts.isStringLiteralLike(name) || ts.isNumericLiteral(name) ? name.text
+    : ts.isComputedPropertyName(name) && ts.isStringLiteralLike(unwrap(name.expression)) ? (unwrap(name.expression) as ts.StringLiteralLike).text : undefined;
+}
 function property(object: ts.ObjectLiteralExpression, name: string): ts.Expression | undefined {
   for (const p of object.properties) if ((ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) && (ts.isIdentifier(p.name) || ts.isStringLiteralLike(p.name)) && p.name.text === name) return ts.isShorthandPropertyAssignment(p) ? p.name : p.initializer;
   return undefined;
@@ -241,14 +245,23 @@ const payloadMember = (name: string): boolean => /data|calldata|bytecode/i.test(
 /** Resolve identifiers and member roots at their capture location. The same walk
  * inspects a payload's initializer; typed ABI arguments only flag raw-byte names.
  */
-function requestMember(node: ts.Node, at: ts.Node = node, typedArgument = false, seen = new Set<ts.Node>()): boolean {
+// Each payload/command query owns its budget; recursive branches never reset it.
+interface InspectionBudget { visits: number; incomplete: boolean }
+function inspectionBudget(): InspectionBudget { return { visits: 0, incomplete: false }; }
+function requestMember(node: ts.Node, at: ts.Node = node, typedArgument = false): { hit: boolean; incomplete: boolean } {
+  const query = inspectionBudget();
+  const hit = requestMemberWalk(node, at, typedArgument, new Set(), query, 0);
+  return { hit, incomplete: query.incomplete };
+}
+function requestMemberWalk(node: ts.Node, at: ts.Node, typedArgument: boolean, seen: Set<ts.Node>, query: InspectionBudget, depth: number): boolean {
   if (ts.isExpression(node)) node = unwrap(node);
-  if (seen.has(node)) return false;
+  if (query.incomplete || seen.has(node)) return false;
+  if (depth > 64 || ++query.visits > 4096) { query.incomplete = true; return false; }
   seen.add(node);
   const reference = node.parent && node.pos >= 0 ? node : at;
   try {
     if (ts.isIdentifier(node)) {
-      return binding(node.text, reference).some(value => value.expression && requestMember(value.expression, value.declaration ?? reference, typedArgument, seen));
+      return binding(node.text, reference).some(value => value.expression && requestMemberWalk(value.expression, value.declaration ?? reference, typedArgument, seen, query, depth + 1));
     }
     if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
       const names: string[] = [];
@@ -260,34 +273,34 @@ function requestMember(node: ts.Node, at: ts.Node = node, typedArgument = false,
       if (ts.isIdentifier(cursor)) {
         if (requestRoots.has(cursor.text) && names.some(name => requestFields.has(name))) return !typedArgument || names.some(payloadMember);
         const values = binding(cursor.text, reference);
-        if (values.some(value => value.expression && requestMember(value.expression, value.declaration ?? reference, false, seen))) {
-          return !typedArgument || names.some(payloadMember) || values.some(value => value.expression && requestMember(value.expression, value.declaration ?? reference, true, seen));
+        if (values.some(value => value.expression && requestMemberWalk(value.expression, value.declaration ?? reference, false, seen, query, depth + 1))) {
+          return !typedArgument || names.some(payloadMember) || values.some(value => value.expression && requestMemberWalk(value.expression, value.declaration ?? reference, true, seen, query, depth + 1));
         }
       }
       return false;
     }
     if (ts.isCallExpression(node) && calleeName(node.expression) === "encodeFunctionData") {
-      const config = node.arguments.map(unwrap).find(ts.isObjectLiteralExpression);
+      const first = node.arguments[0] && unwrap(node.arguments[0]);
+      const config = first && ts.isObjectLiteralExpression(first) ? first : undefined;
       const abi = config && property(config, "abi"), name = config && property(config, "functionName");
-      if (config && !config.properties.some(ts.isSpreadAssignment) && abi && literalName(name) !== undefined && !requestMember(abi, reference, false, seen)) {
+      if (config && config.properties.every(item => (ts.isPropertyAssignment(item) || ts.isShorthandPropertyAssignment(item)) && staticPropertyName(item.name) !== undefined) && abi && literalName(name) !== undefined && !requestMemberWalk(abi, reference, false, seen, query, depth + 1)) {
         // A fixed encoder's ordinary address/amount args are data. Raw-byte args
         // retain the same guard as writeContract args, regardless of alias spelling.
         return config.properties.some(item => {
-          if (ts.isPropertyAssignment(item)) return requestMember(item.initializer, reference, item.name.getText() === "args", seen);
-          if (ts.isShorthandPropertyAssignment(item)) return requestMember(item.name, reference, item.name.text === "args", seen);
+          if (ts.isPropertyAssignment(item)) return requestMemberWalk(item.initializer, reference, staticPropertyName(item.name) === "args", seen, query, depth + 1);
+          if (ts.isShorthandPropertyAssignment(item)) return requestMemberWalk(item.name, reference, item.name.text === "args", seen, query, depth + 1);
           return false;
         });
       }
     }
     // Object keys, declaration names and callee names are not payload values.
-    if (ts.isPropertyAssignment(node)) return requestMember(node.initializer, reference, typedArgument, seen);
-    if (ts.isShorthandPropertyAssignment(node)) return requestMember(node.name, reference, typedArgument, seen);
+    if (ts.isPropertyAssignment(node)) return requestMemberWalk(node.initializer, reference, typedArgument, seen, query, depth + 1);
+    if (ts.isShorthandPropertyAssignment(node)) return requestMemberWalk(node.name, reference, typedArgument, seen, query, depth + 1);
     let hit = false;
-    ts.forEachChild(node, child => { if (requestMember(child, reference, typedArgument, seen)) hit = true; });
+    ts.forEachChild(node, child => { if (requestMemberWalk(child, reference, typedArgument, seen, query, depth + 1)) hit = true; });
     return hit;
   } finally { seen.delete(node); }
 }
-function memberHasPayloadName(node: ts.Node): boolean { return requestMember(node, node, true); }
 // Scanner-only provenance is not serialized into the reviewed fixture.
 const importedPayloadBindings = new WeakMap<WriteRecord, Set<string>>();
 function importedName(name: string, at: ts.Node): boolean {
@@ -341,6 +354,11 @@ export function scanWrites(root: string, files: string[]): { records: WriteRecor
     const source = parseSource(file, text);
     const walk = (node: ts.Node) => {
       if (ts.isCallExpression(node)) {
+        const inspectRequest = (operand: ts.Node, at: ts.Node = operand, typedArgument = false): boolean => {
+          const result = requestMember(operand, at, typedArgument);
+          if (result.incomplete) findings.push(location("E2-R4", file, node, "payload cannot be inspected: depth or visit bound exceeded"));
+          return result.hit;
+        };
         const resolvedMethods = writeCallees(node.expression, node);
         const bare = calleeName(node.expression);
         // Callable provenance may be opaque (parameters, callbacks, injected locals).
@@ -356,7 +374,7 @@ export function scanWrites(root: string, files: string[]): { records: WriteRecor
               const value = binding(expr.text, node);
               bindings[expr.text] = value.map(candidate => candidate.printed).join(" | ");
               if (value.every(candidate => !candidate.declaration) && importedName(expr.text, node)) importedBindings.add(expr.text);
-              if (inspectPayload && value.some(candidate => candidate.expression && requestMember(candidate.expression, candidate.declaration ?? node))) findings.push(location("E2-R4", file, node, `one-hop ${expr.text}: ${bindings[expr.text]}`));
+              if (inspectPayload && value.some(candidate => candidate.expression && inspectRequest(candidate.expression, candidate.declaration ?? node))) findings.push(location("E2-R4", file, node, `one-hop ${expr.text}: ${bindings[expr.text]}`));
             }
           };
           const record: WriteRecord = { file, enclosing: enclosingName(node), method, args: node.arguments.map(a => printNode(a)).join(", "), count: 1 };
@@ -378,11 +396,11 @@ export function scanWrites(root: string, files: string[]): { records: WriteRecor
             record.functionName = literal ?? (name ? printNode(name) : "<missing>");
             const spreads = object?.properties.filter(ts.isSpreadAssignment) ?? [];
             record.nonLiteralFunctionName = literal === undefined || spreads.length > 0;
-            for (const spread of spreads) if (requestMember(spread.expression)) findings.push(location("E2-R4", file, node, "request-derived writeContract config spread"));
+            for (const spread of spreads) if (inspectRequest(spread.expression)) findings.push(location("E2-R4", file, node, "request-derived writeContract config spread"));
             record.abi = object && property(object, "abi") ? printNode(property(object, "abi")!) : "<missing>";
             const args = object && property(object, "args");
             // Resolve args for intrinsic findings only; their aliases add no record bindings.
-            if (args && memberHasPayloadName(args)) findings.push(location("E2-R4", file, node, "request member used as writeContract payload argument"));
+            if (args && inspectRequest(args, args, true)) findings.push(location("E2-R4", file, node, "request member used as writeContract payload argument"));
           } else {
             const collect = (n: ts.Node) => {
               if (ts.isPropertyAssignment(n) || ts.isShorthandPropertyAssignment(n)) {
@@ -399,15 +417,15 @@ export function scanWrites(root: string, files: string[]): { records: WriteRecor
             // put the client first and the request second; the client is not payload.
             for (const argument of argumentsToInspect.map(unwrap).filter(ts.isIdentifier)) {
               const values = binding(argument.text, node);
-              const requestValues = values.filter(value => value.expression && (ts.isObjectLiteralExpression(unwrap(value.expression)) || requestMember(value.expression, value.declaration ?? node)));
+              const requestValues = values.filter(value => value.expression && (ts.isObjectLiteralExpression(unwrap(value.expression)) || inspectRequest(value.expression, value.declaration ?? node)));
               if (argument === first || requestValues.length) addBinding(argument, false);
               for (const candidate of requestValues) if (candidate.expression) {
                 collect(candidate.expression);
                 const resolved = unwrap(candidate.expression);
-                if ((ts.isPropertyAccessExpression(resolved) || ts.isElementAccessExpression(resolved)) && requestMember(resolved, candidate.declaration ?? node)) findings.push(location("E2-R4", file, node, `request object from ${candidate.printed}`));
+                if ((ts.isPropertyAccessExpression(resolved) || ts.isElementAccessExpression(resolved)) && inspectRequest(resolved, candidate.declaration ?? node)) findings.push(location("E2-R4", file, node, `request object from ${candidate.printed}`));
               }
             }
-            for (const payload of payloads) { addBinding(payload); if (requestMember(payload)) findings.push(location("E2-R4", file, node, `payload ${printNode(payload)}`)); }
+            for (const payload of payloads) { addBinding(payload); if (inspectRequest(payload)) findings.push(location("E2-R4", file, node, `payload ${printNode(payload)}`)); }
           }
           if (Object.keys(bindings).length) record.bindings = Object.fromEntries(Object.entries(bindings).sort(([a], [b]) => a.localeCompare(b)));
           importedPayloadBindings.set(record, importedBindings);
@@ -568,43 +586,47 @@ function isSubprocessCall(node: ts.CallExpression): boolean {
 // Known limits: commands imported from other modules, returned from functions,
 // held in object properties or joined from arrays; words split across + operands,
 // nested node -e programs, and shell redirects glued to a tool word (forge>out).
-// Template expansion keeps at most 256 candidates; overflowing spans become unknown.
-function commandLiteralParts(expression: ts.Expression, at: ts.Node, seen = new Set<ts.Node>(), argvOnly = false): string[] {
+// Template expansion keeps at most 256 joined candidates. Overflow values remain
+// separate command parts; only words glued across an overflowing span are lost.
+function commandLiteralParts(expression: ts.Expression, at: ts.Node, seen = new Set<ts.Node>(), argvOnly = false, query = inspectionBudget(), depth = 0): string[] {
   expression = unwrap(expression);
-  if (seen.has(expression)) return [];
+  if (query.incomplete || seen.has(expression)) return [];
+  if (depth > 64 || ++query.visits > 4096) { query.incomplete = true; return []; }
   seen.add(expression);
   const reference = expression.parent && expression.pos >= 0 ? expression : at;
   try {
     if (ts.isIdentifier(expression)) {
       const value = binding(expression.text, reference);
-      return value.flatMap(candidate => candidate.expression && candidate.printed !== "param" ? commandLiteralParts(candidate.expression, candidate.declaration ?? reference, seen, argvOnly) : []);
+      return value.flatMap(candidate => candidate.expression && candidate.printed !== "param" ? commandLiteralParts(candidate.expression, candidate.declaration ?? reference, seen, argvOnly, query, depth + 1) : []);
     }
-    if (ts.isArrayLiteralExpression(expression)) return expression.elements.flatMap(element => commandLiteralParts(element, reference, seen));
-    if (ts.isConditionalExpression(expression)) return [...commandLiteralParts(expression.whenTrue, reference, seen, argvOnly), ...commandLiteralParts(expression.whenFalse, reference, seen, argvOnly)];
-    if (ts.isBinaryExpression(expression) && [ts.SyntaxKind.QuestionQuestionToken, ts.SyntaxKind.BarBarToken].includes(expression.operatorToken.kind)) return [...commandLiteralParts(expression.left, reference, seen, argvOnly), ...commandLiteralParts(expression.right, reference, seen, argvOnly)];
+    if (ts.isArrayLiteralExpression(expression)) return expression.elements.flatMap(element => commandLiteralParts(element, reference, seen, false, query, depth + 1));
+    if (ts.isConditionalExpression(expression)) return [...commandLiteralParts(expression.whenTrue, reference, seen, argvOnly, query, depth + 1), ...commandLiteralParts(expression.whenFalse, reference, seen, argvOnly, query, depth + 1)];
+    if (ts.isBinaryExpression(expression) && [ts.SyntaxKind.QuestionQuestionToken, ts.SyntaxKind.BarBarToken].includes(expression.operatorToken.kind)) return [...commandLiteralParts(expression.left, reference, seen, argvOnly, query, depth + 1), ...commandLiteralParts(expression.right, reference, seen, argvOnly, query, depth + 1)];
     if (ts.isElementAccessExpression(expression) && expression.argumentExpression && ts.isNumericLiteral(unwrap(expression.argumentExpression))) {
       const index = Number((unwrap(expression.argumentExpression) as ts.NumericLiteral).text);
       const owner = unwrap(expression.expression);
       const arrays = ts.isIdentifier(owner) ? binding(owner.text, reference).flatMap(value => value.expression ? [{ expression: unwrap(value.expression), at: value.declaration ?? reference }] : []) : [{ expression: owner, at: reference }];
-      return arrays.flatMap(value => ts.isArrayLiteralExpression(value.expression) && value.expression.elements[index] ? commandLiteralParts(value.expression.elements[index], value.at, seen, argvOnly) : []);
+      return arrays.flatMap(value => ts.isArrayLiteralExpression(value.expression) && value.expression.elements[index] ? commandLiteralParts(value.expression.elements[index], value.at, seen, argvOnly, query, depth + 1) : []);
     }
     if (argvOnly) return [];
-    if (ts.isTaggedTemplateExpression(expression) && ts.isPropertyAccessExpression(expression.tag) && ts.isIdentifier(expression.tag.expression) && expression.tag.expression.text === "String" && expression.tag.name.text === "raw") return commandLiteralParts(expression.template, reference, seen);
+    if (ts.isTaggedTemplateExpression(expression) && ts.isPropertyAccessExpression(expression.tag) && ts.isIdentifier(expression.tag.expression) && expression.tag.expression.text === "String" && expression.tag.name.text === "raw") return commandLiteralParts(expression.template, reference, seen, false, query, depth + 1);
     if (ts.isStringLiteralLike(expression)) return [expression.text];
     if (ts.isTemplateExpression(expression)) {
       let candidates = [expression.head.text];
+      const overflowValues: string[] = [];
       for (const span of expression.templateSpans) {
-        const values = commandLiteralParts(span.expression, reference, seen);
+        const values = commandLiteralParts(span.expression, reference, seen, false, query, depth + 1);
         // Unknown substitutions separate known words; known spans must be joined
         // before tokenization so `for${suffix}` is inspected as one command word.
         const options = values.length ? [...new Set(values)] : [" "];
+        if (candidates.length * options.length > 256) overflowValues.push(...values);
         candidates = candidates.length * options.length > 256
           ? candidates.map(prefix => prefix + " " + span.literal.text)
           : candidates.flatMap(prefix => options.map(value => prefix + value + span.literal.text));
       }
-      return candidates;
+      return [...candidates, ...overflowValues];
     }
-    if (ts.isBinaryExpression(expression) && expression.operatorToken.kind === ts.SyntaxKind.PlusToken) return [...commandLiteralParts(expression.left, reference, seen), ...commandLiteralParts(expression.right, reference, seen)];
+    if (ts.isBinaryExpression(expression) && expression.operatorToken.kind === ts.SyntaxKind.PlusToken) return [...commandLiteralParts(expression.left, reference, seen, false, query, depth + 1), ...commandLiteralParts(expression.right, reference, seen, false, query, depth + 1)];
     return [];
   } finally { seen.delete(expression); }
 }
@@ -631,13 +653,17 @@ export function scanForbiddenRuntime(root: string, files: string[]): Finding[] {
       if (ts.isStringLiteralLike(node) && deniedRPC.has(node.text)) findings.push(location("E2-R5", file, node));
       if (imported === "solc" || imported === "solc-js") findings.push(location("E3-R2", file, node));
       if (ts.isCallExpression(node) && isSubprocessCall(node)) {
-        const parts = node.arguments[0] ? commandLiteralParts(node.arguments[0], node) : [];
-        if (node.arguments[1]) parts.push(...commandLiteralParts(node.arguments[1], node, new Set(), true));
+        const query = inspectionBudget();
+        const parts = node.arguments[0] ? commandLiteralParts(node.arguments[0], node, new Set(), false, query) : [];
+        if (node.arguments[1]) parts.push(...commandLiteralParts(node.arguments[1], node, new Set(), true, query));
+        if (query.incomplete) findings.push(location("E3-R2", file, node, "command cannot be inspected: depth or visit bound exceeded"));
         const words = solidityCommandWords(parts);
         if (words.length) findings.push(location("E3-R2", file, node, `Solidity command words: ${words.join(", ")}`));
       }
       if (ts.isTaggedTemplateExpression(node) && subprocessBinding(node.tag, node).some(target => ["execa", "zx", "bun"].includes(target.module))) {
-        const words = solidityCommandWords(commandLiteralParts(node.template, node));
+        const query = inspectionBudget();
+        const words = solidityCommandWords(commandLiteralParts(node.template, node, new Set(), false, query));
+        if (query.incomplete) findings.push(location("E3-R2", file, node, "command template cannot be inspected: depth or visit bound exceeded"));
         if (words.length) findings.push(location("E3-R2", file, node, `Solidity command words: ${words.join(", ")}`));
       }
       ts.forEachChild(node, walk);
