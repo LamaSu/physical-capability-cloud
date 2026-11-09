@@ -60,8 +60,8 @@ type Route = typeof routes[number];
 type Flag = typeof flags[number];
 type Caller = keyof typeof callers;
 const ADMIN_REQUIRED = { error: "forbidden", reason: "admin_required", message: "These escrow chain writes need the gateway admin secret." };
-const NOT_FOUND = { error: "escrow_not_found", message: "No escrow with this contract address is known to this gateway. Funding is limited to protocol-created escrows." };
-const LOOKUP_UNAVAILABLE = { error: "escrow_lookup_unavailable", message: "The escrow registry is unreadable; refusing to fund an address of unverified provenance." };
+const NOT_FOUND = { error: "escrow_not_found", message: "No escrow with this contract address is known to this gateway. Gateway-key settlement writes are limited to protocol-created escrows." };
+const LOOKUP_UNAVAILABLE = { error: "escrow_lookup_unavailable", message: "The escrow registry is unreadable; refusing a gateway-key settlement write to an address of unverified provenance." };
 const BUYER_FUNDED = { error: "escrow_buyer_funded", message: "Buyer-funded escrows do not use gateway-key settlement writes." };
 const VERSION_UNKNOWN = { error: "escrow_version_unknown", message: "The escrow version is not supported for gateway-key settlement writes." };
 const NOT_PINNED = { error: "evidence_not_pinned", message: "This escrow's job has no pinned evidence bundle to relay." };
@@ -378,6 +378,20 @@ describe("escrow chain writes check the caller, the escrow and the submitted val
     expect(res.statusCode, context).toBe(200);
     expect(chain.submitEvidenceV2, context).toHaveBeenCalledOnce();
     expect(chain.submitEvidenceV2, context).toHaveBeenCalledWith(0, "0x" + "c1".repeat(32), SAME);
+  });
+  it("an evidence hash that isn't a string is refused as a bad request", async () => {
+    for (const flag of flags) for (const { kind, body } of [
+      { kind: "array", body: { evidenceBundleHash: ["0x" + "a2".repeat(32)] } },
+      { kind: "number", body: { evidenceBundleHash: 42 } },
+      { kind: "object", body: { evidenceBundleHash: { h: "0x" + "a2".repeat(32) } } },
+    ]) {
+      fresh();
+      const res = await call("evidence", V2, "admin", flag, body as any);
+      context += `, body=${kind}`;
+      expect(res.statusCode, context).toBe(400);
+      expect(res.json(), context).toEqual({ error: "evidenceBundleHash is required" });
+      nothingRan();
+    }
   });
   it("I1 a refused call takes no idempotency key: the admin's call right after it succeeds", async () => {
     for (const route of ["fund", "dispute", "deposit-bond", "release", "evidence"] as const) {

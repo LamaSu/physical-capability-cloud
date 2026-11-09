@@ -83,7 +83,7 @@ function escrowRelayTarget(
       body: {
         error: "escrow_lookup_unavailable",
         message:
-          "The escrow registry is unreadable; refusing to fund an address of unverified provenance.",
+          "The escrow registry is unreadable; refusing a gateway-key settlement write to an address of unverified provenance.",
       },
     };
   }
@@ -95,7 +95,7 @@ function escrowRelayTarget(
         error: "escrow_not_found",
         message:
           "No escrow with this contract address is known to this gateway. " +
-          "Funding is limited to protocol-created escrows.",
+          "Gateway-key settlement writes are limited to protocol-created escrows.",
       },
     };
   }
@@ -539,7 +539,7 @@ export async function escrowRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
       const body = req.body as { evidenceBundleHash?: string } | undefined;
-      if (!body?.evidenceBundleHash) {
+      if (typeof body?.evidenceBundleHash !== "string" || body.evidenceBundleHash === "") {
         return reply.status(400).send({ error: "evidenceBundleHash is required" });
       }
       const target = escrowRelayTarget(req, address);
