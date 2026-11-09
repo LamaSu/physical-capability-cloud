@@ -143,6 +143,16 @@ async function remount(page: ReactElement) {
   return renderPage(page);
 }
 function text() { return container.textContent ?? ""; }
+function expectSkippedEscrowRow() {
+  expect.soft(text()).toContain("1 listed escrow couldn't be read and isn't shown.");
+  expect.soft(text()).not.toContain("Couldn't load escrows");
+  expect.soft(text()).not.toContain("escrow-a");
+  expect.soft(text()).not.toMatch(/No escrows yet|No escrows|Nothing running yet|No jobs or escrows yet|No active escrows/);
+}
+function expectEscrowNotice(notice: string) {
+  expect(text().split(notice).length - 1).toBe(1);
+  expect(elementWithText(notice, "p").getAttribute("role")).toBe("status");
+}
 async function refresh(client: QueryClient) {
   await act(async () => { await client.refetchQueries(); });
   await settled(client);
@@ -255,9 +265,10 @@ describe("Command Center reads", () => {
     expect(await renderPage(<DashboardPage />)).toContain("Some live data couldn't be loaded");
     expect(text()).not.toMatch(/1\/1|0\/1/);
   });
-  it("rejects an escrow that omits status", async () => {
+  it("leaves out an escrow that omits status and says so", async () => {
     liveRoutes(escrowRows([{ id: "escrow-a" }]));
-    expect(await renderPage(<DashboardPage />)).toContain("Couldn't load escrows");
+    await renderPage(<DashboardPage />);
+    expectSkippedEscrowRow();
   });
   it("qualifies an empty active list after only one jobs page", async () => {
     liveRoutes(jobRows(Array.from({ length: 50 }, (_, i) => ({ id: `job-${i}`, status: "completed" }))));
@@ -269,11 +280,13 @@ describe("Command Center reads", () => {
     expect(await renderPage(<DashboardPage />)).toContain("ETH");
     expect(text()).not.toMatch(/USDC|\$10\.00/);
   });
-  it("rejects a malformed escrow amount on both pages", async () => {
+  it("leaves out a malformed escrow amount on both pages and says so", async () => {
     liveRoutes(escrowRows([escrow({ totalAmount: "not-money" })]));
-    expect(await renderPage(<DashboardPage />)).toContain("Couldn't load escrows");
+    await renderPage(<DashboardPage />);
+    expectSkippedEscrowRow();
     expect(text()).not.toContain("0.00");
-    expect(await remount(<EscrowPage />)).toContain("Couldn't load escrows");
+    await remount(<EscrowPage />);
+    expectSkippedEscrowRow();
     expect(text()).not.toContain("0.00");
   });
   it("rejects an unknown job status", async () => {
@@ -289,6 +302,23 @@ describe("Command Center reads", () => {
     liveRoutes(kernelRows([{ id: "kernel-a", status: "expired", isStale: false }, { id: "kernel-b", status: "online", isStale: false }]));
     expect(await renderPage(<DashboardPage />)).toContain("1/2");
     expect(text()).not.toContain("Some live data couldn't be loaded");
+  });
+  it("counts exactly the known statuses whose execution phase is not terminal", async () => {
+    const active = new Set(["pending", "queued", "in_progress", "paused", "executing", "active", "preparing", "collecting_evidence", "awaiting_pickup"]);
+    const jobs = [...KNOWN_JOB_STATUSES].map((status) => ({ id: `job-${status}`, status }));
+    liveRoutes(jobRows(jobs));
+    await renderPage(<DashboardPage />);
+    expect(elementWithText("Active Jobs").nextElementSibling?.textContent).toBe(String(active.size));
+    for (const { id, status } of jobs) expect(text().includes(id), status).toBe(active.has(status));
+  });
+  it("removes the left-out escrow notice after the escrow refresh fails", async () => {
+    liveRoutes(escrowRows([escrow(), escrow({ id: "escrow-unreadable", status: "unexpected" })]));
+    const client = newClient();
+    await renderPage(<DashboardPage />, client);
+    expectEscrowNotice("1 listed escrow couldn't be read and isn't shown.");
+    liveRoutes({ "/api/escrow": errorReply });
+    expect(await refresh(client)).toContain("Couldn't load escrows");
+    expect(text()).not.toContain("couldn't be read and isn't shown");
   });
 });
 
@@ -337,14 +367,16 @@ describe("Escrow reads", () => {
     expect(await renderPage(<EscrowPage />)).toContain("ETH");
     expect(text()).not.toMatch(/USDC|\$10\.00/);
   });
-  it("rejects a currency outside the escrow vocabulary", async () => {
+  it("leaves out a currency outside the escrow vocabulary and says so", async () => {
     liveRoutes(escrowRows([escrow({ currency: "XYZ" })]));
-    expect(await renderPage(<EscrowPage />)).toContain("Couldn't load escrows");
+    await renderPage(<EscrowPage />);
+    expectSkippedEscrowRow();
     expect(text()).not.toContain("USDC");
   });
-  it("rejects an unknown status", async () => {
+  it("leaves out an unknown status and says so", async () => {
     liveRoutes(escrowRows([escrow({ status: "unexpected" })]));
-    expect(await renderPage(<EscrowPage />)).toContain("Couldn't load escrows");
+    await renderPage(<EscrowPage />);
+    expectSkippedEscrowRow();
   });
   it("accepts every known escrow status", async () => {
     const escrows = [...KNOWN_ESCROW_STATUSES].map((status, i) => escrow({ id: `escrow-${i}`, status }));
@@ -363,19 +395,27 @@ describe("Escrow reads", () => {
     expect(text()).toContain("DAI");
     expect(text()).not.toMatch(/\$|USDC/);
   });
-  it("rejects inconsistent milestone counts", async () => {
+  it("leaves out inconsistent milestone counts and says so", async () => {
     liveRoutes(escrowRows([escrow({ releasedCount: 1, disputedCount: 1 })]));
-    expect(await renderPage(<EscrowPage />)).toContain("Couldn't load escrows");
+    await renderPage(<EscrowPage />);
+    expectSkippedEscrowRow();
   });
-  it("rejects signed, exponent, grouped, and noncanonical amounts", async () => {
+  it("leaves out signed, exponent, grouped, and noncanonical amounts and says so", async () => {
     for (const totalAmount of ["-10", "1e3", "1,000", "010", " 10", "10.", ".5"]) {
       liveRoutes(escrowRows([escrow({ totalAmount })]));
-      expect(await remount(<EscrowPage />), totalAmount).toContain("Couldn't load escrows");
+      await remount(<EscrowPage />);
+      expectSkippedEscrowRow();
     }
   });
 });
 
 describe("Revenue reads", () => {
+  it("shows the active job count without a phase list", async () => {
+    liveRoutes(jobRows([{ id: "job-a", status: "awaiting_pickup" }]));
+    await renderPage(<RevenueDashboardPage />);
+    expect(text()).not.toContain("pending, queued, running or paused");
+    expect(elementWithText("Active Jobs").parentElement?.children).toHaveLength(2);
+  });
   it("reports an unreachable gateway without claiming revenue", async () => {
     fetchRoutes();
     expect(await renderPage(<RevenueDashboardPage />)).toMatch(/Couldn't load (jobs|escrows)/);
@@ -495,10 +535,65 @@ describe.each(moneyPages)("$name escrow failures", ({ name, page }) => {
     { name: "malformed amount", changes: { totalAmount: "unreadable" } },
     { name: "unknown currency", changes: { currency: "XYZ" } },
     { name: "missing currency", changes: { currency: undefined } },
-  ])("rejects $name without manufacturing money", async ({ changes }) => {
+  ])("leaves out a row with $name and says so, without manufacturing money", async ({ changes }) => {
     liveRoutes(escrowRows([escrow(changes)]));
-    expect(await renderPage(page())).toContain("Couldn't load escrows");
+    await renderPage(page());
+    expectSkippedEscrowRow();
     expect(text()).not.toMatch(/0\.00|USDC/);
+  });
+});
+
+describe.each(moneyPages)("$name escrow rows that can't be read", ({ name, page }) => {
+  it("shows the readable row and says one listed row was left out", async () => {
+    liveRoutes(escrowRows([escrow(), escrow({ id: "escrow-unreadable", status: "unexpected", totalAmount: "777", currency: "ETH" })]));
+    await renderPage(page());
+    expect(text()).toContain("escrow-a");
+    expectEscrowNotice("1 listed escrow couldn't be read and isn't shown.");
+    expect(text()).not.toMatch(/escrow-unreadable|777|ETH/);
+    expect(text()).not.toContain("Couldn't load escrows");
+    expect(text()).not.toMatch(/No escrows yet|No escrows|Nothing running yet|No jobs or escrows yet|No active escrows/);
+    if (name === "Command Center") expect(text()).toMatch(/Escrows\s*1\+/);
+    if (name === "Escrow") {
+      expect(text()).toMatch(/Escrows\s*1\+\s*all states/);
+      expect(text()).toMatch(/Active Escrows\s*1\+\s*of 1\+ total/);
+      expect(text()).toMatch(/Milestones\s*1\+/);
+    }
+  });
+  it("says how many listed rows were left out when none can be read", async () => {
+    liveRoutes(escrowRows([
+      escrow({ id: "escrow-unreadable", status: "unexpected", totalAmount: "777", currency: "ETH" }),
+      escrow({ id: "escrow-unreadable-2", totalAmount: "888", currency: "XYZ" }),
+    ]));
+    await renderPage(page());
+    expectEscrowNotice("2 listed escrows couldn't be read and aren't shown.");
+    expect(text()).not.toMatch(/escrow-unreadable|777|888|ETH|XYZ/);
+    expect(text()).not.toContain("Couldn't load escrows");
+    expect(text()).not.toMatch(/No escrows yet|No escrows|Nothing running yet|No jobs or escrows yet|No active escrows/);
+    if (name === "Command Center") expect(text()).toMatch(/Escrows\s*0\+/);
+    if (name === "Escrow") {
+      expect(text()).toMatch(/Escrows\s*0\+\s*all states/);
+      expect(text()).toMatch(/Active Escrows\s*0\+\s*of 0\+ total/);
+      expect(text()).toMatch(/Milestones\s*0\+/);
+    }
+  });
+  it("shows exact counts and no notice when every listed row is readable", async () => {
+    liveRoutes(escrowRows([escrow()]));
+    await renderPage(page());
+    expect(text()).toContain("escrow-a");
+    expect(text()).not.toContain("couldn't be read");
+    if (name === "Command Center") expect(text()).toMatch(/Escrows\s*1(?!\+)/);
+    if (name === "Escrow") {
+      expect(text()).toMatch(/Escrows\s*1\s*all states/);
+      expect(text()).toMatch(/Active Escrows\s*1\s*of 1 total/);
+      expect(text()).toMatch(/Milestones\s*1(?!\+)/);
+    }
+  });
+  it("leaves out a listed row that isn't an object and says so", async () => {
+    liveRoutes(escrowRows([escrow(), null]));
+    await renderPage(page());
+    expect(text()).toContain("escrow-a");
+    expectEscrowNotice("1 listed escrow couldn't be read and isn't shown.");
+    expect(text()).not.toContain("Couldn't load escrows");
   });
 });
 
@@ -649,9 +744,10 @@ describe("held escrow records", () => {
   });
 });
 
-function expectScope(label: string) {
-  expect(text().split(label).length - 1).toBe(1);
-  const line = elementWithText(label, "p");
+function expectScope(label: string, count = 1) {
+  expect(text().split(label).length - 1).toBe(count);
+  const lines = Array.from(container.querySelectorAll<HTMLElement>("p")).filter((element) => element.textContent === label);
+  const line = lines[lines.length - 1]!;
   expect(line.classList.contains("text-xs")).toBe(true);
   expect(line.classList.contains("text-white/30")).toBe(true);
   expect(line.parentElement?.firstElementChild).toBe(line);
@@ -661,10 +757,36 @@ it("Command Center shows the escrow account scope once when loaded and when the 
   liveRoutes(escrowRows([escrow()]));
   const client = newClient();
   expect(await renderPage(<DashboardPage />, client)).toContain("escrow-a");
-  expectScope(label);
+  expectScope(label, 2);
   liveRoutes({ "/api/escrow": errorReply });
   expect(await refresh(client)).toContain("Couldn't load escrows");
-  expectScope(label);
+  expectScope(label, 2);
+  liveRoutes(jobRows([{ id: "job-a", status: "queued" }]));
+  expect(await refresh(client)).toContain("No escrows");
+  expectScope(label, 2);
+});
+it.each([
+  { tile: "Active Jobs", label: "Your account's jobs, as the gateway records them.", route: "/api/jobs", rows: jobRows([{ id: "job-a", status: "queued" }]) },
+  { tile: "Kernels Online", label: "Every account's kernels, as the gateway records them.", route: "/api/kernels", rows: kernelRows([{ id: "kernel-a", status: "online", isStale: false }]) },
+  { tile: "Escrows", label: "Every account's escrows, as the gateway records them.", route: "/api/escrow", rows: escrowRows([escrow()]) },
+])("Command Center $tile tile shows its scope line once when loaded and when its read fails", async ({ tile, label, route, rows }) => {
+  function expectTileScope() {
+    const panel = elementWithText(tile).closest(".rounded-xl")!;
+    expect(panel.textContent!.split(label).length - 1).toBe(1);
+    const line = panel.lastElementChild!;
+    expect(line.tagName.toLowerCase()).toBe("p");
+    expect(line.textContent).toBe(label);
+    expect(line.classList.contains("text-xs")).toBe(true);
+    expect(line.classList.contains("text-white/30")).toBe(true);
+  }
+  liveRoutes(rows);
+  const client = newClient();
+  await renderPage(<DashboardPage />, client);
+  expectTileScope();
+  liveRoutes({ ...rows, [route]: errorReply });
+  await refresh(client);
+  expect(elementWithText(tile).closest(".rounded-xl")!.textContent).toContain("unavailable");
+  expectTileScope();
 });
 const scopePages = [
   { id: "escrow", path: "/escrow", label: "Every account's escrows, as the gateway records them." },
