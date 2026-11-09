@@ -25,14 +25,14 @@ import { UnitState } from "../settlement/unit-state-mapper.js";
 
 /** The one finalized block every read in a response is pinned to (rule 22/24). */
 const SNAP_HASH = "0x" + "cd".repeat(32);
+const DEPLOYMENT = { chainId: 84532, factory: "0x" + "fa".repeat(20), implementation: "0x" + "1e".repeat(20), recordSha256: "ab".repeat(32) };
 
 const UNIT = "0x" + "ab".repeat(32);
 const OTHER_TENANT = "tenant-b";
 
 function makeReader(over: Partial<SettlementUnitReader> = {}): SettlementUnitReader {
   return {
-    binding: () => ({ chainId: 84532, escrow: "0xEsCrOw" }),
-    windows: () => ({ challengeWindow: 3600n, appealWindow: 7200n }),
+    binding: async () => ({ chainId: 84532, escrow: "0xEsCrOw", deployment: DEPLOYMENT, windows: { challengeWindow: 3600n, appealWindow: 7200n } }),
     // v1.5 rule 22/24: ONE pinned FINALIZED snapshot per response, echoed on
     // every DTO so Surface A can assert all three routes agree.
     pinSnapshot: async (asOf?: string) => {

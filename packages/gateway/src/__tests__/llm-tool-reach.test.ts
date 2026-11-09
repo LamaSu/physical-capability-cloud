@@ -202,7 +202,9 @@ export function scanToolReach(root: string, files: string[]): ToolScan {
         if (registration === "registerTool" && shape) {
           let config = unwrap(shape);
           if (ts.isIdentifier(config)) config = resolve(config) ?? config;
-          if (ts.isObjectLiteralExpression(config) && !config.properties.some(ts.isSpreadAssignment)) {
+          if (ts.isObjectLiteralExpression(config) && config.properties.every(item =>
+            (ts.isPropertyAssignment(item) || ts.isShorthandPropertyAssignment(item))
+            && propertyName(item.name) !== undefined && propertyName(item.name) !== "__proto__")) {
             const input = config.properties.find(item => (ts.isPropertyAssignment(item) || ts.isShorthandPropertyAssignment(item)) && propertyName(item.name) === "inputSchema");
             shape = input && ts.isPropertyAssignment(input) ? input.initializer
               : input && ts.isShorthandPropertyAssignment(input) ? input.name : ts.factory.createObjectLiteralExpression();
@@ -483,6 +485,29 @@ describe("E4b: LLM tool parameter boundary", () => {
     expect(scan.findings, formatFindings(scan.findings)).toEqual([]);
     expect(compareAddressReview(scan, fixtureCopy({ schema: "pcc-llm-money-address-tools/1", entries: [] }))).toEqual([]);
   }, TIMEOUT);
+});
+
+describe("N258 W1 registerTool inspection", () => {
+  for (const [name, text] of [
+    ["R4-get", 'server.registerTool("pcc_x", { description: "x", get inputSchema() { return { calldata: z.string(), recipient: z.string() }; } }, cb);'],
+    ["R4-comp", 'const KEY = "inputSchema"; server.registerTool("pcc_x", { description: "x", [KEY]: { calldata: z.string(), recipient: z.string() } }, cb);'],
+    ["R4-proto", 'server.registerTool("pcc_x", { description: "x", __proto__: { inputSchema: { calldata: z.string(), recipient: z.string() } } }, cb);'],
+    ["R4-idget", 'const cfg = { get inputSchema() { return { calldata: z.string(), recipient: z.string() }; } }; server.registerTool("pcc_x", cfg, cb);'],
+  ]) it(`N258 W1 ${name}: opaque members fail loudly`, () => {
+    const t = synthetic([], text);
+    const scan = scanToolReach(t.root, t.files);
+    expect(scan.findings, formatFindings(scan.findings)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rule: "E4b-R1", detail: expect.stringContaining("missing or opaque input shape") }),
+    ]));
+  });
+
+  it("N258 W1 R4-litcomp: literal computed inputSchema retains byte and address paths", () => {
+    const t = synthetic([], 'server.registerTool("pcc_x", { ["inputSchema"]: { calldata: z.string(), recipient: z.string() } }, cb);');
+    const scan = scanToolReach(t.root, t.files);
+    expect(scan.parameters.map(parameter => parameter.path)).toEqual(["calldata", "recipient"]);
+    expect(scan.findings.some(hit => hit.rule === "E4b-R1" && hit.detail?.includes("calldata"))).toBe(true);
+    expect(scan.addresses).toEqual([{ source: "mcp", tool: "pcc_x", params: ["recipient"] }]);
+  });
 });
 
 describe("verdict controls for E4b", () => {

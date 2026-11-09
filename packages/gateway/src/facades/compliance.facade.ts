@@ -40,6 +40,7 @@ import {
   type RawEvidenceBundle,
 } from "./populators/compliance.populator.js";
 import { detectDrifts } from "./drift-detector.js";
+import { PLACEHOLDER_SIGNATURE_VALUES } from "../services/device-evidence-settlement.js";
 
 // ── ISO 9001 / FDA Part 11 audit standard constants ───────────────────────────
 
@@ -445,10 +446,12 @@ export class ComplianceFacade extends BaseFacade {
     // through it. Folding the authenticity predicate (source.simulated /
     // payload.mock) into "Original" makes the leg mean origin again: a
     // simulated/mock-tagged bundle now fails ALCOA "Original". (coord #312/#316)
+    // A gateway placeholder signature (PLACEHOLDER_SIGNATURE_VALUES) never counts as the original (N292).
     const ZERO_SIGNER = "0x0000000000000000000000000000000000000000";
     const signerOriginal = allBundles.every((b) => {
-      const sig = (b as any).kernelSignature as { signer?: string } | undefined;
-      return sig !== undefined && sig.signer !== ZERO_SIGNER;
+      const sig = (b as any).kernelSignature as { signer?: string; value?: unknown } | undefined;
+      return sig !== undefined && sig.signer !== ZERO_SIGNER
+        && !(typeof sig.value === "string" && PLACEHOLDER_SIGNATURE_VALUES.has(sig.value));
     });
     const authentic = allEvents.every((e) => !isFabricated(e));
     const original = signerOriginal && authentic;

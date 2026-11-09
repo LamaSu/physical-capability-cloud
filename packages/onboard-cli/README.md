@@ -22,8 +22,8 @@ Three ways for a layperson to onboard to PCC:
 3. **`npx @pcc/onboard`** (this package) — talks to the gateway from
    your laptop with your own Anthropic key, no browser required.
 
-All three paths end up at the same place: a real registered capability,
-kernel, or channel on https://capability.network.
+The browser chat (path 1) can't complete a registration yet: its tool calls
+carry no API key. Check each step's result on the other paths too.
 
 ## Install / run
 

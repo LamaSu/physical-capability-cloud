@@ -11,12 +11,10 @@
  * Conformance target:    docs/genui/settlement-read-surface-conformance-matrix.md
  *
  * ── WHY THERE IS A PORT AND NOT A CHAIN CALL ─────────────────────────
- * The V-next escrow is NOT DEPLOYED — escrow's M-2 has not produced artifact
- * (D), the deployed address, and VCR (#623/#690) is blocked on the same one. So
- * a concrete staticcall reader cannot exist yet and anything claiming to be one
- * would be fiction. The routes bind to `SettlementUnitReader`; until an
- * implementation is registered they answer INDEX_NOT_READY (503 + Retry-After)
- * — an honest "ask again later", never an empty or fabricated DTO.
+ * Phase 1 adds a per-unit, snapshot-pinned async binding carrying the escrow,
+ * deployment identity and window constants, plus a public client re-check kit.
+ * The routes bind to `SettlementUnitReader`; until an implementation is
+ * registered they answer INDEX_NOT_READY (503 + Retry-After).
  *
  * ── MONEY-CRITICAL RULES (not cosmetic) ──────────────────────────────
  *  rule 2   Asserts NOTHING sound. No verified/paid/settled boolean.
@@ -89,12 +87,22 @@ export interface ChainSnapshot {
   logCompleteness: Completeness;
 }
 
+export interface DeploymentIdentity {
+  chainId: number;
+  factory: string;
+  implementation: string;
+  recordSha256: string;
+}
+
 export interface UnitBinding {
   chainId: number;
   escrow: string;
+  deployment: DeploymentIdentity;
+  windows: WindowConstants;
 }
 
 export interface EconomicsRecord {
+  /** The recipient's amount (net of the fee): the payee's net n, never the buyer's gross g = n + f. */
   amount: string;
   feeAmount: string;
   recipient: string;
@@ -123,8 +131,7 @@ export interface ProvenancePage {
  * in one response come from one pinned block (rule 16/24).
  */
 export interface SettlementUnitReader {
-  binding(): UnitBinding;
-  windows(): WindowConstants;
+  binding(unitId: string, snap: ChainSnapshot): Promise<UnitBinding>;
   /**
    * Pin the snapshot for this response.
    * - No `asOf` -> pin the current FINALIZED head (rule 22).
@@ -227,6 +234,25 @@ function snapshotEcho(snap: ChainSnapshot) {
   };
 }
 
+/** Build a fresh, exact identity envelope; reader metadata must not escape. */
+function deploymentEcho(deployment: DeploymentIdentity): DeploymentIdentity {
+  return {
+    chainId: deployment.chainId,
+    factory: deployment.factory,
+    implementation: deployment.implementation,
+    recordSha256: deployment.recordSha256,
+  };
+}
+
+function validDeployment(deployment: DeploymentIdentity | null, chainId: number): deployment is DeploymentIdentity {
+  return deployment !== null && typeof deployment === "object"
+    && Number.isSafeInteger(deployment.chainId) && deployment.chainId > 0
+    && deployment.chainId === chainId
+    && typeof deployment.factory === "string" && /^0x[0-9a-f]{40}$/.test(deployment.factory)
+    && typeof deployment.implementation === "string" && /^0x[0-9a-f]{40}$/.test(deployment.implementation)
+    && typeof deployment.recordSha256 === "string" && /^[0-9a-f]{64}$/.test(deployment.recordSha256);
+}
+
 // ── Routes ────────────────────────────────────────────────────────────
 
 export async function settlementReadRoutes(app: FastifyInstance) {
@@ -288,9 +314,35 @@ export async function settlementReadRoutes(app: FastifyInstance) {
       return null;
     }
 
+    let binding: UnitBinding;
+    try {
+      binding = await r.binding(unitId, snap);
+    } catch (e) {
+      if (e instanceof UnitNotFoundError) {
+        fail(reply, "UNKNOWN_UNIT", "No such settlement unit");
+        return null;
+      }
+      throw e;
+    }
+    if (binding === null || typeof binding !== "object") {
+      fail(reply, "INDEX_NOT_READY", "Settlement read is misbound: no valid binding");
+      return null;
+    }
+    const deployment = binding.deployment !== null && typeof binding.deployment === "object" ? deploymentEcho(binding.deployment) : null;
+    if (!validDeployment(deployment, binding.chainId)) {
+      req.log?.error({ unitId }, "settlement read has no valid deployment identity");
+      fail(reply, "INDEX_NOT_READY", "Settlement read is misbound: no valid deployment identity");
+      return null;
+    }
+    if (!(typeof binding.windows?.challengeWindow === "bigint" && binding.windows.challengeWindow >= 0n
+      && typeof binding.windows?.appealWindow === "bigint" && binding.windows.appealWindow >= 0n)) {
+      fail(reply, "INDEX_NOT_READY", "Settlement read is misbound: no valid binding");
+      return null;
+    }
+
     let lifecycle: LifecycleView;
     try {
-      lifecycle = toLifecycleView(anchors, r.windows());
+      lifecycle = toLifecycleView(anchors, binding.windows);
     } catch (e) {
       if (e instanceof UnreachableUnitStateError) {
         req.log?.error({ err: e, unitId }, "unreachable unit state from settlement read");
@@ -299,7 +351,7 @@ export async function settlementReadRoutes(app: FastifyInstance) {
       }
       throw e;
     }
-    return { r, anchors, lifecycle, snap };
+    return { r, anchors, lifecycle, snap, binding, deployment };
   }
 
   // ── GET /lifecycle ──────────────────────────────────────────────────
@@ -308,13 +360,14 @@ export async function settlementReadRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const ctx = await prelude(req, reply, req.params.unitId, req.query.asOf);
       if (!ctx) return;
-      const { r, lifecycle, snap } = ctx;
-      const { chainId, escrow } = r.binding();
+      const { r, lifecycle, snap, binding } = ctx;
+      const { chainId, escrow } = binding;
 
       return reply.send({
         chainId,
         escrow,
         unitId: req.params.unitId,
+        deployment: ctx.deployment,
         ...snapshotEcho(snap),
         unitState: lifecycle.unitState,
         phase: lifecycle.phase,
@@ -332,9 +385,9 @@ export async function settlementReadRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const ctx = await prelude(req, reply, req.params.unitId, req.query.asOf);
       if (!ctx) return;
-      const { r, lifecycle, snap } = ctx;
+      const { r, lifecycle, snap, binding } = ctx;
       const unitId = req.params.unitId;
-      const { chainId, escrow } = r.binding();
+      const { chainId, escrow } = binding;
       const chainCtx = {
         chain: `eip155:${chainId}`,
         contractOrRegistryId: escrow,
@@ -389,6 +442,7 @@ export async function settlementReadRoutes(app: FastifyInstance) {
         chainId,
         escrow,
         unitId,
+        deployment: ctx.deployment,
         ...snapshotEcho(snap),
         // rule 2 — no settled/verified/paid boolean. Callers key off finalState.
         finalState: lifecycle.finalState,
@@ -410,9 +464,9 @@ export async function settlementReadRoutes(app: FastifyInstance) {
   }>("/api/settlement/units/:unitId/provenance", async (req, reply) => {
     const ctx = await prelude(req, reply, req.params.unitId, req.query.asOf);
     if (!ctx) return;
-    const { r, snap } = ctx;
+    const { r, snap, binding } = ctx;
     const unitId = req.params.unitId;
-    const { chainId, escrow } = r.binding();
+    const { chainId, escrow } = binding;
 
     const limit = req.query.limit ? Number(req.query.limit) : undefined;
     if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 500)) {
@@ -444,6 +498,7 @@ export async function settlementReadRoutes(app: FastifyInstance) {
         chainId,
         escrow,
         unitId,
+        deployment: ctx.deployment,
         ...snapshotEcho(snap),
         provenanceAvailability: page.availability,
       });
@@ -453,6 +508,7 @@ export async function settlementReadRoutes(app: FastifyInstance) {
       chainId,
       escrow,
       unitId,
+      deployment: ctx.deployment,
       ...snapshotEcho(snap),
       provenanceAvailability: "AVAILABLE",
       compositionRoot: page.compositionRoot,

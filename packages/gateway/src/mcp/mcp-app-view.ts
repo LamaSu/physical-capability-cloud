@@ -1276,6 +1276,7 @@ export function buildMcpAppIrDashboardHtml(nonce: string = cspNonce()): string {
    bound data carries a text "as of" line that says "stale" when it is. */
 .pcc-src-proposed{border-left:2px dashed currentColor;padding-left:6px}
 .pcc-text.pcc-src-proposed::before,.pcc-heading.pcc-src-proposed::before{content:"agent-authored";display:block;font-size:10px;letter-spacing:.06em;text-transform:uppercase;opacity:.6}
+.pcc-ir.pcc-src-proposed,.pcc-section.pcc-src-proposed,.pcc-grid.pcc-src-proposed,.pcc-form.pcc-src-proposed{border-left:0;padding-left:0}
 .pcc-fresh{font-size:12px}
 .pcc-stale,.pcc-unavail,.pcc-time-unknown{border-left:3px solid currentColor;padding-left:6px}
 .pcc-absent{font-style:italic}
@@ -1284,7 +1285,7 @@ export function buildMcpAppIrDashboardHtml(nonce: string = cspNonce()): string {
 </head>
 <body>
 <main id="pcc-ir-root">
-  <p class="pcc-invalid">Waiting for the host to hand off a dashboard&hellip;</p>
+  <p class="pcc-invalid pcc-src-ephemeral" data-source="ephemeral">Waiting for the host to hand off a dashboard&hellip;</p>
 </main>
 <script nonce="${nonce}">
 ${dashboardIrViewBootScript()}

@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { HostingSpace } from "@pcc/spec";
+import { gateDemoRoutes, notAvailable } from "../config/demo-routes.js";
 
 const mockSpaces: HostingSpace[] = [
   {
@@ -44,7 +45,14 @@ const mockSpaces: HostingSpace[] = [
   },
 ];
 
+const SPACES_NOT_AVAILABLE = notAvailable(
+  "Hosting spaces are not recorded or matched on this gateway.",
+  "Only built-in examples exist, and they are not served.",
+  [],
+);
+
 export async function spaceRoutes(app: FastifyInstance) {
+  gateDemoRoutes(app, SPACES_NOT_AVAILABLE);
   // List hosting spaces with optional filters
   app.get("/api/spaces", async (req) => {
     const query = req.query as Record<string, string>;

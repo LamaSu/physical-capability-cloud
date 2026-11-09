@@ -6,9 +6,9 @@ import { deepFreeze } from "../deep-freeze.js";
 
 export const AGENT_PACKAGE_PIN = deepFreeze({
   schema: "pcc-agent-package/2.0",
-  version: "2.19.5",
-  toolCount: 243,
-  sha256: "sha256:1f21719ef67e91c267e28526ea3b9203a1161afe7550ad001d1cfd4ae4f02a9e",
+  version: "2.19.6",
+  toolCount: 239,
+  sha256: "sha256:ef61e537b1040e973f3749fe35eb3f1fe8d0c503b13b1a5b63c6e3f587a3f2ad",
 } as const);
 
 export const AGENT_TOOLS = deepFreeze({
@@ -199,10 +199,6 @@ export const AGENT_TOOLS = deepFreeze({
   "pcc_submit_request": { method: "POST", path: "/api/requests", required: ["description","title"] },
   "pcc_training_manifest_get": { method: "GET", path: "/api/contributors/training-manifests/{modelIpId}", required: ["modelIpId"] },
   "pcc_training_manifest_set": { method: "POST", path: "/api/contributors/training-manifests", required: ["datasetWeights","modelIpId"] },
-  "pcc_trilobio_build_config": { method: "POST", path: "/api/helpers/trilobio/build-config", required: ["url"] },
-  "pcc_trilobio_capability_template": { method: "GET", path: "/api/helpers/trilobio/capability-template", required: [] },
-  "pcc_trilobio_validate_options": { method: "POST", path: "/api/helpers/trilobio/validate-options", required: [] },
-  "pcc_trilobio_validate_script": { method: "POST", path: "/api/helpers/trilobio/validate-script", required: ["source"] },
   "pcc_update_node_status": { method: "PUT", path: "/api/requests/{requestId}/nodes/{nodeId}/status", required: ["nodeId","requestId","status"] },
   "pcc_update_request": { method: "PUT", path: "/api/requests/{requestId}", required: ["requestId"] },
   "pcc_verifier_health": { method: "GET", path: "/api/capture/verifier-health", required: [] },

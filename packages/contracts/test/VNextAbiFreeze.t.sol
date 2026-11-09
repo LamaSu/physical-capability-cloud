@@ -170,6 +170,31 @@ contract VNextAbiFreezeTest is Test {
         assertEq(VNextSettlementEscrow.dischargeClaim.selector, bytes4(0xb409a86d), "dischargeClaim");
     }
 
+    function test_Freeze_KitReadSelectors() public view {
+        assertEq(VNextSettlementEscrow.settlement.selector, bytes4(0x115785ee), "settlement");
+        assertEq(VNextSettlementEscrow.unitCounters.selector, bytes4(0x0c5aca79), "unitCounters");
+        assertEq(VNextSettlementEscrow.feeAmountsOf.selector, bytes4(0x6c523346), "feeAmountsOf");
+        assertEq(VNextSettlementEscrow.requiredTierOf.selector, bytes4(0x984ba332), "requiredTierOf");
+        assertEq(VNextSettlementEscrow.compositionRootOf.selector, bytes4(0xae576fd7), "compositionRootOf");
+        assertEq(VNextSettlementEscrow.unitExists.selector, bytes4(0xb0db18ad), "unitExists");
+        assertEq(VNextSettlementEscrow.emergencyAnchorOf.selector, bytes4(0xff6ef8e5), "emergencyAnchorOf");
+        VNextSettlementEscrow esc;
+        VNextSettlementEscrowFactory fac;
+        assertEq(esc.initialized.selector, bytes4(0x158ef93e), "initialized");
+        assertEq(esc.factory.selector, bytes4(0xc45a0155), "factory");
+        assertEq(esc.USDC.selector, bytes4(0x89a30271), "USDC");
+        assertEq(fac.implementation.selector, bytes4(0x5c60da1b), "implementation");
+    }
+
+    function test_Freeze_KitEventTopics() public pure {
+        assertEq(VNextSettlementEscrow.Finalized.selector, bytes32(0x376ddd15bbb3f80631b75629ce073b8e7b0986c38539b19ecafd468fb2a2fb1a), "Finalized");
+        assertEq(VNextSettlementEscrow.EscalationResolved.selector, bytes32(0x80f5cfd14e62601fb5210041726f0eb0dce1b48cb7cbb8a53e6da99ec56c721c), "EscalationResolved");
+        assertEq(VNextSettlementEscrow.ReleaseAllocated.selector, bytes32(0x027f6e4c8ebce37645149e6b0b68699811e190b74ecfb619734822cb35219420), "ReleaseAllocated");
+        assertEq(VNextSettlementEscrow.RefundAllocated.selector, bytes32(0x2fece9b6f1acc81b244c4bde917d4737df62bda83258eb681240460113bb3d58), "RefundAllocated");
+        assertEq(VNextSettlementEscrow.ClaimCreated.selector, bytes32(0xca2397b5fee9c9ff08e892bdb054290eafb220ecd68be7853f4948d6db277571), "ClaimCreated");
+        assertEq(VNextSettlementEscrow.ClaimDischarged.selector, bytes32(0xe525c1af03c162ad35592aff4c9388ae955424eba5f84af4f87ba47dfc944c1a), "ClaimDischarged");
+    }
+
     /// @dev The golden inputs themselves, hashed here from their doc §8 preimages.
     function test_Freeze_GoldenInputs() public pure {
         assertEq(keccak256("pcc:vnext:golden:job"), GOLDEN_JOB_ID_HASH);

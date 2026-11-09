@@ -1,5 +1,14 @@
 import { authorizedFetch } from "./authorized-fetch.js";
 
+export const SIGN_IN_EXPIRED = "Your sign-in is no longer valid; sign in again.";
+export const SIGN_IN_REFUSED = "PCC refused this with your current sign-in.";
+
+export function walletLinkSignInRemedy(message: string | null | undefined): "sign-in-again" | "sign-out" | null {
+  if (message === SIGN_IN_EXPIRED) return "sign-in-again";
+  if (message === SIGN_IN_REFUSED) return "sign-out";
+  return null;
+}
+
 const UNREACHABLE = "Could not reach PCC. Nothing was linked.";
 const UNKNOWN_APPROVAL = "PCC did not confirm your decision. The link may have been made; check your terminal before trying again.";
 const UNKNOWN_DENIAL = "PCC did not confirm your denial. The request expires on its own.";
@@ -24,9 +33,9 @@ class WalletLinkError extends Error {
     } else if (status === 403 && code === "code_mismatch") {
       message = "The code does not match. Check the code and try again.";
     } else if (status === 403) {
-      message = "PCC refused this with your current sign-in.";
+      message = SIGN_IN_REFUSED;
     } else if (status === 401) {
-      message = "Your sign-in is no longer valid; sign in again.";
+      message = SIGN_IN_EXPIRED;
     }
     super(message);
   }

@@ -8,14 +8,16 @@ export function jobSubmitQueueOnly(): boolean {
 }
 
 export type LocalJobDispatchReason = "queue_only" | "emergency_stop" | "policy_unavailable"
-  | "not_local" | "no_configured_local_kernel";
+  | "not_local" | "no_configured_local_kernel" | "no_kernel_signer";
 
-/** One decision for dispatch, queued replies, audit, detect and the boot log. */
+/** One decision for dispatch, queued replies, audit, detect and the boot log.
+ * N267: production refuses only an exact true report of the test-only signer. */
 export function localJobDispatchDecision(
   localKernelId: unknown,
   kernelId: string,
   hasExplicitConfig: boolean,
   queueOnly?: unknown,
+  usesTestSigner?: unknown,
 ): { ok: true } | { ok: false; reason: LocalJobDispatchReason } {
   if (hasExplicitConfig !== true || localKernelId === "kernel_dev_001") {
     return { ok: false, reason: "no_configured_local_kernel" };
@@ -25,7 +27,12 @@ export function localJobDispatchDecision(
     return { ok: false, reason: "not_local" };
   }
   const stop = emergencyStopState(kernelId);
-  if (stop === "clear") return { ok: true };
+  if (stop === "clear") {
+    if (process.env.NODE_ENV === "production" && usesTestSigner === true) {
+      return { ok: false, reason: "no_kernel_signer" };
+    }
+    return { ok: true };
+  }
   return { ok: false, reason: stop === "stopped" ? "emergency_stop" : "policy_unavailable" };
 }
 

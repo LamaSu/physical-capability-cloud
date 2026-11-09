@@ -487,7 +487,7 @@ function inlineManifestJson(manifest: unknown): string {
  */
 function renderShell(a: UiArtifact): string {
   const title = escapeHtml(a.manifest.title || a.name);
-  const desc = a.manifest.description ? `<p>${escapeHtml(a.manifest.description)}</p>` : "";
+  const desc = a.manifest.description ? `<p class="pcc-agent pcc-untrusted pcc-src-proposed" data-source="proposed">${escapeHtml(a.manifest.description)}</p>` : "";
   const theme = escapeHtml(a.manifest.theme ?? "auto");
   const slug = escapeHtml(a.slug);
   const manifestJson = inlineManifestJson(a.manifest);
@@ -501,10 +501,10 @@ function renderShell(a: UiArtifact): string {
 <body>
 <main id="pcc-root" data-slug="${slug}">
   <header>
-    <h1>${title}</h1>
+    <h1 class="pcc-agent pcc-untrusted pcc-src-proposed" data-source="proposed">${title}</h1>
     ${desc}
   </header>
-  <p id="pcc-kit-status">Loading the PCC dashboard kit&hellip;</p>
+  <p id="pcc-kit-status" class="pcc-src-ephemeral" data-source="ephemeral">Loading the PCC dashboard kit&hellip;</p>
 </main>
 <script type="application/json" id="pcc-manifest">${manifestJson}</script>
 <script src="/ui-kit/v1/pcc-ui.js" defer></script>

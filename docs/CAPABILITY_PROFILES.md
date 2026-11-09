@@ -573,10 +573,7 @@ When a job request comes in for "2D printing":
 
 ### 5.3 Storage
 
-CSDs are stored in three places:
-1. **IPFS** — canonical, content-addressed, immutable (the source of truth)
-2. **SQLite** — local cache for fast queries (the working copy)
-3. **On-chain** — hash commitment for integrity (the proof it hasn't been tampered with)
+CSDs are held in the gateway's process memory, in a registry keyed by each CSD's url: registering a CSD whose url is already held replaces it. Nothing stores CSDs on IPFS or on chain yet.
 
 ---
 
