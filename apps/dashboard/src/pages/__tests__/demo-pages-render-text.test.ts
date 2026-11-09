@@ -74,6 +74,7 @@ function order(shopName = "Shop", driverName = "Driver") {
 
 async function plan() {
   (page.document.querySelector("#userId") as HTMLInputElement).value = "customer";
+  await vi.waitFor(() => expect((page.document.querySelector("#planBtn") as HTMLButtonElement).onclick).not.toBeNull());
   (page.document.querySelector("#planBtn") as HTMLButtonElement).click();
   await vi.waitFor(() => expect(page.document.querySelectorAll("#steps .step")).toHaveLength(2));
 }
