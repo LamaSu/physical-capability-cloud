@@ -464,6 +464,7 @@ interface ViewNode {
   textContent: string | null;
   parentNode: { removeChild(child: ViewNode): void } | null;
   className: string;
+  setAttribute(name: string, value: string): void;
   appendChild(child: ViewNode): ViewNode;
 }
 interface ViewDocument {
@@ -887,6 +888,8 @@ export function renderGalleryIntoView(win: ViewWindow, entries: unknown[]): bool
   if (status && status.parentNode) status.parentNode.removeChild(status);
   if (!entries.length) {
     var empty = doc.createElement("p");
+    empty.className = "pcc-src-ephemeral";
+    empty.setAttribute("data-source", "ephemeral");
     empty.textContent = "No dashboards found.";
     root.appendChild(empty);
     return true;
