@@ -97,7 +97,7 @@ describe("graph dev registration routes", () => {
     await expectGraphRegistrations(await makeGraphApp(), 201);
   });
 
-  it.each(["1", "TRUE"])("G3: production with PCC_DEMOS_ENABLED=%s", async (flag) => {
+  it.each(["1", "TRUE", " true", "true "])("G3: production with PCC_DEMOS_ENABLED=%s", async (flag) => {
     setEnvironment("production", flag);
     await expectGraphRegistrations(await makeGraphApp(), 404);
   });
@@ -137,7 +137,7 @@ describe("compose dev registration route", () => {
     await expectComposeRegistration(await makeComposeApp(), 201);
   });
 
-  it.each(["1", "TRUE"])("C3: production with PCC_DEMOS_ENABLED=%s", async (flag) => {
+  it.each(["1", "TRUE", " true", "true "])("C3: production with PCC_DEMOS_ENABLED=%s", async (flag) => {
     setEnvironment("production", flag);
     await expectComposeRegistration(await makeComposeApp(), 404);
   });
