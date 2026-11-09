@@ -284,6 +284,7 @@ describe("MCP Apps lifecycle — gallery (search) view", () => {
     const empty = Array.from(document.querySelectorAll("p")).find(
       (node) => node.textContent === "No dashboards found.",
     );
+    expect(document.querySelectorAll("#pcc-root > p")).toHaveLength(1);
     expect(empty?.className).toBe("pcc-src-ephemeral");
     expect(empty?.getAttribute("data-source")).toBe("ephemeral");
   });
