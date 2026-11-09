@@ -174,6 +174,11 @@ describe("V-next encoders reproduce the golden vectors", () => {
     );
   });
 
+  it("T17 the factory's createEscrow selector is the frozen one", () => {
+    expect(toFunctionSelector(getAbiItem({ abi: FACTORY_ABI, name: "createEscrow" })))
+      .toBe(golden.selectors["createEscrow((address,address,bytes32,bytes32,uint256,bytes32,bytes32))"]);
+  });
+
   // reviewer-charlie L5 (implementer-delta): the two new live checks rest on these bytes.
   it("the factory's predictEscrow selector is the frozen one (its PolicyIdentity tuple in order)", () => {
     const predict = getAbiItem({ abi: FACTORY_ABI, name: "predictEscrow" });

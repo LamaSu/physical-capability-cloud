@@ -40,6 +40,7 @@ import {
   maxUint256,
   parseAbi,
   parseEventLogs,
+  parseTransaction,
   recoverAddress,
   stringToHex,
   zeroAddress,
@@ -56,6 +57,7 @@ import {
   FundingRefusal,
   approveAndFund,
   classifyFunding,
+  ensureEscrow,
   prepareFunding,
   readFundedState,
   signJobPolicy,
@@ -184,7 +186,7 @@ describe.skipIf(!RUN)("buyer funding with @pcc/spec/funding against the real V-n
    * The gateway's side of plan §3 step 4: compile with the canonical compiler (payer = the buyer's wallet), take the
    * operator's signature, create the escrow (the gateway pays gas only), and return the prepare payload as JSON.
    */
-  async function gatewayPrepare(label: string, d: { FACTORY: Address; IMPL: Address } = deployed) {
+  async function gatewayPrepare(label: string, d: { FACTORY: Address; IMPL: Address } = deployed, o: { create?: boolean } = {}) {
     const now = (await pub.getBlock()).timestamp;
     const compiled: CompiledVNextPolicy = compileVNextPolicy({
       chainId: 31337n,
@@ -227,7 +229,7 @@ describe.skipIf(!RUN)("buyer funding with @pcc/spec/funding against the real V-n
       ],
     });
     const operatorSignature = await operator.sign({ hash: compiled.digest });
-    await send(gateway, { address: d.FACTORY, abi: VNextSettlementEscrowFactoryABI, functionName: "createEscrow", args: [compiled.identity] });
+    if (o.create !== false) await send(gateway, { address: d.FACTORY, abi: VNextSettlementEscrowFactoryABI, functionName: "createEscrow", args: [compiled.identity] });
     const payload = toWire({
       schema: FUNDING_PREPARE_SCHEMA,
       chainId: compiled.chainId,
@@ -444,4 +446,51 @@ describe.skipIf(!RUN)("buyer funding with @pcc/spec/funding against the real V-n
     expect(classifyFunding({ kind: "mined", txHash: result.fundTx!, status: "success", blockHash: fundedAt }, stale.kind)).toBe("indeterminate");
     expect((await readFundedState({ publicClient: pub, prepared })).kind).toBe("unfunded");
   }, 120_000);
+
+  it("T26 the SDK creates the clone before approving and funding", async () => {
+    const { compiled, payload } = await gatewayPrepare("N5a", deployed, { create: false });
+    const prepared = await prepare(payload, compiled, "N5a");
+    expect(await pub.getCode({ address: prepared.escrow })).toBeUndefined();
+    const created = await ensureEscrow({ prepared, wallet: wallet(buyer), publicClient: pub });
+    expect(created.outcome).toBe("ready");
+    expect(created.create).toMatchObject({ kind: "mined", status: "success" });
+    const receipt = await pub.getTransactionReceipt({ hash: created.createTx! });
+    const [event] = parseEventLogs({ abi: VNextSettlementEscrowFactoryABI, logs: receipt.logs, eventName: "EscrowCreated" });
+    expect(event?.args.escrow.toLowerCase()).toBe(prepared.escrow.toLowerCase());
+    expect(event?.args.payer.toLowerCase()).toBe(buyer.address.toLowerCase());
+    expect(event?.args.operator.toLowerCase()).toBe(operator.address.toLowerCase());
+    expect(event?.args.salt).toBe(compiled.salt);
+    expect((await approveAndFund({ prepared, wallet: wallet(buyer), publicClient: pub })).outcome).toBe("committed");
+    const nonce = await pub.getTransactionCount({ address: buyer.address });
+    const again = await ensureEscrow({ prepared, wallet: wallet(buyer), publicClient: pub });
+    expect(again.outcome).toBe("ready");
+    expect(again.create).toBeUndefined();
+    expect(await pub.getTransactionCount({ address: buyer.address })).toBe(nonce);
+  }, 120_000);
+
+  it("T27 a front-run between the last read and send still leaves the clone ready", async () => {
+    const { compiled, payload } = await gatewayPrepare("N5b", deployed, { create: false });
+    const prepared = await prepare(payload, compiled, "N5b");
+    const base = http(rpc)({ chain });
+    let frontRan = false;
+    const racingWallet = createWalletClient({ account: buyer, chain, transport: custom({
+      async request({ method, params }: { method: string; params?: unknown }) {
+        if (method === "eth_sendRawTransaction" && !frontRan) {
+          const tx = parseTransaction((params as [Hex])[0]);
+          if (tx.to?.toLowerCase() === prepared.factory.toLowerCase() && tx.data?.startsWith("0x886deb02")) {
+            frontRan = true;
+            await send(gateway, { address: deployed.FACTORY, abi: VNextSettlementEscrowFactoryABI,
+              functionName: "createEscrow", args: [compiled.identity] });
+          }
+        }
+        return base.request({ method, params } as never);
+      },
+    }) });
+    const created = await ensureEscrow({ prepared, wallet: racingWallet, publicClient: pub });
+    expect(frontRan).toBe(true);
+    expect(created.outcome).toBe("ready");
+    expect(created.create).toMatchObject({ kind: "mined", status: "reverted" });
+    expect((await approveAndFund({ prepared, wallet: wallet(buyer), publicClient: pub })).outcome).toBe("committed");
+  }, 120_000);
+
 });

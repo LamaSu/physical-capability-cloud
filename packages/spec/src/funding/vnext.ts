@@ -180,6 +180,17 @@ export function prePolicyRoot(configs: readonly UnitConfig[]): Hex {
   );
 }
 
+/** VNextSettlementLib's PolicyIdentity, in the factory's field order. */
+export interface PolicyIdentity {
+  payer: Address;
+  operator: Address;
+  jobIdHash: Hex;
+  termsHash: Hex;
+  policyNonce: bigint;
+  prePolicyRoot: Hex;
+  acceptedPolicyDigest: Hex;
+}
+
 /** ABI doc §3 step 2: the CREATE2 salt over the whole policy identity. */
 export function policySalt(id: {
   payer: Address;
@@ -295,11 +306,12 @@ export const ERC20_ABI = parseAbi([
   "function allowance(address owner, address spender) view returns (uint256)",
 ]);
 
-/** Factory reads (FAC:34, 54, 146). `predictEscrow`'s selector is pinned to the golden vector (0xa5b0de55). */
+/** Factory reads (FAC:34, 54, 146) and its one write, createEscrow (FAC:136). The predictEscrow (0xa5b0de55) and createEscrow (0x886deb02) selectors are pinned to the golden vectors. */
 export const FACTORY_ABI = parseAbi([
   "struct PolicyIdentity { address payer; address operator; bytes32 jobIdHash; bytes32 termsHash; uint256 policyNonce; bytes32 prePolicyRoot; bytes32 acceptedPolicyDigest; }",
   "function implementation() view returns (address)",
   "function predictEscrow(PolicyIdentity p) view returns (address)",
+  "function createEscrow(PolicyIdentity p) returns (address escrow)",
   "function fundedEscrowOf(bytes32 policyKey) view returns (address)",
 ]);
 

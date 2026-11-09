@@ -52,6 +52,7 @@ import {
   type JobPolicyMessage,
   type JobPolicyTypedData,
   type PayoutEntry,
+  type PolicyIdentity,
   type UnitConfig,
 } from "./vnext.js";
 
@@ -135,7 +136,7 @@ export interface PrepareFundingArgs {
    */
   allowUnchecked?: boolean;
   /**
-   * Extra pins by chain id; required for the factory until a V-next deployment is pinned in this module.
+   * Extra pins by chain id; required for the factory on a chain with no built-in one (VNEXT_FACTORY has only 84532).
    * Every pin, especially the factory, must come from the caller's own trusted configuration,
    * never from the gateway payload or any gateway response.
    */
@@ -168,6 +169,8 @@ export interface PreparedFunding {
   readonly chainId: bigint;
   readonly factory: Address;
   readonly implementation: Address;
+  /** The factory's PolicyIdentity with prePolicyRoot recomputed from fund.configs: exactly what prepareFunding asked the pinned factory to predict, and what ensureEscrow sends to createEscrow. */
+  readonly identity: PolicyIdentity;
   readonly escrow: Address;
   readonly usdc: Address;
   readonly payer: Address;
@@ -629,6 +632,7 @@ export async function prepareFunding(args: PrepareFundingArgs): Promise<Prepared
     chainId: p.chainId,
     factory: message.factory,
     implementation: message.implementation,
+    identity,
     escrow,
     usdc: getAddress(pins.usdc),
     payer: message.payer,

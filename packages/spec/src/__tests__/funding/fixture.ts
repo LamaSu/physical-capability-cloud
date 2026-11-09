@@ -8,6 +8,7 @@
  *   can assert that nothing was sent.
  * No key literal anywhere: every account is `generatePrivateKey()` per run. Addresses below are placeholders, not keys.
  */
+import { readFileSync } from "node:fs";
 import {
   createPublicClient,
   createWalletClient,
@@ -80,6 +81,13 @@ export const FACTORY_PREDICT_ABI = parseAbi([
   "function predictEscrow(PolicyIdentity p) view returns (address)",
 ]);
 
+export const FACTORY_CREATE_ABI = parseAbi([
+  "struct PolicyIdentity { address payer; address operator; bytes32 jobIdHash; bytes32 termsHash; uint256 policyNonce; bytes32 prePolicyRoot; bytes32 acceptedPolicyDigest; }",
+  "function createEscrow(PolicyIdentity p) returns (address escrow)",
+]);
+const canonicalRecord = JSON.parse(readFileSync(new URL(
+  "../../../../contracts/deployments/vnext/base-sepolia/CANONICAL.json", import.meta.url), "utf8"));
+
 /** JSON wire form: bigint as a decimal string, as the gateway would send it. */
 export function toWire<T>(value: T): any {
   return JSON.parse(JSON.stringify(value, (_k, v) => (typeof v === "bigint" ? v.toString() : v)));
@@ -143,7 +151,7 @@ export interface Fixture {
 export async function buildFixture(o: FixtureOptions = {}, parties = { payer: newAccount(), operator: newAccount() }): Promise<Fixture> {
   const { payer, operator } = parties;
   const chainId = BigInt(o.chainId ?? CHAIN_ID);
-  const factory = o.factory ?? FACTORY;
+  const factory = o.factory ?? (chainId === 84532n ? canonicalRecord.factory as Address : FACTORY);
   const usdc = o.usdc ?? TOKEN;
   const expiry = o.expiry ?? NOW + DAY;
   const configs = (o.reclaimAt ?? [NOW + 30n * DAY, NOW + 60n * DAY]).map((r, i) => unit(i, r, operator.address));
@@ -330,6 +338,19 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
   on(fx.factory, FACTORY_PREDICT_ABI, "predictEscrow", ([p]) =>
     predictEscrow(fx.factory, IMPLEMENTATION, policySalt(p as Parameters<typeof policySalt>[0])),
   );
+  on(fx.factory, FACTORY_CREATE_ABI, "createEscrow", ([identity]) => {
+    const escrow = predictEscrow(fx.factory, IMPLEMENTATION, policySalt(identity as Parameters<typeof policySalt>[0]));
+    if ((state.code.get(escrow.toLowerCase()) ?? "0x") !== "0x") {
+      revertWith(encodeErrorResult({ abi: parseAbi(["error CloneCreationFailed()"]), errorName: "CloneCreationFailed" }));
+    }
+    return escrow;
+  });
+  const createIfSuccessful = (tx: SentTx) => {
+    if (tx.plan !== "success" || tx.to.toLowerCase() !== fx.factory.toLowerCase() || !tx.data.startsWith("0x886deb02")) return;
+    const [identity] = decodeFunctionData({ abi: FACTORY_CREATE_ABI, data: tx.data }).args!;
+    const escrow = predictEscrow(fx.factory, IMPLEMENTATION, policySalt(identity));
+    if ((state.code.get(escrow.toLowerCase()) ?? "0x") === "0x") state.code.set(escrow.toLowerCase(), cloneRuntime(IMPLEMENTATION));
+  };
   on(IMPLEMENTATION, ESCROW_ABI, "USDC", () => fx.usdc);
   on(fx.escrow, ESCROW_ABI, "policy", () => [fx.operator.address, 1n, fx.message.prePolicyRoot, zeroHash, fx.message.acceptedPolicyDigest]);
   on(fx.factory, FACTORY_ABI, "fundedEscrowOf", ([key]) =>
@@ -429,6 +450,7 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
           const hash = keccak256(stringToHex(`fake-json-rpc-${index}`));
           state.sent.push({ hash, to: tx.to, data: tx.data ?? "0x", plan: state.receipts[index] ?? "success",
             block: { number: state.block.number, hash: state.block.hash } });
+          createIfSuccessful(state.sent[index]!);
           state.afterSend?.(index);
           return hash;
         }
@@ -444,6 +466,7 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
             plan: state.receipts[index] ?? "success",
             block: { number: state.block.number, hash: state.block.hash },
           });
+          createIfSuccessful(state.sent[index]!);
           state.afterSend?.(index);
           return keccak256(raw);
         }
