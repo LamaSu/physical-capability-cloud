@@ -130,12 +130,12 @@ describe("Capability Kit publishing scopes with provisioned keys", () => {
     expect((await registry.list()).total).toBe(0);
   });
 
-  it("K4: anonymous kit listing and detail reads require an API key", async () => {
-    for (const url of ["/api/kits", KIT_URL]) {
-      const response = await app.inject({ method: "GET", url });
-      expect(response.statusCode, url).toBe(401);
-      expect(response.json().error, url).toBe("api_key_required");
-    }
+  it("K4: anonymous kit listing and detail reads are public (K1b)", async () => {
+    const listing = await app.inject({ method: "GET", url: "/api/kits" });
+    expect(listing.statusCode).toBe(200);
+    const detail = await app.inject({ method: "GET", url: KIT_URL });
+    expect(detail.statusCode).toBe(404);
+    expect(detail.json().error).toBe("not_found");
   });
 
   it("K5: a provisioned operator:basic key can list kits", async () => {

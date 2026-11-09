@@ -122,6 +122,7 @@ const PUBLIC_READ_EXACT: PublicRead[] = [
   { methods: GET, match: "exact", path: "/api/capabilities", why: "capability listing (creating one is not public)" },
   { methods: GET, match: "exact", path: "/api/capabilities/types", why: "capability type discovery" },
   { methods: GET, match: "exact", path: "/api/artifacts", why: "UI-artifact discovery (public listing)" },
+  { methods: GET, match: "exact", path: "/api/kits", why: "Capability Kit listing and search (publishing and forking stay authenticated)" },
 ];
 
 // ── Public READS: regexes (GET) ─────────────────────────────────────
@@ -149,6 +150,7 @@ const PUBLIC_READ_REGEX: PublicRead[] = [
   // D2 compiler ABI: the snapshot and its historical recall by digest. The
   // sibling /api/compose/:id stays gated (its second segment is never this literal).
   { methods: GET, match: "regex", path: /^\/api\/compose\/registry-snapshot(?:\/[^/]+)?$/, why: "public compiler-ABI registry snapshot" },
+  { methods: GET, match: "regex", path: /^\/api\/kits\/[^/]+$/, why: "Capability Kit detail by digest (the route rejects a malformed digest)" },
 ];
 
 // ── PUBLIC-BY-DESIGN writes ─────────────────────────────────────────
