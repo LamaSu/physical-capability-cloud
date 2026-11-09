@@ -438,11 +438,25 @@ describe("GET /a/:slug — render shell", () => {
     expect(html).not.toContain("innerHTML");
   });
 
+  it("marks the manifest's title and description agent-authored and the kit status line a passing state", async () => {
+    const manifest = validManifest({ description: "About this view" });
+    const a = (await save({ manifest })).json();
+    const res = await app.inject({ method: "GET", url: `/a/${a.slug}` });
+    expect(res.body).toContain('<h1 class="pcc-agent pcc-untrusted pcc-src-proposed" data-source="proposed">');
+    expect(res.body).toContain('<p class="pcc-agent pcc-untrusted pcc-src-proposed" data-source="proposed">About this view</p>');
+    expect(res.body).toContain('<p id="pcc-kit-status" class="pcc-src-ephemeral" data-source="ephemeral">Loading the PCC dashboard kit&hellip;</p>');
+    expect(res.body.match(/data-source=/g)).toHaveLength(3);
+    const missing = await app.inject({ method: "GET", url: "/a/no-such-dashboard" });
+    expect(missing.body).not.toContain("data-source");
+  });
+
   it("escapes hostile manifest content — no script breakout (XSS-safe)", async () => {
     const manifest = validManifest({
       sections: [
         { windows: [{ kind: "note", text: "</script><script>window.__pwned=1</script>" }] },
       ],
+      title: "<img src=x onerror=alert(1)>",
+      description: "</p><img src=x onerror=alert(2)>",
     });
     const a = (await save({ name: "xss", manifest })).json();
     const res = await app.inject({ method: "GET", url: `/a/${a.slug}` });
@@ -451,6 +465,7 @@ describe("GET /a/:slug — render shell", () => {
     // inside the JSON data block), never emitted as a live script element.
     expect(res.body).not.toContain("<script>window.__pwned");
     expect(res.body).toContain("\\u003c/script");
+    expect(res.body).not.toContain("<img");
   });
 
   it("private dashboard: the SAME generic 404 as a missing slug for a non-owner (D13 — no oracle)", async () => {
