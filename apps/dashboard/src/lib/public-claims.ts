@@ -176,7 +176,7 @@ export const GUARDED_CLAIMS: readonly GuardedClaim[] = [
   {
     id: "automatic-contributor-payout",
     pattern:
-      /\bsends your cut\b|\bpays you,? automatically\b|\bget paid every time your work is used\b|\bevery job that uses your work pays you\b/i,
+      /\bsends\s+your\s+cut\b|\bpays\s+you,?\s+automatically\b|\bget\s+paid\s+every\s+time\s+your\s+work\s+is\s+used\b|\bevery\s+job\s+that\s+uses\s+your\s+work\s+pays\s+you\b|\bwhere\s+you'll\s+get\s+paid\b|\bpays?\s+(you|contributors),?\s+automatically\b/i,
     status: "roadmap",
     requires:
       "A job settlement that pays published contributor rates to contributors' wallets. No settlement reads a published rate today.",
@@ -186,6 +186,8 @@ export const GUARDED_CLAIMS: readonly GuardedClaim[] = [
 
 /** Repo-relative files that are served publicly or read by external agents. */
 export const PUBLISHED_SURFACES: readonly string[] = [
+  "apps/dashboard/src/components/OnboardingTour.tsx",
+  "apps/dashboard/src/pages/LoginPage.tsx",
   "apps/dashboard/src/pages/AgentChatPage.tsx",
   "README.md",
   "apps/dashboard/index.html",
