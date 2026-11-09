@@ -1127,6 +1127,23 @@ export async function createGateway(port = 3200) {
         console.warn("[gateway] settlement-keeper start failed:", err);
       }
 
+      try {
+        const { startBuyerFundingSweep } = await import(
+          "./services/buyer-funding-sweep.js"
+        );
+        const handle = startBuyerFundingSweep({
+          info: (m) => app.log.info(`[buyer-funding-sweep] ${m}`),
+          warn: (m) => app.log.warn(`[buyer-funding-sweep] ${m}`),
+        });
+        if (handle.started) {
+          console.log(
+            `[gateway] buyer-funding-sweep started (interval=${handle.intervalSec}s)`,
+          );
+        }
+      } catch {
+        console.warn("[gateway] buyer-funding-sweep start failed");
+      }
+
       const address = await app.listen({ port, host });
       console.log(`PCC Gateway listening on ${address}`);
       return address;
