@@ -12,6 +12,7 @@
  */
 
 import type { OnboardConfig } from "./types.js";
+import { scaffoldRuleProblems } from "./scaffold-rules.js";
 
 export interface ValidationCheck {
   name: string;
@@ -308,6 +309,10 @@ export function validate(options: ValidationOptions): ValidationResult {
         });
       }
     }
+  }
+
+  for (const { name, message } of scaffoldRuleProblems(config)) {
+    checks.push({ name, passed: false, message, severity: "error" });
   }
 
   // ── Summary ─────────────────────────────────────────────────────
