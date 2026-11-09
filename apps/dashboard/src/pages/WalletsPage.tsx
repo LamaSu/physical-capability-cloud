@@ -15,9 +15,10 @@ const BUTTON = "rounded-lg border border-white/20 px-5 py-3 text-sm font-medium 
 const SIGN_IN_CHANGED = "Your sign-in changed, so nothing was unlinked. The list now shows this sign-in's wallets.";
 const UNKNOWN_UNLINK = "PCC did not confirm the unlink. Reload this page to see whether it is still linked.";
 
-export function WalletPageSignInAgain({ attempted, pagePending, signIn }: {
+export function WalletPageSignInAgain({ attempted, pagePending, failedBeforeMint, signIn }: {
   attempted: boolean;
   pagePending: boolean;
+  failedBeforeMint: boolean;
   signIn: (login: () => Promise<void>) => Promise<void>;
 }) {
   const { address, isConnected, error, authNotice, isVerifying, login } = useAuth();
@@ -31,7 +32,7 @@ export function WalletPageSignInAgain({ attempted, pagePending, signIn }: {
         </>
       ) : <SignInAgainButton login={guardedLogin} isVerifying={pagePending || isVerifying} />}
       {attempted && error !== null && <p role="alert">{error}</p>}
-      {attempted && !pagePending && error === null && authNotice !== null && !useAuthStore.getState().isAuthenticated && <p role="status">{authNotice}</p>}
+      {attempted && !pagePending && !failedBeforeMint && authNotice !== null && !useAuthStore.getState().isAuthenticated && <p role="status">{authNotice}</p>}
     </div>
   );
 }
@@ -44,6 +45,7 @@ export function WalletsPage() {
   const signInAttempted = useRef(false);
   const [attempted, setAttempted] = useState(false);
   const [signInPending, setSignInPending] = useState(false);
+  const [failedBeforeMint, setFailedBeforeMint] = useState(false);
   const generation = useRef(0);
   const readSequence = useRef(0);
   const mounted = useRef(false);
@@ -132,6 +134,7 @@ export function WalletsPage() {
       await login();
     } finally {
       signInFlight.current = false;
+      setFailedBeforeMint(useAuthStore.getState().error !== null);
       setSignInPending(false);
     }
   }
@@ -145,7 +148,7 @@ export function WalletsPage() {
         {error && <p role="alert">{error}</p>}
         {remedy && <div className="flex flex-wrap items-center gap-3">
           <button type="button" onClick={() => void useAuthStore.getState().signOutWallet()} className={BUTTON}>Sign out</button>
-          {remedy === "sign-in-again" && walletSession && <WalletPageSignInAgain attempted={attempted} pagePending={signInPending} signIn={signInAgain} />}
+          {remedy === "sign-in-again" && walletSession && <WalletPageSignInAgain attempted={attempted} pagePending={signInPending} failedBeforeMint={failedBeforeMint} signIn={signInAgain} />}
         </div>}
         {busy && <p role="status">Unlinking…</p>}
         {read.step === "loading" && <p role="status">Loading your wallets…</p>}

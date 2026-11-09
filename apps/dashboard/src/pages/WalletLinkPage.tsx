@@ -19,6 +19,7 @@ export function WalletLinkPage() {
   const signInAttempted = useRef(false);
   const [attempted, setAttempted] = useState(false);
   const [signInPending, setSignInPending] = useState(false);
+  const [failedBeforeMint, setFailedBeforeMint] = useState(false);
   const [state, setState] = useState<PageState>({ step: "code", input: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -35,14 +36,16 @@ export function WalletLinkPage() {
     signInAttempted.current = true;
     setAttempted(signInAttempted.current);
     setSignInPending(true);
+    const keyEpoch = useAuthStore.getState().keyEpoch;
     try {
       await login();
-      if (useAuthStore.getState().isAuthenticated) {
+      if (useAuthStore.getState().isAuthenticated && useAuthStore.getState().keyEpoch !== keyEpoch) {
         setError(null);
         setState({ step: "code", input: "" });
       }
     } finally {
       signInFlight.current = false;
+      setFailedBeforeMint(useAuthStore.getState().error !== null);
       setSignInPending(false);
     }
   }
@@ -108,7 +111,7 @@ export function WalletLinkPage() {
           <div className="flex flex-wrap items-center gap-3">
             <p role="alert" className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-4 text-amber-100">{error}</p>
             {remedy && <button type="button" onClick={() => void useAuthStore.getState().signOutWallet()} className={BUTTON}>Sign out</button>}
-            {remedy === "sign-in-again" && walletSession && <WalletPageSignInAgain attempted={attempted} pagePending={signInPending} signIn={signInAgain} />}
+            {remedy === "sign-in-again" && walletSession && <WalletPageSignInAgain attempted={attempted} pagePending={signInPending} failedBeforeMint={failedBeforeMint} signIn={signInAgain} />}
           </div>
         )}
 
