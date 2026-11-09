@@ -23,7 +23,7 @@ let betaWindowCount = 0;
 function hasControlChar(text: string): boolean {
   return [...text].some((ch) => {
     const c = ch.codePointAt(0) ?? 0;
-    return c < 32 || c === 127 || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069);
+    return c < 32 || (c >= 0x7f && c <= 0x9f) || c === 0x061c || c === 0x200e || c === 0x200f || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069);
   });
 }
 
@@ -210,18 +210,18 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
 
   // Admin review / export (gated by X-Admin-Token).
   app.get("/api/admin/waitlist", async (req, reply) => {
-    if (!adminOk(req, reply)) return;
+    if (!adminOk(req, reply)) return reply;
     const items = readCoalesced(WAITLIST_FILE); // one merged record per lead
     return { total: items.length, items };
   });
   app.get("/api/admin/beta-apply", { logLevel: "silent" }, async (req, reply) => {
-    if (!adminOk(req, reply)) return;
+    if (!adminOk(req, reply)) return reply;
     const items = readBetaByEmail();
     return { total: items.length, items };
   });
 
   app.post("/api/admin/beta-apply/remove", BETA_WRITE, async (req, reply) => {
-    if (!adminOk(req, reply)) return;
+    if (!adminOk(req, reply)) return reply;
     const b = (req.body ?? {}) as Record<string, any>;
     const email = typeof b.email === "string" ? b.email.trim().toLowerCase() : "";
     if (!email) return reply.code(400).send({ error: "bad_request" });

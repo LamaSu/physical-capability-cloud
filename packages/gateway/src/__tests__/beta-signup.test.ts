@@ -111,6 +111,18 @@ describe("the beta signup", () => {
     expect(lines()).toHaveLength(30);
   });
 
+  it("a filled hp never counts toward the limits", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+    for (let i = 0; i < 31; i++) {
+      const response = await signup({ ...D, hp: "x" });
+      expect(response.statusCode).toBe(200);
+      expect(response.body).toBe(OK);
+      expect(existsSync(betaFile)).toBe(false);
+    }
+    expect((await signup()).statusCode).toBe(200);
+    expect(lines()).toHaveLength(1);
+  });
+
   it("a body over 4 KB is refused and stores nothing", async () => {
     expect((await signup({ ...D, pad: "x".repeat(5000) })).statusCode).toBe(413);
     expect(existsSync(betaFile)).toBe(false);
@@ -142,6 +154,11 @@ describe("the beta signup", () => {
     ["names with U+0000", { ...D, name: `Ann${String.fromCharCode(0)}` }, "application/json"],
     ["names with U+202E", { ...D, name: `Ann${String.fromCharCode(0x202e)}` }, "application/json"],
     ["an email with <", { ...D, email: "<ann@example.com" }, "application/json"],
+    ["an email with U+0000", { ...D, email: `ann${String.fromCharCode(0)}@example.com` }, "application/json"],
+    ["an email with U+202E", { ...D, email: `ann${String.fromCharCode(0x202e)}@example.com` }, "application/json"],
+    ["a name with U+2066", { ...D, name: `Ann${String.fromCharCode(0x2066)}` }, "application/json"],
+    ["a name with U+0085", { ...D, name: `Ann${String.fromCharCode(0x85)}` }, "application/json"],
+    ["a name with U+200F", { ...D, name: `Ann${String.fromCharCode(0x200f)}` }, "application/json"],
     ['role "admin"', { ...D, role: "admin" }, "application/json"],
     ['role ["buyer"]', { ...D, role: ["buyer"] }, "application/json"],
     ["no role", { name: D.name, email: D.email }, "application/json"],

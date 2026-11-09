@@ -121,4 +121,57 @@ describe("Sentry and incoming request bodies", () => {
     expect(signup.status).toBe(400);
     expect(signup.text).toBe('{"error":"bad_request"}');
   });
+
+  it("no beta signup route sends Sentry an event, while another route keeps its transaction and error event", async () => {
+    const adminToken = "beta-admin-token";
+    vi.stubEnv("WAITLIST_ADMIN_TOKEN", adminToken);
+    if (!app.server.listening) await app.listen({ port: 0, host: "127.0.0.1" });
+    const port = (app.server.address() as { port: number }).port;
+    const send = (method: "GET" | "POST", path: string, body?: unknown, headers: Record<string, string> = {}): Promise<{ status: number; text: string }> => new Promise((resolve, reject) => {
+      const payload = body === undefined ? undefined : JSON.stringify(body);
+      const request = httpRequest({ host: "127.0.0.1", port, method, path, headers: {
+        authorization: `Bearer ${KEY}`, "content-type": "application/json",
+        ...(payload === undefined ? {} : { "content-length": String(Buffer.byteLength(payload)) }), ...headers,
+      } }, response => {
+        let text = "";
+        response.setEncoding("utf8");
+        response.on("data", chunk => { text += chunk; });
+        response.on("end", () => resolve({ status: response.statusCode ?? 0, text }));
+      });
+      request.on("error", reject);
+      request.end(payload);
+    });
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => { rejections.push(reason); };
+    process.on("unhandledRejection", onRejection);
+    try {
+      expect(await Sentry.flush(3000)).toBe(true);
+      sentry.envelopes.length = 0;
+      const headers = { "x-forwarded-for": "203.0.113.99", "user-agent": "beta-ua-marker" };
+      expect((await send("POST", "/api/beta-apply", { name: "Ann", email: "ann@example.com", role: "buyer" }, headers)).status).toBe(200);
+      expect((await send("GET", "/api/admin/beta-apply", undefined, { ...headers, "x-admin-token": adminToken })).status).toBe(200);
+      expect((await send("POST", "/api/admin/beta-apply/remove", { email: "ann@example.com" }, { ...headers, "x-admin-token": adminToken })).status).toBe(200);
+      expect((await send("GET", "/api/admin/waitlist", undefined, { "x-admin-token": "x" })).status).toBe(403);
+      expect((await send("POST", "/api/ordinary/body-error", { note: "x" })).status).toBe(500);
+      for (let i = 0; i < 2; i++) await new Promise<void>(resolve => setImmediate(resolve));
+      expect(await Sentry.flush(3000)).toBe(true);
+      expect(rejections).not.toContainEqual(expect.objectContaining({ code: "ERR_HTTP_HEADERS_SENT" }));
+      expect(rejections).toEqual([]);
+      const items = (sentry.envelopes as Array<[unknown, Array<[{ type: string }, Event]>]>).flatMap(([, items]) => items);
+      for (const [header, event] of items) {
+        expect(event.transaction ?? "").not.toContain("beta-apply");
+        expect(event.request?.url ?? "").not.toContain("beta-apply");
+        if (header.type === "transaction" || header.type === "event") {
+          expect(event.transaction).toBe("POST /api/ordinary/body-error");
+        }
+      }
+      const output = JSON.stringify(sentry.envelopes);
+      expect(output).not.toContain("beta-ua-marker");
+      expect(output).not.toContain("203.0.113.99");
+      expect(items.some(([header, event]) => header.type === "transaction" && event.transaction === "POST /api/ordinary/body-error")).toBe(true);
+      expect(items.some(([header, event]) => header.type === "event" && event.transaction === "POST /api/ordinary/body-error")).toBe(true);
+    } finally {
+      process.removeListener("unhandledRejection", onRejection);
+    }
+  });
 });
