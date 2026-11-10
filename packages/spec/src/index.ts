@@ -38,3 +38,6 @@ export * from "./money/money-status.js";
 export * from "./readmodels/job-execution.js";
 export * from "./readmodels/operator-work.js";
 export * from "./readmodels/product-home.js";
+// Registered price for a discovery quote (N281 PR-B): the gateway's services/quote-pricing.ts re-exports these.
+export { SETTLEMENT_CURRENCY, amountCents, registeredQuotePrice } from "./pricing/registered-price.js";
+export type { RegisteredQuotePrice } from "./pricing/registered-price.js";
