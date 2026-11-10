@@ -28,7 +28,7 @@
  *   - No mock fallback: a scope that went live on a mock escrow has no record, so it is `unknown`.
  *
  * GET /api/operator/jobs serves this projection only for a decide-strength caller (admin or
- * proven wallet matching the polled kernel's operator), after the job and scope kernel filters.
+ * proven wallet matching the polled kernel's operator), and GET /api/jobs/:jobId/funding behind gateJobRead, after the job and scope kernel filters.
  * When a record exists, the route supplies the testnet-only flag and buyer allowance from
  * reconcile's terms, and paidScopeActivationTerms(scope).expectedChainId for the expected chain.
  * Without a record it supplies nulls and an empty allowance without reading those sources.

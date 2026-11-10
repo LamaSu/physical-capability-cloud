@@ -13,6 +13,8 @@
  *   const acceptance = await signJobPolicy({ prepared, wallet });   // optional for a payer-sent fund()
  *   const result = await approveAndFund({ prepared, wallet, publicClient });
  *   if (result.outcome !== "committed") { ... }                     // "indeterminate" is NOT success
+ *   const units = await readUnitStates({ publicClient, chainId, escrow, pins }); // states and reclaimAt at one block
+ *   const refund = await reclaimUnits({ wallet, publicClient, chainId, escrow, unitIds, pins }); // "indeterminate" is NOT reclaimed
  *
  * After an indeterminate result, resolve with readFundedState (or wait for the earlier transactions) before retrying:
  * `readFundedState({ publicClient, prepared })` reads the escrow again. A retried approveAndFund refuses
@@ -53,6 +55,11 @@ export { jobIdHashOf } from "./vnext.js";
 export { signJobPolicy } from "./sign.js";
 export { approveAndFund, readFundedState, classifyFunding, ensureEscrow, classifyEscrowCreation } from "./fund.js";
 export type { EnsureEscrowArgs, EnsureEscrowResult, EscrowCreationOutcome, EscrowCodeKind, ApproveAndFundArgs, FundedState, FundedStateKind, FundingOutcome, FundingResult, SendResult } from "./fund.js";
+export { readUnitStates } from "./units.js";
+export type { UnitsTarget, ReadUnitStatesArgs, UnitStateEntry, UnitStateName, UnitStatesRead } from "./units.js";
+export { reclaimUnits, classifyReclaim } from "./reclaim.js";
+export type { ReclaimUnitsArgs, ReclaimUnitResult, ReclaimResult, ReclaimOutcome } from "./reclaim.js";
+export { UNIT_STATE_NAMES } from "./vnext.js";
 export { FUNDING_PREPARE_SCHEMA } from "./payload.js";
 export { FundingRefusal } from "./errors.js";
 export type { FundingRefusalCode } from "./errors.js";

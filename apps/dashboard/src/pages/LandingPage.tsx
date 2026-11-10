@@ -1900,7 +1900,7 @@ function ForOperatorsSection() {
                 }}
               >
                 Installs the node, auto-detects hardware, generates keys, and joins the network.
-                Your 207-tool agent package is served at{" "}
+                Your agent package is served at{" "}
                 <span style={{ fontFamily: mono, color: TEXT_MUTED }}>/agent-package.json</span>{" "}
                 automatically.
               </p>
@@ -2107,7 +2107,7 @@ function ForAgentsSection() {
                 marginBottom: "3rem",
               }}
             >
-              34 typed A2A intents. 207 agent tools. MCP server. Any agent framework, any chain.
+              34 typed A2A intents. 180+ agent tools. MCP server. Any agent framework, any chain.
             </p>
           </Reveal>
 
@@ -2236,7 +2236,7 @@ function ForAgentsSection() {
                 MCP Compatible
               </p>
               <p style={{ fontFamily: inter, fontSize: "0.85rem", color: TEXT_MUTED, margin: 0 }}>
-                207 structured tools. Connect any Claude, GPT-4, or custom agent via the MCP server
+                180+ structured tools. Connect any Claude, GPT-4, or custom agent via the MCP server
                 — no custom integration required.
               </p>
             </div>

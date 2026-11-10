@@ -77,7 +77,11 @@ const DEFAULT_SCOPE_REQUIREMENTS: Array<{
   { method: "PUT",    pattern: "/api/templates/*",                  scopes: ["template_author", "operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
   // Capability Kit authors (kits K1) — publish and fork kits
   { method: "POST",   pattern: "/api/kits",                         scopes: ["template_author", "admin"] },
-  { method: "POST",   pattern: "/api/kits/**",                      scopes: ["template_author", "admin"] },
+  { method: "POST",   pattern: "/api/kits/*",                       scopes: ["template_author", "admin"] },
+  { method: "POST",   pattern: "/api/kits/*/fork",                  scopes: ["template_author", "admin"] },
+  { method: "POST",   pattern: "/api/kits/*/bindings",              scopes: ["operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
+  { method: "POST",   pattern: "/api/kits/*/bindings/*/withdraw",   scopes: ["operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
+  { method: "POST",   pattern: "/api/kits/*/**",                    scopes: ["template_author", "admin"] },
   // Auditor endpoints — read-only audit and compliance access
   { method: "GET",    pattern: "/api/audit/*",                      scopes: ["auditor", "admin"] },
   { method: "GET",    pattern: "/api/compliance/*",                 scopes: ["auditor", "operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },

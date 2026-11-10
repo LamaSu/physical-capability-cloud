@@ -68,6 +68,22 @@ export interface StepUnitContext {
 
 const UNIT_FIELD = /^0x[0-9a-f]{64}$/;
 
+export const KERNEL_SIGNER_REQUIRED_MESSAGE = "kernel_signer_required: in production this kernel runs no job and signs no bundle with the test-only key. Build its EvidenceEmitter with a real signing function.";
+
+export class EvidenceSignerRequiredError extends Error {
+  readonly code = "kernel_signer_required";
+
+  constructor() {
+    super(KERNEL_SIGNER_REQUIRED_MESSAGE);
+    this.name = "EvidenceSignerRequiredError";
+  }
+}
+
+/** True means refuse; only the built-in TEST-ONLY default is refused. Checking a signature against the registered key isn't this check's job. */
+export function refusesTestSigner(emitter: EvidenceEmitter): boolean {
+  return process.env.NODE_ENV === "production" && emitter.isTestSigner() === true;
+}
+
 export class EvidenceEmitter {
   private kernelId: string;
   /**
@@ -243,6 +259,8 @@ export class EvidenceEmitter {
 
   /** Finalize and sign an evidence bundle for a job step */
   async finalizeBundle(jobId: string, stepId: string): Promise<EvidenceBundle> {
+    // JobRunner and runPrintJob refuse before any device command; this catches every other caller.
+    if (refusesTestSigner(this)) throw new EvidenceSignerRequiredError();
     const stepEv = this.step(jobId, stepId);
     if (!stepEv) {
       throw new Error(`No step registered for ${jobId}:${stepId}`);

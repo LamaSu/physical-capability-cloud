@@ -43,7 +43,7 @@ Live at [capability.network](https://capability.network).
 - Every capability has an assurance tier (0-3) with defined evidence requirements
 - Escrow settles only when evidence meets tier requirements
 - MCP server: `packages/mcp-server` (63 tools)
-- Agent package: `apps/dashboard/public/agent-package.json` (19 REST tools)
+- Agent package: `apps/dashboard/public/agent-package.json` (180+ REST tools)
 - pcc-node: `pip install pcc-node` (Python operator CLI)
 
 ## Dev Commands

@@ -62,6 +62,10 @@ export type FundingRefusalCode =
   | "SIGNATURE_NOT_CANONICAL"
   /** The escrow clone does not exist yet: ensureEscrow creates it, and approveAndFund never does. */
   | "ESCROW_NOT_CREATED"
+  /** A named unit is not a unit of this escrow, or is not FUNDED_ACTIVE: it was released, refunded, asserted, challenged or never funded. Nothing was sent. */
+  | "UNIT_NOT_ACTIVE"
+  /** A named FUNDED_ACTIVE unit's reclaimAt is later than the pinned block's timestamp. Nothing was sent. */
+  | "NOT_RECLAIMABLE"
   /**
    * The escrow or the job is already funded under some other acceptance, or the escrow reports this policy's hash
    * uncorroborated: its `prePolicyRoot_` is not this policy's, or the pinned factory's `fundedEscrowOf(policyKey)` is
