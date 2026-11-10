@@ -1354,7 +1354,7 @@ function buildMcpAppDashboardHtml(nonce: string = cspNonce()): string {
 </head>
 <body>
 <main id="pcc-root">
-  <p id="pcc-kit-status">Waiting for the host to hand off a dashboard&hellip;</p>
+  <p id="pcc-kit-status" class="pcc-src-ephemeral" data-source="ephemeral">Waiting for the host to hand off a dashboard&hellip;</p>
 </main>
 <script type="application/json" id="pcc-manifest">null</script>
 <script nonce="${nonce}">
@@ -1388,7 +1388,7 @@ function buildMcpAppGalleryHtml(nonce: string = cspNonce()): string {
 </head>
 <body>
 <main id="pcc-root">
-  <p id="pcc-kit-status">Waiting for the host to hand off saved dashboards&hellip;</p>
+  <p id="pcc-kit-status" class="pcc-src-ephemeral" data-source="ephemeral">Waiting for the host to hand off saved dashboards&hellip;</p>
 </main>
 <script nonce="${nonce}">
 ${galleryViewBootScript()}
@@ -1434,7 +1434,7 @@ function buildMcpAppDashboardHtmlForManifest(
 </head>
 <body>
 <main id="pcc-root">
-  <p id="pcc-kit-status">Loading the PCC dashboard&hellip;</p>
+  <p id="pcc-kit-status" class="pcc-src-ephemeral" data-source="ephemeral">Loading the PCC dashboard&hellip;</p>
 </main>
 <script type="application/json" id="pcc-manifest">${manifestJson}</script>
 <script nonce="${nonce}">

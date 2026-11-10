@@ -198,6 +198,38 @@ describe("Streamable HTTP MCP server", () => {
     // guarantee is proven behaviorally in mcp-app-view-lifecycle.test.ts.)
   });
 
+  it("the classic MCP App views mark their status line ephemeral", async () => {
+    for (const [uri, statusLine] of [
+      ["ui://pcc/dashboard/render", '<p id="pcc-kit-status" class="pcc-src-ephemeral" data-source="ephemeral">Waiting for the host to hand off a dashboard&hellip;</p>'],
+      ["ui://pcc/dashboard/saved", '<p id="pcc-kit-status" class="pcc-src-ephemeral" data-source="ephemeral">Waiting for the host to hand off a dashboard&hellip;</p>'],
+      ["ui://pcc/dashboard/gallery", '<p id="pcc-kit-status" class="pcc-src-ephemeral" data-source="ephemeral">Waiting for the host to hand off saved dashboards&hellip;</p>'],
+    ]) {
+      const read = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: {
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+          "mcp-session-id": sessionId,
+          "mcp-protocol-version": protocolVersion,
+        },
+        payload: {
+          jsonrpc: "2.0",
+          id: 4,
+          method: "resources/read",
+          params: { uri },
+        },
+      });
+      const contents = read.json().result.contents;
+      expect(read.statusCode).toBe(200);
+      expect(contents).toHaveLength(1);
+      expect.soft(contents[0].text).toContain(statusLine);
+      expect.soft(contents[0].text).not.toContain('<p id="pcc-kit-status">');
+      expect.soft(contents[0].text.match(/data-source=/g)).toHaveLength(1);
+      expect.soft(contents[0].text.match(/id="pcc-kit-status"/g)).toHaveLength(1);
+    }
+  });
+
   it("render_pcc_dashboard renders a valid manifest and rejects one containing an API key", async () => {
     const goodManifest = {
       csd: "pcc://artifacts/dashboard/v1",
