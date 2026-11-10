@@ -47,7 +47,7 @@ Agents can compose an interactive dashboard for a physical task by calling the M
 2. Set `Authorization: Bearer <api_key>` on every subsequent request.
 3. `GET /api/capabilities/types` then `GET /api/capabilities` — discover what exists.
 4. `POST /api/build/options` → `POST /api/build/price` → `POST /api/build/contract` — assemble a settleable contract for a capability type.
-5. Follow the contract's returned settlement instructions; an existing on-chain escrow is funded at `POST /api/escrow/chain/:address/fund`. Submit work with `POST /api/jobs/submit`, then poll `GET /api/jobs/:jobId` or subscribe to `GET /sse/stream/job/:jobId`.
+5. Follow the contract's returned settlement instructions. Submit work with `POST /api/jobs/submit`, then poll `GET /api/jobs/:jobId` or subscribe to `GET /sse/stream/job/:jobId`.
 
 ## Publishing a capability (become a provider)
 
@@ -66,7 +66,7 @@ CLI alternative: `pip install pcc-node && pcc-node start` auto-detects hardware,
 - Discovery: `GET /api/capabilities`, `GET /api/capabilities/by-type/:type`, `GET /api/capabilities/search?q=`, `GET /api/capabilities/:id`
 - Kernels (sites): `GET /api/kernels`, `GET /api/kernels/:id`, `POST /api/kernels`
 - Jobs: `POST /api/jobs/submit`, `GET /api/jobs/:id`, `PATCH /api/jobs/:id/status`
-- Escrow & settlement (Base Sepolia, USDC, milestone): `POST /api/escrow/chain/:address/fund`, `POST /api/escrow/chain/:address/release/:milestoneIndex`, `POST /api/escrow/chain/:address/dispute/:milestoneIndex`
+- Escrow & settlement (Base Sepolia, USDC, milestone): `GET /api/escrow`, `GET /api/escrow/:escrowId`, `GET /api/escrow/chain/:address/state`, `GET /api/escrow/chain/:address/events`
 - Evidence & compliance (ALCOA+, assurance tiers 0–3): `GET /api/jobs/:id/evidence`, `GET /api/capabilities/:id/compliance`, `GET /api/jobs/:id/drift-alerts`
 - Real-time: Server-Sent Events at `GET /sse/stream/job/:id`, `/sse/stream/kernel/:id`, `/sse/notifications`
 
