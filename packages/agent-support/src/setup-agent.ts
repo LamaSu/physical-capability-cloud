@@ -427,7 +427,7 @@ export class SetupAgent {
       },
       {
         name: "run_test_job",
-        description: "Submit a test job to verify the full pipeline end-to-end.",
+        description: "Submit a test job for one device on a kernel (Step 4 of onboarding). The gateway runs it only for a kernel it operates in-process; for any other kernel it refuses and runs nothing. Every reply says whether the job ran and passed.",
         parameters: {
           kernelId: { type: "string", description: "Kernel to run the test job on", required: false },
           deviceId: { type: "string", description: "Specific device to use", required: false },

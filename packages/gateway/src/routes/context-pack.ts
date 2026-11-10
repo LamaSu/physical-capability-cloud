@@ -126,7 +126,7 @@ All endpoints are relative to the base URL above. Most return JSON.
 | POST | /api/setup/generate-config | Generate KERNEL_CONFIG from device descriptions |
 | POST | /api/setup/validate | Validate kernel configuration + adapter connectivity |
 | POST | /api/setup/register-device | Register a physical device on the network |
-| POST | /api/setup/test-job | Submit a test job to verify the full pipeline |
+| POST | /api/setup/test-job | Submit a test job for one device; the gateway runs it only for a kernel it operates in-process |
 | GET | /api/setup/status | Comprehensive setup status across all categories |
 
 ### Onboarding
@@ -174,20 +174,22 @@ All endpoints are relative to the base URL above. Most return JSON.
 | POST | /api/certificates/mint | Not implemented (501): no certificate is minted yet |
 | GET | /api/treasury/summary | Not implemented (501): no treasury balance is read |
 
-### IP (Intellectual Property via Story Protocol)
+### IP (Intellectual Property)
+Story Protocol (now The DATA Foundation). These routes make no on-chain call: nothing is registered, claimed or disputed on chain.
+
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | /api/ip/register-capability | Register a CSD as a Story Protocol IP Asset |
-| POST | /api/ip/register-job-evidence | Register job evidence as IP |
-| POST | /api/ip/distribute-royalties | Distribute royalties for an IP asset |
+| POST | /api/ip/register-capability | Record a capability as an IP asset |
+| POST | /api/ip/register-job-evidence | Record job evidence as a derivative of a capability's IP asset |
+| POST | /api/ip/distribute-royalties | Set revenue splits for an IP asset; no revenue is paid from them |
 | POST | /api/ip/set-licensing-terms | Set licensing terms for an IP asset |
-| POST | /api/ip/settle-royalties | Settle accumulated royalties |
+| POST | /api/ip/settle-royalties | Settles nothing on chain: no tokens move, and any transaction hash in the reply is a placeholder |
 | GET | /api/ip/:ipId/licensing-terms | Get licensing terms |
 | GET | /api/ip/:ipId/derivative-tree | Get IP derivative tree |
 | GET | /api/ip/:ipId/royalty-distribution | Get royalty distribution breakdown |
-| POST | /api/ip/:ipId/pay | Pay royalties for usage |
-| POST | /api/ip/:ipId/claim | Claim accumulated royalty revenue |
-| GET | /api/ip/:ipId/revenue | Get IP revenue snapshot |
+| POST | /api/ip/:ipId/pay | Record a royalty payment to an IP asset; no tokens move |
+| POST | /api/ip/:ipId/claim | Claim an IP asset's recorded revenue; nothing is paid out |
+| GET | /api/ip/:ipId/revenue | Get the revenue PCC has recorded for an IP asset; no revenue has been paid |
 | GET | /api/ip/:ipId/lineage | Get IP provenance graph |
 | GET | /api/ip/capability/:capabilityId | Get IP for a capability |
 | POST | /api/ip/:ipId/dispute | File an IP dispute |
@@ -360,7 +362,7 @@ AssuranceTier -- evidence depth + liability
 4. \`POST /api/build/contract\` -- create the contract (body: \`{ type, selections, assuranceTier }\`)
 5. Track progress: \`GET /api/jobs/:jobId\` or SSE: \`GET /sse/stream/job/:jobId\`
 6. Evidence is collected automatically by the kernel
-7. Settlement happens when evidence meets tier requirements
+7. Check settlement: \`GET /api/settlement/:jobId\` reports what the job's escrow records show (settled only when a settlement read confirms it)
 
 ### For Operators: "I want to offer my equipment"
 1. \`GET /api/setup/detect\` -- check what is already configured
@@ -368,8 +370,8 @@ AssuranceTier -- evidence depth + liability
 3. \`POST /api/setup/generate-config\` -- get a kernel config from your description
 4. \`POST /api/setup/validate\` -- validate connectivity and adapter compatibility
 5. \`POST /api/setup/register-device\` -- register your device on the network
-6. \`POST /api/setup/test-job\` -- run a test job to verify the full pipeline
-7. Jobs arrive automatically based on your listed capabilities
+6. \`POST /api/setup/test-job\` -- run a test job (only on a kernel the gateway operates in-process; it activates nothing)
+7. \`pcc-node\` keeps the kernel online and takes no jobs: devices run only through the operating agent's typed operations
 
 ### For Verifiers: "I want to earn by verifying work"
 1. \`GET /api/verification/assignments\` -- see available verification tasks
@@ -380,10 +382,10 @@ AssuranceTier -- evidence depth + liability
 
 ### Full IP Registration Flow
 1. \`POST /api/csd/validate\` -- validate your CSD
-2. \`POST /api/ip/register-capability\` -- register as Story Protocol IP
+2. \`POST /api/ip/register-capability\` -- record it as an IP asset (no on-chain call)
 3. \`POST /api/ip/set-licensing-terms\` -- set licensing terms
 4. \`GET /api/ip/:ipId/revenue\` -- check revenue snapshot
-5. \`POST /api/ip/:ipId/claim\` -- claim royalties
+5. \`POST /api/ip/:ipId/claim\` -- claim its recorded revenue (nothing is paid out)
 
 ### Fiat Funding Flow
 1. \`GET /api/fiat-ramp/status\` -- check provider availability
@@ -514,9 +516,9 @@ function buildStructuredPack(baseUrl: string): {
       {
         name: "IP & Royalties",
         endpoints: [
-          { method: "POST", path: "/api/ip/register-capability", description: "Register IP asset" },
-          { method: "POST", path: "/api/ip/distribute-royalties", description: "Distribute royalties" },
-          { method: "POST", path: "/api/ip/:ipId/claim", description: "Claim royalty revenue" },
+          { method: "POST", path: "/api/ip/register-capability", description: "Record an IP asset (no on-chain call)" },
+          { method: "POST", path: "/api/ip/distribute-royalties", description: "Set revenue splits (no revenue is paid)" },
+          { method: "POST", path: "/api/ip/:ipId/claim", description: "Claim recorded revenue (nothing is paid out)" },
           { method: "GET", path: "/api/ip/:ipId/revenue", description: "Revenue snapshot" },
           { method: "GET", path: "/api/ip/:ipId/lineage", description: "IP provenance graph" },
         ],

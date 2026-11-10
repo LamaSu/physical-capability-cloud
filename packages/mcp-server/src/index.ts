@@ -194,7 +194,7 @@ server.tool(
 
 server.tool(
   "pcc_build_contract",
-  "Build a complete capability contract with all parameters, pricing, and assurance tier. Returns the full contract object ready for escrow.",
+  "Build a complete capability contract with all parameters, pricing, and assurance tier. Returns the full unsigned contract object; building it creates no escrow and funds nothing.",
   {
     type: z.string().describe("Capability type"),
     selections: z.record(z.unknown()).describe("Complete parameter selections"),
