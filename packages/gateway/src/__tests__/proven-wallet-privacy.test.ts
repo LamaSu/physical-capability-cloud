@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Sentry from "@sentry/node";
 import { requestLogSerializer } from "../services/telemetry-privacy.js";
 
-vi.mock("@sentry/node", () => ({ init: vi.fn() }));
+vi.mock("@sentry/node", () => ({ init: vi.fn(), httpIntegration: vi.fn(() => ({ name: "Http" })) }));
 
 const ADDRESS = "0x1111222233334444555566667777888899990000";
 const MALFORMED = "wallet-header-sensitive-marker";
