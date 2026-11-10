@@ -179,8 +179,7 @@ triple prevents settlement, so Thursday's terms must pin this value. Thursday
 uses `bindings: []`, whose root is the pin above. All twelve zero fields and
 `integrityGrade: 0` are exact pins.
 
-These economic limits mirror economics' Thursday terms file at
-`/mnt/sparkbulk/pcc-reconciliation/returns/pcc-economics-work/terms/print-unit-thursday.v1.json`.
+These economic limits mirror economics' Thursday terms file for the print unit (v1).
 Thursday allows only tier 1: tier 2 must NOT be allowed because S2's ladder is
 `tier1`. The reclaim maximum is 1814400 seconds because `reclaimAt` is policy
 creation plus 21 days. Thursday's settlement token is Circle USDC on Base Sepolia
@@ -340,8 +339,7 @@ events on success, or `execution_failed` evidence on failure. A committed print-
 package can never be extended with later carrier events: `submitEvidence` is one shot.
 The reference is
 pcc-oracle's B5 print-host bundle contract, **including the 10/10 amendment**
-(pcc-oracle `16aa336b`; on the Spark:
-`/mnt/sparkbulk/pcc-reconciliation/returns/pcc-oracle-work/print-host-bundle-contract-20261009.md`),
+(pcc-oracle `16aa336b`; the oracle's print-host bundle contract document of 10/09),
 sections 3.0, 4.2 and 5, and amended hazards H1 and H6. Q-E2 was ruled yes
 (evidence #7539): H1(b) mints the session key at finalization and permits its
 delegation's `issuedAt` to precede signing time. Producer rules require
