@@ -153,15 +153,11 @@ describe("buyer funding finalized verifier", () => {
       const j = await buyerFundingJob(f, { prepare: over }); await refuses(j, "reclaim_before_deadline");
     }
   });
-  it("V26: missing, multiple, above-finalized, noncanonical or unbounded funding log", async () => {
+  it("V26: missing, multiple, above-finalized or noncanonical funding log", async () => {
     for (const logs of [[], [{ blockNumber: FUND, blockHash: hash(900) }, { blockNumber: FUND, blockHash: hash(900) }],
       [{ blockNumber: B.number + 1n, blockHash: hash(1001) }], [{ blockNumber: FUND, blockHash: hash(999) }]]) {
       const j = await buyerFundingJob(f); vi.mocked(j.reads.fundedLogs).mockResolvedValue(logs); await refuses(j, "funding_block_unproven");
     }
-    const j = await buyerFundingJob(f);
-    vi.mocked(j.reads.finalizedBlock).mockResolvedValue({ ...B, number: 30000n });
-    vi.mocked(j.reads.blockByNumber).mockImplementation(async n => ({ number: n, hash: hash(Number(n)), timestamp: BigInt(T0 / 1000) + n }));
-    await refuses(j, "funding_block_unproven");
   });
   it("V27: pinned read error with canonical B is closed", async () => { const j = await buyerFundingJob(f); vi.mocked(j.reads.call).mockRejectedValueOnce(new Error("private")); await refuses(j, "chain_read_failed"); });
   it("V28: reorg just before commit refuses", async () => {
@@ -231,5 +227,152 @@ describe("buyer funding finalized verifier", () => {
     vi.mocked(j.reads.unitConfigs).mockResolvedValue({ ok: true, chainId: 84532, escrow: other.escrow, blockNumber: B.number, blockHash: B.hash,
       prePolicyRoot: other.prePolicyRoot, units: other.unitIds.map((unitId, i) => ({ unitId, config: other.configs[i]! })), checks: [] });
     await refuses(j, "escrow_identity_mismatch");
+  });
+});
+
+describe("N325 funding search by timestamp", () => {
+  const t0 = BigInt(T0 / 1000);
+  const fastTimestamp = (n: bigint) => t0 - 1_000_000n + n / 5n;
+  function chain(j: FundingJob, height: bigint, funded: bigint, timestamp: (n: bigint) => bigint) {
+    const head = { number: height, hash: B.hash, timestamp: timestamp(height) };
+    vi.mocked(j.reads.finalizedBlock).mockResolvedValue(head);
+    vi.mocked(j.reads.blockByNumber).mockImplementation(async n => n === height
+      ? head : { number: n, hash: hash(Number(n)), timestamp: timestamp(n) });
+    vi.mocked(j.reads.fundedLogs).mockImplementation(async (_address, from, to) => from <= funded && funded <= to
+      ? [{ blockNumber: funded, blockHash: hash(Number(funded)) }] : []);
+  }
+
+  it("C1: 200 ms blocks find funding three hours before the finalized head", async () => {
+    const j = await buyerFundingJob(f); const height = 5_055_502n;
+    chain(j, height, 5_001_502n, fastTimestamp);
+    expect(await run(j)).toMatchObject({ kind: "recorded", record: {
+      fundingBlockNumber: "5001502", fundingBlockHash: hash(5_001_502), fundedAt: Number(t0 + 300n),
+      blockNumber: "5055502", blockHash: B.hash,
+    } });
+    expect(vi.mocked(j.reads.fundedLogs).mock.calls).toHaveLength(11);
+    expect(vi.mocked(j.reads.blockByNumber).mock.calls.length).toBeLessThanOrEqual(height.toString(2).length + 3);
+  });
+
+  it("C2: two-second blocks find funding three days after the fixture head", async () => {
+    const j = await buyerFundingJob(f);
+    chain(j, 130_600n, FUND, n => j.block(n).timestamp);
+    expect(await run(j)).toMatchObject({ kind: "recorded", record: {
+      fundingBlockNumber: "900", fundedAt: Number(t0 + 400n), blockNumber: "130600",
+    } });
+    const calls = vi.mocked(j.reads.fundedLogs).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0]![1]).toBe(640n);
+  });
+
+  it("C3: starts at the first block of a repeated threshold second with spans at most 199", async () => {
+    const j = await buyerFundingJob(f);
+    chain(j, 5_055_502n, 5_001_502n, fastTimestamp);
+    expect((await run(j)).kind).toBe("recorded");
+    const calls = vi.mocked(j.reads.fundedLogs).mock.calls;
+    expect(calls[0]![1]).toBe(4_999_400n);
+    for (const [, from, to] of calls) expect(to - from + 1n).toBeLessThanOrEqual(199n);
+  });
+
+  it("C4: refuses a within-expiry log beyond the 101-chunk budget", async () => {
+    const j = await buyerFundingJob(f); const height = 5_100_000n;
+    chain(j, height, 5_017_199n, n => t0 - 200_000n + n / 25n);
+    await refuses(j, "funding_block_unproven");
+    const calls = vi.mocked(j.reads.fundedLogs).mock.calls;
+    expect(calls).toHaveLength(101);
+    expect(calls[100]![2]).toBe(5_017_098n);
+    expect(vi.mocked(j.reads.blockByNumber).mock.calls.length).toBeLessThanOrEqual(height.toString(2).length + 3);
+  });
+
+  it("C5a: includes the last block of the signed expiry second", async () => {
+    const j = await buyerFundingJob(f);
+    chain(j, 5_055_502n, 5_004_504n, fastTimestamp);
+    expect(await run(j)).toMatchObject({ kind: "recorded", record: {
+      fundingBlockNumber: "5004504", fundedAt: Number(t0 + 900n),
+    } });
+    expect(vi.mocked(j.reads.fundedLogs).mock.calls).toHaveLength(26);
+  });
+
+  it("C5b: refuses a log block one second past the signed expiry", async () => {
+    const j = await buyerFundingJob(f);
+    chain(j, 5_055_502n, 5_004_505n, fastTimestamp);
+    await refuses(j, "funding_block_unproven");
+  });
+
+  it("C6: a finalized head before the threshold reads no blocks or logs", async () => {
+    const j = await buyerFundingJob(f);
+    chain(j, B.number, FUND, n => n === B.number ? t0 - 121n : j.block(n).timestamp);
+    await refuses(j, "funding_block_unproven");
+    expect(vi.mocked(j.reads.blockByNumber).mock.calls).toHaveLength(0);
+    expect(vi.mocked(j.reads.fundedLogs).mock.calls).toHaveLength(0);
+  });
+
+  it("C7: covers the 1,200-second prepare window with a late finalized head", async () => {
+    const j = await buyerFundingJob(f, { prepare: { createdAt: new Date(T0 - 300_000).toISOString() } });
+    chain(j, 5_040_504n, 5_004_504n, fastTimestamp);
+    expect(await run(j)).toMatchObject({ kind: "recorded", record: {
+      fundingBlockNumber: "5004504", fundedAt: Number(t0 + 900n),
+    } });
+    const calls = vi.mocked(j.reads.fundedLogs).mock.calls;
+    expect(calls).toHaveLength(34);
+    expect(calls[0]![1]).toBe(4_997_900n);
+  });
+
+  it("C8: finds the threshold across a switch from two-second to 200 ms blocks", async () => {
+    const j = await buyerFundingJob(f);
+    chain(j, 1_055_502n, 1_001_502n, n => n < 1_000_000n
+      ? t0 - 2n * (1_000_000n - n) : t0 + (n - 1_000_000n) / 5n);
+    expect(await run(j)).toMatchObject({ kind: "recorded", record: {
+      fundingBlockNumber: "1001502", fundedAt: Number(t0 + 300n),
+    } });
+    const calls = vi.mocked(j.reads.fundedLogs).mock.calls;
+    expect(calls).toHaveLength(8);
+    expect(calls[0]![1]).toBe(999_940n);
+  });
+
+  it("C9: retries the same job after a replica misses the funding log", async () => {
+    const j = await buyerFundingJob(f);
+    chain(j, B.number, FUND, n => j.block(n).timestamp);
+    let missed = false;
+    vi.mocked(j.reads.fundedLogs).mockImplementation(async (_address, from, to) => {
+      if (from > FUND || FUND > to) return [];
+      if (!missed) { missed = true; return []; }
+      return [{ blockNumber: FUND, blockHash: hash(Number(FUND)) }];
+    });
+    await refuses(j, "funding_block_unproven");
+    expect(vi.mocked(j.reads.fundedLogs).mock.calls).toHaveLength(2);
+    expect(await run(j)).toMatchObject({ kind: "recorded", record: { fundingBlockNumber: "900" } });
+  });
+
+  it("C10: an unfunded prepare refuses before any funding search", async () => {
+    const j = await buyerFundingJob(f);
+    chain(j, 130_600n, FUND, n => j.block(n).timestamp);
+    changePolicy(j, 3, zeroHash);
+    vi.mocked(j.reads.fundedLogs).mockResolvedValue([]);
+    await refuses(j, "not_funded_at_finalized");
+    expect(vi.mocked(j.reads.blockByNumber).mock.calls).toHaveLength(0);
+    expect(vi.mocked(j.reads.fundedLogs).mock.calls).toHaveLength(0);
+  });
+
+  it("C11: refuses an in-range funding log whose block hash is not canonical", async () => {
+    const j = await buyerFundingJob(f);
+    vi.mocked(j.reads.fundedLogs).mockImplementation(async (_address, from, to) => from <= FUND && FUND <= to
+      ? [{ blockNumber: FUND, blockHash: hash(999) }] : []);
+    await refuses(j, "funding_block_unproven");
+    expect(vi.mocked(j.reads.blockByNumber).mock.calls.some(([n]) => n === FUND)).toBe(true);
+  });
+
+  it("C12: no funding-log query reaches past the finalized head", async () => {
+    const j = await buyerFundingJob(f);
+    expect((await run(j)).kind).toBe("recorded");
+    for (const [, , to] of vi.mocked(j.reads.fundedLogs).mock.calls) expect(to).toBeLessThanOrEqual(B.number);
+  });
+
+  it("C13: a glitched bisection on one verify is not carried to the next", async () => {
+    const j = await buyerFundingJob(f); let glitch = true;
+    vi.mocked(j.reads.blockByNumber).mockImplementation(async n => glitch && n !== B.number && n <= 950n
+      ? { ...j.block(n), timestamp: t0 - 10_000n } : j.block(n));
+    await refuses(j, "funding_block_unproven");
+    glitch = false;
+    expect(await run(j)).toMatchObject({ kind: "recorded", record: { fundingBlockNumber: "900" } });
   });
 });
