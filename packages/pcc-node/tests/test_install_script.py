@@ -662,7 +662,6 @@ def test_n210_T5d_printed_command(installer, cell):
          mock.patch("pcc_node.cli.provision_api_key", side_effect=AssertionError("unexpected provisioning")), \
          mock.patch("pcc_node.cli.register_kernel", return_value={"ok": True}) as register, \
          mock.patch("pcc_node.cli.register_devices"), \
-         mock.patch("pcc_node.cli.register_signing_key", return_value=(200, {})), \
          mock.patch("pcc_node.cli.run_daemon") as daemon, \
          mock.patch("pcc_node.register.pcc_request", side_effect=AssertionError("unexpected request")), \
          mock.patch("pcc_node.http_util.pcc_request", side_effect=AssertionError("unexpected request")):

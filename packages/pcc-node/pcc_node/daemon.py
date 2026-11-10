@@ -234,7 +234,7 @@ def run_daemon(config: NodeConfig, *, on_running=None):
     # 3. Register kernel with gateway
     # ------------------------------------------------------------------
     try:
-        register_kernel(config.pcc_base, config.pcc_api_key, config)
+        register_kernel(config.pcc_base, config.pcc_api_key, config, signer=(public_key, secret_key))
         log.info(f"Kernel {config.kernel_id} registered")
     except Exception as e:
         # Fail CLOSED (verdict 133a MED, 133b Q1): a kernel whose registration was REFUSED (a non-2xx)
@@ -249,7 +249,8 @@ def run_daemon(config: NodeConfig, *, on_running=None):
         except OSError:
             pass
         # Propagate the refusal (ChatGPT r3 finding 1): a normal return here let `pcc-node start`
-        # exit 0 for a node that never ran. The CLI turns it into exit 1; a direct caller sees it too.
+        # exit 0 for a node that never ran. The CLI turns it into exit 1, or 78 when a restart cannot fix it;
+        # a direct caller sees it too.
         if isinstance(e, RegistrationError):
             raise
         raise RegistrationError(0, {"error": "unexpected_registration_failure"}) from e
