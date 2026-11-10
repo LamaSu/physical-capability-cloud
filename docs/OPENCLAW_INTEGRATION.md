@@ -28,7 +28,7 @@ That is a complete substrate for "do anything digital."
 
 PCC owns the four primitives that make a physical job billable and
 verifiable: **discovery** (which physical capability is available, where,
-at what price — DHT + agent-package + 180+ tools), **execution** (the
+at what price — DHT + agent-package + 170+ tools), **execution** (the
 kernel that actually runs the job on a real machine — OctoPrint, ROS,
 SiLA, OPC-UA, Modbus, Opentrons, generic HTTP), **verification** (evidence
 bundle + ALCOA+ checks + verifier attestation + drift detection +
@@ -344,7 +344,7 @@ Coordination items, ordered low-cost to high-cost:
 
 - `docs/CONTRIBUTOR_ECONOMICS.md` — the full protocol primitives:
   10-role taxonomy, RateSchedule DSL, on-chain split mechanics
-- `docs/AGENT_INTEGRATION.md` — the 180+ agent-package tools + MCP
+- `docs/AGENT_INTEGRATION.md` — the 170+ agent-package tools + MCP
   server + REST surface
 - `docs/DEPLOY_CONTRIBUTOR_ECONOMICS.md` — forge scripts, contract
   addresses, cast-send recipes for Base Sepolia

@@ -26,7 +26,7 @@ describe("the pack pin", () => {
   it("the served package loads under its pin, with every tool's endpoint", async () => {
     const pack = await loadPinnedPack(serve(SERVED), PIN);
     expect(pack.version).toBe(VERSION);
-    expect(pack.tools.length).toBeGreaterThan(180);
+    expect(pack.tools.length).toBeGreaterThan(170);
     expect(pack.tools.find((t) => t.def.name === "provision_api_key")!.spec).toEqual({
       name: "provision_api_key",
       method: "POST",

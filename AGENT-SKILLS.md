@@ -38,8 +38,6 @@ Every PCCP capability is exposed as a REST API endpoint that any AI agent can ca
 |-------|--------|----------|-------------|
 | `list_escrows` | GET | `/api/escrow` | List escrow contracts with their milestone counts. Optionally filter by escrow status |
 | `get_escrow` | GET | `/api/escrow/:escrowId` | Get one escrow. By its PCC id: the database record, with milestones and disputes. By its contract address: read from the chain |
-| `fund_escrow` | POST | `/api/escrow/chain/:address/fund` | Fund, on-chain, an escrow contract this gateway created |
-| `file_escrow_dispute` | POST | `/api/escrow/chain/:address/dispute/:milestoneIndex` | File a dispute against a milestone on-chain. The body gives the challenger's bond amount, an evidence hash and a reason |
 
 ## Evidence Skills
 

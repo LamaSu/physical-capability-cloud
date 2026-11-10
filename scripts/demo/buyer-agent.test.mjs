@@ -87,7 +87,7 @@ describe("toOpenAiTools — whole array + real agent-package.json", () => {
 
   it("produces a valid OpenAI tool for ALL 253 real tools", () => {
     const tools = toOpenAiTools(realPkg.tools);
-    expect(tools.length).toBeGreaterThan(180);
+    expect(tools.length).toBeGreaterThan(170);
     for (const t of tools) {
       expect(t.type).toBe("function");
       expect(typeof t.function.name).toBe("string");
