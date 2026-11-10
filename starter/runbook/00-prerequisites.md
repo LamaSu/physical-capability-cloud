@@ -36,6 +36,7 @@ Install this pinned commit, not a release from PyPI: phase 5 calls `register_ker
 python3 -c "from pcc_node.register import register_kernel_signed" && echo "pcc-node OK"
 python3 -c "import nacl.signing" && echo "signing OK"
 ```
+If the check fails after an earlier pcc-node install, pip kept that copy, because both report the same version: run the install line again with `--force-reinstall --no-deps` after `install`, then the check.
 
 ## 3. The node's signing key, made here and never sent
 The node signs its evidence with an Ed25519 key. Make it now, on this machine, and give PCC only its public half so its signatures can be verified. Without `publicKey`, the API key has no signing key on file; the gateway never generates or returns a private signing key.

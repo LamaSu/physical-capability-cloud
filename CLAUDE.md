@@ -607,6 +607,8 @@ pcc-node start
 
 This auto-detects hardware, generates Ed25519 keys, registers the kernel with the API key you give it (`PCC_API_KEY` or `--api-key`), and starts a daemon that keeps the kernel online. Without a key it stops: the gateway refuses to provision one without an email, so provision it first (`POST /api/auth/provision`). The daemon takes no jobs: jobs run through the operating agent's typed operations. Set `PCC_BASE` and `PCC_API_KEY` env vars if not using defaults.
 
+After an earlier pcc-node install, pip may keep that copy, because both report the same version: run the install line again with `--force-reinstall --no-deps` after `install`.
+
 ---
 
 ## 5. DTOs & Response Shapes
@@ -1031,6 +1033,8 @@ This single command:
 3. Uses the API key you give it (`PCC_API_KEY` or `--api-key`); without one it stops, because the gateway refuses to provision a key without an email
 4. Registers a kernel
 5. Starts a daemon that keeps the kernel online. It takes no jobs: they run through the operating agent's typed operations
+
+After an earlier pcc-node install, pip may keep that copy, because both report the same version: run the install line again with `--force-reinstall --no-deps` after `install`.
 
 ### Commands
 

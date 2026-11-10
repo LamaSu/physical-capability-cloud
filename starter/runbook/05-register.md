@@ -25,7 +25,7 @@ python3 -c "import json; json.load(open('.pcc/kernel-fields.json')); print('kern
 ## 2. The kernel's signing key
 Create the kernel and register the node key you made in phase 0 (step 3) as its signing key, in one call. The node signs its evidence with it, so its work can be checked against the kernel. pcc-node proves possession by signing a challenge; the private half never leaves the selected key file. Use the default `~/.pcc-node/keys.json`, or set `PCC_NODE_KEY_PATH` (or the fallback `PCC_NODE_KEYS_FILE`) to an absolute path outside this folder and every source checkout. Use the same location as phase 0, keeping any override set. Keep this owner-only location outside every source checkout. Key persistence requires Linux (see phase 0 step 3).
 
-**First, GET `$BASE/api/kernels/<id>`.** It answers 404 for a new id. A 200 means a kernel already has this id, such as one an earlier run in this folder created; the call below then registers this node's key on it. Any other answer means the request itself failed: check `.pcc/base` and the API key first.
+**First, GET `$BASE/api/kernels/<id>`.** It answers 404 for a new id. A 200 means a kernel already has this id, such as one an earlier run in this folder created; the call below then registers this node's key on it, or refuses it (see the Check below). Any other answer means the request itself failed: check `.pcc/base` and the API key first.
 ```bash
 echo "GET kernel: $(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/kernels/$(cat .pcc/kernel-id)" -H @.pcc/auth.header)"
 ```
