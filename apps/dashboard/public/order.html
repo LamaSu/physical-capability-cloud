@@ -199,7 +199,7 @@ function connectSse(){
     } else if(e.type==="job_accepted"){pushTl(`${e.job.type} job accepted by ${e.job.assigneeSlug}`,true)}
       else if(e.type==="job_pickup"){pushTl(`driver picked up the pizza`,true)}
       else if(e.type==="delivered"){
-        pushTl(`settlement — shop $${e.settlement.shopPayoutUSD} · driver $${e.settlement.driverPayoutUSD} · pcc fee $${e.settlement.pccFeeUSD}`,true);
+        pushTl(`settlement — shop $${e.settlement.shopPayoutUSD} · driver $${e.settlement.driverPayoutUSD}`,true);
         pushTl(`reputation — shop +${e.reputation.shopDelta} · driver +${e.reputation.driverDelta}`,true);
       }
   };
