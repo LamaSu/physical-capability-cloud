@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAddress } from "viem";
-import { eq, schema } from "@pcc/store";
+import { eq, schema, sql } from "@pcc/store";
 import { getRepos, getStore } from "../db.js";
 import { fundingStateOf, projectFundingStatus, type FundingStatusDTO } from "../readmodels/funding-status.js";
 import {
@@ -209,6 +209,15 @@ describe("N297 recorded funding", () => {
     expect(shippedVNextDeploymentRecord).not.toHaveBeenCalled();
   });
 
+  it("N5b (neg-db-error): a failed prepare read is a 503, never a reading", async () => {
+    const j = await paidScope(fixture);
+    plantRecord(installTestFundingRecordStore(), j.scopeId);
+    setScopeStatus(j.scopeId, "active");
+    getStore().db.run(sql`DROP TABLE funding_prepares`);
+    const res = await app.inject({ method: "GET", url: `/api/jobs/${j.jobId}/funding`, headers: BUYER_HEADERS });
+    expect(res.statusCode).toBe(503);
+  });
+
   it.each([
     ["a-scope", { scopeId: "scope-another" }],
     ["b-superseded", { state: "superseded", endedAt: iso(T0), supersededBy: "prepare-new" }],
@@ -230,6 +239,28 @@ describe("N297 recorded funding", () => {
     expect(dto).toMatchObject({ binding: "bound", state: "funded_verified" });
     expect(dto.deployment).toEqual(RECORDED);
     expectVerification(dto, j.record);
+  });
+
+  it("N6(i) (neg-escrow-case): a checksummed record escrow still joins its lower-case row", async () => {
+    const j = await paidScope(fixture);
+    const record = verification(j.scopeId, { escrowAddress: getAddress(ESCROW_A) });
+    expect(record.escrowAddress).not.toBe(ESCROW_A);
+    installTestFundingRecordStore().plant(record);
+    insertPrepare(record, j.jobId);
+    setScopeStatus(j.scopeId, "active");
+    const dto = await read(j.jobId);
+    expect(dto).toMatchObject({ binding: "bound", state: "funded_verified" });
+    expect(dto.deployment).toEqual(RECORDED);
+  });
+
+  it("N6(j) (neg-other-chain): a row on another chain is checked against that chain's shipped record only", async () => {
+    const j = await paidScope(fixture);
+    const record = verification(j.scopeId, { chainId: 8453 });
+    installTestFundingRecordStore().plant(record);
+    insertPrepare(record, j.jobId);
+    setScopeStatus(j.scopeId, "active");
+    expectUnknown(await read(j.jobId));
+    expect(vi.mocked(shippedVNextDeploymentRecord).mock.calls.map(([, network]) => network)).toEqual(["base"]);
   });
 
   it.each([
@@ -259,6 +290,22 @@ describe("N297 recorded funding", () => {
     const j = await setupRecorded();
     installActivationTerms({ expectedChainId: chainId, postActivationTtlMs: ACTIVATION_TTL, testnetOnly: false });
     expect((await read(j.jobId)).deployment).toMatchObject({ basis: "configured", chainId, chainClass, scheduleTestnetOnly: false });
+  });
+
+  it("N8 (neg-configured-flag): a configured testnet-only schedule reads scheduleTestnetOnly true", async () => {
+    const j = await setupRecorded();
+    installActivationTerms({ expectedChainId: 84532, postActivationTtlMs: ACTIVATION_TTL, testnetOnly: true });
+    expect((await read(j.jobId)).deployment).toEqual({
+      basis: "configured", chainId: 84532, network: "base-sepolia", chainClass: "testnet", scheduleTestnetOnly: true, scheduleId: null, recordSha256: null,
+    });
+  });
+
+  it.each([[8453, "base", "mainnet"], [31337, "anvil", "local"], [545, "chain-545", "unknown"]] as const)("N8 (neg-recorded-chain-%i): the recorded basis names its own chain's network and class", (chainId, network, chainClass) => {
+    const record = verification("scope-class", { chainId });
+    const scope = { id: record.scopeId, jobId: "job-class", createdBy: BUYER, status: "active", createdAt: iso(T0), expiresAt: iso(T0 + 3600000) };
+    const dto = projectFundingStatus(scope, record, escrow, null, iso(T0), NO_TESTNET, { ...recorded, chainId });
+    expect(dto).toMatchObject({ binding: "bound", state: "funded_verified" });
+    expect(dto.deployment).toEqual({ ...RECORDED, chainId, network, chainClass });
   });
 
   it("N9 (neg-no-record): opt-ins set then unset give equal replies and no lookup", async () => {
@@ -329,6 +376,11 @@ describe("N297 recorded funding", () => {
     const record = verification("scope-agreement");
     expect(recordedDeploymentOf(record, [], shipped)).toBeNull();
     expect(recordedDeploymentOf(record, [identityRow(record)], null)).toBeNull();
+  });
+
+  it("N13(f) (neg-shipped-other-chain): another chain's shipped record never vouches", () => {
+    const record = verification("scope-agreement", { chainId: 31337 });
+    expect(recordedDeploymentOf(record, [identityRow(record)], shipped)).toBeNull();
   });
 
   it("N13 (neg-malformed-record): malformed records cause no query", () => {
