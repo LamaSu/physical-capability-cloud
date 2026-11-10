@@ -1374,39 +1374,10 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         }
       }
 
-      // ── 4a-V2. On-chain evidence leg via the settlement crank (V2 path) ──
-      // driveSettlement reads the milestone's receipt-confirmed on-chain state,
-      // funds it if needed, and submits the evidence hash — mapping the contract's
-      // own dedup reverts to already-done, so this is safe to re-run. It returns the
-      // on-chain stepId (the oracle binds its EAS mint to it) and stops at
-      // needs_input:eas_uid; the UID is minted at 4b and bound at 4c.
-      //
-      // This replaces the former one-shot submitEvidence. We no longer swallow the
-      // result and silently fall back to V1: expected reverts are handled INSIDE the
-      // crank, and an unexpected chain error (RPC down) leaves the job recoverable at
-      // 'evidence_submitted' for resume-settlement to re-drive — it is not hidden.
       const hasRealEscrow =
         !!escrowAddress && escrowAddress.startsWith("0x") && !escrowAddress.startsWith("mock");
 
       // V3 Mode-A (oracle-free approveAndRelease) settlement REMOVED per owner directive — everything through the oracle. V3 escrows now settle via the oracle-attested Mode-B dispatch below.
-
-      let onChainStepId: `0x${string}` | undefined;
-      let evidenceTxHash: string | null = null;
-      if (useEasV2() && hasRealEscrow && escrowWriteEnabled()) {
-        try {
-          const drive = await driveSettlement(escrowAddress as `0x${string}`, 0, {
-            evidenceBundleHash: bundleHash as `0x${string}`,
-          });
-          onChainStepId = (drive.stepId as `0x${string}` | undefined) ?? undefined;
-          evidenceTxHash = drive.steps.find((s) => s.action === "submitEvidence")?.txHash ?? null;
-        } catch (evErr) {
-          // The milestone stays where the crank left it on-chain; a fresh read on the
-          // next drive (4c below, or resume-settlement) resumes it. Surface, don't hide.
-          pipelineTelemetry.emit(jobId, "settlement_claim", "failed", {
-            metadata: { path: "crank-evidence", error: evErr instanceof Error ? evErr.message : String(evErr) },
-          });
-        }
-      }
 
       // ── 4b. Oracle verification ─────────────────────────────────────
       // Every settlement must pass through the PCC Verification Oracle.
@@ -1424,9 +1395,10 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           ? {
               mintEasAttestation: true,
               schemaUid: process.env.PCC_EVIDENCE_SCHEMA_UID,
-              // Prefer the real on-chain stepId; fall back to the job's stepId
-              // string (hashed by the oracle) when no real escrow is available.
-              stepId: onChainStepId ?? job.stepId,
+              // The job's stepId string: the oracle hashes it (keccak256 of its UTF-8
+              // bytes) exactly as the escrow derived the milestone's stepId at creation.
+              // Never the bytes32 read from the chain, which it would hash again.
+              stepId: job.stepId,
             }
           : {}),
       });
@@ -1437,6 +1409,44 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           reason: oracleResponse.result.reason,
           checks: oracleResponse.result.checks,
         });
+      }
+
+      // The chain takes the pinned digest as bytes32 (the same 0x<hex> /complete's
+      // V3 path submits and the oracle attests), never the sha256:-tagged string.
+      const chainEvidenceHash = (
+        bundleHash.startsWith("sha256:") ? `0x${bundleHash.slice("sha256:".length)}` : bundleHash
+      ) as `0x${string}`;
+      // The escrow's DB version: V3 escrows settle their evidence and attestation
+      // through 4c's V3 branch. Falls back to V2 when the row is missing.
+      const escrowVersionOf = (address: string) =>
+        (repos.escrows.findByContractAddress(address)?.version as "v2" | "v3" | null | undefined) ?? "v2";
+
+      // ── 4a-V2. On-chain evidence leg via the settlement crank (V2 path) ──
+      // Runs only after the oracle verified the evidence (4b). driveSettlement reads
+      // the milestone's receipt-confirmed on-chain state, funds it if needed, and
+      // submits the evidence hash — mapping the contract's own dedup reverts to
+      // already-done, so this is safe to re-run. It stops at needs_input:eas_uid; 4c
+      // binds the UID minted at 4b. A V3 escrow gets no evidence hash here: 4c's V3
+      // branch submits it and waits for its receipt before it binds.
+      //
+      // This replaces the former one-shot submitEvidence. We no longer swallow the
+      // result and silently fall back to V1: expected reverts are handled INSIDE the
+      // crank, and an unexpected chain error (RPC down) leaves the job recoverable at
+      // 'evidence_submitted' for resume-settlement to re-drive — it is not hidden.
+      let evidenceTxHash: string | null = null;
+      if (useEasV2() && hasRealEscrow && escrowWriteEnabled()) {
+        try {
+          const evidenceLeg =
+            escrowVersionOf(escrowAddress as string) === "v3" ? {} : { evidenceBundleHash: chainEvidenceHash };
+          const drive = await driveSettlement(escrowAddress as `0x${string}`, 0, evidenceLeg);
+          evidenceTxHash = drive.steps.find((s) => s.action === "submitEvidence")?.txHash ?? null;
+        } catch (evErr) {
+          // The milestone stays where the crank left it on-chain; a fresh read on the
+          // next drive (4c below, or resume-settlement) resumes it. Surface, don't hide.
+          pipelineTelemetry.emit(jobId, "settlement_claim", "failed", {
+            metadata: { path: "crank-evidence", error: evErr instanceof Error ? evErr.message : String(evErr) },
+          });
+        }
       }
 
       // Store the attestation for potential on-chain submission
@@ -1491,9 +1501,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           // crank (driveSettlement), which is V2-only. Falls back to V2 when the row
           // is missing.
           if (easUid && hasRealEscrow && escrowWriteEnabled() && escrowAddress) {
-            const escrowRow = repos.escrows.findByContractAddress(escrowAddress);
-            const escrowVersion =
-              (escrowRow?.version as "v2" | "v3" | null | undefined) ?? "v2";
+            const escrowVersion = escrowVersionOf(escrowAddress);
             if (escrowVersion === "v3") {
               // V3 requires the evidence hash on-chain BEFORE the attestation binds —
               // submitAttestation reverts "Evidence not submitted" otherwise. Submit the
@@ -1529,7 +1537,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
               // not land it resubmits evidence first, then binds. A re-run maps
               // "Attestation already used" / "Evidence not submitted" to already-done.
               const drive = await driveSettlement(escrowAddress as `0x${string}`, 0, {
-                evidenceBundleHash: bundleHash as `0x${string}`,
+                evidenceBundleHash: chainEvidenceHash,
                 easUid,
               });
               const attestStep = drive.steps.find((s) => s.action === "submitAttestation");
