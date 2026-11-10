@@ -12,9 +12,6 @@ const NESTING = /\bnested transactions?\b|pays? the network twice|\btake a cut\b
 const ALLOWED: Array<{ file: string; text: string; owner: string; reason: string }> = [
   { file: "README.md", text: "The protocol charges 2.35% on settlement", owner: "not-served", reason: "a repo file that no host serves" },
   { file: "PCC-NETWORK.md", text: "The protocol fee is 2.35%", owner: "managed-elsewhere", reason: "its template lives in another repo" },
-  { file: "apps/dashboard/public/whitepaper.md", text: "The Coordination Tax", owner: "kept", reason: "about other platforms" },
-  { file: "apps/dashboard/public/whitepaper.md", text: "takes a license fee", owner: "kept", reason: "about other platforms" },
-  { file: "apps/dashboard/public/whitepaper.md", text: "Treasury balance, soulbound certificate registry", owner: "operator", reason: "vision text" },
   { file: "apps/dashboard/public/FOUR_SLOTS.md", text: "+20% rush fee", owner: "kept", reason: "an operator's own price" },
   { file: "docs/FOUR_SLOTS.md", text: "+20% rush fee", owner: "kept", reason: "an operator's own price" },
   { file: "docs/ADAPTER_BOUNTIES.md", text: "Tax treatment?", owner: "kept", reason: "a recipient's own taxes" },
