@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex">
 <title>PCC · Pizza agent prompt</title>
 <meta name="description" content="The system prompt that turns your AI into a pizza-ordering agent on PCC. Read it, then copy it into your chat.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -75,6 +76,7 @@ td code.inline,th code.inline{font-size:.82em}
   <div class="foot">PCC // capability.network &middot; agents compose reality</div>
 </main>
 <div class="toast" id="toast"></div>
+<script src="/demo-gate.js"></script>
 <script>
 const $=s=>document.querySelector(s);
 const PROMPT_URL="/pizza-llm-agent-prompt.md";
@@ -186,12 +188,15 @@ async function load(){
     $("#doc").innerHTML='<p>Couldn&rsquo;t load the prompt. Open the <a href="/pizza-llm-agent-prompt.md">raw .md</a> directly.</p>';
   }
 }
+Promise.resolve(window.pccDemoGate).then((state) => {
+if (state === "off") return;
 $("#copyAll").onclick=async()=>{
   try{ if(!rawText){const r=await fetch(PROMPT_URL,{cache:"no-store"});rawText=await r.text();}
     await navigator.clipboard.writeText(rawText); toast("Full prompt copied — paste it into your AI chat");
   }catch(e){ toast("Copy blocked — open Raw .md and copy manually",1); window.open(PROMPT_URL,"_blank","noopener"); }
 };
 load();
+});
 </script>
 </body>
 </html>
