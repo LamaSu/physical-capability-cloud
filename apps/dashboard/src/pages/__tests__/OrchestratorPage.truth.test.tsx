@@ -290,7 +290,6 @@ describe("OrchestratorPage reports only known state", () => {
   it("R7 all four successful reads show their counts and claim badges", async () => {
     await renderPage();
     expectOverview();
-    expect(useOrchestratorStore.getState()).toMatchObject({ graphs: [GRAPH], samples: SAMPLES, workflows: WORKFLOWS, claims: CLAIMS });
   });
 
   it.each([true, false])("R8 shared cache, detail first = %s: both pages retain their counts and badges", async (detailFirst) => {
@@ -303,5 +302,106 @@ describe("OrchestratorPage reports only known state", () => {
     root = createRoot(container);
     await renderPage(!detailFirst);
     if (detailFirst) expectOverview(); else expectDetail();
+  });
+
+  it.each([
+    ["graphs", "Transfer Graphs"],
+    ["samples", "Active Samples"],
+    ["workflows", "Running Workflows"],
+    ["claims", "Active Claims"],
+  ])("O2 %s: an ok read without its list leaves its displays unknown", async (path, label) => {
+    useOrchestratorStore.setState({ graphs: [GRAPH], samples: SAMPLES, workflows: WORKFLOWS, claims: CLAIMS });
+    answers.set(`/api/orchestrator/${path}`, () => json({}));
+    await renderPage();
+    expect(kpi(label)).toBe("—");
+    expect(container.textContent).not.toContain("Some data failed to load");
+    if (path === "graphs") {
+      expect(container.textContent).not.toContain("View Detail");
+      expect(container.textContent).not.toContain("Instrument Status");
+      expect(container.innerHTML).not.toContain("Truth mixer");
+      expect(container.innerHTML).not.toContain("Truth reader");
+    } else if (path === "samples") {
+      expect(container.textContent).not.toContain("Labware:");
+      expect(container.textContent).not.toContain("No active samples");
+      expect(container.textContent).not.toContain("Sample:");
+    } else if (path === "workflows") {
+      expect(container.textContent).not.toContain("Steps:");
+      expect(container.textContent).not.toContain("No workflows found");
+    } else {
+      expect(container.textContent).not.toContain("Available");
+      expect(container.textContent).not.toContain("Ready");
+      expect(container.textContent).not.toContain("Claimed by");
+      for (const node of GRAPH.nodes) {
+        const labels = [...container.querySelectorAll("span")].filter((element) =>
+          element.textContent === node.label && element.classList.contains("font-medium"));
+        expect(labels, `both displays of ${node.label}`).toHaveLength(2);
+        for (const nodeLabel of labels) {
+          expect(nodeLabel.parentElement!.parentElement!.textContent).toContain("Claim status unknown");
+        }
+      }
+    }
+  });
+
+  it("O3 failed samples hide the graph card's stale sample line", async () => {
+    useOrchestratorStore.setState({ samples: SAMPLES });
+    answers.set("/api/orchestrator/samples", () => json({ message: "Samples failed" }, 500));
+    await renderPage();
+    expect(container.textContent).toContain("View Detail");
+    expect(container.textContent).not.toContain("Sample:");
+  });
+
+  it("S7 successful reads render their own lists and leave a stale store untouched", async () => {
+    const seed = {
+      graphs: [GRAPH, {
+        ...GRAPH, id: "stale-graph", kernelId: "stale-lab",
+        nodes: [{ ...GRAPH.nodes[0], id: "stale-node", label: "Stale node" }], edges: [],
+      }],
+      samples: [...SAMPLES, { ...SAMPLES[0], id: "stale-sample", label: "Stale sample", currentNodeId: "stale-node" }],
+      workflows: [...WORKFLOWS, { ...WORKFLOWS[0], id: "stale-workflow" }],
+      claims: [...CLAIMS, { ...CLAIMS[0], id: "stale-claim", nodeId: "stale-node", claimedBy: "stale-holder" }],
+    };
+    useOrchestratorStore.setState(seed);
+    await renderPage();
+    expectOverview();
+    expect(container.textContent).toContain("Truth mixer");
+    for (const extra of ["Stale node", "Stale sample", "stale-workflow", "stale-holder"]) {
+      expect(container.innerHTML).not.toContain(extra);
+    }
+    expect(container.textContent).toContain("Sample: Truth sample alpha");
+    expect(container.textContent!.match(/Labware:/g)).toHaveLength(SAMPLES.length);
+    expect(container.textContent!.match(/Steps:/g)).toHaveLength(WORKFLOWS.length);
+    expect(container.textContent).not.toContain("No active samples");
+    expect(container.textContent).not.toContain("No workflows found");
+    expect(useOrchestratorStore.getState()).toMatchObject(seed);
+  });
+
+  it.each([
+    ["graphs", "Transfer Graphs"],
+    ["samples", "Active Samples"],
+    ["workflows", "Running Workflows"],
+    ["claims", "Active Claims"],
+  ])("E2 %s: an ok read with an empty list shows a known-empty display over a stale store", async (path, label) => {
+    useOrchestratorStore.setState({ graphs: [GRAPH], samples: SAMPLES, workflows: WORKFLOWS, claims: CLAIMS });
+    answers.set(`/api/orchestrator/${path}`, () => json({ [path]: [] }));
+    await renderPage();
+    expect(kpi(label)).toBe("0");
+    expect(container.textContent).not.toContain("Some data failed to load");
+    if (path === "graphs") {
+      expect(container.textContent).not.toContain("View Detail");
+      expect(container.textContent).toContain("Instrument Status");
+      expect(container.innerHTML).not.toContain("Truth mixer");
+    } else if (path === "samples") {
+      expect(container.textContent).toContain("No active samples");
+      expect(container.textContent).not.toContain("Labware:");
+      expect(container.textContent).not.toContain("Sample:");
+    } else if (path === "workflows") {
+      expect(container.textContent).toContain("No workflows found");
+      expect(container.textContent).not.toContain("Steps:");
+    } else {
+      expect(container.textContent).not.toContain("Claimed by");
+      expect(container.textContent).not.toContain("Claim status unknown");
+      expect(container.textContent!.match(/Available/g)).toHaveLength(GRAPH.nodes.length);
+      expect(container.textContent!.match(/Ready/g)).toHaveLength(GRAPH.nodes.length);
+    }
   });
 });

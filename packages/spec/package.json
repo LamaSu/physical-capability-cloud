@@ -40,8 +40,19 @@
       "types": "./dist/funding/index.d.ts",
       "import": "./dist/funding/index.js",
       "default": "./dist/funding/index.js"
+    },
+    "./recheck": {
+      "types": "./dist/recheck/index.d.ts",
+      "import": "./dist/recheck/index.js",
+      "default": "./dist/recheck/index.js"
+    },
+    "./recheck/replay": {
+      "types": "./dist/recheck/replay.d.ts",
+      "import": "./dist/recheck/replay.js",
+      "default": "./dist/recheck/replay.js"
     }
   },
+  "bin": { "pcc-settlement-recheck": "./dist/recheck/cli.js" },
   "files": [
     "dist",
     "README.md",

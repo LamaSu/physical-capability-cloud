@@ -8,9 +8,13 @@
  * ERR_MODULE_NOT_FOUND.
  *
  *   const prepared = await prepareFunding({ payload, wallet, publicClient, quote: { maxTotalGross }, expect, pins });
+ *   const escrow = await ensureEscrow({ prepared, wallet, publicClient }); // createEscrow only if the clone has no code
+ *   if (escrow.outcome !== "ready") { ... }                                 // "indeterminate" is NOT ready
  *   const acceptance = await signJobPolicy({ prepared, wallet });   // optional for a payer-sent fund()
  *   const result = await approveAndFund({ prepared, wallet, publicClient });
  *   if (result.outcome !== "committed") { ... }                     // "indeterminate" is NOT success
+ *   const units = await readUnitStates({ publicClient, chainId, escrow, pins }); // states and reclaimAt at one block
+ *   const refund = await reclaimUnits({ wallet, publicClient, chainId, escrow, unitIds, pins }); // "indeterminate" is NOT reclaimed
  *
  * After an indeterminate result, resolve with readFundedState (or wait for the earlier transactions) before retrying:
  * `readFundedState({ publicClient, prepared })` reads the escrow again. A retried approveAndFund refuses
@@ -49,16 +53,21 @@ export { prepareFunding, DEFAULT_MARGIN_SECONDS } from "./prepare.js";
 export type { PrepareFundingArgs, PreparedFunding, FundingExpectations, UncheckedFundingField } from "./prepare.js";
 export { jobIdHashOf } from "./vnext.js";
 export { signJobPolicy } from "./sign.js";
-export { approveAndFund, readFundedState, classifyFunding } from "./fund.js";
-export type { ApproveAndFundArgs, FundedState, FundedStateKind, FundingOutcome, FundingResult, SendResult } from "./fund.js";
+export { approveAndFund, readFundedState, classifyFunding, ensureEscrow, classifyEscrowCreation } from "./fund.js";
+export type { EnsureEscrowArgs, EnsureEscrowResult, EscrowCreationOutcome, EscrowCodeKind, ApproveAndFundArgs, FundedState, FundedStateKind, FundingOutcome, FundingResult, SendResult } from "./fund.js";
+export { readUnitStates } from "./units.js";
+export type { UnitsTarget, ReadUnitStatesArgs, UnitStateEntry, UnitStateName, UnitStatesRead } from "./units.js";
+export { reclaimUnits, classifyReclaim } from "./reclaim.js";
+export type { ReclaimUnitsArgs, ReclaimUnitResult, ReclaimResult, ReclaimOutcome } from "./reclaim.js";
+export { UNIT_STATE_NAMES } from "./vnext.js";
 export { FUNDING_PREPARE_SCHEMA } from "./payload.js";
 export { FundingRefusal } from "./errors.js";
 export type { FundingRefusalCode } from "./errors.js";
-export { CIRCLE_USDC } from "./pins.js";
+export { CIRCLE_USDC, VNEXT_FACTORY } from "./pins.js";
 export { RECLAIM_WINDOWS, reclaimWindowFor } from "./pins.js";
 export type { ReclaimWindow } from "./pins.js";
 export type { FundingPins } from "./pins.js";
-export type { JobPolicyMessage, JobPolicyTypedData, PayoutEntry, UnitConfig } from "./vnext.js";
+export type { PolicyIdentity, JobPolicyMessage, JobPolicyTypedData, PayoutEntry, UnitConfig } from "./vnext.js";
 
 /** A Thursday PRINT-unit buyer calls printUnitThursdayExpectation and never passes allowUnchecked. */
 export { PRINT_UNIT_THURSDAY_V1, RECLAIM_SKEW_SECONDS, printUnitPrincipalWord, printUnitThursdayExpectation } from "./print-unit.js";

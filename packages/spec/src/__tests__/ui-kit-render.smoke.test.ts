@@ -157,6 +157,17 @@ describe("pcc-ui kit renders a manifest in snapshot mode (offline, no gateway)",
     expect(document.querySelector(".pcc-overlay")).toBeNull();
     expect(document.querySelector(".pcc-chip")).toBeNull();
   });
+
+  it("with no manifest, the kit's notice is marked ephemeral", () => {
+    boot("null");
+    expect(document.getElementById("pcc-kit-status")).toBeNull();
+    const notices = document.querySelectorAll("#pcc-root > p.pcc-err");
+    expect(notices).toHaveLength(1);
+    const notice = notices[0]!;
+    expect(notice.textContent).toBe("No dashboard manifest found.");
+    expect(notice.className).toBe("pcc-err pcc-src-ephemeral");
+    expect(notice.getAttribute("data-source")).toBe("ephemeral");
+  });
 });
 
 describe("pcc-ui kit renders an actions manifest and gates money verbs", () => {

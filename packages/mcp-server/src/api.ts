@@ -8,9 +8,11 @@
 // Config
 // ---------------------------------------------------------------------------
 
-export const PCC_URL = (
-  process.env.PCC_URL ?? "https://pcc-gateway-production.up.railway.app"
-).replace(/\/$/, "");
+export function resolveGatewayUrl(env: Record<string, string | undefined>): string {
+  return (env.PCC_URL ?? "https://pcc-gateway-production.up.railway.app").replace(/\/$/, "");
+}
+
+export const PCC_URL = resolveGatewayUrl(process.env);
 
 /**
  * Optional bearer token. When set, it is sent as `Authorization: Bearer <key>`
@@ -21,6 +23,28 @@ export const PCC_URL = (
  * is never logged — only the resolved gateway URL is logged on boot.
  */
 export const PCC_API_KEY = process.env.PCC_API_KEY?.trim() || undefined;
+
+let sessionBearerProvider: (() => string | undefined) | undefined;
+let redactionSecretsProvider: (() => readonly string[]) | undefined;
+
+export function setSessionBearerProvider(provider: (() => string | undefined) | undefined): void {
+  sessionBearerProvider = provider;
+}
+
+export function setRedactionSecretsProvider(provider: (() => readonly string[]) | undefined): void {
+  redactionSecretsProvider = provider;
+}
+
+export function currentBearer(): string | undefined {
+  return sessionBearerProvider?.() ?? PCC_API_KEY;
+}
+
+function redact(message: string, secrets: ReadonlyArray<string | undefined>): string {
+  const patterns = secrets.filter((secret): secret is string => !!secret)
+    .sort((a, b) => b.length - a.length)
+    .map(secret => secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return patterns.length ? message.replace(new RegExp(patterns.join("|"), "gi"), "[redacted]") : message;
+}
 
 // ---------------------------------------------------------------------------
 // HTTP helpers
@@ -49,8 +73,9 @@ export async function pccFetch(path: string, opts: FetchOptions = {}): Promise<u
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   // Forward the bearer token when configured. Public reads work without it;
   // negotiation/escrow/ramp calls need it or the gateway returns 401.
-  if (PCC_API_KEY) {
-    headers["Authorization"] = `Bearer ${PCC_API_KEY}`;
+  const bearer = currentBearer();
+  if (bearer) {
+    headers["Authorization"] = `Bearer ${bearer}`;
   }
 
   const init: RequestInit = { method, headers };
@@ -64,7 +89,7 @@ export async function pccFetch(path: string, opts: FetchOptions = {}): Promise<u
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`PCC API ${res.status}: ${text || res.statusText}`);
+    throw new Error(redact(`PCC API ${res.status}: ${text || res.statusText}`, [bearer, PCC_API_KEY, ...(redactionSecretsProvider?.() ?? [])]));
   }
 
   // Some write/cancel endpoints answer 204 with no body — don't choke on json().

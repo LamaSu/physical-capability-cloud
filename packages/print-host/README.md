@@ -63,6 +63,9 @@ the message and verifying contract. For D1 and `submitEvidence`, the escrow addr
 is supplied per signing call until canonical deployment binding is added; no
 escrow configuration field is needed yet. Policy acceptance binds the deployment
 through the loaded terms and derives the escrow as described below.
+A key loaded with the gateway's `baseUrl` (gateway funding mode) has a fourth
+scoped use: EIP-191 sign-in messages with the fixed statement, for that origin
+only (see "Funding source and operator sign-in").
 
 October ships no `invokeBackup` path. A recursive source guard test enforces the
 absence of its name and selector and checks the host's `submitEvidence` selector
@@ -92,7 +95,8 @@ total pass-through is the sum of each unit's `n` minus that operator amount, and
 must be at most `maxPassThrough`. A CARRIER unit paying only the treasury counts
 its entire `n`; the cap applies across the policy, including all its units.
 Other scalar limits are integer numbers. `reclaimMinSeconds` must be at least
-864000 (10 days), and `reclaimMaxSeconds` at most 31536000 (365 days).
+4500 on Base Sepolia (84532) and 864000 (10 days) on a local chain (31337), and
+`reclaimMaxSeconds` at most 31536000 (365 days).
 The file also requires a valid non-zero address `settlementToken` and a
 `subjectPins` object. A `termsHash` field in a terms file is refused with `bad_terms`.
 On chain 84532, `settlementToken` must equal Base Sepolia USDC
@@ -295,7 +299,10 @@ prints only a closed error code.
 
 The strict JSON configuration has `kernelId`, `deviceId`, `printer.uri`,
 `chain.chainId`, `chain.rpcUrlFile`, `gateway.baseUrl`, `gateway.apiKeyFile`,
-`keys.deviceKeyFile`, `keys.operatorKeyFile`, and `dataDir`. All file and directory
+`keys.deviceKeyFile`, `keys.operatorKeyFile`, and `dataDir`, plus an optional
+`funding.source`: `"manifest"` (the default) or `"gateway"` (see "Funding
+source and operator sign-in"). Gateway mode never reads `gateway.apiKeyFile`,
+though the field stays required. All file and directory
 paths must be absolute. Only Base Sepolia (84532) and offline anvil (31337) are
 accepted. Secret files and their immediate parent directories must belong to the
 current uid and deny group/other access; the configuration file must deny
@@ -346,6 +353,82 @@ bundle once; the mandatory MVP package signature set is exactly D1 and D2.
 These repros track the needed pcc-adk toolkit changes;
 the local session and package library supply the MVP pipeline while those APIs
 remain parked.
+
+## Funding source and operator sign-in
+
+`funding.source` picks the source of `fundedAt` and the credential:
+
+- `"manifest"` (the default): `unit.fundedAt` comes from the inputs manifest,
+  unchecked, and every call sends the key in `gateway.apiKeyFile`. The CLI
+  refuses a manifest run without `--no-submit` or `--poll-only`
+  (`manifest_requires_no_submit`), so a manifest unit is never sent.
+- `"gateway"`: the operator key signs in (SIWE) and the host sends a
+  short-lived session key, read afresh for every call. `fundedAt` comes only
+  from the poll's verified funding. Every sending run needs this mode.
+  `--poll-only` is refused (`gateway_refuses_poll_only`).
+
+In both modes, the host refuses a unit when
+`Math.floor(now() / 1_000) >= unit.reclaimAt`, logging `unit_expired` once per
+job. It moves on to the next job without reserving, journaling or reporting it.
+
+In gateway mode the host claims a queued job only when its `funding` reads
+`"ok"` and exactly one entry has state `funded_verified` with a verification,
+selected by state (a cancelled, expired or unknown scope never counts). That
+verification's operator must be the host's (ignoring case), its escrow the
+manifest's `unit.escrow`, and its chain `chain.chainId`; its `fundedAt` must be
+an integer in `[1_600_000_000, 2^32)` below `unit.reclaimAt`
+and no later than the host clock. The manifest's
+`unit.fundedAt` is optional and, if present, must be equal. No clock reading or
+estimate ever stands in. Otherwise the job is not claimed, stays queued, the
+host moves on to the next job, and logs one code: `funding_absent` (no
+`funding`, as for a key without wallet proof or a gateway before #686),
+`funding_read_failed` (a failed or malformed read), `funding_unverified`,
+`funding_ambiguous`, `funding_operator_mismatch`, `funding_escrow_mismatch`
+(including a manifest with no escrow), `funding_chain_mismatch`,
+`funding_bad_time` or `funding_mismatch` (the manifest's `fundedAt` differs).
+Each job's code is logged once, and again only when it changes, the job
+leaves and returns to the queued list, or the host restarts, so a 5-second
+poll does not repeat it. Logs carry no job, scope or escrow value.
+
+The claim record journals the source and, in gateway mode, the verified
+`fundedAt`, operator, escrow address, chain id, `fundingBlockNumber` (a decimal
+string) and `fundingBlockHash`; the session uses that `fundedAt`. A restarted
+host resumes from the journal and never reads a journaled job's funding again.
+The journal records what was verified and never permits anything: the e-stop,
+the claim route, the job's status and the scope's status still decide. No path
+sends a unit whose claim record does not say `"gateway"` (a manifest claim, or
+an older host's claim with no source): it ends `refused` with
+`funding_source_manifest`, nothing is sent, and the operator decides. A unit
+already `submit_attempted` or `submit_indeterminate` keeps its read-back.
+
+Gateway mode needs a gateway that proves session keys (#686 or later; an older
+one gives the key no `funding`, so the host claims nothing), a kernel whose
+recorded operator is the operator key's address, and a host clock no more than
+5 minutes behind the gateway's, or sign-in is refused. At startup the CLI
+waits up to 60 seconds for the first key, else exits with
+`operator_session_unavailable`. The key signs only the fixed statement "Sign in
+to Physical Capability Cloud as an operator host." for the configured gateway
+origin. Keys stay in memory.
+
+With no usable key the host sends nothing: calls fail as `unauthenticated` and
+e-stop reads fail closed, as for an unreachable gateway. That happens after a
+401 until the next key, no sooner than 60 seconds after the last sign-in; and
+in the last 60 seconds of a key whose renewals all failed (about 29 minutes of
+failures). After a 401 the host drops only the key that request carried; a 403
+drops none. A 401 or no-key claim report is retried like a network failure, and
+such an evidence post is held and posted again like the other refusals that
+stored nothing.
+
+The gateway allows 5 unrevoked keys per operator address (compared as exact
+text), of any kind and shared with every host and dashboard sign-in of that
+wallet. A host that starts at the cap gets no key, so it exits after the
+60-second wait with `operator_session_unavailable`. Each session-key mint first
+revokes that sign-in's earlier key and any expired session keys, which frees
+their slots; a provisioned key keeps its slot until it is revoked, so revoke
+the `apiKeyFile` key once no manifest-mode run needs it. The CLI revokes its
+key on exit, SIGINT and SIGTERM. A crash or SIGKILL leaves the key active for
+up to 12 hours, so repeated unclean restarts can lock the host out for up to 12
+hours.
 
 ## Run loop
 
@@ -411,7 +494,7 @@ the same directory. A manifest contains these fields:
 | `totalPages` | Integer 1–50 |
 | `documentFile` | A plain basename, at most 240 UTF-8 bytes; the file must begin `%PDF-` |
 | `unit.settlementUnitId`, `unit.challengeNonce` | Lowercase `0x`-prefixed bytes32; the challenge nonce must be nonzero for packaging |
-| `unit.fundedAt`, `unit.reclaimAt` | Integer Unix seconds in `[1_600_000_000, 2^32)`, with `reclaimAt > fundedAt` |
+| `unit.fundedAt`, `unit.reclaimAt` | Integer Unix seconds in `[1_600_000_000, 2^32)`, with `reclaimAt > fundedAt`; in gateway funding mode `unit.fundedAt` is optional and, when present, must equal the verified value |
 | `unit.chainId` | 84532 or 31337, matching the configured chain |
 | `unit.escrow` | Nonzero EIP-55 address |
 | `unit.jobIdHash`, `unit.stepId`, `unit.compositionRoot`, `unit.acceptedEnvelopeHash` | Lowercase `0x`-prefixed bytes32 |
@@ -646,13 +729,22 @@ unchanged.
 
 ## Operator relay gateway client
 
-`createGatewayClient({baseUrl, apiKey, kernelId, wallet?})` uses the Node 20+ global fetch
-and keeps the API key in a closure. The frozen client exposes five calls:
+`createGatewayClient({baseUrl, apiKey | sessionKeys, kernelId, wallet?})` uses
+the Node 20+ global fetch and takes one credential: a static `apiKey` kept in a
+closure, or `sessionKeys` (`key()` and `invalidate(keyId)`, as the ADK's
+operator session keeper). It reads `key()` once per request; with no usable key
+it sends nothing and the call fails as `unauthenticated` with no status, never
+`indeterminate`. A 401 invalidates the keyId that request carried; a 403 never
+invalidates. The frozen client exposes five calls:
 
 - `pollJobs()` requests `GET /api/operator/jobs?kernelId=...&status=queued`,
   validates the job list, drops foreign-kernel jobs, and marks lists of 50 or
   more as truncated. The gateway offers no paging and returns an empty list
   on facade failure, so an empty poll alone is not proof that the site is idle.
+  When a listed job carries `funding`, the client returns either its verified
+  facts or one closed code (`funding_read_failed`, `funding_unverified` or
+  `funding_ambiguous`), selecting the one `funded_verified` entry by its state.
+  A malformed value never fails the poll.
 - `heartbeat()` sends only `{kernelId, status: "online"}` to
   `POST /api/operator/heartbeat`. Capability announcements are omitted because
   the gateway automatically creates missing capability rows with zero pricing.
@@ -683,7 +775,9 @@ and keeps the API key in a closure. The frozen client exposes five calls:
 The optional wallet must be `0x` followed by 40 hex digits and is normalized to
 lowercase once. Only evidence and receipt POSTs carry one `X-PCC-Wallet` header;
 poll, heartbeat and status requests omit it. The CLI uses the loaded operator
-address and reads its API key from the configured mode-0600 `apiKeyFile`.
+address. In manifest mode it reads its API key from the configured mode-0600
+`apiKeyFile`; in gateway mode it passes the operator session keeper instead and
+never reads that file.
 
 The library client's fallback e-stop reader returns
 `{proceed: false, why: "reader_unavailable"}`. The CLI explicitly selects the
@@ -712,6 +806,9 @@ and any `429` (`rate_limited`). On this route a `429` comes only from the
 gateway's global rate limiter before the handler runs, or from an edge proxy
 that never passed the request on. Only those allow the host to post the same
 bundle again; see the run loop.
+A `401` (`unauthenticated`), which the gateway sends before any route runs, and
+a post the host never sent because it had no session key also stored nothing,
+and the host posts the same bundle again for them in the same way.
 
 bundleHash is spec's tagged SHA256, as hashBundle produces it.
 

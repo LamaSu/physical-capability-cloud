@@ -4,7 +4,7 @@ import { classifySettlementRead, statusPillText } from "@pcc/spec";
 import { AnimatedNumber, DataCell, EmptyState, GlassPanel, GlowBadge, LoadingShell } from "@pcc/ui";
 import { useEscrows, useJobs } from "../api/hooks/use-pcc-data.js";
 import { EscrowAmount } from "../components/EscrowAmount.js";
-import { StaleNotice, UnavailableState } from "../components/ReadState.js";
+import { SKIPPED_ESCROWS_NOTICE, StaleNotice, UnavailableState } from "../components/ReadState.js";
 import { formatCount, isActiveJob, JOBS_PAGE_SIZE, mayBeTruncated } from "../lib/live-list.js";
 import { moneyToneColor } from "../lib/money-badge.js";
 import { useUIStore } from "../stores/ui-store.js";
@@ -18,7 +18,8 @@ export function RevenueDashboardPage() {
   const jobsQuery = useJobs();
   const escrowsQuery = useEscrows();
   const jobs = jobsQuery.data;
-  const escrows = escrowsQuery.data;
+  const escrows = escrowsQuery.data?.items;
+  const skipped = escrowsQuery.data?.skipped ?? 0;
   const loading = jobsQuery.isLoading || escrowsQuery.isLoading;
   const retry = () => { void jobsQuery.refetch(); void escrowsQuery.refetch(); };
   const truncated = jobs ? mayBeTruncated(jobs) : false;
@@ -27,7 +28,7 @@ export function RevenueDashboardPage() {
   const successRate = finished > 0 && !truncated ? Math.round(completed.length / finished * 1000) / 10 : null;
   const activeEscrows = escrows?.filter((escrow) => escrow.status === "active") ?? [];
   const stale = jobsQuery.isError && escrowsQuery.isError ? "jobs and escrows" : jobsQuery.isError ? "jobs" : escrowsQuery.isError ? "escrows" : null;
-  const empty = jobsQuery.isSuccess && escrowsQuery.isSuccess && jobs?.length === 0 && escrows?.length === 0;
+  const empty = jobsQuery.isSuccess && escrowsQuery.isSuccess && jobs?.length === 0 && escrows?.length === 0 && skipped === 0;
 
   return (
     <div className="space-y-6">
@@ -38,7 +39,7 @@ export function RevenueDashboardPage() {
         <>
           {stale && <StaleNotice what={stale} updatedAt={Math.min(jobsQuery.dataUpdatedAt, escrowsQuery.dataUpdatedAt)} onRetry={retry} />}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <GlassPanel padding="md"><DataCell label="Active Jobs" value={truncated ? formatCount(jobs.filter(isActiveJob).length, true) : <AnimatedNumber value={jobs.filter(isActiveJob).length} />} sub="pending, queued, running or paused" mono /></GlassPanel>
+            <GlassPanel padding="md"><DataCell label="Active Jobs" value={truncated ? formatCount(jobs.filter(isActiveJob).length, true) : <AnimatedNumber value={jobs.filter(isActiveJob).length} />} mono /></GlassPanel>
             <GlassPanel padding="md"><DataCell label="Success Rate" value={successRate === null ? "--" : `${successRate}%`} sub={successRate !== null ? "completed of finished jobs" : truncated ? "needs the gateway's job total" : "no finished jobs"} mono /></GlassPanel>
             <GlassPanel padding="md"><DataCell label="Completed" value={truncated ? formatCount(completed.length, true) : <AnimatedNumber value={completed.length} />} sub="total jobs" mono /></GlassPanel>
           </div>
@@ -48,7 +49,8 @@ export function RevenueDashboardPage() {
             <>
               <GlassPanel padding="lg">
                 <h2 className="text-sm font-medium text-white/60 mb-4">Active Escrows</h2>
-                {activeEscrows.length === 0 ? <EmptyState title="No active escrows" description="Escrows will appear here when jobs are in progress." /> : (
+                {skipped > 0 && <p role="status" className="text-xs text-amber-200/70">{SKIPPED_ESCROWS_NOTICE(skipped)}</p>}
+                {activeEscrows.length === 0 && skipped === 0 ? <EmptyState title="No active escrows" description="Escrows will appear here when jobs are in progress." /> : (
                   <div className="space-y-3">
                     {activeEscrows.map((escrow) => {
                       const classification = classifySettlementRead(escrow, { path: "/api/escrow", live: true });

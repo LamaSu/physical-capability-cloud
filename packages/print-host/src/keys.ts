@@ -3,6 +3,7 @@ import { createPrivateKey, sign } from "node:crypto";
 import { makeKernelEd25519Signer } from "./kernel-signer.js";
 import { getAddress, type Address, type Hex, type LocalAccount } from "viem";
 import type { SessionKey } from "@pcc/spec";
+import { buildOperatorSignInMessage, type OperatorSignInFields } from "@pcc/adk";
 import { privateKeyToAccount } from "viem/accounts";
 import {
   DeviceSigningError, delegationParent, prepareDelegation, prepareD2,
@@ -58,6 +59,7 @@ export interface DeviceKeyLoadOptions extends KeyLoadOptions {
 export interface OperatorKeyLoadOptions extends KeyLoadOptions {
   terms?: HostTerms;
   clock?: () => Date;
+  signIn?: { baseUrl: string };
 }
 
 /** Public identity, delegation signing and guarded raw32 signing; private material stays in closures. */
@@ -101,12 +103,13 @@ function deviceKey(seed: Buffer, publicKeyHex: string, signingPublicKey: string,
   })) as DeviceKey;
 }
 
-/** Public identity and three scoped closures; no general signer is reachable. WP-A remains open. */
+/** Public identity and four scoped closures; no general signer is reachable. WP-A remains open. */
 export interface OperatorKey {
   readonly address: Address;
   readonly signD1: (input: D1Input) => Promise<Hex>;
   readonly signSubmitEvidenceTx: (input: SubmitEvidenceTxInput) => Promise<Hex>;
   readonly signJobPolicyAcceptance: (input: JobPolicyAcceptanceInput) => Promise<Hex>;
+  readonly signOperatorSignIn?: (message: string, fields: OperatorSignInFields) => Promise<Hex>;
   toJSON(): { kind: "pcc-printhost.operator-key"; address: Address };
   toString(): string;
   [inspect.custom](): string;
@@ -119,8 +122,10 @@ const operatorKeyPrototype = Object.freeze(Object.assign(Object.create(null), {
   [inspect.custom](this: OperatorKey) { return this.toString(); },
 }));
 
+const OPERATOR_SIGN_IN_STATEMENT = "Sign in to Physical Capability Cloud as an operator host.";
+
 function operatorKey(account: LocalAccount, chainId: OperatorChainId, terms: HostTerms | undefined,
-  clock: () => Date): OperatorKey {
+  clock: () => Date, signIn: { domain: string; uri: string } | undefined): OperatorKey {
   return Object.freeze(Object.assign(Object.create(operatorKeyPrototype), {
     address: account.address,
     async signD1(input: D1Input): Promise<Hex> {
@@ -138,6 +143,27 @@ function operatorKey(account: LocalAccount, chainId: OperatorChainId, terms: Hos
       try { return await account.signTypedData(typedData); }
       catch { throw new OperatorSigningError("signing_failed"); }
     },
+    ...(signIn === undefined ? {} : {
+      async signOperatorSignIn(message: string, fields: OperatorSignInFields): Promise<Hex> {
+        try {
+          if (fields === null || typeof fields !== "object" || Array.isArray(fields)) throw new OperatorSigningError("bad_input");
+          const copy = {
+            domain: fields.domain, address: fields.address, statement: fields.statement, uri: fields.uri,
+            version: fields.version, chainId: fields.chainId, nonce: fields.nonce, issuedAt: fields.issuedAt,
+          };
+          if (copy.domain !== signIn.domain || copy.uri !== signIn.uri || copy.address !== account.address
+            || copy.chainId !== chainId || copy.version !== "1" || copy.statement !== OPERATOR_SIGN_IN_STATEMENT
+            || typeof copy.nonce !== "string" || !/^[A-Za-z0-9]{8,128}$/.test(copy.nonce)
+            || typeof copy.issuedAt !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(copy.issuedAt)
+            || !(Math.abs(Date.parse(copy.issuedAt) - clock().getTime()) <= 300_000)
+            || typeof message !== "string" || message !== buildOperatorSignInMessage(copy)) {
+            throw new OperatorSigningError("bad_input");
+          }
+        } catch { throw new OperatorSigningError("bad_input"); }
+        try { return await account.signMessage({ message }); }
+        catch { throw new OperatorSigningError("signing_failed"); }
+      },
+    }),
   })) as OperatorKey;
 }
 
@@ -216,6 +242,17 @@ const secp256k1Order = (1n << 256n) - BigInt("0x14551231950b75fc4402da1732fc9beb
 
 export async function loadOperatorKey(path: string, chainId: OperatorChainId, options: OperatorKeyLoadOptions = {}): Promise<OperatorKey> {
   if (chainId !== 84532 && chainId !== 31337) throw new KeyFileError("bad_chain", path);
+  let signIn: { domain: string; uri: string } | undefined;
+  try {
+    const binding = options.signIn;
+    if (binding !== undefined) {
+      if (binding === null || typeof binding !== "object" || Array.isArray(binding)) throw new OperatorSigningError("bad_input");
+      const baseUrl = binding.baseUrl;
+      if (typeof baseUrl !== "string") throw new OperatorSigningError("bad_input");
+      const url = new URL(baseUrl);
+      signIn = { domain: url.host, uri: url.origin };
+    }
+  } catch { throw new OperatorSigningError("bad_input"); }
   const suppliedClock = options.clock;
   if (suppliedClock !== undefined && typeof suppliedClock !== "function") throw new OperatorSigningError("bad_input");
   const clock = suppliedClock === undefined ? () => new Date() : suppliedClock;
@@ -234,7 +271,7 @@ export async function loadOperatorKey(path: string, chainId: OperatorChainId, op
     if (scalar <= 0n || scalar >= secp256k1Order) throw new KeyFileError("bad_key", path);
     const account = privateKeyToAccount(record.privateKey as `0x${string}`);
     if (account.address.toLowerCase() !== record.address.toLowerCase()) throw new KeyFileError("public_mismatch", path);
-    return operatorKey(account, chainId, terms, clock);
+    return operatorKey(account, chainId, terms, clock, signIn);
   } catch (error) {
     if (error instanceof KeyFileError) throw error;
     throw new KeyFileError("bad_key", path);

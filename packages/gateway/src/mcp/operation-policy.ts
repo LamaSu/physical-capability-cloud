@@ -9,7 +9,7 @@
  * `arguments`; the SERVER — not the manifest — owns the tool name, the HTTP
  * semantics, argument validation, resource authorization, approval copy, and the
  * effect. The registry itself IS the D10 allowlist: an operation not registered
- * here cannot be invoked (there is no fall-through to the raw 256-tool proxy).
+ * here cannot be invoked (there is no fall-through to the raw proxy).
  *
  * Scope (re-audit #2 hardening, 2026-07-14): register ONLY the read-only
  * `capability.request_quote` (approval `none`). `job.cancel` (approval

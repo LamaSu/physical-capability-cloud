@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex">
 <title>PCC · Driver</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700;800&family=JetBrains+Mono:wght@400;700&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -64,7 +65,7 @@ main{position:relative;z-index:1;max-width:560px;margin:0 auto;padding:20px 18px
 <body>
 <div class="grid-bg"></div>
 <header>
-  <div class="brand"><span class="mark"></span><b>PCC</b><span>// driver</span></div>
+  <div class="brand"><span class="mark"></span><b>PCC</b><span>// pizza demo</span></div>
   <span style="color:var(--muted)"><span class="dot"></span> <span id="connStatus">connecting</span></span>
 </header>
 <main>
@@ -93,6 +94,7 @@ main{position:relative;z-index:1;max-width:560px;margin:0 auto;padding:20px 18px
   <div class="foot">PCC // capability.network · driver dashboard</div>
 </main>
 <div class="toast" id="toast"></div>
+<script src="/demo-gate.js"></script>
 <script>
 const $=s=>document.querySelector(s);
 const esc=v=>String(v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -219,7 +221,10 @@ function connect(){
   };
   es.onerror=()=>{$("#connStatus").textContent="reconnecting"; setTimeout(connect,3000); es.close();};
 }
+Promise.resolve(window.pccDemoGate).then((state) => {
+if (state === "off") return;
 loadQueue(); connect();
+});
 </script>
 </body>
 </html>

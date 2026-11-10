@@ -694,3 +694,94 @@ it("f2b E3 repeated markdown replacements do not expand alias paths exponentiall
     expect(result.hits).toEqual([]);
   } finally { clearTimeout(timer); await worker.terminate(); }
 }, 15_000);
+
+// Follow-up controls use synthetic trees and never change the real-tree fixtures.
+describe("N258 scanner follow-ups", () => {
+  for (const [name, source] of [
+    ["E2-multi", 'function h(req) { const data = (encodeFunctionData as any)(req.body, { abi: ABI, functionName: "noop", args: [] }); w.sendTransaction({ to, data }); }'],
+    ["E2-getargs", 'function h(req) { const data = encodeFunctionData({ abi: ABI, functionName: "relay", get args() { return [req.body.calldata]; } }); w.sendTransaction({ to, data }); }'],
+    ["E2-multi-ctl", 'function h(req) { const data = encodeFunctionData(req.body as any); w.sendTransaction({ to, data }); }'],
+  ]) it(`N258 W2 ${name}: an opaque encoder config fails E2-R4`, () => {
+    const t = tree({ "packages/sample/src/a.ts": source });
+    const scan = scanWrites(t.root, t.files);
+    expect(codes(scan.findings), formatFindings(scan.findings)).toContain("E2-R4");
+  });
+
+  it("N258 W2 B2: the faucet's fixed ABI keeps typed address and amount inputs clean", () => {
+    const t = tree({ "packages/gateway/src/routes/fiat-ramp.ts": `async function faucet(req) {
+      const body = req.body as { walletAddress: string; amount?: number };
+      const amountRaw = BigInt(body.amount ?? 100) * BigInt(1e6);
+      const mintData = encodeFunctionData({
+        abi: [{ name: "mint", type: "function", inputs: [{ name: "to", type: "address" }, { name: "amount", type: "uint256" }], outputs: [] }],
+        functionName: "mint", args: [body.walletAddress as \`0x\${string}\`, amountRaw],
+      });
+      return client.sendTransaction({ to: MOCK_USDC as \`0x\${string}\`, data: mintData });
+    }` });
+    const scan = scanWrites(t.root, t.files);
+    expect(scan.records).toHaveLength(1);
+    clean(scan.findings, "E2-R4");
+  });
+
+  for (const [name, tail] of [
+    ["E3-cap", '${t ? "forge" : "solc"} build'],
+    ["E3-cap-ctl", "forge build"],
+  ]) it(`N258 W3 ${name}: template candidate overflow cannot hide a tool word`, () => {
+    const spans = Array.from({ length: 8 }, (_, i) => `\${f${i} ? "a${i}" : "b${i}"}`).join(" ");
+    const t = tree({ "packages/sample/src/a.ts": `execSync(\`${spans} ${tail}\`);` });
+    expect(codes(scanForbiddenRuntime(t.root, t.files))).toContain("E3-R2");
+  });
+
+  for (const rule of ["E2", "E3"] as const) it(`N258 W4 ${rule}-exp N=24: a query finishes under 1 s and fails loudly`, async () => {
+    const variable = rule === "E2" ? "data" : "html";
+    const lines = Array.from({ length: 24 }, (_, i) => `${variable} = ${variable} + ${rule === "E2" ? `part${i}` : `"<p${i}>"`};`).join(" ");
+    const source = rule === "E2"
+      ? `function h(w, to) { let data = "0x"; ${lines} return w.sendTransaction({ to, data }); }`
+      : `export function render(md) { let html = md; ${lines} const re = /<p(\\d+)>/g; return re.exec(html); }`;
+    const file = rule === "E2" ? "packages/sample/src/a.ts" : "apps/sample/src/Page.tsx";
+    const t = tree({ [file]: source });
+    // The pre-fix walk is exponential. Stop at 120 s in an isolated worker.
+    const result = await followupScan(t.root, file, rule, 120_000);
+    console.info(`N258 W4 ${rule}-exp N=24: ${result.ms.toFixed(2)} ms; ${formatFindings(result.hits) || "0 findings"}`);
+    expect(result.ms).toBeLessThan(1000);
+    expect(result.hits).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rule: rule === "E2" ? "E2-R4" : "E3-R2", detail: expect.stringContaining("cannot be inspected") }),
+    ]));
+  }, 135_000);
+
+  it("N258 W-NIT5: log(html) after 20 reassignments scans under 100 ms", async () => {
+    const lines = Array.from({ length: 20 }, (_, i) => `html = html + "<p${i}>";`).join(" ");
+    const file = "apps/sample/src/Page.tsx";
+    const t = tree({ [file]: `export function render(md) { let html = md; ${lines} log(html); return html; }` });
+    const result = await followupScan(t.root, file, "E3", 100);
+    console.info(`N258 W-NIT5 log(html): ${result.ms.toFixed(2)} ms`);
+    expect(result.ms).toBeLessThan(100);
+    expect(result.hits).toEqual([]);
+  }, 15_000);
+});
+
+function followupScan(root: string, file: string, rule: "E2" | "E3", limit: number): Promise<{ ms: number; hits: Finding[] }> {
+  const worker = new Worker(`
+    const { parentPort, workerData } = require("node:worker_threads");
+    const { createRequire } = require("node:module");
+    const { readFileSync } = require("node:fs");
+    const localRequire = createRequire(workerData.helper);
+    const ts = localRequire("typescript");
+    const js = ts.transpileModule(readFileSync(workerData.helper, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
+    const compiled = { exports: {} };
+    new Function("require", "module", "exports", js)(localRequire, compiled, compiled.exports);
+    parentPort.postMessage({ ready: true });
+    const start = performance.now();
+    const hits = workerData.rule === "E2" ? compiled.exports.scanWrites(workerData.root, [workerData.file]).findings : compiled.exports.scanForbiddenRuntime(workerData.root, [workerData.file]);
+    parentPort.postMessage({ ms: performance.now() - start, hits });
+  `, { eval: true, workerData: { helper: fileURLToPath(new URL("./helpers/negative-proof-scan.ts", import.meta.url)), root, file, rule }, resourceLimits: { maxOldGenerationSizeMb: 2048 } });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return new Promise<{ ms: number; hits: Finding[] }>((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error("N258 worker did not initialize")), 10_000);
+    worker.on("error", reject);
+    worker.on("message", message => {
+      clearTimeout(timer);
+      if (message.ready) timer = setTimeout(() => reject(new Error(`N258 ${rule} scan exceeded ${limit} ms`)), limit);
+      else resolve(message);
+    });
+  }).finally(async () => { clearTimeout(timer); await worker.terminate(); });
+}

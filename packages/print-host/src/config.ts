@@ -9,7 +9,8 @@ export type HostConfigErrorCode =
   | "not_absolute" | "not_found" | "not_regular_file" | "symlink"
   | "bad_mode" | "bad_owner" | "too_large" | "changed_during_open"
   | "read_failed" | "bad_json" | "bad_schema" | "testnet_only"
-  | "bad_rpc_url" | "bad_api_key" | "bad_data_dir" | "submit_caps_required";
+  | "bad_rpc_url" | "bad_api_key" | "bad_data_dir" | "submit_caps_required"
+  | "manifest_requires_no_submit" | "gateway_refuses_poll_only";
 
 /** Deliberately excludes input values and underlying exception messages. */
 export class HostConfigError extends Error {
@@ -97,6 +98,7 @@ const hostConfigSchema = z.object({
     baseUrl: z.string().refine(isGatewayBaseUrl, "must be HTTPS or loopback HTTP without credentials, query, or fragment"),
     apiKeyFile: absolutePath,
   }).strict(),
+  funding: z.object({ source: z.union([z.literal("gateway"), z.literal("manifest")]) }).strict().optional(),
   keys: z.object({
     deviceKeyFile: absolutePath,
     operatorKeyFile: absolutePath,
@@ -121,6 +123,7 @@ export type HostConfig = Readonly<{
     pollingIntervalMs?: number;
   }>;
   gateway: Readonly<{ baseUrl: string; apiKeyFile: string }>;
+  funding?: Readonly<{ source: "gateway" | "manifest" }>;
   keys: Readonly<{ deviceKeyFile: string; operatorKeyFile: string }>;
   dataDir: string;
   /** Re-check execution permission during a print (default 5 seconds). */
@@ -146,7 +149,7 @@ const knownFields = new Set([
   "kernelId", "deviceId", "printer", "uri", "chain", "chainId", "rpcUrlFile",
   "maxFeePerGasCap", "maxPriorityFeePerGasCap", "gasCap", "confirmations",
   "rpcTimeoutMs", "receiptTimeoutMs", "pollingIntervalMs",
-  "gateway", "baseUrl", "apiKeyFile", "keys", "deviceKeyFile", "operatorKeyFile", "dataDir", "eStopPollIntervalMs",
+  "gateway", "baseUrl", "apiKeyFile", "funding", "source", "keys", "deviceKeyFile", "operatorKeyFile", "dataDir", "eStopPollIntervalMs",
 ]);
 
 /** Snapshot and validate manually constructed chain config as well as file config. */
@@ -184,7 +187,7 @@ function validateConfig(value: unknown, path: string): HostConfig {
     const field = issue.path.filter((part): part is string => typeof part === "string" && knownFields.has(part)).join(".");
     throw new HostConfigError("bad_schema", path, field || "config");
   }
-  for (const child of [parsed.data.printer, parsed.data.chain, parsed.data.gateway, parsed.data.keys]) Object.freeze(child);
+  for (const child of [parsed.data.printer, parsed.data.chain, parsed.data.gateway, parsed.data.keys, parsed.data.funding]) Object.freeze(child);
   return Object.freeze(parsed.data);
 }
 
@@ -272,11 +275,13 @@ export async function checkHostConfig(config: HostConfig, options: HostConfigOpt
       throw new HostConfigError("bad_rpc_url", checked.chain.rpcUrlFile);
     }
   } finally { rpcBytes.fill(0); }
-  const apiBytes = await readSecretFile(checked.gateway.apiKeyFile, { expectedUid });
-  try {
-    const token = singleLine(apiBytes);
-    if (token === undefined || /\s/.test(token)) throw new HostConfigError("bad_api_key", checked.gateway.apiKeyFile);
-  } finally { apiBytes.fill(0); }
+  if (checked.funding?.source !== "gateway") {
+    const apiBytes = await readSecretFile(checked.gateway.apiKeyFile, { expectedUid });
+    try {
+      const token = singleLine(apiBytes);
+      if (token === undefined || /\s/.test(token)) throw new HostConfigError("bad_api_key", checked.gateway.apiKeyFile);
+    } finally { apiBytes.fill(0); }
+  }
   let data;
   try { data = await lstat(checked.dataDir); }
   catch { throw new HostConfigError("bad_data_dir", checked.dataDir); }

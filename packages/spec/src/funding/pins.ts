@@ -5,10 +5,10 @@
  * packages/contracts/script/vnext/VNextDeploySpec.sol:76-79). A payload naming any other token, MockUSDC included,
  * is refused (plan G12: MockUSDC has a free mint and proves nothing).
  *
- * Factory: NONE is built in. V-next is not deployed anywhere (deployments/vnext/ holds only its README), so a
- * caller must pin the factory it trusts until plan S0.1 commits a deployment record. The pinned factory is the
- * trust anchor: the escrow address, the implementation (`factory.implementation()`, an immutable) and the
- * token (`implementation.USDC()`, an immutable) all hang off it.
+ * Factory: built in for Base Sepolia (84532) only (VNEXT_FACTORY), copied from the committed canonical record
+ * packages/contracts/deployments/vnext/base-sepolia/CANONICAL.json. Every other chain has none, so a caller must pin
+ * the factory it trusts there. The pinned factory is the trust anchor: the escrow address, the implementation
+ * (`factory.implementation()`, an immutable) and the token (`implementation.USDC()`, an immutable) all hang off it.
  *
  * A caller may add pins for chains without a built-in one (a local anvil, say), never override a built-in one.
  */
@@ -20,6 +20,17 @@ import { MAX_RECLAIM_DELAY, MIN_RECLAIM_DELAY } from "./vnext.js";
 export const CIRCLE_USDC: Readonly<Record<string, Address>> = Object.freeze({
   "8453": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
   "84532": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+});
+
+/**
+ * The V-next settlement-escrow factory by chain id (decimal string), copied byte for byte from the committed,
+ * operator-approved canonical record packages/contracts/deployments/vnext/base-sepolia/CANONICAL.json. A spec test
+ * pins it to that record, and the gateway's drift test pins the record, this copy and the gateway's reader to one
+ * another. Base mainnet (8453) has no committed record, so no entry. Never copy a PROVISIONAL, DRYRUN or doNotPin
+ * record here.
+ */
+export const VNEXT_FACTORY: Readonly<Record<string, Address>> = Object.freeze({
+  "84532": "0xA31938E1a57E569E1d34F55E7F7A92BE1467c6d7",
 });
 
 /**
@@ -65,10 +76,11 @@ export type FundingPins = Readonly<Record<string, { readonly usdc?: Address; rea
 
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 
-/** The effective pins for one chain: the built-in USDC (if any) plus the caller's, which may only fill gaps. */
+/** The effective pins for one chain: the built-in USDC and factory (if any) plus the caller's, which may only fill gaps. */
 export function resolvePins(chainId: bigint, extra: FundingPins | undefined): { usdc?: Address; factory?: Address } {
   const key = chainId.toString();
   const builtinUsdc = Object.prototype.hasOwnProperty.call(CIRCLE_USDC, key) ? CIRCLE_USDC[key] : undefined;
+  const builtinFactory = Object.prototype.hasOwnProperty.call(VNEXT_FACTORY, key) ? VNEXT_FACTORY[key] : undefined;
   const pin = extra !== undefined && Object.prototype.hasOwnProperty.call(extra, key) ? extra[key] : undefined;
   for (const field of ["usdc", "factory"] as const) {
     const v = pin?.[field];
@@ -77,5 +89,8 @@ export function resolvePins(chainId: bigint, extra: FundingPins | undefined): { 
   if (builtinUsdc !== undefined && pin?.usdc !== undefined && !same(builtinUsdc, pin.usdc)) {
     refuse("PIN_INVALID", `pins[${key}].usdc ${pin.usdc} contradicts the built-in Circle USDC pin ${builtinUsdc}`);
   }
-  return { usdc: builtinUsdc ?? pin?.usdc, factory: pin?.factory };
+  if (builtinFactory !== undefined && pin?.factory !== undefined && !same(builtinFactory, pin.factory)) {
+    refuse("PIN_INVALID", `pins[${key}].factory ${pin.factory} contradicts the built-in V-next factory pin ${builtinFactory}`);
+  }
+  return { usdc: builtinUsdc ?? pin?.usdc, factory: builtinFactory ?? pin?.factory };
 }

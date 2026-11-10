@@ -2,8 +2,12 @@
  * Scope authorization tests for the Capability Kit routes (kits K1 slice 1).
  *
  * scope-checker.ts's DEFAULT_SCOPE_REQUIREMENTS adds:
- *   { method: "POST", pattern: "/api/kits",    scopes: ["template_author", "admin"] }
- *   { method: "POST", pattern: "/api/kits/**", scopes: ["template_author", "admin"] }
+ *   { method: "POST", pattern: "/api/kits", scopes: ["template_author", "admin"] }
+ *   { method: "POST", pattern: "/api/kits/*", scopes: ["template_author", "admin"] }
+ *   { method: "POST", pattern: "/api/kits/*\/fork", scopes: ["template_author", "admin"] }
+ *   { method: "POST", pattern: "/api/kits/*\/bindings", scopes: ["operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] }
+ *   { method: "POST", pattern: "/api/kits/*\/bindings/*\/withdraw", scopes: ["operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] }
+ *   { method: "POST", pattern: "/api/kits/*\/**", scopes: ["template_author", "admin"] }
  * GET /api/kits has no requirement and is not on the money-path default-deny
  * list, so it stays open to any authenticated caller regardless of scope.
  *

@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex">
 <title>PCC · Order pizza</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700;800&family=JetBrains+Mono:wght@400;700&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -68,7 +69,7 @@ input:focus,textarea:focus{border-color:var(--lime);box-shadow:0 0 0 3px color-m
 <body>
 <div class="grid-bg"></div>
 <header>
-  <div class="brand"><span class="mark"></span><b>PCC</b><span>// order pizza</span></div>
+  <div class="brand"><span class="mark"></span><b>PCC</b><span>// pizza demo</span></div>
   <span style="color:var(--muted)"><span class="dot"></span> live</span>
 </header>
 <main>
@@ -114,6 +115,7 @@ input:focus,textarea:focus{border-color:var(--lime);box-shadow:0 0 0 3px color-m
   <div class="foot">PCC // capability.network · agents compose reality</div>
 </main>
 <div class="toast" id="toast"></div>
+<script src="/demo-gate.js"></script>
 <script>
 const $=s=>document.querySelector(s);
 const esc=v=>String(v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -133,6 +135,8 @@ async function api(path,opts={}){
 
 function fmtSec(s){if(s<60)return s+"s";if(s<3600)return Math.round(s/60)+" min";return Math.round(s/3600*10)/10+" hr";}
 
+Promise.resolve(window.pccDemoGate).then((state) => {
+if (state === "off") return;
 $("#planBtn").onclick=async()=>{
   const userId=$("#userId").value.trim();
   if(!userId){toast("set your agent id first",1);return;}
@@ -164,6 +168,7 @@ $("#confirmBtn").onclick=async()=>{
     connectSse();
   }catch(e){toast(e.message,1); $("#confirmBtn").disabled=false;}
 };
+});
 
 function setStatus(label,title,meta){
   $("#statusLabel").textContent=label;

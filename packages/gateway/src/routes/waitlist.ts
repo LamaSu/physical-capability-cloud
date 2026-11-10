@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, readFileSync, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { SUMMIT_HTML } from "./summit-page.js";
 
@@ -11,6 +11,62 @@ const WAITLIST_FILE = `${DATA_DIR}/waitlist.jsonl`;
 const BETA_FILE = `${DATA_DIR}/beta-applications.jsonl`;
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+const BETA_WRITE = { bodyLimit: 4096, logLevel: "silent", config: { auditOmitsClient: true } } as const;
+const BETA_ROLES = new Set(["buyer", "operator", "builder"]);
+const BETA_FORBIDDEN = new Set([...'<>()[],;:"', String.fromCharCode(92)]);
+const BETA_KEYS = ["id", "kind", "email", "name", "role", "status", "createdAt"];
+const betaHits = new Map<string, number[]>();
+let betaWindowStart = 0;
+let betaWindowCount = 0;
+
+function hasControlChar(text: string): boolean {
+  return [...text].some((ch) => {
+    const c = ch.codePointAt(0) ?? 0;
+    return c < 32 || (c >= 0x7f && c <= 0x9f) || c === 0x061c || c === 0x200e || c === 0x200f || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069);
+  });
+}
+
+function betaSignup(body: unknown): { email: string; name: string; role: string } | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const { email, name, role } = body as Record<string, unknown>;
+  if (typeof email !== "string" || typeof name !== "string" || typeof role !== "string") return null;
+  const e = email.trim().toLowerCase();
+  const n = name.trim();
+  if (e.length > 254 || !EMAIL_RE.test(e) || [...e].some((c) => BETA_FORBIDDEN.has(c)) || hasControlChar(e)) return null;
+  if (n.length < 1 || n.length > 100 || hasControlChar(n) || !BETA_ROLES.has(role)) return null;
+  return { email: e, name: n, role };
+}
+
+function betaRateLimited(ip: string): boolean {
+  const now = Date.now();
+  if (now - betaWindowStart >= 60_000) {
+    betaWindowStart = now;
+    betaWindowCount = 0;
+  }
+  if (betaHits.size > 10_000) betaHits.clear();
+  const recent = (betaHits.get(ip) ?? []).filter((t) => now - t < 60_000);
+  if (recent.length >= 10 || betaWindowCount >= 30) return true;
+  betaHits.set(ip, [...recent, now]);
+  betaWindowCount++;
+  return false;
+}
+
+function readBetaByEmail(): Record<string, unknown>[] {
+  const byEmail = new Map<string, Record<string, unknown>>();
+  for (const row of readAll(BETA_FILE) as Record<string, unknown>[]) {
+    if (typeof row.email !== "string") continue;
+    const merged = byEmail.get(row.email) ?? {};
+    for (const key of BETA_KEYS) if (row[key] !== null && row[key] !== undefined && row[key] !== "") merged[key] = row[key];
+    byEmail.set(row.email, merged);
+  }
+  return [...byEmail.values()];
+}
+
+export function __resetBetaSignupLimits(): void {
+  betaHits.clear();
+  betaWindowStart = betaWindowCount = 0;
+}
 
 // Per-IP sliding-window limit. Generous: the summit signup is progressive (one POST
 // per step) and a packed room shares NAT'd IPs. Updates to a lead we've already
@@ -127,65 +183,22 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
     return { status: "ok", id: rec.id, leadId, message: "You're on the waitlist — we'll be in touch." };
   });
 
-  // Full beta-tester application (PUBLIC). Required: email, name, company.
-  // Everything else is optional/skippable and stored in `details`.
-  app.post("/api/beta-apply", async (req, reply) => {
+  // Beta signup (PUBLIC): name, email and role, all required; nothing else is kept.
+  app.post("/api/beta-apply", BETA_WRITE, async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, any>;
     if (b.website || b.hp) return { status: "ok" }; // honeypot
-    if (rateLimited(req.ip)) {
-      return reply.code(429).send({ error: "rate_limited", message: "Too many submissions — try again shortly." });
+    if (betaRateLimited(req.ip)) {
+      return reply.code(429).send({ error: "rate_limited" });
     }
-    const email = String(b.email ?? "").trim().toLowerCase();
-    const name = String(b.name ?? "").trim();
-    const company = String(b.company ?? "").trim();
-    // Only email is hard-required — Step 2 (name/company/role/pitch) is fully
-    // skippable per the summit spec; it is pure upside.
-    if (!EMAIL_RE.test(email)) {
-      return reply.code(400).send({ error: "bad_request", message: "A valid email is required." });
+    const signup = betaSignup(req.body);
+    if (!signup) return reply.code(400).send({ error: "bad_request" });
+    try {
+      if (existsSync(BETA_FILE) && statSync(BETA_FILE).size >= 10 * 1024 * 1024) return reply.code(503).send({ error: "unavailable" });
+      append(BETA_FILE, { id: rid("beta"), kind: "beta-application", ...signup, status: "new", createdAt: new Date().toISOString() });
+    } catch {
+      return reply.code(503).send({ error: "unavailable" });
     }
-
-    // Optional invite code → fast-track if it validates against PCC's existing invite system.
-    const inviteCode = b.inviteCode ? String(b.inviteCode).trim() : null;
-    let status = "new";
-    if (inviteCode) {
-      try {
-        const port = process.env.PORT ?? "3200";
-        const r = await fetch(`http://127.0.0.1:${port}/api/onboard/check/${encodeURIComponent(inviteCode)}`);
-        if (r.ok) {
-          const j = (await r.json().catch(() => ({}))) as { valid?: boolean };
-          if (j?.valid === true) status = "fast-track";
-        }
-      } catch {
-        // best-effort; leave status=new for manual admin review
-      }
-    }
-
-    // Everything beyond the known top-levels lands in `details` (no migration on field changes).
-    const { email: _e, name: _n, company: _c, inviteCode: _i, role: _r, source: _s, ref: _rf, website: _w, hp: _h, ...details } = b;
-    const rec = {
-      id: rid("beta"),
-      kind: "beta-application",
-      email,
-      name: name || null,
-      company: company || null,
-      role: b.role ?? null,
-      inviteCode,
-      source: b.source ?? b.ref ? String(b.source ?? b.ref).trim() : null,
-      status,
-      details,
-      createdAt: new Date().toISOString(),
-      ip: req.ip,
-    };
-    append(BETA_FILE, rec);
-    return {
-      status: "ok",
-      id: rec.id,
-      fastTracked: status === "fast-track",
-      message:
-        status === "fast-track"
-          ? "Valid invite — you're fast-tracked. Check your email for next steps."
-          : "Application received — we read every one and will be in touch.",
-    };
+    return { status: "ok" };
   });
 
   // Public live counter for the signup page (#N social proof + open-mic read-out). No auth.
@@ -197,13 +210,31 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
 
   // Admin review / export (gated by X-Admin-Token).
   app.get("/api/admin/waitlist", async (req, reply) => {
-    if (!adminOk(req, reply)) return;
+    if (!adminOk(req, reply)) return reply;
     const items = readCoalesced(WAITLIST_FILE); // one merged record per lead
     return { total: items.length, items };
   });
-  app.get("/api/admin/beta-apply", async (req, reply) => {
-    if (!adminOk(req, reply)) return;
-    const items = readAll(BETA_FILE);
+  app.get("/api/admin/beta-apply", { logLevel: "silent" }, async (req, reply) => {
+    if (!adminOk(req, reply)) return reply;
+    const items = readBetaByEmail();
     return { total: items.length, items };
+  });
+
+  app.post("/api/admin/beta-apply/remove", BETA_WRITE, async (req, reply) => {
+    if (!adminOk(req, reply)) return reply;
+    const b = (req.body ?? {}) as Record<string, any>;
+    const email = typeof b.email === "string" ? b.email.trim().toLowerCase() : "";
+    if (!email) return reply.code(400).send({ error: "bad_request" });
+    const rows = readAll(BETA_FILE) as Record<string, unknown>[];
+    const kept = rows.filter((row) => row.email !== email);
+    if (kept.length === rows.length) return { status: "ok" };
+    try {
+      writeFileSync(`${BETA_FILE}.tmp`, "");
+      for (const row of kept) append(`${BETA_FILE}.tmp`, row);
+      renameSync(`${BETA_FILE}.tmp`, BETA_FILE);
+    } catch {
+      return reply.code(503).send({ error: "unavailable" });
+    }
+    return { status: "ok" };
   });
 }

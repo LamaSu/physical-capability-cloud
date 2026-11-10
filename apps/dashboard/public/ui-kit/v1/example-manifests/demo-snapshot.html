@@ -2722,7 +2722,9 @@
     if (status && status.parentNode) status.parentNode.removeChild(status);
 
     if (!manifest || !Array.isArray(manifest.sections)) {
-      root.appendChild(el('p', 'pcc-err', kitText('No dashboard manifest found.')));
+      var noManifest = el('p', 'pcc-err pcc-src-ephemeral', kitText('No dashboard manifest found.'));
+      noManifest.setAttribute('data-source', 'ephemeral');
+      root.appendChild(noManifest);
       return;
     }
 

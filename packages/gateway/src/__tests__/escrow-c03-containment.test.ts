@@ -43,6 +43,8 @@ const KNOWN_2 = getAddress(KNOWN_2_LOWER);
 const UNKNOWN = "0x1111111111111111111111111111111111111111";
 /** The attacker's own address in the original C-03 report. */
 const ATTACKER = "0x2222222222222222222222222222222222222222";
+/** The gateway admin secret these tests run with; the escrow chain writes need it. */
+const ADMIN = "c03-admin";
 
 function seedEscrow(id: string, contractAddress: string, version: "v2" | "v3" = "v2") {
   const now = new Date().toISOString();
@@ -77,6 +79,7 @@ describe("audit C-03 — escrow chain-write containment", () => {
   let approveSpy: ReturnType<typeof vi.spyOn>;
 
   beforeAll(async () => {
+    process.env.PCC_ADMIN_KEY = ADMIN;
     initStore({ seed: false });
     seedEscrow("esc-known-001", KNOWN);
     seedEscrow("esc-known-002", KNOWN_2);
@@ -100,6 +103,7 @@ describe("audit C-03 — escrow chain-write containment", () => {
     vi.restoreAllMocks();
     await app.close();
     closeStore();
+    delete process.env.PCC_ADMIN_KEY;
   });
 
   beforeEach(() => {
@@ -198,6 +202,7 @@ describe("audit C-03 — escrow chain-write containment", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/escrow/chain/${UNKNOWN}/fund`,
+        headers: { "x-admin-key": ADMIN },
       });
 
       expect(res.statusCode).toBe(404);
@@ -211,6 +216,7 @@ describe("audit C-03 — escrow chain-write containment", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/escrow/chain/${ATTACKER}/fund`,
+        headers: { "x-admin-key": ADMIN },
       });
 
       expect(res.statusCode).toBe(404);
@@ -231,6 +237,7 @@ describe("audit C-03 — escrow chain-write containment", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/escrow/chain/${KNOWN}/fund`,
+        headers: { "x-admin-key": ADMIN },
       });
 
       expect(res.statusCode).toBe(200);
@@ -243,6 +250,7 @@ describe("audit C-03 — escrow chain-write containment", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/escrow/chain/${KNOWN_2_LOWER}/fund`,
+        headers: { "x-admin-key": ADMIN },
       });
 
       expect(res.statusCode).toBe(200);
@@ -253,7 +261,7 @@ describe("audit C-03 — escrow chain-write containment", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/escrow/chain/${KNOWN}/fund`,
-        headers: { "idempotency-key": "c03-test-key-1" },
+        headers: { "idempotency-key": "c03-test-key-1", "x-admin-key": ADMIN },
       });
 
       // Same escrow as the earlier happy path: the activity's on-chain
@@ -262,6 +270,17 @@ describe("audit C-03 — escrow chain-write containment", () => {
       // provenance rejection.
       expect(res.statusCode).toBe(200);
       expect(res.statusCode).not.toBe(404);
+    });
+
+    it("refuses a caller without the gateway admin secret before any chain call", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/escrow/chain/${KNOWN}/fund`,
+      });
+
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reason).toBe("admin_required");
+      expect(fundSpy).not.toHaveBeenCalled();
     });
   });
 });

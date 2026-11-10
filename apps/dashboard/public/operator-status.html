@@ -206,7 +206,7 @@ function render(d) {
   }
 
   if (d.status === 'unconfigured') {
-    html.push('<div class="empty"><h3>No record for this slug</h3><p>No kernel is registered with operatorAddress = <code>'+escape(d.operatorSlug)+'</code>. Onboard via the <code>pcc-author-integration</code> A2A skill, or the wizard at <a href="/pizza-onboard-shop.html" style="color:var(--accent)">/pizza-onboard-shop.html</a>.</p></div>');
+    html.push('<div class="empty"><h3>No record for this slug</h3><p>No kernel is registered with operatorAddress = <code>'+escape(d.operatorSlug)+'</code>. Onboard via the <code>pcc-author-integration</code> A2A skill.</p></div>');
   }
 
   out.innerHTML = html.join('');

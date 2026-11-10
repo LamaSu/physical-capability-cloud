@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="robots" content="noindex">
 <title>PCC · Sell Pizza on the Network</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -213,10 +214,11 @@ select{appearance:none;cursor:pointer;background-image:linear-gradient(45deg,tra
 <div class="toast" id="toast"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="/demo-gate.js" data-base-param="api"></script>
 <script>
 /* ───────────────────────── config ───────────────────────── */
 const STEPS=["Identity","Menu","Policy","Evidence","Live"];
-const PROD="https://capability.network";
+const PROD=location.origin;
 const CITIES={"San Francisco":[37.77,-122.42],"New York":[40.71,-74.01],"London":[51.51,-0.13],
   "Berlin":[52.52,13.40],"Toronto":[43.65,-79.38],"Austin":[30.27,-97.74],"Lagos":[6.52,3.38],
   "Bengaluru":[12.97,77.59],"São Paulo":[-23.55,-46.63],"Singapore":[1.35,103.82]};
@@ -436,8 +438,11 @@ function go(n){
   S.step=Math.max(0,Math.min(4,n)); maxReached=Math.max(maxReached,S.step);
   renderStepper(); renderStep(); window.scrollTo({top:0,behavior:"smooth"});
 }
+Promise.resolve(window.pccDemoGate).then((state) => {
+if (state === "off") return;
 $("#nextBtn").onclick=()=>go(S.step+1);
 $("#backBtn").onclick=()=>go(S.step-1);
+});
 
 /* ───────────────────────── go live ───────────────────────── */
 function policyBody(){
@@ -568,7 +573,10 @@ function renderQR(id,text){
 }
 
 /* ───────────────────────── init ───────────────────────── */
+Promise.resolve(window.pccDemoGate).then((state) => {
+if (state === "off") return;
 renderStepper(); renderStep();
+});
 </script>
 </body>
 </html>

@@ -52,6 +52,20 @@ function textContent(node: ts.Node): string {
   return "";
 }
 
+function handled(element: Element): boolean {
+  const initializer = attribute(element, "onClick")?.initializer;
+  const handler = initializer && ts.isJsxExpression(initializer) ? initializer.expression : undefined;
+  if (!handler) return false;
+  return !(ts.isArrowFunction(handler) && ts.isBlock(handler.body) && handler.body.statements.length === 0);
+}
+
+function explainedDisabled(element: Element): boolean {
+  const disabled = attribute(element, "disabled");
+  if (!disabled || !attribute(element, "title")) return false;
+  const value = disabled.initializer && ts.isJsxExpression(disabled.initializer) ? disabled.initializer.expression : undefined;
+  return value?.kind !== ts.SyntaxKind.FalseKeyword;
+}
+
 function elementText(element: Element): string {
   return textContent(element).replace(/\s+/g, " ").trim();
 }
@@ -77,7 +91,7 @@ describe("builder buttons and contributor rate copy", () => {
   it("T1: every builder button has a click handler or a disabled explanation", () => {
     const unexplained = pages.flatMap((page) => page.elements
       .filter((element) => opening(element).tagName.getText() === "button")
-      .filter((element) => !attribute(element, "onClick") && !(attribute(element, "disabled") && attribute(element, "title")))
+      .filter((element) => !handled(element) && !explainedDisabled(element))
       .map((element) => location(page, element)));
     expect(unexplained).toEqual([]);
   });
@@ -89,7 +103,7 @@ describe("builder buttons and contributor rate copy", () => {
       .map((element) => location(page, element)));
     expect(removedButtons).toEqual([]);
     expect(pages.find((page) => page.path.endsWith("ProtocolDetailPage.tsx"))!.source)
-      .not.toMatch(/\/protocols\/\$\{[^}]*\}\/edit/);
+      .not.toContain("/edit");
     const builder = pages.find((page) => page.path.endsWith("ProtocolBuilderPage.tsx"))!.source;
     expect(builder).not.toContain("Edit Protocol");
     expect(builder).not.toContain("Editing ");
@@ -148,7 +162,7 @@ describe("builder buttons and contributor rate copy", () => {
     const text = publishedText(EARN_PATH, read(EARN_PATH));
     for (const removed of [
       "CompositionManifest", "smart contract", "sends your cut", "pays you", "on-chain",
-      "where you'll get paid", "Your cut", "of every job", "Get paid every time",
+      "where you'll get paid", "Your cut", "of every job", "Get paid every time", "payout",
     ]) {
       expect(text).not.toContain(removed);
     }
@@ -174,6 +188,8 @@ describe("builder buttons and contributor rate copy", () => {
       "When the job settles, the smart contract sends your cut directly to the wallet above.",
       "Get paid every time your work is used.",
       "Every job that uses your work pays you 2% of the job value.",
+      "Every job that uses your work\n          pays you, automatically.",
+      "It pays you automatically.",
     ]) {
       expect(findClaimViolations(text).map((violation) => violation.id), text).toContain("automatic-contributor-payout");
     }

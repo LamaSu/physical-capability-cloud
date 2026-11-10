@@ -56,6 +56,9 @@ export const MAX_PAYOUT_LEGS = 16;
 export const ECDSA_S_MAX = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0n;
 /** `UnitState.FUNDED_ACTIVE`. */
 export const UNIT_FUNDED_ACTIVE = 1;
+export const UNIT_STATE_NAMES = ["AWAITING_FUNDING", "FUNDED_ACTIVE", "PRIMARY_ASSERTED", "CHALLENGED", "BACKUP_PENDING", "BACKUP_ASSERTED", "RELEASE_ALLOCATED", "REFUND_ALLOCATED", "SETTLED_RELEASED", "SETTLED_REFUNDED"] as const;
+export const UNIT_REFUND_ALLOCATED = 7;
+export const UNIT_SETTLED_REFUNDED = 9;
 
 /**
  * EIP-1167 as the factory's Clones.sol builds it (its line 23). The 10-byte creation code copies the 45 bytes after
@@ -180,6 +183,17 @@ export function prePolicyRoot(configs: readonly UnitConfig[]): Hex {
   );
 }
 
+/** VNextSettlementLib's PolicyIdentity, in the factory's field order. */
+export interface PolicyIdentity {
+  payer: Address;
+  operator: Address;
+  jobIdHash: Hex;
+  termsHash: Hex;
+  policyNonce: bigint;
+  prePolicyRoot: Hex;
+  acceptedPolicyDigest: Hex;
+}
+
 /** ABI doc §3 step 2: the CREATE2 salt over the whole policy identity. */
 export function policySalt(id: {
   payer: Address;
@@ -295,11 +309,12 @@ export const ERC20_ABI = parseAbi([
   "function allowance(address owner, address spender) view returns (uint256)",
 ]);
 
-/** Factory reads (FAC:34, 54, 146). `predictEscrow`'s selector is pinned to the golden vector (0xa5b0de55). */
+/** Factory reads (FAC:34, 54, 146) and its one write, createEscrow (FAC:136). The predictEscrow (0xa5b0de55) and createEscrow (0x886deb02) selectors are pinned to the golden vectors. */
 export const FACTORY_ABI = parseAbi([
   "struct PolicyIdentity { address payer; address operator; bytes32 jobIdHash; bytes32 termsHash; uint256 policyNonce; bytes32 prePolicyRoot; bytes32 acceptedPolicyDigest; }",
   "function implementation() view returns (address)",
   "function predictEscrow(PolicyIdentity p) view returns (address)",
+  "function createEscrow(PolicyIdentity p) returns (address escrow)",
   "function fundedEscrowOf(bytes32 policyKey) view returns (address)",
 ]);
 
@@ -349,4 +364,14 @@ export const ESCROW_ABI = parseAbi([
   "error BadOperatorSignature()",
   "error NotActive()",
   "error UnitNotFound()",
+  "function payer() view returns (address)",
+  "function unitTerms(bytes32 unitId) view returns (uint256 milestoneIndex_, bytes32 stepId_, uint8 requestedTier_, uint256 reclaimAt_, bytes32 payoutConfigHash_, uint16 compositionSchemaVersion_, bool evidenceCommitted_)",
+  "function reclaimAfterDeadline(bytes32 unitId)",
+  "error TooEarlyToReclaim()",
+  "error AuthorizationUsed()",
+  "error Insolvent()",
+  "error RuntimeDomainMismatch()",
+  "error ContradictoryTokenState()",
+  "error NonCanonicalTransferReturn()",
+  "error WrongTransferDelta()",
 ]);

@@ -223,9 +223,11 @@ Full rationale, growth math, vacuum guidance, and recovery semantics: [`docs/WOR
 
 ## Local job dispatch on the production image (self-hosted labs)
 
-The image sets `NODE_ENV=production` (Dockerfile). A gateway in production runs a submitted job on a device it hosts only when ALL of these hold. Every other submitted job is queued for a remote node, such as pcc-node, to claim.
+The image sets `NODE_ENV=production` (Dockerfile). **In production the gateway never runs a submitted job on a device it hosts.** It holds no kernel signing key: its own kernel's evidence emitter has only the test-only zero-address key. So in production a job that passes every check below is queued too, with reason `no_kernel_signer`, for a node that signs with the kernel's registered key to pick up. A job that fails a check keeps that check's reason.
 
-1. **`PCC_JOB_SUBMIT_QUEUE_ONLY=false`, exactly.** In production, an unset variable or any other value means queue-only. Outside production it's the reverse: only an exact `true` turns queue-only on.
+Outside production, a gateway runs a submitted job on a device it hosts only when ALL of these hold. Every other submitted job is queued for a remote node to pick up.
+
+1. **Queue-only is off.** Outside production that's the default: only an exact `PCC_JOB_SUBMIT_QUEUE_ONLY=true` turns it on. In production it's the reverse: an unset variable or any value but an exact `false` means queue-only, and its reason, `queue_only`, comes before `no_kernel_signer` (a gateway with no explicit kernel config, items 2 and 3, reports `no_configured_local_kernel` first).
 2. **An explicit kernel config:** `KERNEL_CONFIG` (the config JSON, inline) or `KERNEL_CONFIG_FILE` (a path to a JSON file). If both are set, `KERNEL_CONFIG` wins. With neither, the gateway generates a mock config, and a generated config never authorizes a local job.
 3. **The config's `kernelId` isn't the placeholder `kernel_dev_001`.**
 4. **The job is for that `kernelId`,** and that kernel's emergency stop reads clear. A stop that is engaged, or that can't be read, queues the job instead.
@@ -236,16 +238,17 @@ A submit can also send `queueOnly: true` to queue a job that would otherwise run
 
 Enable local dispatch only on a gateway that untrusted callers can't reach.
 
-A self-hosted lab that runs its devices in the gateway process sets, for example:
-
-```
-PCC_JOB_SUBMIT_QUEUE_ONLY=false
-KERNEL_CONFIG_FILE=/app/data/kernel-config.json
-```
+Outside production, a lab that runs its devices in the gateway process sets an explicit kernel config, for example `KERNEL_CONFIG_FILE=/app/data/kernel-config.json`. In production its jobs wait in the queue for a node that signs with the kernel's registered key. pcc-node registers its signing key when it starts, but it takes no jobs yet (`pcc-node start` says so), so it doesn't run them.
 
 To check the effective policy:
-- The boot log prints `[jobs] Effective local dispatch policy` with `queueOnly`, `localDispatch` and, when local dispatch is off, the `reason`.
-- `GET /api/setup/detect` (API key required) returns `jobs: { queueOnly, localDispatch }`. Its `localDispatch` is true only when the checks above pass for the config's own kernel AND at least one machine device has a loaded runner.
+- The boot log prints `[jobs] Effective local dispatch policy` with `queueOnly`, `localDispatch` and, when local dispatch is off, the `reason`. In production, when the checks above pass, the reason is `no_kernel_signer`.
+- `GET /api/setup/detect` (API key required) returns `jobs: { queueOnly, localDispatch }`. Its `localDispatch` is true only when the checks above pass for the config's own kernel AND at least one machine device has a loaded runner. In production it's false.
+
+## Demo surfaces in production
+
+In production the gateway serves no demo routes and starts no demo agent. The pizza demo's routes (`/api/demo/*` and `/sse/demo/*`) aren't registered, and the agent bridge starts its user and broker agents without its demo kernel agent, `kernel-gateway`. The dashboard's demo pages (`order.html`, `operator.html`, `driver.html`, `operator-capture.html` and the `pizza-*.html` pages) call those routes, so in production they don't work.
+
+`PCC_DEMOS_ENABLED=true`, exactly, turns both back on in production, for a demo deployment. Unset, or any other value, leaves them off. Outside production they're on, whatever the variable says. The gateway reads it at boot.
 
 ## Buyer-funding V-next record: operator-approved live window
 
@@ -294,6 +297,31 @@ not a regular file or directory.
 
 The `escrow_funding` and `funding_prepares` tables start empty. **Nothing activates** via this
 path until both S1.1 (prepared TTL terms) and S1.2 (the production funding-store wiring) land.
+
+### Buyer-funding verifier sweep (S1.2)
+
+One run first retries activation for finalized funding records whose scopes are awaiting funding
+inside their window. It then verifies eligible served or expired prepares, oldest first, at a
+finalized chain block. Each pass handles at most 25 rows. Funding evidence, the escrow's funded
+status and its milestones commit together; activation runs after that commit and is retried if
+it fails while the window remains open.
+
+The sweep starts only outside tests, when the deployment record resolves through the record
+opt-ins and the RPC URL is valid. With the record variables unset (the production default), it
+starts nothing, reads nothing and writes nothing.
+
+`PCC_VNEXT_RPC_URL` has no default. Use HTTPS, or HTTP on `127.0.0.1`, `[::1]` or `localhost`.
+Credentials in the user part and any `#` are refused. This is the window's fourth setting: unset
+it along with `PCC_VNEXT_RECORD_NETWORK`, `PCC_VNEXT_ALLOW_TESTNET_RECORD` and
+`PCC_VNEXT_TESTNET_BUYERS` after the window.
+
+`PCC_VNEXT_FUNDING_SWEEP_INTERVAL_SEC` is optional: a decimal integer from 60 to 180 seconds,
+default 60. The `escrows.version` value `vnext-buyer` marks a buyer-funded V-next row.
+
+For a `vnext-buyer` row, `POST /api/escrow/chain/:address/fund` answers HTTP 409
+`escrow_buyer_funded`, and the settlement crank answers `blocked` with that reason.
+The EAS release and attestation routes also answer HTTP 409 `escrow_buyer_funded` for these rows.
+An unrecognized escrow version answers HTTP 409 `escrow_version_unknown` on those EAS routes.
 
 ## What this does NOT yet include
 

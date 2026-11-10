@@ -30,6 +30,7 @@ import {
   type SubjectBinding,
   type SubjectBlockFields,
 } from "@pcc/spec";
+import { reclaimWindowFor } from "@pcc/spec/funding";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getAddress,
@@ -943,7 +944,7 @@ describe("HostTerms loading refuses malformed authorizations", () => {
     ["negative tier", { allowedRequiredTiers: [-1] }], ["fractional tier", { allowedRequiredTiers: [1.5] }],
     ["repeated tier", { allowedRequiredTiers: [1, 1] }],
     ["negative reclaim minimum", { reclaimMinSeconds: -1 }],
-    ["reclaim minimum below contract minimum", { reclaimMinSeconds: 863_999 }],
+    ["Base Sepolia reclaim minimum of 4499", { reclaimMinSeconds: 4_499 }],
     ["reclaim maximum above contract maximum", { reclaimMaxSeconds: 31_536_001 }],
     ["zero factory", { factory: zeroAddress }], ["invalid factory", { factory: "invalid" }],
     ["zero implementation", { implementation: zeroAddress }], ["invalid implementation", { implementation: "invalid" }],
@@ -974,6 +975,31 @@ describe("HostTerms loading refuses malformed authorizations", () => {
     it(`refuses ${label} at load with bad_terms`, async () => {
       await refusal(() => loadOperatorKey(path, 84532, { now, clock: () => now, terms: { ...terms(), ...change } as never }), "bad_terms");
     });
+  }
+  it("refuses reclaim minimum below contract minimum at load with bad_terms", async () => {
+    await refusal(() => loadOperatorKey(path, 31337, { now, clock: () => now,
+      terms: { ...terms(31337), reclaimMinSeconds: 863_999 } }), "bad_terms");
+  });
+  it("loads the local-chain reclaim minimum of 864000 with a key on 31337", async () => {
+    const bound = await loadOperatorKey(path, 31337, { now, clock: () => now,
+      terms: { ...terms(31337), reclaimMinSeconds: 864_000 } });
+    expect(bound.address).toBe(key.address);
+  });
+  for (const chainId of [84532, 31337] as const) {
+    const window = reclaimWindowFor(BigInt(chainId));
+    for (const [boundary, field, value, refused] of [
+      ["min - 1", "reclaimMinSeconds", window.min - 1n, true],
+      ["min", "reclaimMinSeconds", window.min, false],
+      ["max", "reclaimMaxSeconds", window.max, false],
+      ["max + 1", "reclaimMaxSeconds", window.max + 1n, true],
+    ] as const) {
+      it(`agrees with reclaimWindowFor on chain ${chainId} at ${boundary}`, async () => {
+        const load = () => loadOperatorKey(path, chainId, { now, clock: () => now,
+          terms: { ...terms(chainId), [field]: Number(value) } });
+        if (refused) await refusal(load, "bad_terms");
+        else expect((await load()).address).toBe(key.address);
+      });
+    }
   }
   for (const field of ["allowedPayoutRecipients", "operatorPayoutRecipient", "maxPassThrough", "factory", "implementation",
     "settlementToken", "subjectPins"] as const) {

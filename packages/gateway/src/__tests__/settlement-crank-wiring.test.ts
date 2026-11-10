@@ -206,7 +206,7 @@ describe("resume-settlement routes the chain re-drive through driveSettlement", 
         ],
       });
 
-    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, payload: {} });
+    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, headers: { "x-admin-key": ADMIN }, payload: {} });
 
     expect(res.statusCode).toBe(200);
     expect(h.driveSettlement).toHaveBeenCalledTimes(2);
@@ -242,7 +242,7 @@ describe("resume-settlement routes the chain re-drive through driveSettlement", 
         steps: [{ action: "submitAttestation", result: "landed", txHash: "0xat" }],
       });
 
-    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, payload: {} });
+    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, headers: { "x-admin-key": ADMIN }, payload: {} });
 
     expect(res.statusCode).toBe(200);
     expect(h.driveSettlement).toHaveBeenCalledTimes(2);
@@ -267,7 +267,7 @@ describe("resume-settlement routes the chain re-drive through driveSettlement", 
       steps: [{ action: "release", result: "already_done", revert: "Not attested" }],
       stepId: "0x" + "11".repeat(32),
     });
-    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, payload: {} });
+    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, headers: { "x-admin-key": ADMIN }, payload: {} });
 
     expect(res.statusCode).toBe(200);
     expect(res.json().status).toBe("settled");
@@ -304,7 +304,7 @@ describe("/complete routes the on-chain settle through driveSettlement", () => {
         steps: [{ action: "submitAttestation", result: "landed", txHash: "0xat" }],
       });
 
-    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} });
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: { "x-admin-key": ADMIN }, payload: {} });
 
     expect(res.statusCode).toBe(200);
     expect(h.driveSettlement).toHaveBeenCalledTimes(2);
