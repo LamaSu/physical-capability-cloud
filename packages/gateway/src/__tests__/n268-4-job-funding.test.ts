@@ -208,7 +208,7 @@ describe("GET /api/jobs/:jobId/funding (N268-4)", () => {
     expect(res.headers["cache-control"]).toBe("no-store");
   });
 
-  it("H2: only jobId and scopes are returned, preserving all eight DTO fields and verification fields", async () => {
+  it("H2: only jobId and scopes are returned, preserving all nine DTO fields and verification fields", async () => {
     installActivationTerms();
     const { jobId, scopeId } = await paidScope(fixture);
     const record = plantRecord(installTestFundingRecordStore(), scopeId);
@@ -217,8 +217,8 @@ describe("GET /api/jobs/:jobId/funding (N268-4)", () => {
     expect(Object.keys(res.json()).sort()).toEqual(["jobId", "scopes"]);
     expect(res.json().jobId).toBe(jobId);
     expect(res.json().scopes).toHaveLength(1);
-    expect(Object.keys(res.json().scopes[0]).sort()).toEqual(["asOf", "binding", "jobId", "schemaId", "scope", "scopeId", "state", "verification"]);
-    expect(res.json().scopes[0]).toMatchObject({ schemaId: "pcc.funding-status/v1", asOf: iso(T0), verification: { fundingBlockHash: record.fundingBlockHash } });
+    expect(Object.keys(res.json().scopes[0]).sort()).toEqual(["asOf", "binding", "deployment", "jobId", "schemaId", "scope", "scopeId", "state", "verification"]);
+    expect(res.json().scopes[0]).toMatchObject({ schemaId: "pcc.funding-status/v2", asOf: iso(T0), verification: { fundingBlockHash: record.fundingBlockHash } });
     const expected = jobFundingOf(jobId, KERNEL, iso(T0));
     expect(expected.read).toBe("ok");
     if (expected.read !== "ok") throw new Error("fixture funding read failed");
