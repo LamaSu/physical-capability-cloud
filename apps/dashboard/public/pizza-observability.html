@@ -496,7 +496,7 @@ function renderStepDetail(o,step,at){
   if(det.amountUSDC)rows.push(["amount",`<span style="color:var(--lime)">${esc(det.amountUSDC)} USDC</span>`]);
   if(det.evidenceHash)rows.push(["evidence",`${esc(det.evidenceHash)} <span class="tag mock">mock</span>`]);
   if(det.photo)rows.push(["photo",esc(det.photo)]);
-  if(det.gps)rows.push(["gps",`${det.gps.lat}, ${det.gps.lng}`]);
+  if(det.gps)rows.push(["gps",`${esc(det.gps.lat)}, ${esc(det.gps.lng)}`]);
   if(det.assuranceTier!=null)rows.push(["assurance tier",`T${det.assuranceTier} <span class="tag mock">mock</span>`]);
   if(det.shopPayoutUSD!=null)rows.push(["shop payout",`$${det.shopPayoutUSD}`]);
   if(det.driverPayoutUSD!=null)rows.push(["driver payout",`$${det.driverPayoutUSD}`]);
