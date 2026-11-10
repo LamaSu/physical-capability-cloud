@@ -285,12 +285,12 @@ function renderStep(){
   }
   else if(S.step===2){
     const modes=[
-      ["auto","◆ AUTO","Accept orders automatically when price + capacity check out. Hands-off — best for the demo."],
+      ["auto","◆ AUTO","Accept orders automatically when price + capacity check out."],
       ["negotiate","◈ NEGOTIATE","Counter-offer on price, then auto-accept inside your rules. Some haggling, still hands-off."],
       ["always-prompt","◐ ALWAYS ASK","Every order pings you to accept or decline by hand. Maximum control."]
     ];
     h=`<div class="kick">Step 03 · policy</div><div class="q">How should your agent handle orders?</div>
-    <p class="sub">Your policy decides what happens when an order lands. You can change it any time from your dashboard.</p>
+    <p class="sub">This demo doesn't save your policy, so your choice here doesn't change how orders are handled.</p>
     <div class="cards">${modes.map(m=>`
       <div class="pcard ${S.policyMode===m[0]?'sel':''}" data-mode="${m[0]}">
         <div class="ico">${m[1]}</div><h3>${m[0].replace("-"," ")}</h3><p>${m[2]}</p></div>`).join("")}</div>
@@ -445,12 +445,6 @@ $("#backBtn").onclick=()=>go(S.step-1);
 });
 
 /* ───────────────────────── go live ───────────────────────── */
-function policyBody(){
-  const b={slug:S.slug,role:"shop",mode:S.policyMode};
-  if(S.policyMode==="auto"){b.priceFloorUSD=+S.priceFloor||0;b.maxConcurrent=+S.maxConcurrent||1;}
-  else if(S.policyMode==="negotiate"){b.counterMultiplier=+S.counterMult||1.1;b.maxCounterAttempts=+S.maxCounter||1;}
-  return b;
-}
 
 let liveStarted=false;
 async function runLive(){
@@ -468,7 +462,6 @@ async function runLive(){
     catch(e){finishRow(el,critical?"fail":"warn",e&&e.message);if(critical)throw e;return null;}
   }
   async function post(path,body){const r=await fetch(base+path,{method:"POST",headers:{"content-type":"application/json",...auth()},body:JSON.stringify(body)});if(!r.ok)throw new Error(path+" → "+r.status);return r.json().catch(()=>({}));}
-  async function put(path,body){const r=await fetch(base+path,{method:"PUT",headers:{"content-type":"application/json",...auth()},body:JSON.stringify(body)});if(!r.ok)throw new Error(path+" → "+r.status);return r.json().catch(()=>({}));}
   async function get(path){const r=await fetch(base+path,{headers:{...auth()}});if(!r.ok)throw new Error(path+" → "+r.status);return r.json().catch(()=>({}));}
 
   try{
@@ -515,7 +508,7 @@ async function runLive(){
       if(!drivers.length)throw new Error("no drivers yet — they'll link to you when they join");
     });
 
-    await step("Saving your "+S.policyMode+" order policy",()=>put("/api/demo/operator-policy/"+S.slug,policyBody()));
+    const policyRow=rowEl("Your order policy isn't saved: this demo doesn't save policies.");finishRow(policyRow,"warn");policyRow.querySelector(".st").textContent="not saved";
 
     showLiveSuccess();
   }catch(e){ showLiveError(e); }
@@ -526,8 +519,6 @@ function showLiveSuccess(){
   $("#liveTitle").textContent="You're live.";
   $("#liveSub").style.display="none";
   const items=S.menu.filter(m=>m.name.trim()&&+m.price>0);
-  const pol=S.policyMode==="auto"?`auto · floor $${S.priceFloor} · ${S.maxConcurrent} concurrent`
-    :S.policyMode==="negotiate"?`negotiate · ×${S.counterMult} · ${S.maxCounter} tries`:`always ask`;
   $("#liveResult").innerHTML=`
     <div class="finale">
       <div class="activated" style="margin-top:18px">◆ Activated</div>
@@ -537,7 +528,7 @@ function showLiveSuccess(){
         <div class="cn">${esc(S.name)}</div>
         <div class="meta">
           <span>menu · <b>${items.length} pizza${items.length===1?'':'s'}</b> published</span>
-          <span>policy · <b>${pol}</b></span>
+          <span>policy · <b>not saved</b></span>
           <span>slug · <b>${esc(S.slug)}</b></span>
         </div>
       </div>
