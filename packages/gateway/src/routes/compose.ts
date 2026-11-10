@@ -49,6 +49,7 @@ import type { WorkflowContext } from "@pcc/workflow";
 import { getJobFacade, getCapabilityFacade, getKernelFacade } from "../facades/index.js";
 import type { SubmitJobInput, JobSubmitResult, CapabilityDTO } from "../facades/index.js";
 import type { Result } from "@pcc/spec";
+import { demoSurfacesEnabled } from "../config/demo-surfaces.js";
 
 // ---------------------------------------------------------------------------
 // Store access — getStore() is booted by server.ts in production; tests lazily
@@ -909,26 +910,29 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // POST /api/compose/_dev/register-candidate — dev/test-only candidate injection
-  //
-  // Production draws candidates from CapabilityFacade (PCC_COMPOSE_USE_FACADE=true);
-  // this endpoint + the in-memory pool are retained for dev/test, which rely on them.
-  app.post(
-    "/api/compose/_dev/register-candidate",
-    async (req, reply) => {
-      const parsed = RegisterCandidateRequestSchema.safeParse(req.body);
-      if (!parsed.success) {
-        return reply.code(400).send({
-          error: "validation_failed",
-          message: "Invalid candidate",
-          details: parsed.error.format(),
-        });
-      }
-      const cap = parsed.data;
-      saveCandidate(cap);
-      return reply.code(201).send({ ok: true, capabilityId: cap.capabilityId });
-    },
-  );
+  // N314-B: dev registration routes are off in production unless PCC_DEMOS_ENABLED=true (N291's flag).
+  if (demoSurfacesEnabled()) {
+    // POST /api/compose/_dev/register-candidate — dev/test-only candidate injection
+    //
+    // Production draws candidates from CapabilityFacade (PCC_COMPOSE_USE_FACADE=true);
+    // this endpoint + the in-memory pool are retained for dev/test, which rely on them.
+    app.post(
+      "/api/compose/_dev/register-candidate",
+      async (req, reply) => {
+        const parsed = RegisterCandidateRequestSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return reply.code(400).send({
+            error: "validation_failed",
+            message: "Invalid candidate",
+            details: parsed.error.format(),
+          });
+        }
+        const cap = parsed.data;
+        saveCandidate(cap);
+        return reply.code(201).send({ ok: true, capabilityId: cap.capabilityId });
+      },
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

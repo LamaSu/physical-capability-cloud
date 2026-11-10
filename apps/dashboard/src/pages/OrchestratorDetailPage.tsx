@@ -6,6 +6,8 @@ import type { TransferGraph, TransferNode, Sample, InstrumentWorkflow, ResourceC
 import { useUIStore } from "../stores/ui-store.js";
 import { useOrchestratorStore } from "../stores/orchestrator-store.js";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { isNotAvailable, readGatewayJson } from "../lib/not-available.js";
+import { NotAvailablePanel } from "../components/NotAvailablePanel.js";
 
 const NODE_TYPE_COLORS: Record<TransferNode["nodeType"], string> = {
   instrument: "border-green-500/40",
@@ -50,27 +52,27 @@ export function OrchestratorDetailPage() {
   // Fetch graph for kernel
   const { data: graphData } = useQuery({
     queryKey: ["orchestrator-graph", kernelId],
-    queryFn: () => authorizedFetch(`/api/orchestrator/graphs/${kernelId}`).then((r) => r.json()),
+    queryFn: () => authorizedFetch(`/api/orchestrator/graphs/${kernelId}`).then(readGatewayJson),
     enabled: !!kernelId,
   });
 
   // Fetch samples for kernel
   const { data: sampleData } = useQuery({
     queryKey: ["orchestrator-samples", kernelId],
-    queryFn: () => authorizedFetch(`/api/orchestrator/samples?kernelId=${kernelId}`).then((r) => r.json()),
+    queryFn: () => authorizedFetch(`/api/orchestrator/samples?kernelId=${kernelId}`).then(readGatewayJson),
     enabled: !!kernelId,
   });
 
   // Fetch workflows
   const { data: workflowData } = useQuery({
     queryKey: ["orchestrator-workflows"],
-    queryFn: () => authorizedFetch("/api/orchestrator/workflows").then((r) => r.json()),
+    queryFn: () => authorizedFetch("/api/orchestrator/workflows").then(readGatewayJson),
   });
 
   // Fetch claims
   const { data: claimData } = useQuery({
     queryKey: ["orchestrator-claims"],
-    queryFn: () => authorizedFetch("/api/orchestrator/claims").then((r) => r.json()),
+    queryFn: () => authorizedFetch("/api/orchestrator/claims").then(readGatewayJson),
   });
 
   const graph: TransferGraph | null = graphData?.graph ?? null;
@@ -101,6 +103,22 @@ export function OrchestratorDetailPage() {
     }
     return map;
   }, [claims]);
+
+  const notAvailable = [graphData, sampleData, workflowData, claimData].find(isNotAvailable);
+
+  if (notAvailable) {
+    return (
+      <div className="space-y-6">
+        <Link
+          to="/orchestrator"
+          className="inline-flex items-center gap-1 text-xs text-white/40 hover:text-green-400 transition-colors"
+        >
+          &larr; Back to Orchestrator
+        </Link>
+        <NotAvailablePanel reply={notAvailable} />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

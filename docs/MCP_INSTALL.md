@@ -3,7 +3,7 @@
 The Physical Capability Cloud ships an MCP (Model Context Protocol) server
 that exposes 63 of the gateway's most-used tools — capability discovery,
 contract building, job submission, escrow lifecycle, evidence verification,
-Story Protocol royalties, fiat on/off-ramps — over the standard MCP stdio
+Story Protocol (now The DATA Foundation) IP records with no on-chain call, fiat on/off-ramps — over the standard MCP stdio
 transport. Any MCP-compatible client speaks to it: Claude Desktop, Claude
 Code CLI, Cursor, Goose, ChatGPT Apps, your own MCP host.
 
@@ -89,7 +89,7 @@ Then point your MCP client at the built file:
 ## Authentication
 
 Most read endpoints work without an API key. Write endpoints (registering
-a kernel, funding escrow, claiming royalties) need one.
+a kernel, funding escrow, recording IP) need one.
 
 Provision one — no signup form, the gateway mints it:
 
@@ -155,7 +155,7 @@ reach the gateway.
 | Setup / onboarding | `pcc_setup_detect`, `pcc_setup_generate_config`, `pcc_setup_validate_config`, `pcc_setup_register_device`, `pcc_setup_test_job`, `pcc_setup_status` |
 | CSD registry | `pcc_csd_list`, `pcc_csd_get`, `pcc_csd_register` |
 | Discovery / onboarding | `pcc_discover_scan`, `pcc_discover_onboard` |
-| Story Protocol IP | `pcc_ip_register_capability`, `pcc_ip_revenue_snapshot`, `pcc_ip_claim`, `pcc_ip_lineage`, `pcc_ip_set_splits` |
+| Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. | `pcc_ip_register_capability`, `pcc_ip_revenue_snapshot`, `pcc_ip_claim`, `pcc_ip_lineage`, `pcc_ip_set_splits` |
 | Sovereign Wealth Fund | `pcc_swf_summary`, `pcc_swf_participant_dashboard`, `pcc_swf_list_proposals` |
 | Fiat ramp | `pcc_get_wallet_balance`, `pcc_get_funding_options`, `pcc_create_onramp_session`, `pcc_submit_withdrawal`, `pcc_send_enterprise_payout` |
 | DePIN + rewards | `pcc_depin_stats` |
@@ -175,7 +175,7 @@ matches your client:
 |---|---|---|
 | Claude Desktop, Claude Code, Cursor, Goose, ChatGPT Apps | **MCP** (this page) | `npx -y @pcc/mcp-server` |
 | ChatGPT Custom GPTs, OpenAI Custom Tools, Codex, Anthropic Custom Tools, Zapier, n8n, Make | **OpenAPI 3.0.3** | `https://capability.network/openapi.json` (700+ paths) |
-| A2A-native agents, your own LLM tool-use loop, any HTTP-aware agent | **agent-package.json** | `https://capability.network/agent-package.json` (248 tools, system prompt, input schemas, endpoint mappings) |
+| A2A-native agents, your own LLM tool-use loop, any HTTP-aware agent | **agent-package.json** | `https://capability.network/agent-package.json` (180+ tools, system prompt, input schemas, endpoint mappings) |
 
 Any of the three gives full read access. Write access needs the same
 Bearer token across all three.

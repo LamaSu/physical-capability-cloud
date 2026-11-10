@@ -274,7 +274,7 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
             type: "application/mcp-server+json",
             url: `${PUBLIC_BASE_URL}/mcp`,
             description:
-              "254-tool MCP server to discover, hire, and verify real-world physical capability.",
+              "MCP server to discover, hire, and verify real-world physical capability.",
           },
           {
             identifier: "urn:ai:capability.network:agent-package",

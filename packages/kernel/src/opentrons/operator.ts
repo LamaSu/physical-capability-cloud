@@ -32,7 +32,6 @@ import { ProtocolEstimator, type FullEstimate, type JobHistoryEntry } from "./es
 import { OperatorHealthTracker, type OperatorInfo, type CompletionRecord } from "./health.js";
 import { buildCapabilityCard, type CapabilityCard, type DeckSlotState } from "./capability-card.js";
 import { BundleValidator, type ExecutionBundle, type BundleValidationResult } from "./execution-bundle.js";
-import { EvidenceEmitter } from "../evidence-emitter.js";
 import { JobRunner } from "../job-runner.js";
 
 // ── Operator Config ───────────────────────────────────────────────
@@ -90,7 +89,6 @@ export class OpentronOperator {
   private compiler: ProtocolCompiler;
   private estimator: ProtocolEstimator;
   private health: OperatorHealthTracker;
-  private evidenceEmitter: EvidenceEmitter;
   private config: OperatorConfig;
   private jobs: Map<string, OperatorJob> = new Map();
   private capability: Capability | null = null;
@@ -114,7 +112,6 @@ export class OpentronOperator {
     this.estimator = new ProtocolEstimator();
     this.health = new OperatorHealthTracker();
     this.bundleValidator = new BundleValidator();
-    this.evidenceEmitter = new EvidenceEmitter(config.kernelId);
 
     // Wire queue executor to run jobs on the adapter
     this.queue.setExecutor((job) => this.executeJob(job));

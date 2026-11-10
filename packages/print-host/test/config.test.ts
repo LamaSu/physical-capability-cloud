@@ -107,6 +107,8 @@ describe("host configuration", () => {
     ["port over 65535", "ipp://printer.example.test:65536/ipp/print"],
     ["canonical href over 1023 octets", `ipp://printer.example.test/${"a".repeat(1000)}`],
     ["encoded path over 1023 octets", `ipp://printer.example.test/${"\u00e9".repeat(167)}`],
+    ["path-less canonical href of 1024 octets", `ipp://${"a".repeat(1017)}`],
+    ["canonical href of 1024 octets", `ipp://printer.example.test/${"a".repeat(997)}`],
     ["userinfo", "ipp://private-user:private-password@printer.example.test/ipp/print"],
     ["empty userinfo", "ipp://@printer.example.test/ipp/print"],
     ["no host", "ipp:///ipp/print"],
@@ -428,4 +430,28 @@ describe("host configuration", () => {
     const invalid = { ...setup.config, chain: { ...setup.config.chain, chainId: 8453 } } as unknown as HostConfig;
     await expectConfigFailure(() => checkHostConfig(invalid), "testnet_only");
   });
+
+  it.each(["gateway", "manifest", undefined] as const)("accepts funding.source %s and treats an absent funding as manifest", async (source) => {
+    const setup = await fixture();
+    await setup.save({ ...setup.config, ...(source === undefined ? {} : { funding: { source } }) });
+    const config = await loadHostConfig(setup.path);
+    expect(config.funding?.source ?? "manifest").toBe(source ?? "manifest");
+    if (source !== undefined) expect(Object.isFrozen(config.funding)).toBe(true);
+  });
+
+  it.each([{ source: "other" }, { source: "gateway", extra: 1 }, {}, "gateway", null])("refuses funding %j as bad_schema", async (funding) => {
+    const setup = await fixture();
+    await setup.save({ ...setup.config, funding });
+    const error = await expectConfigFailure(() => loadHostConfig(setup.path), "bad_schema");
+    expect(error.field).toBe(typeof funding === "object" && funding !== null && (!("source" in funding) || funding.source === "other") ? "funding.source" : "funding");
+  });
+
+  it("checkHostConfig in gateway mode never reads gateway.apiKeyFile", async () => {
+    const setup = await completeFixture();
+    await rm(setup.config.gateway.apiKeyFile);
+    await expect(checkHostConfig({ ...setup.config, funding: { source: "gateway" } })).resolves.toMatchObject({ operatorAddress: setup.pair.identity.operatorAddress });
+    expect(mocks.fileBuffers.filter(entry => entry.path === setup.config.gateway.apiKeyFile)).toHaveLength(0);
+    await expect(checkHostConfig({ ...setup.config, funding: { source: "manifest" } })).rejects.toMatchObject({ code: "not_found" });
+  });
+
 });

@@ -256,8 +256,8 @@ pcc agents registration
 `.trim(),
 
   reputation: `
-pcc reputation get <agentId> [--tag=<tag>]
-  Get reputation scores for a kernel or agent.
+pcc reputation get <agentId>
+  Get the composition reputation PCC records for a kernel or agent.
 `.trim(),
 
   depin: `
@@ -283,8 +283,8 @@ pcc setup register-device --kernelId=<id> --deviceId=<id> --type=<type> --adapte
 pcc setup health [--deviceId=<id>]
   Run health checks. Omit --deviceId to check all devices.
 
-pcc setup test-job [--kernelId=<id>] [--deviceId=<id>] [--tier=<0-3>]
-  Submit a test job to verify the full pipeline.
+pcc setup test-job --kernelId=<id> --deviceId=<id> [--tier=<0-3>]
+  Submit a test job; the gateway runs it only for a kernel it operates in-process.
 
 pcc setup env <profile>
   Generate a .env file. Profiles: dev, testnet, mainnet.
@@ -652,11 +652,7 @@ const commands: Record<string, Record<string, Handler>> = {
   reputation: {
     get: async (pos, flags, pretty) => {
       const agentId = requireArg(pos, 0, "agentId");
-      const tag = flagStr(flags, "tag");
-      const data = await pccFetch(
-        `/api/registry/entities/${encodeURIComponent(agentId)}/reputation`,
-        { query: { tag } },
-      );
+      const data = await pccFetch(`/api/reputation/${encodeURIComponent(agentId)}`);
       out(data, pretty);
     },
   },

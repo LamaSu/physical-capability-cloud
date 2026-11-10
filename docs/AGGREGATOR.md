@@ -169,8 +169,10 @@ export PCC_X402_HMAC_KEY=$(openssl rand -hex 32)
 # Start the gateway
 pnpm --filter @pcc/gateway start
 
-# First call (no payment) → 402
+# First call (an API key, no payment) → 402. Without a key, the gateway
+# answers 401 api_key_required before it checks payment.
 curl -X POST http://localhost:3000/api/aggregator/invoke/some-paid-tool \
+  -H "Authorization: Bearer pcc_live_..." \
   -H "Content-Type: application/json" \
   -d '{"args": {"q": "hello"}}'
 

@@ -32,6 +32,36 @@ async function fixture(change: Record<string, unknown> = {}, content = pdf): Pro
 }
 
 describe("fileJobInputSource", () => {
+  it("an optional-fundedAt source accepts a manifest without unit.fundedAt and keeps reclaimAt > fundedAt when present", async () => {
+    const { fundedAt, ...withoutFundedAt } = unit;
+    await fixture({ unit: withoutFundedAt });
+    const source = fileJobInputSource(dir, { fundedAt: "optional" });
+    expect(await source(jobId)).toEqual({ ok: true, value: {
+      documentData: pdf, jobName: "Operator rehearsal", totalPages: 2, unit: withoutFundedAt,
+    } });
+    await fixture();
+    expect((await source(jobId)).ok).toBe(true);
+    for (const reclaimAt of [fundedAt, fundedAt - 1]) {
+      await fixture({ unit: { ...unit, reclaimAt } });
+      expect(await source(jobId)).toEqual({ ok: false, code: "job_inputs_bad_schema" });
+    }
+  });
+
+  it("the default source still refuses a manifest without unit.fundedAt", async () => {
+    const { fundedAt: _fundedAt, ...withoutFundedAt } = unit;
+    await fixture({ unit: withoutFundedAt });
+    expect(await fileJobInputSource(dir)(jobId)).toEqual({ ok: false, code: "job_inputs_bad_schema" });
+  });
+
+  it("isUnitBinding requires fundedAt by default and accepts its absence only when optional", () => {
+    const { fundedAt: _fundedAt, ...withoutFundedAt } = unit;
+    expect(isUnitBinding(withoutFundedAt)).toBe(false);
+    expect(isUnitBinding(withoutFundedAt, "required")).toBe(false);
+    expect(isUnitBinding(withoutFundedAt, "optional")).toBe(true);
+    expect(isUnitBinding(unit)).toBe(true);
+    expect(isUnitBinding({ ...unit, reclaimAt: unit.fundedAt }, "optional")).toBe(false);
+  });
+
   it("accepts the closed funded-unit manifest and a local PDF", async () => {
     await fixture();
     const result = await fileJobInputSource(dir)(jobId);

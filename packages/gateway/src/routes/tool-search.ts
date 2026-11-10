@@ -1,5 +1,5 @@
 /**
- * BigTool-style retrieval over PCC's 218-tool agent-package.json catalog.
+ * BigTool-style retrieval over PCC's agent-package.json catalog.
  *
  * The package @pcc/tool-index does the embedding + cosine work. This route
  * file is the gateway HTTP surface around it:
@@ -24,7 +24,7 @@
  *     by the index-store layer.
  *   - The path to agent-package.json is resolved (in order):
  *       1. process.env.PCC_AGENT_PACKAGE_PATH   (explicit override)
- *       2. apps/dashboard/public/agent-package.json (the canonical 218-tool
+ *       2. apps/dashboard/public/agent-package.json (the canonical
  *          file as of v2.11.x; auto-located relative to repo root)
  *       3. agent-package-test.json at repo root  (smoke-test fixture, last resort)
  *   - If none resolve, the index initializes empty and /status reports

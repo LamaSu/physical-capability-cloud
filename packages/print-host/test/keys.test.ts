@@ -7,6 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeKernelEd25519Signer } from "../src/kernel-signer.js";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { formatOperatorPrincipalId } from "@pcc/spec";
+import { recoverMessageAddress } from "viem";
+import { buildOperatorSignInMessage, type OperatorSignInFields } from "@pcc/adk";
+import { readSecretFile } from "../src/secret-file.js";
 import { KeyFileError, loadDeviceKey, loadOperatorKey, type KeyFileErrorCode } from "../src/keys.js";
 import type * as secretFile from "../src/secret-file.js";
 
@@ -367,4 +370,90 @@ describe("host key loading and redaction", () => {
     const content = await readFile(join(directory, "device.json"));
     content.fill(0);
   });
+
+  function signInFields(address: string): OperatorSignInFields {
+    return {
+      domain: "gateway.example.test", address,
+      statement: "Sign in to Physical Capability Cloud as an operator host.",
+      uri: "https://gateway.example.test", version: "1", chainId: 84532,
+      nonce: "Abc12345Nonce", issuedAt: now.toISOString(),
+    };
+  }
+
+  it("a key loaded with a sign-in binding signs exactly the rebuilt EIP-191 sign-in message", async () => {
+    const document = operatorDocument();
+    const key = await loadOperatorKey(await writeDocument(document), 84532, {
+      now, clock: () => now, signIn: { baseUrl: "https://gateway.example.test" },
+    });
+    const fields = signInFields(key.address);
+    const message = buildOperatorSignInMessage(fields);
+    const signature = await key.signOperatorSignIn!(message, fields);
+    expect(await recoverMessageAddress({ message, signature })).toBe(key.address);
+    expect(Reflect.ownKeys(key).at(-1)).toBe("signOperatorSignIn");
+    assertNoLeak(key, [secret(document)]);
+  });
+
+  it("a key loaded without a sign-in binding has no sign-in method", async () => {
+    const key = await loadOperatorKey(await writeDocument(operatorDocument()), 84532, { now });
+    expect(key.signOperatorSignIn).toBeUndefined();
+    expect(Object.hasOwn(key, "signOperatorSignIn")).toBe(false);
+  });
+
+  it.each([
+    "another domain", "another uri", "another address", "another chainId", "version 2",
+    "another statement", "short nonce", "issuedAt six minutes off", "message newline", "null fields",
+  ])("the sign-in method refuses %s with bad_input and signs nothing", async (variant) => {
+    const document = operatorDocument();
+    const account = privateKeyToAccount(String(document.privateKey) as `0x${string}`);
+    const signMessage = vi.fn(account.signMessage);
+    mocks.publicAccount = { ...account, signMessage };
+    mocks.acceptAnyScalar = true;
+    const key = await loadOperatorKey(await writeDocument(document), 84532, {
+      now, clock: () => now, signIn: { baseUrl: "https://gateway.example.test" },
+    });
+    let fields = signInFields(key.address);
+    if (variant === "another domain") fields = { ...fields, domain: "elsewhere.example.test" };
+    if (variant === "another uri") fields = { ...fields, uri: "https://elsewhere.example.test" };
+    if (variant === "another address") fields = { ...fields, address: `0x${"0".repeat(40)}` };
+    if (variant === "another chainId") fields = { ...fields, chainId: 31337 };
+    if (variant === "version 2") fields = { ...fields, version: "2" as "1" };
+    if (variant === "another statement") fields = { ...fields, statement: "Sign another statement." };
+    if (variant === "short nonce") fields = { ...fields, nonce: "short" };
+    if (variant === "issuedAt six minutes off") fields = { ...fields, issuedAt: new Date(now.getTime() - 360_000).toISOString() };
+    // The canonical message for invalid fields may itself be rejected by the ADK builder.
+    let message = buildOperatorSignInMessage(signInFields(key.address));
+    try { message = buildOperatorSignInMessage(fields); } catch { /* the key must also reject the fields */ }
+    if (variant === "message newline") message += "\n";
+    await expect(key.signOperatorSignIn!(message, variant === "null fields" ? null as unknown as OperatorSignInFields : fields)).rejects.toMatchObject({ code: "bad_input" });
+    expect(signMessage).not.toHaveBeenCalled();
+  });
+
+  it.each([{ baseUrl: 42 }, { baseUrl: "not a url" }, null])("a malformed sign-in binding %j is bad_input before the key file is read", async (signIn) => {
+    vi.mocked(readSecretFile).mockClear();
+    await expect(loadOperatorKey(join(directory, "missing.json"), 84532, { signIn: signIn as unknown as { baseUrl: string } })).rejects.toMatchObject({ code: "bad_input" });
+    expect(readSecretFile).not.toHaveBeenCalled();
+  });
+
+  it("review A4: the sign-in method reads each field once and signs only the message built from those reads", async () => {
+    const document = operatorDocument();
+    const key = await loadOperatorKey(await writeDocument(document), 84532, {
+      now, clock: () => now, signIn: { baseUrl: "https://gateway.example.test" },
+    });
+    const base = signInFields(key.address);
+    const reads = new Map<string, number>();
+    const fields = {} as OperatorSignInFields;
+    for (const [name, value] of Object.entries(base)) {
+      Object.defineProperty(fields, name, { enumerable: true, get: () => {
+        const count = (reads.get(name) ?? 0) + 1;
+        reads.set(name, count);
+        if (count === 1) return value;
+        return name === "domain" ? "elsewhere.example.test" : name === "uri" ? "https://elsewhere.example.test" : value;
+      } });
+    }
+    const message = buildOperatorSignInMessage(base);
+    const signature = await key.signOperatorSignIn!(message, fields);
+    expect(await recoverMessageAddress({ message, signature })).toBe(key.address);
+    expect(Object.fromEntries(reads)).toEqual(Object.fromEntries(Object.keys(base).map((name) => [name, 1])));
+  });
+
 });

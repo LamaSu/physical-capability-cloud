@@ -5,6 +5,7 @@ import {
   formatOperatorPrincipalId, principalTupleWord,
   type SubjectBinding, type SubjectBlockFields,
 } from "@pcc/spec";
+import { reclaimWindowFor } from "@pcc/spec/funding";
 import {
   VNEXT, buildUnitConfig, computeFee, jobPolicyTypedData, policySalt, predictEscrow, prePolicyRoot, settlementUnitId, unitsRoot,
   type JobPolicyFields, type UnitConfig,
@@ -266,6 +267,7 @@ export function validateHostTerms(input: HostTerms): HostTerms {
       "maxFeeBps", "allowedFeeRecipients", "allowedPayoutRecipients", "maxUnits", "maxAcceptanceSeconds"], ["bindingsRoot"]);
     const chainId = r.chainId;
     if (chainId !== 84532 && chainId !== 31337) throw new OperatorSigningError("bad_terms");
+    const reclaimWindow = reclaimWindowFor(BigInt(chainId));
     const factory = policyAddress(r.factory);
     const implementation = policyAddress(r.implementation);
     const operatorPayoutRecipient = policyAddress(r.operatorPayoutRecipient);
@@ -302,7 +304,7 @@ export function validateHostTerms(input: HostTerms): HostTerms {
       || new Set(allowedFeeRecipients.map((address) => address.toLowerCase())).size !== allowedFeeRecipients.length
       || allowedPayoutRecipients.length === 0
       || new Set(allowedPayoutRecipients.map((address) => address.toLowerCase())).size !== allowedPayoutRecipients.length
-      || BigInt(reclaimMinSeconds) < VNEXT.MIN_RECLAIM_DELAY || BigInt(reclaimMaxSeconds) > VNEXT.MAX_RECLAIM_DELAY
+      || BigInt(reclaimMinSeconds) < reclaimWindow.min || BigInt(reclaimMaxSeconds) > reclaimWindow.max
       || reclaimMinSeconds > reclaimMaxSeconds || maxUnits === 0 || maxAcceptanceSeconds === 0) {
       throw new OperatorSigningError("bad_terms");
     }

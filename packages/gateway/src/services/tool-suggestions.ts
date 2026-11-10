@@ -132,11 +132,11 @@ const OPENTRONS_TOOLS: SuggestedTool[] = [
   },
   {
     name: "ot_list_protocols",
-    description: "List protocol templates. NOTE: the gateway currently serves only a fixed set of built-in example templates; templates sent to create_protocol are not stored, so they do not appear here",
+    description: "List protocol templates. Not available (501): protocol templates are not recorded on this gateway. Only built-in examples exist, and they are not served.",
     category: "device",
-    recommended: true,
+    recommended: false,
     endpoint: { method: "GET", path: "/api/protocols" },
-    inputSchema: { type: "object", properties: { capabilityType: { type: "string", description: "Optional and not used: the gateway returns its built-in example list whatever you send." } } },
+    inputSchema: { type: "object", properties: { capabilityType: { type: "string", description: "Optional and not used: the route ignores it." } } },
   },
   {
     name: "ot_queue_status",

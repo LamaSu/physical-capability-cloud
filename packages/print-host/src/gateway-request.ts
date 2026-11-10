@@ -7,9 +7,14 @@ export type RequestReply = {
 };
 export type RequestFailure = {
   ok: false;
-  code: "network" | "timeout" | "malformed_response";
+  code: "network" | "timeout" | "malformed_response" | "no_key";
   status: number | null;
 };
+
+export interface SessionKeySource {
+  key(): { readonly apiKey: string; readonly keyId: string } | null;
+  invalidate(keyId: string): void;
+}
 
 /** Callers can request the configured wallet only; arbitrary headers are closed. */
 export type RequestOptions = { readonly wallet?: true };
@@ -73,14 +78,32 @@ async function boundedBody(response: Response, signal: AbortSignal, limit: numbe
 
 /** Callers validate configuration and choose their own status/error semantics. */
 export function createGatewayRequest(cfg: {
-  apiKey: string;
+  apiKey?: string;
+  sessionKeys?: SessionKeySource;
   fetchImpl: typeof fetch;
   timeoutMs: number;
   maxResponseBytes: number;
   wallet?: string;
 }) {
-  const { apiKey, fetchImpl, timeoutMs, maxResponseBytes, wallet } = cfg;
+  const { apiKey, sessionKeys, fetchImpl, timeoutMs, maxResponseBytes, wallet } = cfg;
   return async (url: string, body?: string, options?: RequestOptions): Promise<RequestReply | RequestFailure> => {
+    let requestApiKey = apiKey;
+    let requestKeyId: string | undefined;
+    if (sessionKeys !== undefined) {
+      try {
+        const key = sessionKeys.key();
+        if (key !== null) {
+          const suppliedApiKey = key.apiKey;
+          const suppliedKeyId = key.keyId;
+          if (typeof suppliedApiKey === "string" && /^pcc_(live|test)_[A-Za-z0-9_-]{16,256}$/.test(suppliedApiKey)
+            && typeof suppliedKeyId === "string" && suppliedKeyId.length > 0) {
+            requestApiKey = suppliedApiKey;
+            requestKeyId = suppliedKeyId;
+          }
+        }
+      } catch { /* A missing or unreadable key never reaches the network. */ }
+      if (requestKeyId === undefined) return { ok: false, code: "no_key", status: null };
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let status: number | null = null;
@@ -89,7 +112,7 @@ export function createGatewayRequest(cfg: {
         method: body === undefined ? "GET" : "POST",
         redirect: "error",
         headers: {
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Bearer ${requestApiKey}`,
           ...(body === undefined ? {} : { "Content-Type": "application/json" }),
           ...(options?.wallet === true && wallet !== undefined ? { "X-PCC-Wallet": wallet } : {}),
         },
@@ -97,6 +120,9 @@ export function createGatewayRequest(cfg: {
         signal: controller.signal,
       }), controller.signal);
       status = response.status;
+      if (status === 401 && sessionKeys !== undefined && requestKeyId !== undefined) {
+        try { sessionKeys.invalidate(requestKeyId); } catch { /* Invalidation cannot change the response. */ }
+      }
       const text = await boundedBody(response, controller.signal, maxResponseBytes);
       if (controller.signal.aborted) throw aborted;
       const contentType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();

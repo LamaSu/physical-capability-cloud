@@ -14,9 +14,10 @@ import { dirname, resolve } from "node:path";
 import { TextDecoder as NodeTextDecoder, TextEncoder as NodeTextEncoder } from "node:util";
 import { JSDOM } from "jsdom";
 import { describe, it, expect } from "vitest";
-import { kitText, dashboardManifestToIr, validateIr, sourceClassOf, provenanceOf, RECORD_CLAIM_NOTE, RECORD_STATUS_NOTE, WITHHELD_FIELD, type IrNode } from "./dashboard-ir.js";
+import { kitText, dashboardManifestToIr, validateIr, sourceClassOf, provenanceOf, RECORD_CLAIM_NOTE, RECORD_STATUS_NOTE, WITHHELD_FIELD, type IrNode, type IrDoc } from "./dashboard-ir.js";
 import { sourceAsOf, isStale, acceptsNewer, ASOF_MAX_SKEW_MS } from "./dashboard-ir-binder.js";
-import { renderIrDoc, applyFreshness, applyUnknownTime, applyUnavailable, type RElement, type RDocument } from "./dashboard-ir-renderer.js";
+import { renderIrDoc, bootIrView, applyFreshness, applyUnknownTime, applyUnavailable, type RElement, type RDocument } from "./dashboard-ir-renderer.js";
+import { buildMcpAppIrDashboardHtml } from "./mcp-app-view.js";
 
 const KIT = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../../apps/dashboard/public/ui-kit/v1/pcc-ir-kit.js"), "utf8");
 const allNodes = (n: IrNode, out: IrNode[] = []): IrNode[] => { out.push(n); (n.children || []).forEach((c) => allNodes(c, out)); return out; };
@@ -32,6 +33,21 @@ const everyKind = {
   ] }],
 };
 
+const containerDoc = {
+  ir: "pcc-dashboard-ir/v1",
+  title: { type: "heading", id: "t", props: { level: 1, text: "T" } },
+  root: { type: "root", id: "r", children: [
+    { type: "section", id: "s", children: [
+      { type: "grid", id: "g", children: [{ type: "badge", id: "b", props: { text: "Go", tone: "neutral" } }] },
+      { type: "form-summary", id: "f", children: [{ type: "field-label", id: "fl", props: { label: "Qty" } }] },
+      { type: "receipt", id: "rc" },
+      { type: "approval-notice", id: "an", props: { notice: "n" } },
+      { type: "plan", id: "pl", props: { kind: "composition" } },
+      { type: "text", id: "w", props: { withheld: true } },
+    ] },
+  ] },
+} as IrDoc;
+
 describe("PX-4 derivation: the class is assigned by the source, never by the manifest", () => {
   const r = dashboardManifestToIr(everyKind as never);
   if (!r.ok) throw new Error("fixture must project: " + r.reason);
@@ -42,7 +58,18 @@ describe("PX-4 derivation: the class is assigned by the source, never by the man
       const c = sourceClassOf(n);
       if (n.type === "heading" || n.type === "text" || n.type === "badge" || n.type === "field-label") expect(c, n.type).toBe("proposed");
       else if (n.bind) expect(c === "authoritative" || c === "accepted", n.type).toBe(true);
-      else expect(c, n.type).toBeNull(); // root/section/receipt pointer/approval notice/...
+      else if (n.type === "root" || n.type === "section") expect(c, n.type).toBe("proposed");
+      else expect(c, n.type).toBeNull(); // the receipt pointer, a PCC constant: no class
+    }
+  });
+
+  it("a container is proposed; a PCC constant and withheld words carry no class; an unknown type is unconfirmed", () => {
+    for (const type of ["root", "section", "grid", "form-summary"]) {
+      expect(sourceClassOf({ type, id: "r" } as IrNode), type).toBe("proposed");
+    }
+    for (const n of containerDoc.root.children![0]!.children!.slice(2)) expect(sourceClassOf(n), n.type).toBeNull();
+    for (const type of ["nope", "constructor"]) {
+      expect(sourceClassOf({ type, id: "x" } as IrNode), type).toBe("unconfirmed");
     }
   });
 
@@ -128,6 +155,55 @@ describe("PX-4 renderer markers (fake DOM)", () => {
     return physicalTextElement({ textContent: "", className: "", children, attrs, setAttr(n: string, v: string) { attrs[n] = v; }, removeAttr(n: string) { delete attrs[n]; }, appendChild(c: RElement) { children.push(c); return c; } }) as FE; };
   const doc: RDocument = { createElement: () => mk() };
   const walk = (e: RElement, out: FE[] = []): FE[] => { out.push(e as FE); e.children.forEach((c) => walk(c, out)); return out; };
+
+  it("paint stamps every container proposed and leaves PCC constants and withheld words unstamped", () => {
+    const mount = mk(); renderIrDoc(doc, mount, containerDoc);
+    const els = walk(mount);
+    const containers = els.filter((e) => e.className.split(" ").some((c) => ["pcc-ir", "pcc-section", "pcc-grid", "pcc-form"].includes(c)));
+    expect(containers.length).toBe(4);
+    const prose = els.filter((e) => e.className.split(" ").some((c) => ["pcc-badge", "pcc-field"].includes(c)));
+    expect(prose.length).toBe(2);
+    for (const e of [...containers, ...prose]) {
+      expect(e.attrs["data-source"]).toBe("proposed");
+      expect(e.className.split(" ")).toContain("pcc-src-proposed");
+    }
+    const constants = els.filter((e) => e.className.split(" ").some((c) => ["pcc-receipt", "pcc-approval", "pcc-plan", "pcc-withheld"].includes(c)));
+    expect(constants.length).toBe(4);
+    for (const e of constants) {
+      expect(e.attrs["data-source"]).toBeUndefined();
+      expect(e.className.split(" ").some((c) => c.startsWith("pcc-src-"))).toBe(false);
+    }
+    const failed = mk();
+    expect(bootIrView(doc, failed, {}, validateIr)).toBe(false);
+    expect(walk(failed).some((e) => e.attrs["data-source"] !== undefined || e.className.includes("pcc-src-"))).toBe(false);
+  });
+
+  it("an unknown node type paints inert, unconfirmed, and says couldn't confirm the source", () => {
+    const ir = { ...containerDoc, root: { ...containerDoc.root, children: [
+      { ...containerDoc.root.children![0]!, children: [{ type: "nope", id: "x" } as IrNode] },
+    ] } };
+    const mount = mk(); renderIrDoc(doc, mount, ir);
+    const invalid = walk(mount).filter((e) => e.className.split(" ").includes("pcc-invalid"));
+    expect(invalid.length).toBe(1);
+    expect(invalid[0]!.className.split(" ")).toContain("pcc-src-unconfirmed");
+    expect(invalid[0]!.attrs["data-source"]).toBe("unconfirmed");
+    expect(invalid[0]!.textContent).toBe("couldn't confirm the source");
+    ir.root.children[0]!.children = [{ type: "constructor", id: "x" } as IrNode];
+    renderIrDoc(doc, mount, ir);
+    const inherited = walk(mount).filter((e) => e.className.split(" ").includes("pcc-invalid"));
+    expect(inherited.length).toBe(1);
+    expect(inherited[0]!.className.split(" ")).toContain("pcc-src-unconfirmed");
+    expect(inherited[0]!.attrs["data-source"]).toBe("unconfirmed");
+    expect(inherited[0]!.textContent).toBe("couldn't confirm the source");
+    for (const type of ["toString", "__proto__"]) {
+      ir.root.children[0]!.children = [{ type, id: "x" } as IrNode];
+      renderIrDoc(doc, mount, ir);
+      const more = walk(mount).filter((e) => e.className.split(" ").includes("pcc-invalid"));
+      expect(more.length, type).toBe(1);
+      expect(more[0]!.attrs["data-source"], type).toBe("unconfirmed");
+      expect(more[0]!.textContent, type).toBe("couldn't confirm the source");
+    }
+  });
 
   it("paint stamps data-source: prose 'proposed', bound 'authoritative'; nothing else", () => {
     const r = dashboardManifestToIr(everyKind as never); if (!r.ok) throw new Error(r.reason);
@@ -244,6 +320,16 @@ const iso = (ms: number) => new Date(ms).toISOString();
 const value = (s: ReturnType<typeof scene>) => (s.stat().querySelector(".pcc-value")!.textContent as string);
 
 describe("PX-4 end-to-end on the rebuilt pcc-ir-kit.js", () => {
+  it("the rebuilt kit stamps the root and the section proposed and leaves the receipt pointer unstamped", async () => {
+    const s = scene([], T0);
+    s.deliver({ csd: "pcc://artifacts/dashboard/v1", title: "R", sections: [{ heading: "Sec", windows: [{ kind: "note", text: "n" }, { kind: "receipt" }] }] });
+    await s.settle();
+    expect(s.q(".pcc-ir").getAttribute("data-source")).toBe("proposed");
+    expect(s.q(".pcc-section").getAttribute("data-source")).toBe("proposed");
+    expect(s.q(".pcc-receipt").getAttribute("data-source")).toBeNull();
+    s.close();
+  });
+
   it("prose is marked proposed; bound data authoritative with a dated source-read line", async () => {
     const s = scene([{ status: 200, json: { progress: 42, asOf: iso(T0 - 10_000) } }], T0);
     s.deliver(statManifest); await s.settle();
@@ -736,5 +822,34 @@ describe("astra r4 (#348 @3e615620): reproduced findings (verify before fix)", (
     expect(repainted.querySelectorAll(".pcc-row").length).toBe(1);
     expect(s.lineOf(repainted).textContent).toContain("source read");
     s.close();
+  });
+});
+
+describe("the IR view's waiting line", () => {
+  it("the IR view's waiting line is marked as a passing state", () => {
+    expect(buildMcpAppIrDashboardHtml()).toContain('<p class="pcc-invalid pcc-src-ephemeral" data-source="ephemeral">Waiting for the host to hand off a dashboard&hellip;</p>');
+  });
+});
+
+describe("the IR view's stylesheet", () => {
+  it("a container's proposed class is an attribute only: the view draws no agent-authored rule beside it", () => {
+    const html = buildMcpAppIrDashboardHtml();
+    const css = html.slice(html.indexOf("<style>") + 7, html.indexOf("</style>"));
+    const dom = new JSDOM("<!doctype html><html><head><style>" + css + '</style></head><body><main id="pcc-ir-root"></main></body></html>', { url: "https://capability.network/", runScripts: "outside-only" });
+    const w: any = dom.window;
+    w.parent.postMessage = () => {};
+    w.eval(KIT);
+    w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", id: 1, result: { protocolVersion: PROTOCOL } } }));
+    const manifest = { csd: "pcc://artifacts/dashboard/v1", title: "T", sections: [{ heading: "S", windows: [{ kind: "note", text: "n" }, { kind: "actions", actions: [{ id: "a", label: "Go" }] }, { kind: "form", schema: { type: "object", properties: { m: { title: "F", type: "string" } } } }] }] };
+    w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: { manifest: w.JSON.parse(w.JSON.stringify(manifest)) } } } }));
+    for (const sel of [".pcc-ir", ".pcc-section", ".pcc-grid", ".pcc-form"]) {
+      const e = w.document.querySelector(sel);
+      expect(e.getAttribute("data-source"), sel).toBe("proposed");
+      expect(w.getComputedStyle(e).borderLeftStyle, sel).not.toBe("dashed");
+      expect(w.getComputedStyle(e).paddingLeft, sel).not.toBe("6px");
+    }
+    expect(w.getComputedStyle(w.document.querySelector(".pcc-text")).borderLeftStyle).toBe("dashed");
+    expect(w.__PCC_UI_TEXT_VIOLATIONS__ ?? 0).toBe(0);
+    w.close();
   });
 });

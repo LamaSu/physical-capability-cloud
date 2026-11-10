@@ -13,12 +13,12 @@ const GA_MEASUREMENT_ID = import.meta.env.VITE_GA_MEASUREMENT_ID || "";
 const SENTRY_DSN = import.meta.env.VITE_SENTRY_DSN || "";
 const IS_PROD = import.meta.env.PROD;
 
-/** Request IDs remain in wallet-link API paths, and public polling can expose accountId; omit this endpoint family from network telemetry. */
+/** Request and link IDs remain in wallet API paths, and public polling can expose accountId; omit the /api/wallets family from network telemetry. */
 function isWalletLinkUrl(value: unknown): boolean {
   if (typeof value !== "string") return false;
   try {
     const path = new URL(value, "https://pcc.invalid").pathname;
-    return path === "/api/wallets/link-requests" || path.startsWith("/api/wallets/link-requests/");
+    return path === "/api/wallets" || path.startsWith("/api/wallets/");
   } catch {
     return false;
   }

@@ -91,7 +91,7 @@ it("T8 IR: every agentEl-produced role matches a rendered label selector from th
   const source = readFileSync(resolve(HERE, "mcp-app-view.ts"), "utf8");
   const irView = source.slice(source.indexOf("export function buildMcpAppIrDashboardHtml"));
   const css = irView.slice(irView.indexOf("<style>") + 7, irView.indexOf("</style>"));
-  expect(createHash("sha256").update(css.replace(/\r\n/g, "\n")).digest("hex")).toBe("c3cbec05c7ac649078bd865e58ff4d1bcd420ac1640cba75c46ef7e15decca9f");
+  expect(createHash("sha256").update(css.replace(/\r\n/g, "\n")).digest("hex")).toBe("26b36d308c6d018097f48d8510f7605c5e00c90ee52e5fe94425697e650e1d31");
   const kit = readFileSync(resolve(HERE, "../../../../apps/dashboard/public/ui-kit/v1/pcc-ir-kit.js"), "utf8");
   const renderer = readFileSync(resolve(HERE, "dashboard-ir-renderer.ts"), "utf8");
   expect([...renderer.matchAll(/\bagentEl\(/g)]).toHaveLength(2); // declaration and shared paintProse call

@@ -1282,7 +1282,6 @@ function ProblemSection() {
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
                   {[
                     ["Winning bid", "$300"],
-                    ["Oracle fee", "2.35%"],
                     ["Time to job", "20 minutes"],
                     ["Proof", "cryptographic"],
                   ].map(([label, val]) => (
@@ -1342,7 +1341,7 @@ const PHASES = [
     phase: "BID",
     title: "Auction pricing. No floor.",
     description:
-      "Operators set maximum prices. Agents bid downward. Queue depth and reputation drive discounts. No broker markup, no minimum contract, no setup fee.",
+      "Operators set maximum prices. Agents bid downward. Queue depth and reputation drive discounts. No broker markup, no minimum contract.",
     tech: "Reverse auction. Queue-depth discounting. Reputation-weighted scoring.",
   },
   {
@@ -1706,7 +1705,7 @@ const STEPS = [
   {
     step: "4",
     title: "Earn",
-    text: "Capabilities announced. Jobs arrive. Escrow releases to your wallet on verified evidence. Minimal protocol fee. Nothing else.",
+    text: "Capabilities announced. Jobs arrive. Escrow releases to your wallet on verified evidence.",
     badge: "ongoing",
   },
 ];
@@ -1901,7 +1900,7 @@ function ForOperatorsSection() {
                 }}
               >
                 Installs the node, auto-detects hardware, generates keys, and joins the network.
-                Your 207-tool agent package is served at{" "}
+                Your agent package is served at{" "}
                 <span style={{ fontFamily: mono, color: TEXT_MUTED }}>/agent-package.json</span>{" "}
                 automatically.
               </p>
@@ -2108,7 +2107,7 @@ function ForAgentsSection() {
                 marginBottom: "3rem",
               }}
             >
-              34 typed A2A intents. 207 agent tools. MCP server. Any agent framework, any chain.
+              34 typed A2A intents. 180+ agent tools. MCP server. Any agent framework, any chain.
             </p>
           </Reveal>
 
@@ -2237,7 +2236,7 @@ function ForAgentsSection() {
                 MCP Compatible
               </p>
               <p style={{ fontFamily: inter, fontSize: "0.85rem", color: TEXT_MUTED, margin: 0 }}>
-                207 structured tools. Connect any Claude, GPT-4, or custom agent via the MCP server
+                180+ structured tools. Connect any Claude, GPT-4, or custom agent via the MCP server
                 — no custom integration required.
               </p>
             </div>

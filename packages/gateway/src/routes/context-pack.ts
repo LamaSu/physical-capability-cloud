@@ -46,10 +46,6 @@ All endpoints are relative to the base URL above. Most return JSON.
 | GET | /api/capabilities | List all registered capability instances |
 | GET | /api/capabilities/types | List capability type identifiers |
 | GET | /api/capabilities/templates | List capability templates with full details |
-| GET | /api/marketplace/classes | Browse marketplace capability classes |
-| GET | /api/marketplace/classes/:id | Get marketplace class details |
-| GET | /api/marketplace/demand-supply | Demand/supply analytics |
-| POST | /api/marketplace/roi | Calculate ROI for a capability class |
 | GET | /api/kernels | List Shop Kernels (physical sites), filter by ?status= |
 | GET | /api/kernels/:kernelId | Get kernel details + capabilities + devices |
 | GET | /api/kernels/:kernelId/devices | List devices at a kernel |
@@ -151,13 +147,6 @@ All endpoints are relative to the base URL above. Most return JSON.
 | GET | /api/onboard/check/:code | Check onboarding code validity |
 | GET | /api/onboard/status | Onboarding pipeline status |
 
-### Device Discovery
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | /api/discover/scan | Scan local network for devices (mDNS/IPP) |
-| POST | /api/discover/generate-csd | Generate a CSD from a discovered device |
-| POST | /api/discover/onboard | Full pipeline: discover, generate CSD, register device, register CSD |
-
 ### CSD (Capability StructureDefinitions)
 | Method | Path | Description |
 |--------|------|-------------|
@@ -184,24 +173,6 @@ All endpoints are relative to the base URL above. Most return JSON.
 | POST | /api/batches/shared | Create a shared batch |
 | GET | /api/batches/shared/open | List open shared batches |
 | GET | /api/batches/shared/:batchId | Get shared batch details |
-
-### Protocols (Multi-Step Workflows)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /api/protocols/:id | Get a protocol template by id: its steps, transfers and parameters. NOTE: the gateway currently knows only its built-in example templates |
-| POST | /api/protocols | Create a protocol template draft. NOTE: the gateway currently stores no template; an id in its reply is not found by any protocol route |
-| PUT | /api/protocols/:id | Update a protocol template. NOTE: the gateway currently stores no change, and it knows only its built-in example templates |
-| POST | /api/protocols/:id/publish | Publish a protocol template. NOTE: the gateway currently stores no change, so nothing becomes visible to anyone |
-| POST | /api/protocols/:id/fork | Fork a protocol template. NOTE: the gateway currently stores no fork; no protocol route accepts the forkId in its reply |
-| GET | /api/protocols/:id/forks | List forks of a protocol template. NOTE: the gateway currently serves a fixed built-in example list of forks, not anyone's real fork |
-| GET | /api/protocols/:id/runs | List protocol runs. NOTE: the gateway currently serves only a fixed built-in example list of runs; runs from create_protocol_run are not stored, so they do not appear |
-| POST | /api/protocols/:id/runs | Request a run of a protocol template. NOTE: the gateway currently stores no run and sends nothing to any kernel: a runId in its reply is not found by get_protocol_run or any other run tool. It knows only its built-in example templates. |
-| POST | /api/protocols/:id/validate | Check a built-in example protocol template against a fixed list of capability types. NOTE: the gateway currently does not look at any kernel: kernelId is only echoed back, so the result says nothing about whether a real kernel can run the template. Ids from create_protocol are not found. |
-| GET | /api/protocol-runs/:runId | Get a protocol run by id. NOTE: the gateway currently knows only a fixed built-in example list of runs, whose step progress and evidence hashes are example values, not a record of real work. Run ids from create_protocol_run are not found. |
-| POST | /api/protocol-runs/:runId/start | Start a protocol run. NOTE: the gateway currently knows only a fixed built-in example run, which it already shows as running, so that run cannot be started; any other id, including a runId from create_protocol_run, is unknown to it. Nothing starts on any kernel. |
-| POST | /api/protocol-runs/:runId/pause | Pause a protocol run. NOTE: the gateway currently stores no change: for its built-in example run the reply says paused, but get_protocol_run still shows it running and resume_protocol_run refuses it. Any other id is unknown to it. Nothing is paused on any kernel. |
-| POST | /api/protocol-runs/:runId/resume | Resume a paused protocol run. NOTE: the gateway currently stores no change, so no run is ever paused: its built-in example run stays shown as running and is refused, and any other id is unknown to it. |
-| POST | /api/protocol-runs/:runId/cancel | Cancel a protocol run. NOTE: the gateway currently stores no change: for its built-in example run the reply says cancelled, but get_protocol_run still shows it running, and the same call answers the same way again. Any other id is unknown to it. Nothing stops on any kernel. |
 
 ### DePIN Rewards & Certificates
 | Method | Path | Description |
@@ -250,43 +221,9 @@ All endpoints are relative to the base URL above. Most return JSON.
 | POST | /api/faucet/usdc | Request testnet USDC |
 | GET | /api/faucet/usdc | Faucet status |
 
-### Spaces (Equipment Hosting)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /api/spaces | List available hosting spaces |
-| GET | /api/spaces/:id | Get space details |
-| POST | /api/spaces/match | Match equipment to spaces |
-
-### Logistics
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /api/logistics/providers | List logistics providers |
-| GET | /api/logistics/providers/:id | Get provider details |
-| GET | /api/logistics/shipments | List shipments |
-| GET | /api/logistics/shipments/:id | Get shipment details |
-| POST | /api/logistics/shipments/quote | Get shipping quote |
-| GET | /api/logistics/bookings | List bookings |
-| GET | /api/logistics/bookings/:id | Get booking details |
-| GET | /api/logistics/installations | List installations |
-| GET | /api/logistics/installations/:id | Get installation details |
-| GET | /api/logistics/timeline | Logistics timeline |
-| GET | /api/logistics/summary | Logistics summary dashboard |
-
-### Orchestrator (Multi-Instrument Workflows)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /api/orchestrator/graphs | List transfer graphs. NOTE: the gateway currently serves one fixed example lab graph, not a real kernel's |
-| GET | /api/orchestrator/graphs/:kernelId | Get a kernel's transfer graph. NOTE: the gateway currently knows only its one example lab kernel |
-| GET | /api/orchestrator/samples/:sampleId | Get sample routing info. NOTE: the gateway currently serves only fixed example samples |
-| GET | /api/orchestrator/claims | List resource claims. NOTE: the gateway currently serves only fixed example claims |
-| POST | /api/orchestrator/workflows | Request an orchestration workflow. NOTE: the gateway currently stores no workflow; GET /api/orchestrator/workflows/:workflowId never finds the id in its reply |
-| GET | /api/orchestrator/workflows/:workflowId | Get workflow details. NOTE: the gateway currently knows only its fixed example workflows |
-
 ### Agents & Negotiation
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | /api/agents/conversations | List agent conversations |
-| GET | /api/agents/conversations/:convId | Get conversation details |
 | GET | /api/agent/tools | List available agent tools |
 | POST | /api/negotiate/session | Start a negotiation session |
 
@@ -477,7 +414,7 @@ When your user needs to SEE something (charts, tables, status dashboards), you s
 - Service Status: ${baseUrl}/api/status/live
 - Agent Registration (ERC-8004): ${baseUrl}/.well-known/agent-registration.json
 - Agent Card (Google A2A): ${baseUrl}/.well-known/agent-card.json
-- Full Agent Package (56 MCP tools): ${baseUrl}/agent-package.json
+- Full Agent Package (180+ MCP tools): ${baseUrl}/agent-package.json
 - Documentation: ${baseUrl}/docs
 - Source: https://capability.network
 
@@ -529,10 +466,6 @@ function buildStructuredPack(baseUrl: string): {
           { method: "GET", path: "/api/capabilities", description: "List all registered capabilities" },
           { method: "GET", path: "/api/capabilities/types", description: "List capability type identifiers" },
           { method: "GET", path: "/api/capabilities/templates", description: "List capability templates" },
-          { method: "GET", path: "/api/marketplace/classes", description: "Browse marketplace classes" },
-          { method: "GET", path: "/api/marketplace/classes/:id", description: "Get marketplace class details" },
-          { method: "GET", path: "/api/marketplace/demand-supply", description: "Demand/supply analytics" },
-          { method: "POST", path: "/api/marketplace/roi", description: "Calculate ROI" },
           { method: "GET", path: "/api/kernels", description: "List Shop Kernels" },
           { method: "GET", path: "/api/kernels/:kernelId", description: "Get kernel details" },
           { method: "POST", path: "/api/kernels", description: "Create a new kernel" },

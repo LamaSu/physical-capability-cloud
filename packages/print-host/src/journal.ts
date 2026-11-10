@@ -18,13 +18,19 @@ export const SUBMIT_CODES = [
   "submit_rpc_unavailable", "submit_refused", "submit_caps_exceeded", "submit_unknown",
   "submit_unreconciled", "receipt_conflict", "receipt_mismatch",
   "receipt_kernel_mismatch", "receipt_invalid_package_body", "receipt_invalid_package_signatures", "receipt_invalid_settlement_unit",
+  "funding_source_manifest",
 ] as const;
 export type JournalCode = GwCode | "no_bundle" | "busy_retry_limit" | "host_shutdown" | typeof SUBMIT_CODES[number];
 export interface PackageHashes { packageDigest: string; evidenceBlockHash: string }
 export interface TransactionHash { transactionHash: string }
-export type JournalMetadata = PackageHashes | TransactionHash;
+export type ClaimFunding = { source: "manifest" } | {
+  source: "gateway"; fundedAt: number; operator: string; escrowAddress: string; chainId: number;
+  fundingBlockNumber: string; fundingBlockHash: string;
+};
+export interface ClaimMetadata { funding: ClaimFunding }
+export type JournalMetadata = PackageHashes | TransactionHash | ClaimMetadata;
 export type SignedMilestonePackage = Awaited<ReturnType<typeof signMilestonePackage>>;
-export interface JournalRecord extends Partial<PackageHashes & TransactionHash> { at: string; jobId: string; state: JournalState; code?: JournalCode }
+export interface JournalRecord extends Partial<PackageHashes & TransactionHash & ClaimMetadata> { at: string; jobId: string; state: JournalState; code?: JournalCode }
 
 export type JournalErrorCode =
   | "journal_bad_id" | "journal_bad_directory" | "journal_bad_file" | "journal_invalid"
@@ -72,12 +78,29 @@ const codes = new Set<string>([
 ]);
 const states = new Set<string>(JOURNAL_STATES);
 const interruptedStates = new Set<JournalState>(["claimed", "in_progress_reported", "printing"]);
-function validMetadata(state: unknown, value: Partial<PackageHashes & TransactionHash>): boolean {
+function validClaimFunding(value: unknown): value is ClaimFunding {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const funding = value as Record<string, unknown>;
+  const keys = Object.keys(funding).sort().join(",");
+  if (funding.source === "manifest") return keys === "source";
+  return funding.source === "gateway"
+    && keys === "chainId,escrowAddress,fundedAt,fundingBlockHash,fundingBlockNumber,operator,source"
+    && Number.isSafeInteger(funding.fundedAt) && (funding.fundedAt as number) >= 1_600_000_000 && (funding.fundedAt as number) < 2 ** 32
+    && typeof funding.operator === "string" && /^0x[0-9a-f]{40}$/.test(funding.operator)
+    && typeof funding.escrowAddress === "string" && /^0x[0-9a-f]{40}$/.test(funding.escrowAddress)
+    && Number.isSafeInteger(funding.chainId) && (funding.chainId as number) > 0
+    && typeof funding.fundingBlockNumber === "string" && /^(0|[1-9][0-9]{0,19})$/.test(funding.fundingBlockNumber)
+    && BigInt(funding.fundingBlockNumber) <= 2n ** 64n - 1n
+    && typeof funding.fundingBlockHash === "string" && /^0x[0-9a-f]{64}$/.test(funding.fundingBlockHash);
+}
+
+function validMetadata(state: unknown, value: Partial<PackageHashes & TransactionHash & ClaimMetadata>): boolean {
   const valid = (word: unknown) => typeof word === "string" && /^0x[0-9a-f]{64}$/.test(word);
   const packageValid = state === "package_built" ? valid(value.packageDigest) && valid(value.evidenceBlockHash)
     : !Object.hasOwn(value, "packageDigest") && !Object.hasOwn(value, "evidenceBlockHash");
   return packageValid && (!Object.hasOwn(value, "transactionHash")
-    || (state === "submit_attempted" && valid(value.transactionHash)));
+    || (state === "submit_attempted" && valid(value.transactionHash)))
+    && (!Object.hasOwn(value, "funding") || (state === "claimed" && validClaimFunding(value.funding)));
 }
 
 function isMissing(error: unknown): boolean {
@@ -258,7 +281,7 @@ export function createJobJournal(dataDir: string, clock: () => number = Date.now
         try { record = JSON.parse(line); } catch { throw new JournalError("journal_invalid"); }
         if (typeof record !== "object" || record === null || Array.isArray(record)) throw new JournalError("journal_invalid");
         const value = record as Record<string, unknown>;
-        if (Object.keys(value).some((key) => !["at", "jobId", "state", "code", "packageDigest", "evidenceBlockHash", "transactionHash"].includes(key))
+        if (Object.keys(value).some((key) => !["at", "jobId", "state", "code", "packageDigest", "evidenceBlockHash", "transactionHash", "funding"].includes(key))
           || value.jobId !== jobId || typeof value.at !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value.at)
           || !Number.isFinite(Date.parse(value.at)) || typeof value.state !== "string" || !states.has(value.state)
           || (Object.hasOwn(value, "code") && (typeof value.code !== "string" || !codes.has(value.code)))
@@ -272,13 +295,27 @@ export function createJobJournal(dataDir: string, clock: () => number = Date.now
 
   async function appendRaw(jobId: string, state: JournalState, code?: JournalCode, metadata?: JournalMetadata): Promise<void> {
     // Snapshot before validation so an accessor or concurrent caller cannot
-    // substitute non-hash text between the check and JSON serialization.
-    const publicHashes: Partial<PackageHashes & TransactionHash> = {};
+    // substitute unvalidated values between the check and JSON serialization.
+    const publicHashes: Partial<PackageHashes & TransactionHash & ClaimMetadata> = {};
     if (metadata !== undefined) {
-      for (const key of Object.keys(metadata)) {
-        if (!["packageDigest", "evidenceBlockHash", "transactionHash"].includes(key)) throw new JournalError("journal_invalid");
-        publicHashes[key as keyof typeof publicHashes] = (metadata as unknown as Record<string, string>)[key];
-      }
+      try {
+        if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) throw new JournalError("journal_invalid");
+        for (const key of Object.keys(metadata)) {
+          if (!["packageDigest", "evidenceBlockHash", "transactionHash", "funding"].includes(key)) throw new JournalError("journal_invalid");
+          const value = (metadata as unknown as Record<string, unknown>)[key];
+          if (key === "funding") {
+            if (typeof value !== "object" || value === null || Array.isArray(value)) throw new JournalError("journal_invalid");
+            const funding: Record<string, unknown> = {};
+            for (const field of Object.keys(value)) {
+              if (!["source", "fundedAt", "operator", "escrowAddress", "chainId", "fundingBlockNumber", "fundingBlockHash"].includes(field)) throw new JournalError("journal_invalid");
+              funding[field] = (value as Record<string, unknown>)[field];
+            }
+            publicHashes.funding = funding as ClaimFunding;
+          } else {
+            publicHashes[key as keyof (PackageHashes & TransactionHash)] = value as string;
+          }
+        }
+      } catch { throw new JournalError("journal_invalid"); }
     }
     if (!states.has(state) || (code !== undefined && !codes.has(code)) || !validMetadata(state, publicHashes)) throw new JournalError("journal_invalid");
     const at = new Date(clock()).toISOString();

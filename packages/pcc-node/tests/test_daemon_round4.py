@@ -64,7 +64,9 @@ def test_start_announces_no_capabilities(tmp_path):
          mock.patch("pcc_node.cli.register_signing_key", return_value=(200, {})), \
          mock.patch("pcc_node.cli.announce_capabilities", create=True) as announce, \
          mock.patch("pcc_node.register.announce_capabilities") as announce_module, \
-         mock.patch("pcc_node.cli.run_daemon"):
+         mock.patch("pcc_node.cli.run_daemon",
+                    # a daemon that comes up: the banner is printed only then (ChatGPT r3 F1)
+                    side_effect=lambda config, on_running=None: on_running()):
         result = CliRunner().invoke(main, ["start", "-c", str(tmp_path / "node-config.json"), "--api-key", "k",
                                            "--pcc-base", "https://gw.example.test"])
     assert result.exit_code == 0, result.output

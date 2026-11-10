@@ -316,6 +316,19 @@ describe("MCP Apps — public share view (getPublicArtifactForRender)", () => {
     expect(html).toContain("KIT_SOURCE"); // kit inlined (boots without handoff)
   });
 
+  it("the saved-dashboard render and the static kit shell mark their status line ephemeral", async () => {
+    const html = renderSavedDashboardHtml(SEEDED_SLUG);
+    expect.soft(html).toContain('<p id="pcc-kit-status" class="pcc-src-ephemeral" data-source="ephemeral">Loading the PCC dashboard&hellip;</p>');
+    expect.soft(html).not.toContain('<p id="pcc-kit-status">');
+    expect.soft(html.match(/data-source=/g)).toHaveLength(1);
+    expect.soft(html.match(/id="pcc-kit-status"/g)).toHaveLength(1);
+    const shell = (await import("node:fs")).readFileSync(new URL("../../../../apps/dashboard/public/ui-kit/v1/shell.html", import.meta.url), "utf8");
+    expect.soft(shell).toContain('<p id="pcc-kit-status" class="pcc-src-ephemeral" data-source="ephemeral">Loading the PCC dashboard kit&hellip;</p>');
+    expect.soft(shell).not.toContain('<p id="pcc-kit-status">');
+    expect.soft(shell.match(/data-source=/g)).toHaveLength(1);
+    expect.soft(shell.match(/id="pcc-kit-status"/g)).toHaveLength(1);
+  });
+
   it("serves an unlisted artifact by slug but never a private one", () => {
     expect(renderSavedDashboardHtml("unlisted-dash-7777")).toContain("Unlisted");
     expect(renderSavedDashboardHtml("private-dash-9999")).toContain("Dashboard not found");

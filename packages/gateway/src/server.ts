@@ -26,6 +26,7 @@ import { capabilityRoutes } from "./routes/capabilities.js";
 import { graphSearchRoutes } from "./routes/graph-search.js";
 import { buildRoutes } from "./routes/build.js";
 import { jobRoutes } from "./routes/jobs.js";
+import { jobFundingRoutes } from "./routes/job-funding.js";
 import { kernelRoutes } from "./routes/kernels.js";
 import { escrowRoutes } from "./routes/escrow.js";
 import { settlementReadRoutes } from "./routes/settlement-read.js";
@@ -40,6 +41,7 @@ import { startRoutes } from "./routes/start.js";
 import { marketplaceRoutes } from "./routes/marketplace.js";
 import { spaceRoutes } from "./routes/spaces.js";
 import { operatorRoutes } from "./routes/operator.js";
+import { kernelPayoutRoutes } from "./routes/kernel-payout.js";
 import { operatorWorkRoutes } from "./routes/operator-work.js";
 import { productHomeRoutes } from "./routes/product-home.js";
 import { operatorsPublicRoutes } from "./routes/operators-public.js";
@@ -49,6 +51,7 @@ import { capabilityAvailabilityRoutes } from "./routes/capability-availability.j
 import { captureRoutes } from "./routes/capture.js";
 import { toolCatalogRoutes } from "./routes/tool-catalog.js";
 import { kitRoutes } from "./routes/kits.js";
+import { operatorBindingRoutes } from "./routes/operator-binding.js";
 import { composeRoutes } from "./routes/compose.js";
 import { agentPlanRoutes } from "./routes/agent-plans.js";
 import { registrySnapshotRoutes } from "./routes/registry-snapshot.js";
@@ -82,6 +85,7 @@ import { wellKnownAeoRoutes } from "./routes/well-known-aeo.js";
 import { appsHttpMcpRoutes, httpMcpRoutes } from "./mcp/http-mcp-server.js";
 import { docsHttpMcpRoutes } from "./mcp/docs-mcp-server.js";
 import { jwksRoutes } from "./routes/jwks.js";
+import { settlementRecheckKitRoutes } from "./routes/settlement-recheck-kit.js";
 import { initSigningKey } from "./signing-key.js";
 import { feedbackRoutes } from "./routes/feedback.js";
 import { identifyDeviceRoutes } from "./routes/identify-device.js";
@@ -207,7 +211,7 @@ export async function createGateway(port = 3200) {
   app.log.info(isRelayGateOpen()
     ? "[relay] The device relay is open."
     : "[relay] The device relay is admin-only.");
-  const dispatch = localJobDispatchDecision(kernelService.kernelId, kernelService.kernelId, kernelService.hasExplicitConfig);
+  const dispatch = localJobDispatchDecision(kernelService.kernelId, kernelService.kernelId, kernelService.hasExplicitConfig, undefined, kernelService.usesTestSigner);
   app.log.info({ queueOnly: jobSubmitQueueOnly(), localDispatch: dispatch.ok, reason: dispatch.ok ? undefined : dispatch.reason },
     "[jobs] Effective local dispatch policy");
   logBootPosture(app.log);
@@ -368,7 +372,7 @@ export async function createGateway(port = 3200) {
         version: process.env.npm_package_version ?? "0.1.0",
         description:
           "Agent-native API for discovering and invoking physical capabilities. " +
-          "See https://capability.network/agent-package.json for the 254-tool agent package.",
+          "See https://capability.network/agent-package.json for the agent package.",
       },
       servers: [{ url: gatewayUrlForOpenApi }],
       components: {
@@ -487,6 +491,7 @@ export async function createGateway(port = 3200) {
   // A2A v1.0 JWKS endpoint (public, before auth, serves the verification
   // key for the agent card's JWS signature)
   await app.register(jwksRoutes);
+  await app.register(settlementRecheckKitRoutes);
   // Agent context pack (public, before auth — this is the primary product)
   await app.register(contextPackRoutes);
   // Bug reports / feedback (public, before auth)
@@ -674,6 +679,7 @@ export async function createGateway(port = 3200) {
   await app.register(graphSearchRoutes);
   await app.register(buildRoutes);
   await app.register(jobRoutes);
+  await app.register(jobFundingRoutes);
   await app.register(kernelRoutes);
   await app.register(escrowRoutes);
   // Settlement READ routes (#573) — receipt/lifecycle/provenance to gen-UI
@@ -699,6 +705,7 @@ export async function createGateway(port = 3200) {
   await app.register(toolCatalogRoutes);
   // Capability Kit registry (kits K1 slice 1): write-once, verified, durable-volume backed.
   await app.register(kitRoutes);
+  await app.register(operatorBindingRoutes);
   await app.register(composeRoutes);
   // R9: externally authored plans. Validate is a live read; accept is money-path (the scope checker
   // default-denies it) and answers 503 until the R13 store, #349, the evidence map, the fee policy and
@@ -709,6 +716,7 @@ export async function createGateway(port = 3200) {
   await app.register(registrySnapshotRoutes);
   await app.register(spaceRoutes);
   await app.register(operatorRoutes);
+  await app.register(kernelPayoutRoutes);
   await app.register(walletsRoutes);
   await app.register(walletFaucetRoutes);
   await app.register(operatorWorkRoutes);
@@ -1123,6 +1131,23 @@ export async function createGateway(port = 3200) {
         }
       } catch (err) {
         console.warn("[gateway] settlement-keeper start failed:", err);
+      }
+
+      try {
+        const { startBuyerFundingSweep } = await import(
+          "./services/buyer-funding-sweep.js"
+        );
+        const handle = startBuyerFundingSweep({
+          info: (m) => app.log.info(`[buyer-funding-sweep] ${m}`),
+          warn: (m) => app.log.warn(`[buyer-funding-sweep] ${m}`),
+        });
+        if (handle.started) {
+          console.log(
+            `[gateway] buyer-funding-sweep started (interval=${handle.intervalSec}s)`,
+          );
+        }
+      } catch {
+        console.warn("[gateway] buyer-funding-sweep start failed");
       }
 
       const address = await app.listen({ port, host });

@@ -168,7 +168,7 @@ describe("completion attests at the job's real assurance tier (finding #3 / A-3)
   }
 
   function complete(jobId: string) {
-    return app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} });
+    return app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: asAdmin, payload: {} });
   }
 
   it("stores the evidence bundle at the negotiated tier 2 (not the hardcoded 0)", async () => {

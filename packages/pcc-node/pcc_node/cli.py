@@ -20,7 +20,7 @@ import click
 from . import __version__
 from .config import ConfigFileError, NodeConfig, generate_config, save_config, load_config, load_config_data
 from .crypto import CompromisedKeyError, CryptoUnavailableError, KeyFileError, load_or_create_keys
-from .daemon import run_daemon, is_running, read_state
+from .daemon import FirstHeartbeatError, run_daemon, is_running, read_state
 from .detect import detect_all
 from .discovery import (
     discover_network,
@@ -509,14 +509,34 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
     saved_path = save_config(config, config_file)
     click.echo(f"  Config saved to {saved_path}")
 
-    # Start daemon
-    click.echo("")
-    click.echo("Node running. It keeps the kernel online and does not take jobs: devices run only through the operating agent's typed operations.")
-    click.echo(f"  Dashboard: {config.pcc_base}/operator")
-    click.echo("  Press Ctrl+C to stop.")
-    click.echo("")
+    # Start daemon. It registers the kernel again; "Node running" is printed only once that
+    # registration succeeded and the daemon is up, and a refusal there ends `start` with exit 1
+    # (ChatGPT r3 finding 1): a launcher must not read a node that never ran as started.
+    def _say_running():
+        click.echo("")
+        click.echo("Node running. It keeps the kernel online and does not take jobs: devices run only through the operating agent's typed operations.")
+        click.echo(f"  Dashboard: {config.pcc_base}/operator")
+        click.echo("  Press Ctrl+C to stop.")
+        click.echo("")
 
-    run_daemon(config)
+    try:
+        run_daemon(config, on_running=_say_running)
+    except RegistrationError as exc:
+        click.echo(
+            f"Registration failed (HTTP {exc.status}) at {config.pcc_base}: {exc.data}. "
+            "The first registration succeeded, but the daemon's own registration did not, so the daemon "
+            "did not start and the node is not running; check the API key and gateway, then run pcc-node start again.",
+            err=True,
+        )
+        sys.exit(1)
+    except FirstHeartbeatError:
+        click.echo(
+            f"The kernel registered at {config.pcc_base}, but its first heartbeat was not confirmed, "
+            "so the daemon did not start and the node is not running; check the API key and gateway, "
+            "then run pcc-node start again.",
+            err=True,
+        )
+        sys.exit(1)
 
 
 @main.command("discover")

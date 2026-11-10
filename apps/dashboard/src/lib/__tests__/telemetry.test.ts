@@ -40,6 +40,10 @@ const WALLET_LINK_URLS = [
   "https://gateway.example/api/wallets/link-requests/req_private/approve",
   "/api/wallets/link-requests/req_private",
   "https://gateway.example/api/wallets/link-requests/req_private",
+  "/api/wallets",
+  "https://gateway.example/api/wallets",
+  "/api/wallets/wl_private/revoke",
+  "https://gateway.example/api/wallets/wl_private/revoke",
 ];
 
 describe("wallet link codes and request IDs stay out of network telemetry", () => {
@@ -117,5 +121,27 @@ describe("telemetry never records the API key (N50)", () => {
     expect(options.maskAllInputs).not.toBe(false);
     expect(options).not.toHaveProperty("unmask");
     expect(options).not.toHaveProperty("networkDetailAllowUrls");
+  });
+});
+
+describe("T13: wallet API telemetry matches only the /api/wallets family", () => {
+  it("keeps near misses in PostHog, Sentry spans and breadcrumbs, and replay", async () => {
+    await initWith({ VITE_POSTHOG_KEY: "phc_test", VITE_SENTRY_DSN: "https://public@o0.ingest.sentry.io/0" });
+    const config = posthogInit.mock.calls[0]![1] as { session_recording: Record<string, unknown> };
+    const mask = config.session_recording.maskCapturedNetworkRequestFn as (request: { name: string }) => unknown;
+    const shouldTrace = browserTracingIntegration.mock.calls[0]![0]!.shouldCreateSpanForRequest as (url: string) => boolean;
+    const beforeBreadcrumb = (sentryInit.mock.calls[0]![0] as Record<string, unknown>).beforeBreadcrumb as (event: unknown) => unknown;
+    const beforeEvent = replayIntegration.mock.calls[0]![0]!.beforeAddRecordingEvent as (event: unknown) => unknown;
+    for (const url of ["/api/walletsx", "/api/wallet/balance", "https://gateway.example/api/walletsx"]) {
+      const request = { name: url };
+      const breadcrumb = { category: "fetch", data: { url } };
+      const span = { type: 5, timestamp: 1, data: { tag: "performanceSpan", payload: { description: url } } };
+      const replayBreadcrumb = { type: 5, timestamp: 1, data: { tag: "breadcrumb", payload: breadcrumb } };
+      expect(mask(request)).toBe(request);
+      expect(shouldTrace(url)).toBe(true);
+      expect(beforeBreadcrumb(breadcrumb)).toBe(breadcrumb);
+      expect(beforeEvent(span)).toBe(span);
+      expect(beforeEvent(replayBreadcrumb)).toBe(replayBreadcrumb);
+    }
   });
 });

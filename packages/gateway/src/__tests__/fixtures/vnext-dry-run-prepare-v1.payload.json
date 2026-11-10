@@ -1,0 +1,128 @@
+{
+  "schema": "pcc.vnext.buyer-funding.prepare.v1",
+  "chainId": "84532",
+  "factory": "0xa31938e1a57e569e1d34f55e7f7a92be1467c6d7",
+  "escrow": "0xb01819588fb711f0b25d32803fc8cd25d6dfc7e3",
+  "usdc": "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+  "totalGross": "1000000",
+  "expiry": "1800001200",
+  "typedData": {
+    "domain": {
+      "name": "VNextSettlementEscrow",
+      "version": "1",
+      "chainId": "84532",
+      "verifyingContract": "0xb01819588fb711f0b25d32803fc8cd25d6dfc7e3"
+    },
+    "types": {
+      "JobPolicy": [
+        {
+          "name": "chainId",
+          "type": "uint256"
+        },
+        {
+          "name": "factory",
+          "type": "address"
+        },
+        {
+          "name": "implementation",
+          "type": "address"
+        },
+        {
+          "name": "escrow",
+          "type": "address"
+        },
+        {
+          "name": "policyVersion",
+          "type": "uint256"
+        },
+        {
+          "name": "payer",
+          "type": "address"
+        },
+        {
+          "name": "operator",
+          "type": "address"
+        },
+        {
+          "name": "jobIdHash",
+          "type": "bytes32"
+        },
+        {
+          "name": "termsHash",
+          "type": "bytes32"
+        },
+        {
+          "name": "policyNonce",
+          "type": "uint256"
+        },
+        {
+          "name": "prePolicyRoot",
+          "type": "bytes32"
+        },
+        {
+          "name": "unitsRoot",
+          "type": "bytes32"
+        },
+        {
+          "name": "expiry",
+          "type": "uint256"
+        },
+        {
+          "name": "acceptedPolicyDigest",
+          "type": "bytes32"
+        }
+      ]
+    },
+    "primaryType": "JobPolicy",
+    "message": {
+      "chainId": "84532",
+      "factory": "0xa31938e1a57e569e1d34f55e7f7a92be1467c6d7",
+      "implementation": "0x0a6811ba19c56dcaa95c4337364cb09d7b3ccbec",
+      "escrow": "0xb01819588fb711f0b25d32803fc8cd25d6dfc7e3",
+      "policyVersion": "2",
+      "payer": "0xff581c2672baccf6e86a917be35773f1821975b1",
+      "operator": "0x5be15b9c13dc1a1e06c1bc4549213771da5d9262",
+      "jobIdHash": "0x5a8814cc75cd922c3bfe7a0b9d861434490e515a6cf662ae3a26470b44c38c7e",
+      "termsHash": "0x01e9683baa9d85d9ddae7bc9bed8b39e8c9eda644e7cc31499b2b418ebea5d30",
+      "policyNonce": "0",
+      "prePolicyRoot": "0x519930832b81a3a736cd4eed2bc04e75189f219ccc7a0ba6d3f2896c2d59459e",
+      "unitsRoot": "0x6e1fe33ee21841847849cb86ff58b480933eb42553a8d1fb2c83dd11b6d38274",
+      "expiry": "1800001200",
+      "acceptedPolicyDigest": "0x824e2aecb17e1b0c1d665de0a3453152aa7b656ffe423875e9888ffe0fb0c88d"
+    }
+  },
+  "approve": {
+    "token": "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+    "spender": "0xb01819588fb711f0b25d32803fc8cd25d6dfc7e3",
+    "amount": "1000000"
+  },
+  "fund": {
+    "configs": [
+      {
+        "milestoneIndex": "0",
+        "stepId": "0x3b0bbb6384031cb464c78d0f4a1b6ada3d16e2a4334b2e8b46ff7a54856a2cec",
+        "requiredTier": 1,
+        "requestedTier": 1,
+        "g": "1000000",
+        "f": "0",
+        "n": "1000000",
+        "feeBps": 0,
+        "feeRecipient": "0x0000000000000000000000000000000000000000",
+        "reclaimAt": "1800007200",
+        "compositionSchemaVersion": 0,
+        "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "payouts": [
+          {
+            "recipient": "0x5be15b9c13dc1a1e06c1bc4549213771da5d9262",
+            "amount": "1000000"
+          }
+        ]
+      }
+    ],
+    "acceptance": {
+      "expiry": "1800001200",
+      "payerSignature": "0x",
+      "operatorSignature": "0xb88c52c3c443c3874660bf7933c489faa67bdb7f6b6baa5b2cef3f1f649c9dde5566e24bd916cd838f09adaffa43c342c0fd9bbbf3ee88e81fba6375c98b9bfb1b"
+    }
+  }
+}

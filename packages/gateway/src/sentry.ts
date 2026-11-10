@@ -11,7 +11,7 @@
  */
 
 import * as Sentry from "@sentry/node";
-import { isWalletRequest } from "./services/telemetry-privacy.js";
+import { canonicalRequestPath, isWalletRequest } from "./services/telemetry-privacy.js";
 import { isOutboundSecretSentryEvent, isOutboundSecretUrl } from "./services/outbound-secrets.js";
 
 /** Remove only the wallet header and its Sentry HTTP span attribute. */
@@ -40,6 +40,16 @@ function withoutWalletHeader<T>(value: T, seen = new WeakMap<object, object>()):
   return output as T;
 }
 
+/** Beta signup requests carry a client's IP and user agent, so their events are dropped too. */
+function isBetaSignupRequest(rawUrl: string): boolean {
+  let path = rawUrl.replace(/^[A-Z]+\s+/, "");
+  if (/^https?:\/\//i.test(path)) {
+    try { path = new URL(path).pathname; } catch { return false; }
+  }
+  const canonical = canonicalRequestPath(path);
+  return canonical === "/api/beta-apply" || canonical === "/api/admin/beta-apply" || canonical.startsWith("/api/admin/beta-apply/");
+}
+
 /** Drop ceremony events before Sentry's transport receives request context. */
 export function walletSafeSentryEvent<T extends {
   request?: { url?: string; query_string?: unknown };
@@ -48,7 +58,7 @@ export function walletSafeSentryEvent<T extends {
 }>(event: T): T | null {
   if (isOutboundSecretSentryEvent(event)) return null;
   const urls = [event.request?.url, event.extra?.url, event.transaction];
-  return urls.some((url) => typeof url === "string" && isWalletRequest(url)) ? null : withoutWalletHeader(event);
+  return urls.some((url) => typeof url === "string" && (isWalletRequest(url) || isBetaSignupRequest(url))) ? null : withoutWalletHeader(event);
 }
 
 // OTel and Sentry integrations use different request-target attribute names.
@@ -87,6 +97,7 @@ export function initSentry(): void {
     // 100 % sample rate for the hackathon demo; reduce in production
     tracesSampleRate: 1.0,
     profilesSampleRate: 0.1,
+    integrations: [Sentry.httpIntegration({ maxIncomingRequestBodySize: "none" })],
     beforeSend: walletSafeSentryEvent,
     beforeSendTransaction: walletSafeSentryEvent,
     beforeBreadcrumb(breadcrumb) {
