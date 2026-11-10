@@ -163,7 +163,7 @@ export async function readFundedState(args: { publicClient: PublicClient; prepar
 }
 
 /** Read the wallet's current network immediately before each send, and bind viem's send-time check explicitly. */
-async function chainForSend(wallet: WalletClient, chainId: bigint): Promise<Chain> {
+export async function chainForSend(wallet: WalletClient, chainId: bigint): Promise<Chain> {
   let walletChain: number;
   try {
     walletChain = await wallet.getChainId();
@@ -197,7 +197,7 @@ function assertLocalTransaction(
   if (tx.value !== undefined && tx.value !== 0n) throw new Error("transaction value must be absent or 0n");
 }
 
-async function sendAndWait(
+export async function sendAndWait(
   wallet: WalletClient,
   publicClient: PublicClient,
   chain: Chain,

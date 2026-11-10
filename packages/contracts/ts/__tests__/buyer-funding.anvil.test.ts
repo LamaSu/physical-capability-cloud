@@ -493,4 +493,48 @@ describe.skipIf(!RUN)("buyer funding with @pcc/spec/funding against the real V-n
     expect((await approveAndFund({ prepared, wallet: wallet(buyer), publicClient: pub })).outcome).toBe("committed");
   }, 120_000);
 
+  it("A2 reclaim before the deadline refuses without spending a nonce or USDC", async () => {
+    const { reclaimUnits } = await import("@pcc/spec/funding");
+    const snapshot = await testClient.snapshot();
+    try {
+      const { compiled, payload } = await gatewayPrepare("reclaim");
+      const prepared = await prepare(payload, compiled, "reclaim");
+      expect((await approveAndFund({ prepared, wallet: wallet(buyer), publicClient: pub })).outcome).toBe("committed");
+      const nonce = await pub.getTransactionCount({ address: buyer.address, blockTag: "latest" });
+      const balance = await usdcBalance(buyer.address);
+      expect(await refusal(reclaimUnits({ wallet: wallet(buyer), publicClient: pub, chainId: 31337n,
+        escrow: compiled.escrow, unitIds: [compiled.unitIds[0]!], pins: pins() }))).toBe("NOT_RECLAIMABLE");
+      expect(await pub.getTransactionCount({ address: buyer.address, blockTag: "latest" })).toBe(nonce);
+      expect(await usdcBalance(buyer.address)).toBe(balance);
+    } finally {
+      // Leave the fresh "reclaim" label available to A1 even if both preparations share a timestamp.
+      await testClient.revert({ id: snapshot });
+    }
+  }, 120_000);
+
+  it("A1 both expired units refund exactly sum G and cannot be reclaimed again", async () => {
+    const { reclaimUnits, readUnitStates } = await import("@pcc/spec/funding");
+    const { compiled, payload } = await gatewayPrepare("reclaim");
+    const prepared = await prepare(payload, compiled, "reclaim");
+    expect((await approveAndFund({ prepared, wallet: wallet(buyer), publicClient: pub })).outcome).toBe("committed");
+    const buyerBefore = await usdcBalance(buyer.address);
+    const escrowBefore = await usdcBalance(compiled.escrow);
+    await testClient.increaseTime({ seconds: Number(45n * DAY + 1n) });
+    await testClient.mine({ blocks: 1 });
+    const args = { wallet: wallet(buyer), publicClient: pub, chainId: 31337n,
+      escrow: compiled.escrow, unitIds: compiled.unitIds, pins: pins() };
+    const result = await reclaimUnits(args);
+    expect(result.results).toHaveLength(2);
+    for (const unit of result.results) expect(unit).toMatchObject({ outcome: "reclaimed", refunded: true });
+    expect((await usdcBalance(buyer.address)) - buyerBefore).toBe(compiled.totalGross);
+    expect(escrowBefore - (await usdcBalance(compiled.escrow))).toBe(compiled.totalGross);
+    const read = await readUnitStates({ publicClient: pub, chainId: 31337n, escrow: compiled.escrow, pins: pins() });
+    expect(read.kind).toBe("read");
+    if (read.kind !== "read") throw new Error(read.detail);
+    expect(read.units.map((unit) => unit.stateName)).toEqual(["SETTLED_REFUNDED", "SETTLED_REFUNDED"]);
+    const nonce = await pub.getTransactionCount({ address: buyer.address, blockTag: "latest" });
+    expect(await refusal(reclaimUnits({ ...args, unitIds: [compiled.unitIds[0]!] }))).toBe("UNIT_NOT_ACTIVE");
+    expect(await pub.getTransactionCount({ address: buyer.address, blockTag: "latest" })).toBe(nonce);
+  }, 120_000);
+
 });
