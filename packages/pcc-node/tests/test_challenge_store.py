@@ -96,6 +96,7 @@ def test_a_store_that_cannot_be_written_is_skipped(state, tmp_path, monkeypatch,
 
 
 @pytest.mark.parametrize("cell", ["not-json", "wrong-keys", "oversize", "readable-by-others", "symlink",
+                                  "readable-by-group", "readable-by-others-only",
                                   "marker-readable-by-others", "marker-symlink"])
 def test_an_unsafe_or_malformed_record_is_ignored(state, tmp_path, cell):
     store, clock, bound = state
@@ -116,6 +117,10 @@ def test_an_unsafe_or_malformed_record_is_ignored(state, tmp_path, cell):
             stream.write(" " * 16385)
     elif cell.endswith("readable-by-others"):
         os.chmod(path, 0o644)
+    elif cell == "readable-by-group":
+        os.chmod(path, 0o640)
+    elif cell == "readable-by-others-only":
+        os.chmod(path, 0o604)
     else:
         target = tmp_path / "record.json"
         os.replace(path, target)
@@ -135,3 +140,9 @@ def test_the_hold_ignores_the_kernel_id_but_not_the_gateway_key_or_api_key(state
         "gateway": BASE + ":443", "kernel": "kernel-b", "key": OTHER_PAIR[0], "api-key": "another-key"}[field]
     assert store.hold_remaining(bound) == store.HOLD_SECONDS - 100
     assert store.hold_remaining(store.binding(*inputs)) == (store.HOLD_SECONDS - 100 if field == "kernel" else 0.0)
+
+
+def test_a_message_nested_too_deeply_to_read_gets_the_fallback_reuse_window(state):
+    store, clock, bound = state
+    assert store._reuse_seconds({"message": base64.b64encode(
+        b"PCC-KERNEL-REG-V1\n" + b"[" * 100000 + b"]" * 100000).decode("ascii")}) == 480

@@ -1,4 +1,4 @@
-"""Written, not run here: the gateway's registration challenge over loopback HTTP."""
+"""The gateway's registration challenge over loopback HTTP."""
 
 import json
 import threading

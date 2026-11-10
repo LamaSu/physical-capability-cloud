@@ -1,6 +1,7 @@
 """The gateway's registration challenge, including restart state."""
 
 import base64
+import errno
 import hashlib
 import http.client
 import json
@@ -772,4 +773,98 @@ def test_a_malformed_challenge_answer_is_refused_without_signing(gateway, body):
     with pytest.raises(RegistrationChallengeError) as error:
         request_registration_challenge(BASE, API_KEY, "k", PAIR[0])
     assert error.value.data["error"] == "registration_challenge_response"
+    assert gateway.paths() == [CHALLENGES]
+
+
+def test_a_save_whose_directory_sync_fails_still_removes_the_challenge_before_it_is_sent(gateway, monkeypatch):
+    from pcc_node import challenge_store
+    real_sync = challenge_store._fsync_dir
+    faults = 0
+
+    def sync(directory):
+        nonlocal faults
+        if not faults and os.path.exists(challenge_store.store_path()):
+            faults += 1
+            raise OSError(errno.EIO, "Input/output error")
+        return real_sync(directory)
+
+    monkeypatch.setattr(challenge_store, "_fsync_dir", sync)
+    signed(gateway)
+    assert not os.path.exists(challenge_store.store_path())
+    signed(gateway)
+    assert faults == 1
+    assert gateway.paths() == [CHALLENGES, KERNELS, CHALLENGES, KERNELS]
+    proofs = [body["registrationProof"] for body in gateway.posts()]
+    assert proofs[0]["challengeId"] != proofs[1]["challengeId"]
+
+
+def test_a_challenge_message_nested_too_deeply_to_parse_is_refused_unsigned(gateway):
+    from pcc_node.register import RegistrationChallengeError
+    gateway.mutate_message = lambda raw: b"PCC-KERNEL-REG-V1\n" + b"[" * 1527 + b"]" * 1527
+    with pytest.raises(RegistrationChallengeError) as error:
+        signed(gateway)
+    assert error.value.data["error"] == "registration_challenge_invalid"
+    assert gateway.paths() == [CHALLENGES]
+
+
+def test_a_challenge_field_nested_too_deeply_to_check_is_refused_unsigned(gateway):
+    from pcc_node.register import RegistrationChallengeError
+    gateway.mutate_message = lambda raw: raw.replace(b'"env":"test"', b'"env":' + b"[" * 1300 + b"]" * 1300)
+    with pytest.raises(RegistrationChallengeError) as error:
+        signed(gateway)
+    assert error.value.data["error"] == "registration_challenge_invalid"
+    assert gateway.paths() == [CHALLENGES]
+
+
+def test_the_challenge_removal_is_synced_before_the_proof_is_sent(gateway, monkeypatch):
+    from pcc_node import challenge_store, register
+    events = []
+    real_sync, real_unlink, request = challenge_store._fsync_dir, challenge_store.os.unlink, register.pcc_request
+
+    def sync(directory):
+        events.append("sync")
+        return real_sync(directory)
+
+    def unlink(path, *args, **kwargs):
+        events.append(os.path.basename(path))
+        return real_unlink(path, *args, **kwargs)
+
+    def send(method, path, *args, **kwargs):
+        events.append(method + " " + path)
+        return request(method, path, *args, **kwargs)
+
+    monkeypatch.setattr(challenge_store, "_fsync_dir", sync)
+    monkeypatch.setattr(challenge_store.os, "unlink", unlink)
+    monkeypatch.setattr(register, "pcc_request", send)
+    signed(gateway)
+    removed = events.index("registration-challenge.json")
+    sent = events.index("POST " + KERNELS)
+    assert "sync" in events[removed + 1:sent]
+
+
+def test_a_challenge_removal_that_cannot_be_synced_stops_before_the_proof_is_sent(gateway, monkeypatch):
+    from pcc_node import challenge_store
+    from pcc_node.register import RegistrationChallengeError
+    real_sync, real_unlink = challenge_store._fsync_dir, challenge_store.os.unlink
+    removed, faults = False, 0
+
+    def sync(directory):
+        nonlocal faults
+        if removed and not faults:
+            faults += 1
+            raise OSError(errno.EIO, "Input/output error")
+        return real_sync(directory)
+
+    def unlink(path, *args, **kwargs):
+        nonlocal removed
+        result = real_unlink(path, *args, **kwargs)
+        if os.path.basename(path) == "registration-challenge.json":
+            removed = True
+        return result
+
+    monkeypatch.setattr(challenge_store, "_fsync_dir", sync)
+    monkeypatch.setattr(challenge_store.os, "unlink", unlink)
+    with pytest.raises(RegistrationChallengeError) as error:
+        signed(gateway)
+    assert error.value.data["error"] == "registration_challenge_store"
     assert gateway.paths() == [CHALLENGES]

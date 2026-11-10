@@ -72,7 +72,7 @@ def _reuse_seconds(challenge):
             raise ValueError("unknown message format")
         fields = json.loads(raw[len(prefix):].decode("utf-8"))
         lifetime = _timestamp(fields["expiresAt"]) - _timestamp(fields["issuedAt"])
-    except (ValueError, TypeError, KeyError, OverflowError, OSError):
+    except (ValueError, TypeError, KeyError, OverflowError, OSError, RecursionError):
         lifetime = 600
     return min(480, lifetime - 120)
 
@@ -110,7 +110,10 @@ def _write(path_function, record):
             os.fsync(stream.fileno())
         os.replace(temporary, path)
         temporary = None
-        _fsync_dir(directory)
+        try:
+            _fsync_dir(directory)
+        except OSError as error:
+            log.warning("Saved registration state, but cannot sync its directory (%s).", error)
         return True
     except Exception as error:
         log.warning("Cannot save registration state (%s).", error)
@@ -195,10 +198,12 @@ def load(bound):
 
 
 def remove():
+    path = store_path()
     try:
-        os.unlink(store_path())
+        os.unlink(path)
     except FileNotFoundError:
-        pass
+        return
+    _fsync_dir(os.path.dirname(path))
 
 
 def save_hold(bound):

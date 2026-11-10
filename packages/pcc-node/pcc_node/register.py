@@ -278,13 +278,17 @@ def _validated_registration_bytes(challenge, kernel_id, public_key_hex, host):
         raise invalid("not UTF-8") from None
     try:
         fields = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise invalid("not a JSON object") from None
     if not isinstance(fields, dict):
         raise invalid("not a JSON object")
     if set(fields) != {"challengeId", "nonce", "kernelId", "env", "chainId", "domain", "issuedAt", "expiresAt", "publicKey"}:
         raise invalid("unexpected fields")
-    if canonicalize(fields) != text:
+    try:
+        canonical = canonicalize(fields)
+    except RecursionError:
+        raise invalid("not in canonical form") from None
+    if canonical != text:
         raise invalid("not in canonical form")
     if fields["kernelId"] != kernel_id:
         raise invalid("for another kernel")
@@ -293,7 +297,7 @@ def _validated_registration_bytes(challenge, kernel_id, public_key_hex, host):
     if fields["challengeId"] != challenge["challengeId"]:
         raise invalid("challenge id mismatch")
     domain = fields["domain"]
-    if not isinstance(domain, str) or domain.lower() != host:
+    if not isinstance(domain, str) or not domain.isascii() or domain.lower() != host:
         raise RegistrationChallengeError(
             "registration_challenge_domain",
             f"The gateway's registration challenge is for {domain}, but this node is configured for {host}. "
@@ -414,7 +418,6 @@ def _kernel_payload(config):
     }
 
 
-
 def register_kernel(pcc_base, api_key, config, signer=None, persist_challenge=True):
     """Register this node's kernel on the PCC network.
 
@@ -426,6 +429,12 @@ def register_kernel(pcc_base, api_key, config, signer=None, persist_challenge=Tr
         Bearer token for authentication.
     config : NodeConfig
         The node configuration.
+    signer : tuple of (str, str), optional
+        (public hex, secret hex): when given, the kernel is registered with the gateway's registration challenge.
+    persist_challenge : bool, optional
+        With signer only. True (the default) keeps a challenge the node has received but not sent beside the node key,
+        for a restart. After a refusal that a restart cannot fix, it also leaves a refusal marker there, which the next
+        registration with the same settings waits out.
 
     Returns
     -------
