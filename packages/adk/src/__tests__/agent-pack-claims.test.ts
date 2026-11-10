@@ -103,10 +103,10 @@ const ROWS = {
   "A30a": {"path": "apps/dashboard/public/onboard.html", "old": "Prove it works → go live.", "new": "Prove it works."},
   "A30b": {"path": "apps/dashboard/public/onboard.html", "old": "Prove a job → go live.", "new": "Prove a job."},
   "A31": {"path": "docs/AGENT_INTEGRATION.md", "old": "The same four helpers are surfaced as agent-package tools (see §8) so external LLMs can discover them: `pcc_trilobio_build_config`, `pcc_trilobio_validate_options`, `pcc_trilobio_validate_script`, `pcc_trilobio_capability_template`.", "new": "The agent package carries none of these helpers as tools: no gateway route serves them yet."},
-  "A6": {"path": "apps/dashboard/public/agent-package.json", "old": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node\"`", "new": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@1d11f37203f99eb1c9f2cfcd2b5ccf278e835820#subdirectory=packages/pcc-node\"`"},
-  "A6m": {"path": "apps/dashboard/public/skills/pcc.md", "old": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node\"`", "new": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@1d11f37203f99eb1c9f2cfcd2b5ccf278e835820#subdirectory=packages/pcc-node\"`"},
-  "A6s1": {"path": "skills/pcc/SKILL.md", "old": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node\"`", "new": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@1d11f37203f99eb1c9f2cfcd2b5ccf278e835820#subdirectory=packages/pcc-node\"`"},
-  "A6s2": {"path": ".claude/skills/pcc/SKILL.md", "old": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node\"`", "new": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@1d11f37203f99eb1c9f2cfcd2b5ccf278e835820#subdirectory=packages/pcc-node\"`"},
+  "A6": {"path": "apps/dashboard/public/agent-package.json", "old": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@1d11f37203f99eb1c9f2cfcd2b5ccf278e835820#subdirectory=packages/pcc-node\"`", "new": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node\"`"},
+  "A6m": {"path": "apps/dashboard/public/skills/pcc.md", "old": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@1d11f37203f99eb1c9f2cfcd2b5ccf278e835820#subdirectory=packages/pcc-node\"`", "new": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node\"`"},
+  "A6s1": {"path": "skills/pcc/SKILL.md", "old": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@1d11f37203f99eb1c9f2cfcd2b5ccf278e835820#subdirectory=packages/pcc-node\"`", "new": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node\"`"},
+  "A6s2": {"path": ".claude/skills/pcc/SKILL.md", "old": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@1d11f37203f99eb1c9f2cfcd2b5ccf278e835820#subdirectory=packages/pcc-node\"`", "new": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node\"`"},
 } as const;
 const SERVED_ROWS = ["A12", "A12o", "A14", "A14s1", "A14s2", "A15a", "A15b", "A15c", "A16a", "A16b", "A16c", "A17", "A18", "A19", "A20", "A21p", "A21d", "A23", "A24", "A25", "A25b", "R1a", "R1b", "I15p", "I16p", "I17p", "I15d", "I16d", "I17d"] as const;
 
@@ -278,14 +278,21 @@ describe("N240 public claims", () => {
     expect(read(ROWS.A31.path)).not.toContain("pcc_trilobio_");
   });
 
-  it("PC14 every agent install line pins N250's merge commit", () => {
+  it("PC14 every agent install line pins pcc-node at 700dcfe9", () => {
     const prompt = pack().system_prompt;
     changed("A6", prompt);
-    expect(prompt).not.toContain("dcc44db9");
+    expect(prompt).not.toContain("1d11f372");
     for (const id of ["A6m", "A6s1", "A6s2"] as const) {
       const text = read(ROWS[id].path);
       changed(id, text);
-      expect(text).not.toContain("dcc44db9");
+      expect(text).not.toContain("1d11f372");
+    }
+  });
+
+  it("PC15 no agent pack file names a pcc-node version", () => {
+    for (const id of ["A6", "A6m", "A6s1", "A6s2"] as const) {
+      const text = read(ROWS[id].path);
+      expect(text, ROWS[id].path).not.toMatch(/\b0\.1\.\d+\b/);
     }
   });
 });

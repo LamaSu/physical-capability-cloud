@@ -6,9 +6,9 @@ import { deepFreeze } from "../deep-freeze.js";
 
 export const AGENT_PACKAGE_PIN = deepFreeze({
   schema: "pcc-agent-package/2.0",
-  version: "2.19.8",
+  version: "2.19.9",
   toolCount: 179,
-  sha256: "sha256:e09734198ada20fca99711767ab746743bee4c40410a2da4e78e2e4f0794a119",
+  sha256: "sha256:66476def3ba1cfc80fb4df9bf34050c606a25afff7061cb2f8f2cdfd7636dc7e",
 } as const);
 
 export const AGENT_TOOLS = deepFreeze({
