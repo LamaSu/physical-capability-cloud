@@ -1,7 +1,7 @@
 {
   "schema": "pcc-adk/runbook@1",
   "title": "Device to registered kernel: onboarding a machine as a PCC operator",
-  "status": "second cut, written against master 753feb43 and pcc-node 0.1.1; each phase lists what is still pending",
+  "status": "second cut, written against master 753feb43; phases 0 and 5 follow the pinned pcc-node commit; each phase lists what is still pending",
   "target": {
     "env": "PCC_BASE",
     "default": null,
@@ -21,7 +21,7 @@
       "goal": "A working PCC_BASE, pcc-node with signing support, and an API key kept out of logs.",
       "doneWhen": [
         "GET $PCC_BASE/api/health returns 200",
-        "pcc-node --version prints 0.1.1 or later, and python3 -c \"import nacl\" succeeds",
+        "python3 -c \"from pcc_node.register import register_kernel_signed\" and python3 -c \"import nacl\" succeed",
         "GET $PCC_BASE/api/auth/validate with your key returns valid: true"
       ],
       "asksHuman": ["which PCC gateway to use, if PCC_BASE is not already set", "the email to register the operator key under"],
