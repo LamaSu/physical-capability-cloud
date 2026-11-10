@@ -1,6 +1,7 @@
 /**
  * The one source of a job's buyer funding for both routes: GET /api/operator/jobs (operator-relay.ts)
  * and GET /api/jobs/:jobId/funding (routes/job-funding.ts). N296 folded the relay's copy onto it; F3c pins equal replies.
+ * With a record and no configured deployment, it also reads the recorded one (N297).
  */
 import { and, asc, eq, schema } from "@pcc/store";
 import { getStore } from "../db.js";
@@ -8,7 +9,8 @@ import { projectFundingStatus, type FundingStatusDTO } from "./funding-status.js
 import { fundingRecordStore } from "../services/funding-record-port.js";
 import { escrowForJob } from "../services/scope-acceptance.js";
 import { paidScopeActivationTerms } from "../services/paid-scope-activation-terms.js";
-import { testnetBuyerAllowance, type TestnetBuyerAllowance } from "../services/funding-binding.js";
+import { isChainId, testnetBuyerAllowance, type TestnetBuyerAllowance } from "../services/funding-binding.js";
+import { recordedDeployment } from "./recorded-deployment.js";
 
 /** One listed job's buyer funding, to the extent the gateway could read it. */
 export type JobFunding =
@@ -35,6 +37,7 @@ export function jobFundingOf(jobId: string, kernelId: string, asOf: string): Job
       }
       const escrow = escrowForJob(jobId) ?? null;
       const terms = paidScopeActivationTerms({ id: scope.id, jobId: scope.jobId, kernelId: scope.kernelId });
+      const recorded = isChainId(terms.expectedChainId) ? null : recordedDeployment(db, record);
       return projectFundingStatus(
         scope,
         record,
@@ -42,6 +45,7 @@ export function jobFundingOf(jobId: string, kernelId: string, asOf: string): Job
         terms.expectedChainId,
         asOf,
         testnetBuyerAllowance(terms),
+        recorded,
       );
     });
     return { read: "ok", scopes };

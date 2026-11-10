@@ -35,6 +35,11 @@
  * Each call reads the file once and nothing is cached, so the chain and testnetOnly that
  * paidScopeActivationTerms returns always come from one record (#10008 INFO-3, INFO-4).
  *
+ * shippedVNextDeploymentRecord reads a given directory by these rules except R-c, so a shipped
+ * testnet-only record needs no window opt-in. It only confirms which deployment a frozen
+ * funding_prepares row names, for the funding-status DTO's recorded basis (N297). It never
+ * configures a chain: nothing that verifies, reconciles or activates calls it.
+ *
  * A test process may install its own source (__setPaidScopeActivationTermsForTest); one installed is
  * never consulted outside a test process. The one logging exception is a fixed-code warning for a
  * refused V-next record (R-a through R-d); nothing it returns carries a request value.
@@ -188,13 +193,7 @@ function hasCanonicalReadFields(r: Record<string, unknown>): boolean {
     && typeof r.blockNumber === "number" && Number.isSafeInteger(r.blockNumber) && r.blockNumber >= 0;
 }
 
-/**
- * Read the canonical record from real directories and a regular file (never a link or FIFO),
- * retaining the existing path and explicit canonical-approval checks. R-a through R-d fail closed
- * before the chain can be used. Unavailable paths have no record to diagnose and remain silent.
- * It returns the whole record; recordSha256 is the sha256 of the same bytes it parsed, from one read.
- */
-export function vnextDeploymentRecord(packageRoot: string, network: string): VNextDeploymentRecord | null {
+function readVNextDeploymentRecord(packageRoot: string, network: string, requireTestnetOptIn: boolean): VNextDeploymentRecord | null {
   if (!NETWORK_RE.test(network)) return null;
   const deployments = join(packageRoot, "deployments");
   const vnext = join(deployments, "vnext");
@@ -213,7 +212,7 @@ export function vnextDeploymentRecord(packageRoot: string, network: string): VNe
   if (r.specVersion !== 2) return recordRefused("R-a");
   if (typeof r.scheduleTestnetOnly !== "boolean"
     || (r.scheduleTestnetOnly && r.chainId !== 84532 && r.chainId !== 31337)) return recordRefused("R-b");
-  if (r.scheduleTestnetOnly && process.env.PCC_VNEXT_ALLOW_TESTNET_RECORD !== "1") return recordRefused("R-c");
+  if (requireTestnetOptIn && r.scheduleTestnetOnly && process.env.PCC_VNEXT_ALLOW_TESTNET_RECORD !== "1") return recordRefused("R-c");
   if (!hasCanonicalReadFields(r)) return recordRefused("R-d");
   const schedule = scheduleTupleOf(r);
   if (schedule === null) return recordRefused("R-d");
@@ -227,6 +226,25 @@ export function vnextDeploymentRecord(packageRoot: string, network: string): VNe
     ...schedule,
     recordSha256: createHash("sha256").update(bytes).digest("hex"),
   };
+}
+
+/**
+ * Read the canonical record from real directories and a regular file (never a link or FIFO),
+ * retaining the existing path and explicit canonical-approval checks. R-a through R-d fail closed
+ * before the chain can be used. Unavailable paths have no record to diagnose and remain silent.
+ * It returns the whole record; recordSha256 is the sha256 of the same bytes it parsed, from one read.
+ */
+export function vnextDeploymentRecord(packageRoot: string, network: string): VNextDeploymentRecord | null {
+  return readVNextDeploymentRecord(packageRoot, network, true);
+}
+
+/**
+ * The record this gateway ships in `network`'s directory, by vnextDeploymentRecord's rules except
+ * R-c: a testnet-only record needs no PCC_VNEXT_ALLOW_TESTNET_RECORD. For the recorded basis only
+ * (readmodels/recorded-deployment.ts).
+ */
+export function shippedVNextDeploymentRecord(packageRoot: string, network: string): VNextDeploymentRecord | null {
+  return readVNextDeploymentRecord(packageRoot, network, false);
 }
 
 /** The chain of the one approved canonical record, or null on an unavailable or refused record. */
