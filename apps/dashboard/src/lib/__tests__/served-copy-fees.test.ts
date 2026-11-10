@@ -23,7 +23,6 @@ const ALLOWED: Array<{ file: string; text: string; owner: string; reason: string
   { file: "apps/dashboard/public/.well-known/mcp/server-card.json", text: "certificates, and treasury balance.", owner: "adk", reason: "adk's copy row" },
   { file: "apps/dashboard/public/agent-package.json", text: "routing and fee estimates", owner: "kept", reason: "a third party's fee" },
   { file: "apps/dashboard/public/agent-package.json", text: "network-treasury", owner: "api-enum", reason: "a role the API defines" },
-  { file: "apps/dashboard/public/agent-package.json", text: "DePIN treasury, soulbound capability certificates", owner: "adk", reason: "adk's copy row" },
   { file: "packages/onboard-kit/AGENT_INSTRUCTIONS.md", text: "flat fee per job", owner: "kept", reason: "an operator's own price" },
   { file: "docs/SETUP_AGENT_SPEC.md", text: "`/api/treasury`", owner: "gateway", reason: "gateway's served docs" },
   { file: "docs/STORY_PROTOCOL_INTEGRATION_PLAN.md", text: "Network Treasury | 10 | 10% | PCC protocol fee", owner: "gateway", reason: "gateway's served docs" },
