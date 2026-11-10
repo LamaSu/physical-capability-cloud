@@ -15,7 +15,8 @@
  *   • unexpected errors still propagate (no silent swallow).
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from "vitest";
+import { initStore, closeStore } from "../db.js";
 
 vi.mock("../contracts/escrow-client.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../contracts/escrow-client.js")>();
@@ -46,6 +47,17 @@ import {
 } from "../contracts/escrow-client.js";
 import { __resetSignerLockForTests } from "../contracts/signer-lock.js";
 import { driveSettlement } from "../services/settlement-crank.js";
+
+const savedDbPath = process.env.PCC_DB_PATH;
+beforeAll(() => {
+  process.env.PCC_DB_PATH = ":memory:";
+  initStore({ seed: false });
+});
+afterAll(() => {
+  closeStore();
+  if (savedDbPath === undefined) delete process.env.PCC_DB_PATH;
+  else process.env.PCC_DB_PATH = savedDbPath;
+});
 
 const ESCROW = ("0x" + "9a".repeat(20)) as `0x${string}`;
 const HASH = ("0x" + "bc".repeat(32)) as `0x${string}`;

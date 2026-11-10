@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex">
 <title>PCC · Order pizza with your AI</title>
 <meta name="description" content="Turn your Claude, ChatGPT, or Gemini session into a pizza-ordering agent on PCC. Paste one prompt, say 'I want a pizza'.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -140,6 +141,7 @@ pre.preview{margin:0;padding:14px;max-height:200px;overflow:auto;font-family:var
   <div class="foot">PCC // capability.network · agents compose reality</div>
 </main>
 <div class="toast" id="toast"></div>
+<script src="/demo-gate.js"></script>
 <script>
 const $=s=>document.querySelector(s);
 const PROMPT_URL="/pizza-llm-agent-prompt.md";
@@ -159,6 +161,8 @@ async function loadPrompt(){
   }
 }
 
+Promise.resolve(window.pccDemoGate).then((state) => {
+if (state === "off") return;
 $("#copyBtn").onclick=async()=>{
   try{
     if(!promptText){const r=await fetch(PROMPT_URL,{cache:"no-store"});promptText=await r.text();}
@@ -171,6 +175,7 @@ $("#copyBtn").onclick=async()=>{
 };
 
 loadPrompt();
+});
 </script>
 </body>
 </html>

@@ -303,8 +303,8 @@ describe("the accept route and reconcilePaidScope", () => {
     const store = installTestFundingRecordStore();
     for (const [terms, reason] of [
       [null, "expected_chain_unavailable"], // nothing installed: neither value
-      [{ expectedChainId: null, postActivationTtlMs: ACTIVATION_TTL }, "expected_chain_unavailable"],
-      [{ expectedChainId: CHAIN_ID, postActivationTtlMs: null }, "activation_ttl_unavailable"],
+      [{ expectedChainId: null, postActivationTtlMs: ACTIVATION_TTL, testnetOnly: false }, "expected_chain_unavailable"],
+      [{ expectedChainId: CHAIN_ID, postActivationTtlMs: null, testnetOnly: false }, "activation_ttl_unavailable"],
     ] as const) {
       if (terms) installActivationTerms(terms);
       const res = await submit(f);
@@ -335,7 +335,7 @@ describe("the accept route and reconcilePaidScope", () => {
     const { scopeId, escrowId } = res.json() as { scopeId: string; escrowId: string };
     setEscrow(escrowId, { contractAddress: ESCROW_A, status: "funded" });
     db().transaction((tx) => store.insert(tx, verification(scopeId)));
-    installActivationTerms({ expectedChainId: CHAIN_ID, postActivationTtlMs: 2 * 24 * 60 * MIN });
+    installActivationTerms({ expectedChainId: CHAIN_ID, postActivationTtlMs: 2 * 24 * 60 * MIN, testnetOnly: false });
     vi.setSystemTime(T0 + 7 * MIN);
     const accepted = await acceptScope(f, scopeId);
     expect(accepted.json()).toMatchObject({ status: "active", activation: { kind: "activated", expiresAt: iso(T0 + 7 * MIN + 2 * 24 * 60 * MIN) } });

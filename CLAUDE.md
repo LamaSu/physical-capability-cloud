@@ -104,7 +104,7 @@ PCC ships a library-only durable execution package at `packages/workflow/` — e
 - **Migration roadmap (3 phases, follow-up PRs after the Wave 3 PR merges)**:
   1. **Phase 1** — wrap `escrow.ts` `/fund`/`/release`/`/dispute` routes as Activities (~300 LOC + ~200 LOC route changes; LOW breaking risk; HTTP shape unchanged).
   2. **Phase 2** — replace `protocol-runner.ts` `runs: Map` with an EventStore-backed `Workflow` subclass (~500 LOC; MEDIUM breaking risk; in-flight runs need drain-before-deploy).
-  3. **Phase 3** — add `GET /api/protocols/:id/cwl` endpoint via `cwlExport` (~80 LOC route + ~50 LOC adapter; ZERO breaking risk; new endpoint).
+  3. **Phase 3** — none for now: `/api/protocols/*` serves only built-in example templates, and it answers 501 unless `PCC_DEMO_ROUTES=1`.
 - **v0.1 limitations** (warn before adopting): `ctx.sleep(id, ms)` throws `NotImplementedError` (durable timers land in v0.2 — use `setTimeout` inside `ctx.step` for non-durable delays); no child workflows (`ctx.startChild` lands in v0.2); single-process signal delivery only (no horizontal scaling of the gateway against one SQLite file); no per-activity `timeoutMs` yet. Full list in `packages/workflow/CHANGELOG.md`.
 - **Operational note**: `@pcc/workflow` reads NO env vars itself — consumers must pass `path` to `openSqliteStore({ path })`. Recommended convention: `process.env.WORKFLOW_DB_PATH ?? '/data/workflow.sqlite'` (gateway). Railway requires a mounted volume — see `docs/DEPLOY.md` for the deploy-side note.
 
@@ -415,16 +415,12 @@ Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
 | GET | `/health` | Gateway healthcheck (bare alias of `/api/health`; same JSON payload — not the SPA shell). Also reports the served build: `commit` (the full git SHA a build argument named, recorded in the image at build time, or `null`), `commitSource` (`build_argument` or `unknown`), `buildArg`, `sourceDigest` (digest of the source the image was built from; CI checks it against the commit before pushing, and `scripts/verify-build-source.sh` checks any served gateway), `sourceDigestSpec`, and `deployMetadata.railwayGitCommitSha` (host metadata, never reported as `commit`); see `docs/DEPLOY.md`. |
 | GET | `/api/status` | Detailed status. |
 | GET | `/.well-known/agent-registration.json` | ERC-8004 Agent Registration File (PUBLIC). |
-| GET | `/agent-package.json` | The agent package (250+ tools) for any LLM (PUBLIC). |
+| GET | `/agent-package.json` | The agent package (180+ tools) for any LLM (PUBLIC). |
 | GET/POST | `/api/sensors/*` | Sensor channels, readings, anomalies. |
 | GET/POST | `/api/zk/*` | ZK proof creation and verification. |
-| GET/POST | `/api/logistics/*` | Shipments, bookings, installations. |
-| GET/POST | `/api/spaces/*` | Equipment hosting spaces. |
-| GET/POST | `/api/marketplace/*` | Capability marketplace listings. |
-| GET/POST | `/api/discover/*` | Device discovery (mDNS/IPP) + auto-onboarding. |
-| GET/POST | `/api/protocols/*` | Protocol templates (DAG workflows). |
-| GET/POST | `/api/orchestrator/*` | Multi-instrument transfer graphs. |
 | GET/POST | `/api/batches/*` | Batch manifests (HPLC, multi-sample). |
+
+Demo-only route families: `/api/marketplace/*` (except its four listing and order writes), `/api/spaces/*`, `/api/logistics/*`, the `/api/orchestrator/` graphs, samples, claims and workflows routes, `/api/protocols*`, `/api/protocol-runs/*`, `/api/automation-status*`, `/api/transfer-agents`, `/api/agents/conversations*`, `/api/discover/*` and `/api/registry/attestations*` serve built-in example data only when `PCC_DEMO_ROUTES=1`. Otherwise each answers 501 `not_available`. Only NODE_ENV=test or NODE_ENV=development honors the flag; production, an unset NODE_ENV and any other value ignore it. Neither `pnpm --filter @pcc/gateway dev` nor `start` sets NODE_ENV, so run them with NODE_ENV=development for the flag to work; root `pnpm dev` (turbo) passes neither variable to the gateway. The ratchet test n34-routes-fabrication-ratchet.test.ts refuses new module-scope rows and value-producing `Math.random` in `packages/gateway/src/routes/`.
 
 ---
 
@@ -705,7 +701,7 @@ All facade responses use the `Result<T>` pattern: `{success: true, data: T}` or 
 ```typescript
 {
   id: string;
-  jobId: string;
+  jobId?: string;
   status: "created"|"funded"|"active"|"completed"|"disputed"|"refunded";
   totalAmount: string;               // USDC amount
   currency: string;
@@ -943,9 +939,9 @@ Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 
 ---
 
-## 10. Agent Package (250+ Tools)
+## 10. Agent Package (180+ Tools)
 
-The agent package is a single JSON file any LLM can consume, containing 250+ tools (the exact count is its `toolCount`) with input schemas and endpoint mappings. It is the load-bearing piece of the **Claude Max front door**: drop the JSON into a Claude conversation and Claude can transact on the user's behalf without further hand-holding.
+The agent package is a single JSON file any LLM can consume, containing 180+ tools (the exact count is its `toolCount`) with input schemas and endpoint mappings. It is the load-bearing piece of the **Claude Max front door**: drop the JSON into a Claude conversation and Claude can transact on the user's behalf without further hand-holding.
 
 > **Claude Max quickstart**: visit `https://capability.network/start` for the three-card landing (Code / Desktop / Web). Per-surface walkthroughs live in `docs/quickstart/`.
 

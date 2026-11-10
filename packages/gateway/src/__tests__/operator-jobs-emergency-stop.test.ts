@@ -7,9 +7,10 @@ import { AUTHENTICATION_REQUIRED } from "../auth/kernel-authority.js";
 import { provisionApiKey, resolveApiKey } from "../auth/api-key-auth.js";
 import { closeStore, getRepos, getStore, initStore } from "../db.js";
 import { getJobFacade } from "../facades/index.js";
-import { emergencyStopState, type EmergencyStopState } from "../routes/device-relay.js";
+import { emergencyStopState } from "../routes/device-relay.js";
 import { operatorRelayRoutes } from "../routes/operator-relay.js";
 import { operatorRoutes } from "../routes/operator.js";
+import { POLICY_CASES } from "./helpers/emergency-stop-policy-cases.js";
 
 const ADMIN = "operator-poll-estop-admin";
 const KERNELS = { A: "kernel-poll-estop-a", B: "kernel-poll-estop-b" };
@@ -71,33 +72,6 @@ function watchPolicyReads(options: { throwPolicy?: boolean; throwAuthority?: boo
   });
   return reads;
 }
-
-interface PolicyCase {
-  label: string;
-  state: EmergencyStopState;
-  policy?: unknown;
-  malformedJSON?: boolean;
-  throwingRead?: boolean;
-}
-
-const POLICY_CASES: PolicyCase[] = [
-  { label: "no policy row", state: "clear" },
-  { label: "absent emergencyStop key", state: "clear", policy: {} },
-  { label: "emergencyStop false", state: "clear", policy: { emergencyStop: false } },
-  { label: "emergencyStop 0", state: "clear", policy: { emergencyStop: 0 } },
-  { label: "emergencyStop null", state: "clear", policy: { emergencyStop: null } },
-  { label: "emergencyStop true", state: "stopped", policy: { emergencyStop: true } },
-  { label: 'emergencyStop string "true"', state: "stopped", policy: { emergencyStop: "true" } },
-  { label: "emergencyStop 1", state: "stopped", policy: { emergencyStop: 1 } },
-  { label: 'emergencyStop string "false"', state: "stopped", policy: { emergencyStop: "false" } },
-  { label: "null policy", state: "unavailable", policy: null },
-  { label: "array policy", state: "unavailable", policy: [] },
-  { label: "string policy", state: "unavailable", policy: "policy" },
-  { label: "number policy", state: "unavailable", policy: 1 },
-  { label: "boolean policy", state: "unavailable", policy: false },
-  { label: "unparseable JSON", state: "unavailable", malformedJSON: true },
-  { label: "throwing policy read", state: "unavailable", throwingRead: true },
-];
 
 const CLOSED_STATES = ["stopped", "unavailable"] as const;
 const STATUS_QUERIES = [

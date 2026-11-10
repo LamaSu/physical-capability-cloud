@@ -69,7 +69,10 @@ beforeEach(async () => {
   await app.register(apiGate);
   app.addHook("onRequest", async req => {
     const proven = req.headers["x-test-proven-wallet"];
-    if (typeof proven === "string") (req as ProofRequest).provenWallet = proven;
+    if (typeof proven === "string") {
+      (req as ProofRequest).provenWallet = proven;
+      req.provenWalletCarrier = "key";
+    }
     if (req.headers["x-test-wallet-array"]) req.headers["x-pcc-wallet"] = [wallet.address];
     if (req.headers["x-test-wallet-raw-duplicate"]) {
       req.raw.rawHeaders.push("X-PCC-Wallet", wallet.address);
@@ -265,7 +268,7 @@ describe("API key self-linked proven wallet", () => {
     expect(withHeader.json()).toEqual(without.json());
     expect(lookup).not.toHaveBeenCalled();
   });
-  it("leaves a cookie session without an API key untouched", async () => {
+  it("preserves the gate's SIWE cookie proof without a self-link lookup", async () => {
     await link();
     getRepos().sessions.insert({ id: "w1b-cookie", token: "w1b-cookie", walletAddress: wallet.address,
       createdAt: new Date(clockNow).toISOString(), lastActiveAt: new Date(clockNow).toISOString(),
@@ -273,7 +276,7 @@ describe("API key self-linked proven wallet", () => {
     const lookup = vi.spyOn(getStore().db, "get");
     const response = await app.inject({ url: "/api/w1b/proof", headers: { cookie: "pcc_session=w1b-cookie", "x-pcc-wallet": wallet.address } });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ provenWallet: null });
+    expect(response.json()).toEqual({ provenWallet: wallet.address.toLowerCase() });
     expect(lookup).not.toHaveBeenCalled();
   });
   it("12 leaves an admin request unchanged", async () => {

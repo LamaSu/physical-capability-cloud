@@ -2,7 +2,7 @@
  * @pcc/tool-index — Phase 1 types
  *
  * IndexedTool is the canonical shape for any tool the index knows about,
- * regardless of source. Phase 1 indexes only PCC's own 218-tool
+ * regardless of source. Phase 1 indexes only PCC's own
  * agent-package.json; Phase 3 will add loaders for external MCP servers,
  * OpenAPI specs, and skills.
  */

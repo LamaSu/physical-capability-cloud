@@ -12,7 +12,7 @@ import { kernelSigningProofMessage } from "@pcc/kernel";
 import { type Result, type RegisteredSigner, type KernelRegistrationProof, ok, err, Errors } from "@pcc/spec";
 import { verifyEd25519Signature, normalizePublicKeyHex } from "../auth/ed25519.js";
 import { getStore } from "../db.js";
-import { mayWriteKernelAsOwner, type KernelAuthority } from "../auth/kernel-authority.js";
+import { EXPLICIT_CREDENTIAL_REQUIRED, mayWriteKernelAsOwner, provenByCookieOnly, type KernelAuthority } from "../auth/kernel-authority.js";
 import {
   legacySigningProofAllowed,
   normalizeRegistrationSigner,
@@ -86,11 +86,12 @@ export interface CreateKernelInput {
  * Who may publish a kernel's exact location (board N68). It is the one change that reveals where
  * an operator is, so a claimed identity is not enough (anyone can self-provision a key that names
  * an email or an id): it needs the gateway's admin secret, or a wallet the caller PROVED that
- * equals the kernel's operator, with an explicitly approved proof source.
+ * equals the kernel's operator, with an explicitly approved proof source, carried by an explicit
+ * key or bearer session. A sign-in cookie alone cannot opt a kernel in.
  */
-export type LocationOptInAuthority = Pick<KernelAuthority, "admin" | "provenWallet" | "provenWalletVia">;
+export type LocationOptInAuthority = Pick<KernelAuthority, "admin" | "provenWallet" | "provenWalletVia" | "provenWalletCarrier">;
 
-export const NO_OPT_IN_AUTHORITY: LocationOptInAuthority = { admin: false, provenWallet: null };
+export const NO_OPT_IN_AUTHORITY: LocationOptInAuthority = { admin: false, provenWallet: null, provenWalletCarrier: null };
 
 /** True when `authority` may publish the exact location of a kernel operated by `operatorAddress`. */
 export function mayPublishExactLocation(authority: LocationOptInAuthority, operatorAddress: string): boolean {
@@ -105,6 +106,12 @@ function exactLocationRefusal(kernelId: string): Error {
     ),
     { name: "ForbiddenError" },
   );
+}
+
+function explicitCredentialRefusal(): Error {
+  return Object.assign(new Error(EXPLICIT_CREDENTIAL_REQUIRED.message), {
+    name: "ForbiddenError", code: EXPLICIT_CREDENTIAL_REQUIRED.error,
+  });
 }
 
 /** The stored point's numbers as they are (even {0,0}); {0,0} when the stored value has none. */
@@ -338,6 +345,7 @@ export class KernelFacade extends BaseFacade {
           ? { algorithm: "ed25519", publicKey: body.signingPublicKey }
           : { algorithm: body.signingKeyAlgorithm ?? "secp256k1", address: body.signingAddress })
         : await this.verifySigningProof(id, body);
+      if (provenSigner && provenByCookieOnly(authority)) throw explicitCredentialRefusal();
       const consumeProof = body.registrationProof !== undefined
         ? await verifyKernelRegistrationProof(id, provenSigner, body.registrationProof, authority)
         : () => {};
@@ -392,6 +400,7 @@ export class KernelFacade extends BaseFacade {
           const currentVisibility = locationVisibilityOf(existing.location);
           const visibility = (requestedVisibility as LocationVisibility | undefined) ?? currentVisibility;
           if (visibility === "exact" && currentVisibility !== "exact") {
+            if (provenByCookieOnly(authority)) throw explicitCredentialRefusal();
             const owner = (updates.operatorAddress as string | undefined) ?? existing.operatorAddress;
             if (!mayPublishExactLocation(authority, owner)) throw exactLocationRefusal(id);
           }
@@ -469,8 +478,9 @@ export class KernelFacade extends BaseFacade {
         const operatorAddress = actorId || body.operatorAddress || "0x0000000000000000000000000000000000000000";
         // Exact location publication requires the admin secret or proven owner wallet.
         const visibility = (requestedVisibility as LocationVisibility | undefined) ?? "approximate";
-        if (visibility === "exact" && !mayPublishExactLocation(authority, operatorAddress)) {
-          throw exactLocationRefusal(id);
+        if (visibility === "exact") {
+          if (provenByCookieOnly(authority)) throw explicitCredentialRefusal();
+          if (!mayPublishExactLocation(authority, operatorAddress)) throw exactLocationRefusal(id);
         }
 
         const signerColumns = this.signerToColumns(provenSigner);

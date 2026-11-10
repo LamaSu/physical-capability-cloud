@@ -169,7 +169,7 @@ export async function wellKnownRoutes(app: FastifyInstance) {
               tokenUrl: "https://capability.network/api/auth/verify",
               scopes: {
                 operator: "Operator-level access (submit jobs, manage kernels)",
-                admin: "Admin-level access (reward epochs, slash bonds)",
+                admin: "Admin-level access (slash bonds)",
               },
             },
           },
@@ -282,12 +282,11 @@ export async function wellKnownRoutes(app: FastifyInstance) {
         {
           id: "pcc-settle",
           name: "Escrow and Settlement",
-          description: "Manage milestone escrow for physical capability contracts. Fund with USDC on Base Sepolia, release milestones after evidence verification, handle disputes and operator bond slashing. Supports x402 micropayments, NEAR cross-chain payment intents, and DePIN reward epochs.",
+          description: "Manage milestone escrow for physical capability contracts. Fund with USDC on Base Sepolia, release milestones after evidence verification, handle disputes and operator bond slashing. Supports x402 micropayments and NEAR cross-chain payment intents.",
           tags: ["escrow", "settlement", "payment", "usdc", "base", "depin", "x402", "near"],
           examples: [
             "Fund escrow for contract cap_xyz with 50 USDC on Base Sepolia",
             "Release milestone payment after verified evidence",
-            "Check DePIN reward epoch and claim operator rewards",
           ],
           inputModes: ["application/json"],
           outputModes: ["application/json"],

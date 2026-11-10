@@ -23,7 +23,7 @@ _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 
 _WINDOWS_REFUSAL = (
     "pcc-node 0.1.1 does not use a config file on Windows: it cannot yet make the file private there, "
-    "and a config decides where your API key is sent. Run the node on Linux or macOS (WSL works)."
+    "and a config decides where your API key is sent. Run the node on Linux (WSL works)."
 )
 
 

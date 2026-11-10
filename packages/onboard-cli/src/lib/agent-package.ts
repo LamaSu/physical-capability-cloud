@@ -4,7 +4,7 @@
  * We fetch `<gateway>/agent-package.json` once at session start, so the
  * tools list + system_prompt the CLI runs with stay in lockstep with
  * production. The same file backs the gateway's dashboard chat (#159) and
- * any other LLM that consumes PCC's public 219-tool surface.
+ * any other LLM that consumes PCC's public surface.
  *
  * No caching across sessions on disk — the gateway evolves quickly enough
  * that a stale local copy is worse than a 200 ms refresh.

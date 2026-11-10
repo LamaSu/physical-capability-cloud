@@ -79,6 +79,20 @@ describe("the agent pack tells agents only true things", () => {
     }
   });
 
+  it("describes the gateway's live verification oracles and agent bridge without Bittensor claims", () => {
+    const testPack = JSON.parse(readFileSync(join(REPO, "agent-package-test.json"), "utf8")) as {
+      tools: Array<{ name: string; description: string }>;
+    };
+    for (const [file, tools] of [
+      ["agent-package.json", pkg.tools],
+      ["agent-package-test.json", testPack.tools],
+    ] as const) {
+      for (const tool of tools) {
+        expect(tool.description, `${file}: ${tool.name}`).not.toMatch(/Bittensor/i);
+      }
+    }
+  });
+
   it("does not sell kernel_announce_capabilities as registration (N75)", () => {
     const announce = pkg.tools.find((t) => t.name === "kernel_announce_capabilities");
     expect(announce).toBeDefined();
@@ -537,6 +551,29 @@ describe("verdict 102g: offers are claims, the report schema is contract v1, and
     const got = await app.inject({ method: "GET", url: `/api/job-offers/${id}` });
     // If this stops holding (claimant binding or required evidence), the pack's offer text must change.
     expect((got.json() as { offer: { status: string } }).offer.status).toBe("delivered");
+  });
+
+  it("FT4 (R2 binding): the skills' quote-required example is a body POST /api/job-offers accepts, and without its amount and currency it is refused", async () => {
+    for (const file of ["skills/pcc/SKILL.md", ".claude/skills/pcc/SKILL.md"]) {
+      const text = readFileSync(join(REPO, file), "utf8");
+      const match = /"\$PCC_BASE\/api\/job-offers"[\s\S]*?-d '(\{[\s\S]*?\})'/.exec(text);
+      expect(match, `${file}: job-offers curl body`).not.toBeNull();
+      const body = JSON.parse(match![1]);
+      expect(body.pricing.model, file).toBe("quote-required");
+      const created = await app.inject({
+        method: "POST", url: "/api/job-offers", headers: { authorization: `Bearer ${posterKey}` },
+        payload: body,
+      });
+      expect(created.statusCode, `${file}: ${created.body}`).toBeLessThan(300);
+      const invalidBody = { ...body, pricing: { model: body.pricing.model } };
+      delete invalidBody.idempotencyKey;
+      const refused = await app.inject({
+        method: "POST", url: "/api/job-offers", headers: { authorization: `Bearer ${posterKey}` },
+        payload: invalidBody,
+      });
+      expect(refused.statusCode, `${file}: ${refused.body}`).toBe(400);
+      expect(refused.json().error, file).toBe("invalid_pricing");
+    }
   });
 
   describe("F3: pcc_report_attempt's schema is contract v1, exactly", () => {

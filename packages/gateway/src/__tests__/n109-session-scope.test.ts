@@ -87,9 +87,9 @@ function requiredScopes(route: ScopeCoveredRoute) {
 }
 
 describe("a wallet session holds no scopes", () => {
-  it("the scope-covered table contains all 57 registrations", () => {
-    expect(SCOPE_COVERED_ROUTES).toHaveLength(57);
-    expect(SCOPE_COVERED_ROUTES.filter((route) => route.url !== PUBLIC_SCOPED_URL)).toHaveLength(56);
+  it("the scope-covered table contains all 61 registrations", () => {
+    expect(SCOPE_COVERED_ROUTES).toHaveLength(61);
+    expect(SCOPE_COVERED_ROUTES.filter((route) => route.url !== PUBLIC_SCOPED_URL)).toHaveLength(60);
   });
 
   // apiGate deliberately leaves public feedback without a principal, even when credentials are sent.

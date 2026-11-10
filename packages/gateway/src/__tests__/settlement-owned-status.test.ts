@@ -166,7 +166,7 @@ const relay = (jobId: string, status: string) => {
 const patch = (jobId: string, status: string) =>
   app.inject({ method: "PATCH", url: `/api/jobs/${jobId}/status`, payload: { status } });
 const complete = (jobId: string) =>
-  app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: { evidenceHash: `sha256:${"ab".repeat(32)}` } });
+  app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: { "x-admin-key": ADMIN }, payload: { evidenceHash: `sha256:${"ab".repeat(32)}` } });
 const statusOf = (jobId: string) => getRepos().jobs.findById(jobId)!.status;
 
 describe("N85(a): a paid job is finished only by its settlement path", () => {

@@ -1,6 +1,6 @@
 export * from "./types/index.js";
 export * from "./schemas/index.js";
-export { canonicalize, canonicalSnapshot, sha256, hashBundle, hashEvent, verifyBundleHash, verifyEventHash } from "./util/canonical.js";
+export { canonicalize, canonicalSnapshot, sha256, hashBundle, hashEvent, hashKernelWrittenEvent, verifyBundleHash, verifyEventHash } from "./util/canonical.js";
 export type { CanonicalSnapshot } from "./util/canonical.js";
 // RTP-absorption doc 03 — job lifecycle reducer + in-memory timeout registry (transport-independent)
 export * from "./util/job-lifecycle.js";
@@ -38,3 +38,6 @@ export * from "./money/money-status.js";
 export * from "./readmodels/job-execution.js";
 export * from "./readmodels/operator-work.js";
 export * from "./readmodels/product-home.js";
+// Registered price for a discovery quote (N281 PR-B): the gateway's services/quote-pricing.ts re-exports these.
+export { SETTLEMENT_CURRENCY, amountCents, registeredQuotePrice } from "./pricing/registered-price.js";
+export type { RegisteredQuotePrice } from "./pricing/registered-price.js";

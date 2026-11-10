@@ -8,7 +8,7 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { eq, or, schema, sql } from "@pcc/store";
-import { classifyProvisionError, provisionApiKey, resolveApiKey } from "../auth/api-key-auth.js";
+import { classifyProvisionError, provisionApiKey, resolveApiKey, siweSessionKeyAddress } from "../auth/api-key-auth.js";
 import { authorityOf } from "../auth/kernel-authority.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 import { SELF_SERVICE_KEY_SCOPES } from "../middleware/scope-checker.js";
@@ -35,16 +35,7 @@ export function provenOwnerAddress(req: FastifyRequest): string | null {
   if (session) return session.address.toLowerCase();
 
   const key = req.apiKeyId ? getRepos().apiKeys.findById(req.apiKeyId) : undefined;
-  if (!key || key.revokedAt || (key.expiresAt !== null && !(Date.parse(key.expiresAt) > Date.now()))) {
-    return null;
-  }
-  try {
-    return JSON.parse(key.metadata ?? "null")?.source === "siwe-session"
-      ? key.operatorId.toLowerCase()
-      : null;
-  } catch {
-    return null;
-  }
+  return siweSessionKeyAddress(key ?? null);
 }
 
 export async function provisionRoutes(app: FastifyInstance) {

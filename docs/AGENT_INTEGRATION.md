@@ -10,7 +10,7 @@ Full API reference, DTOs, MCP tools, operator onboarding, and environment variab
 - §5. Safety & Compliance
 - §6. Settlement & Payments
 - §7. MCP Server (63 Tools)
-- §8. Agent Package (237 Tools)
+- §8. Agent Package (180+ Tools)
 - §9. Environment Variables
 - §10. SSE Streams (Real-Time Events)
 - §11. pcc-node (Python Operator Node)
@@ -239,15 +239,9 @@ Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
 | GET | `/health` | Gateway healthcheck (same payload as `/api/health`). Also reports the served build: `commit` (the full git SHA a build argument named, recorded in the image at build time, or `null`), `commitSource` (`build_argument` or `unknown`), `buildArg`, `sourceDigest` (digest of the source the image was built from; CI checks it against the commit before pushing, and `scripts/verify-build-source.sh` checks any served gateway), `sourceDigestSpec`, and `deployMetadata.railwayGitCommitSha` (host metadata, never reported as `commit`); see `docs/DEPLOY.md`. |
 | GET | `/api/status` | Detailed status. |
 | GET | `/.well-known/agent-registration.json` | ERC-8004 Agent Registration File (PUBLIC). |
-| GET | `/agent-package.json` | 218-tool agent package for any LLM (PUBLIC). |
+| GET | `/agent-package.json` | Agent package for any LLM (PUBLIC). |
 | GET/POST | `/api/sensors/*` | Sensor channels, readings, anomalies. |
 | GET/POST | `/api/zk/*` | ZK proof creation and verification. |
-| GET/POST | `/api/logistics/*` | Shipments, bookings, installations. |
-| GET/POST | `/api/spaces/*` | Equipment hosting spaces. |
-| GET/POST | `/api/marketplace/*` | Capability marketplace listings. |
-| GET/POST | `/api/discover/*` | Device discovery (mDNS/IPP) + auto-onboarding. |
-| GET/POST | `/api/protocols/*` | Protocol templates (DAG workflows). |
-| GET/POST | `/api/orchestrator/*` | Multi-instrument transfer graphs. |
 | GET/POST | `/api/batches/*` | Batch manifests (HPLC, multi-sample). |
 
 ---
@@ -526,7 +520,7 @@ All facade responses use the `Result<T>` pattern: `{success: true, data: T}` or 
 ```typescript
 {
   id: string;
-  jobId: string;
+  jobId?: string;
   status: "created"|"funded"|"active"|"completed"|"disputed"|"refunded";
   totalAmount: string;               // USDC amount
   currency: string;
@@ -771,9 +765,9 @@ For the full contributor-economics surface (REST endpoints, DSL, walkthrough), s
 
 ---
 
-## 8. Agent Package (248 Tools)
+## 8. Agent Package (180+ Tools)
 
-The agent package is a single JSON file any LLM can consume, containing 248 tools with input schemas and endpoint mappings (v2.13.0 — bumped to 248 in June 2026 after adding 11 tools for the channels substrate, suggest-templates, operator status, and the composition engine surface; previous bumps: 237 trilobio operator helpers in May 2026; 218 contributor-economics consolidation; 226 metadata; 233 hamilton + role flows).
+The agent package is a single JSON file any LLM can consume, containing 180+ tools with input schemas and endpoint mappings (v2.13.0 — bumped to 248 in June 2026 after adding 11 tools for the channels substrate, suggest-templates, operator status, and the composition engine surface; previous bumps: 237 trilobio operator helpers in May 2026; 218 contributor-economics consolidation; 226 metadata; 233 hamilton + role flows).
 
 **Fetch it**:
 ```bash
@@ -1156,7 +1150,7 @@ if (!lint.valid) throw new Error(lint.errors.join(", "));
 
 The Trilobio adapter implementation itself lives in `@pcc/kernel` — this helper package is configuration helpers + a published, stable shape for operator config.
 
-The same four helpers are surfaced as agent-package tools (see §8) so external LLMs can discover them: `pcc_trilobio_build_config`, `pcc_trilobio_validate_options`, `pcc_trilobio_validate_script`, `pcc_trilobio_capability_template`.
+The agent package carries none of these helpers as tools: no gateway route serves them yet.
 
 #### Trilobio API specifics
 

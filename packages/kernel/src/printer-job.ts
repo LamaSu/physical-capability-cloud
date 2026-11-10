@@ -68,7 +68,7 @@
 
 import nacl from "tweetnacl";
 import type { Address, AssuranceTier, EvidenceBundle, EvidenceEvent, Signature } from "@pcc/spec";
-import { EvidenceEmitter } from "./evidence-emitter.js";
+import { EvidenceEmitter, KERNEL_SIGNER_REQUIRED_MESSAGE, refusesTestSigner } from "./evidence-emitter.js";
 import { openEvidenceSession, type EmittedEvidence } from "./evidence-session.js";
 import type { JobResult } from "./job-runner.js";
 import { isStepLeased, leaseStep } from "./step-lease.js";
@@ -141,6 +141,8 @@ export function makeKernelEd25519Signer(seed?: Uint8Array): KernelEd25519Signer 
 // Print job
 // ---------------------------------------------------------------------------
 
+export const DEFAULT_CANCEL_WINDOW_MS = 30_000;
+
 export interface PrintJobOptions {
   /**
    * The device to drive: an IppAdapter, or any MachineAdapter whose start names its device
@@ -152,7 +154,7 @@ export interface PrintJobOptions {
    * no job fails the print.
    */
   adapter: MachineAdapter;
-  /** Evidence collector; construct it with a real signFn to get real signatures. */
+  /** Evidence collector; construct it with a real signFn to get real signatures. In production a test-only signer is refused before start (N267). */
   emitter: EvidenceEmitter;
   /** PCC job id — correlates this print with the mail leg (courier record.jobId). */
   jobId: string;
@@ -328,7 +330,7 @@ async function printOnce(
     assuranceTier = 0,
     timeoutMs = 120_000,
     signal,
-    cancelWindowMs = 30_000,
+    cancelWindowMs = DEFAULT_CANCEL_WINDOW_MS,
     settlementUnitId,
     challengeNonce,
     evidenceQuiesceTimeoutMs = 15_000,
@@ -344,6 +346,8 @@ async function printOnce(
     ...(busy ? { busy } : {}),
     durationMs: Date.now() - startTime,
   });
+  // Refuse the test-only signer before registering a step or starting the printer.
+  if (refusesTestSigner(emitter)) return failure(KERNEL_SIGNER_REQUIRED_MESSAGE);
   // The ids key the step and its lease and name the print in every log line, the cleanup's
   // included: ids that are not text could throw from any of those, so they are refused before
   // anything is held (astra pack 213, as in JobRunner).

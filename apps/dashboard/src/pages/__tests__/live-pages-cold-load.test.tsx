@@ -39,14 +39,23 @@ const state: { loading: boolean; kernels: unknown[] } = {
 };
 
 vi.mock("../../api/hooks/use-pcc-data.js", () => ({
-  useCapabilityTemplates: () => ({
-    data: state.loading ? undefined : { templates: [] },
+  useAllCapabilities: () => ({
+    data: state.loading ? undefined : { items: [], total: 0, complete: true, pages: 1, skipped: 0 },
     isLoading: state.loading,
+    isSuccess: !state.loading,
+    isError: false,
+    error: null,
+    dataUpdatedAt: 0,
+    refetch: () => {},
   }),
-  useKernels: () => ({ data: state.kernels, isLoading: state.loading }),
-  useCapabilities: () => ({
-    data: state.loading ? undefined : { items: [], total: 0 },
+  useKernels: () => ({
+    data: state.kernels,
     isLoading: state.loading,
+    isSuccess: !state.loading,
+    isError: false,
+    error: null,
+    dataUpdatedAt: 0,
+    refetch: () => {},
   }),
 }));
 
@@ -102,7 +111,7 @@ describe("live pages survive a cold load (React #310)", () => {
     const { DiscoverPage } = await import("../DiscoverPage.js");
     const { error, text } = await coldLoad(DiscoverPage as React.ComponentType);
     expect(error).toBeNull();
-    expect(text).toContain("No capabilities available");
+    expect(text).toContain("No capabilities listed yet");
   });
 
   it("KernelLeaderboardPage renders through loading into loaded data without crashing", async () => {

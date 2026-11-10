@@ -6,8 +6,8 @@
  * emitter refused it, and a real print that reported progress failed (found merging #336
  * into #502).
  *
- * Real mode runs against a fake IPP client on the fake clock, as in
- * adapter-quiesce-evidence.test.ts: the client answers on microtasks, so the clock alone
+ * Real mode exercises the built-in IPP/1.1 client through its transport seam on the fake clock,
+ * as in adapter-quiesce-evidence.test.ts: the transport answers on microtasks, so the clock alone
  * decides when a poll lands.
  */
 
@@ -36,22 +36,21 @@ afterEach(() => {
  * it was submitted, then reports `endState` (9 completed, 8 aborted) with all 3.
  */
 async function realModePrinter(id: string, endState: 8 | 9 = 9): Promise<IppAdapter> {
-  const ipp = new IppAdapter(id, { uri: "ipp://printer.test/ipp/print", kernelId: KERNEL_ID, mockMode: false, pollIntervalMs: 2_000 });
-  await vi.dynamicImportSettled(); // the optional 'ipp' package is not installed: it routes to mock, then we inject a client
+  const { FakeIppPrinter, jobResponse, printerResponse } = await import("./helpers/fake-ipp-printer.js");
+  const { IPP_OPERATION } = await import("../adapters/ipp-codec.js");
   let jobDoneAt = Number.POSITIVE_INFINITY;
-  class Printer {
-    execute(op: string, _msg: unknown, _data: unknown, cb: (err: Error | null, res: Record<string, unknown>) => void) {
-      if (op === "Print-Job") {
-        jobDoneAt = Date.now() + 5_000;
-        queueMicrotask(() => cb(null, { "job-attributes-tag": { "job-id": 77 } }));
-      } else if (op === "Get-Job-Attributes") {
-        const done = Date.now() >= jobDoneAt;
-        queueMicrotask(() => cb(null, { "job-attributes-tag": { "job-state": done ? endState : 5, "job-impressions-completed": done ? 3 : 1 } }));
-      } else queueMicrotask(() => cb(null, {}));
+  const printer = new FakeIppPrinter((request) => {
+    if (request.code === IPP_OPERATION.PRINT_JOB) {
+      jobDoneAt = Date.now() + 5_000;
+      return jobResponse(request, { jobId: 77 });
     }
-  }
-  Object.assign(ipp, { ippClient: { Printer }, ippAvailable: true });
-  return ipp;
+    if (request.code === IPP_OPERATION.GET_JOB_ATTRIBUTES) {
+      const done = Date.now() >= jobDoneAt;
+      return jobResponse(request, { jobId: 77, jobState: done ? endState : 5, impressionsCompleted: done ? 3 : 1, jobStateReasons: ["job-completed-successfully"] });
+    }
+    return printerResponse(request);
+  });
+  return new IppAdapter(id, { uri: "ipp://printer.test/ipp/print", kernelId: KERNEL_ID, mockMode: false, pollIntervalMs: 2_000, transport: printer.transport });
 }
 
 describe("IppAdapter events record under the PCC job; the printer's job number is ippJobId (LO-EV-9)", () => {
@@ -107,7 +106,7 @@ describe("IppAdapter events record under the PCC job; the printer's job number i
       success: false,
       bundle: expect.any(Object),
       events: result.bundle.events,
-      error: 'printer reported failure: {"ippJobId":77,"state":"aborted"}',
+      error: 'printer reported failure: {"ippJobId":77,"state":"aborted","origin":"device"}',
       failure: { kind: "device_reported", origin: "device" },
       durationMs: expect.any(Number),
     });

@@ -144,7 +144,7 @@ describe("pizza-llm-bootstrap — static asset presence", () => {
     const pkg = JSON.parse(raw) as PizzaAgentPackage;
 
     expect(pkg.schema).toBe("pcc-agent-package-pizza/1.0");
-    expect(pkg.api_base).toBe("https://capability.network");
+    expect(pkg.api_base).toBe("{BASE}");
     expect(Array.isArray(pkg.tools)).toBe(true);
     expect(pkg.tools.length).toBeGreaterThan(0);
     expect(pkg.toolCount).toBe(pkg.tools.length);

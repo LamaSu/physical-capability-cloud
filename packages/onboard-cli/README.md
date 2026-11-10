@@ -7,7 +7,7 @@ npx @pcc/onboard
 ```
 
 The CLI talks to **capability.network** through your own Anthropic key,
-end to end. The same 219-tool agent package that drives the dashboard
+end to end. The same agent package that drives the dashboard
 chat at https://capability.network/onboard/chat drives this CLI too — so
 whatever the in-browser agent can do for you, this can do, in your
 terminal.
@@ -22,8 +22,8 @@ Three ways for a layperson to onboard to PCC:
 3. **`npx @pcc/onboard`** (this package) — talks to the gateway from
    your laptop with your own Anthropic key, no browser required.
 
-All three paths end up at the same place: a real registered capability,
-kernel, or channel on https://capability.network.
+The browser chat (path 1) can't complete a registration yet: its tool calls
+carry no API key. Check each step's result on the other paths too.
 
 ## Install / run
 
@@ -70,7 +70,7 @@ shells only). Use `--persist` to save the resolved settings to
 │  onboard     │    │                                          │
 │              │    │  GET /agent-package.json                 │
 │ 1. fetch agent-pkg ──────────────────────────────────────→   │
-│ 2. read system_prompt + 219 tools                            │
+│ 2. read system_prompt + 180+ tools                           │
 │                                                              │
 │ 3. send user msg to Anthropic ──→ Anthropic Messages API     │
 │    (model: claude-sonnet-4-6)                                │

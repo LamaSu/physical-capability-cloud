@@ -21,6 +21,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { planComposition } from "./compose.js";
 import type { ComposeRequest } from "@pcc/spec";
+import { demoSurfacesEnabled } from "../config/demo-surfaces.js";
 
 // ── State ──────────────────────────────────────────────────────────────────
 
@@ -344,6 +345,8 @@ function setupSse(reply: FastifyReply, topics: string[]): void {
 // ── Routes ─────────────────────────────────────────────────────────────────
 
 export async function pizzaDemoRoutes(app: FastifyInstance): Promise<void> {
+  // N291: production demo routes require the exact opt-in.
+  if (!demoSurfacesEnabled()) return;
   // POST /api/demo/pizza-order — propose a composition for a pizza order.
   app.post("/api/demo/pizza-order", async (req, reply) => {
     const body = req.body as Partial<{

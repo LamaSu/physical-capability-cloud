@@ -199,7 +199,7 @@ function storeRelayedBundle(
 }
 
 async function complete(app: FastifyInstance, jobId: string) {
-  const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} });
+  const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: { "x-admin-key": ADMIN }, payload: {} });
   expect(res.statusCode).toBe(200);
   return res.json() as { status: string; evidenceHash: string };
 }
@@ -290,7 +290,7 @@ describe("LO-EV-9 — /complete binds device evidence to the accepted job and ke
 // ── LO-EV-9 review R1: recovery settles only the pinned, re-verified anchor ──
 
 function resume(app: FastifyInstance, jobId: string) {
-  return app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, payload: {} });
+  return app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, headers: { "x-admin-key": ADMIN }, payload: {} });
 }
 
 /** A failure after evidence was written leaves the job resumable. */

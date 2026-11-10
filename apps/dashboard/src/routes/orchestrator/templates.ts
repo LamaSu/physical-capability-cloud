@@ -33,11 +33,11 @@ export const TEMPLATES: Record<string, TemplateClientManifest> = {
     slug: "data-product",
     display_name: "Data Product",
     description:
-      "Publish a queryable dataset as a paid PCC capability. Walk through data location, schema, query interface (REST/GraphQL/SQL/MCP), pricing, refresh cadence.",
+      "Publishing a dataset as a PCC capability is not available. This template registers no capability and publishes nothing.",
     produces_kind: "data-product",
     capability_class: "digital",
     greeting:
-      "Hi — I'm Navi. I'll help you publish a queryable dataset as a paid PCC capability. Where does your data live? (e.g. Postgres, Snowflake, BigQuery, REST API, GraphQL endpoint, MCP server)",
+      "Hi — I'm Navi. Publishing a dataset as a PCC capability is not available: this template registers no capability and publishes nothing.",
     api_base: "/api/orchestrator/data-product"
   }
 };

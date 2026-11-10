@@ -518,11 +518,11 @@ export async function operatorRoutes(app: FastifyInstance) {
    * carries the reconcile outcome as `activation`, without the verification record
    * (reconcileAnswer: an activation is {kind, activatedAt, expiresAt, escrowAddress}). If
    * reconcilePaidScope refuses, the accept stands and the scope waits in awaiting_funding.
-   * reconcilePaidScope is given the expected chain and the post-activation TTL as
-   * paidScopeActivationTerms reads them (the steward's rulings 4 and 5). Until S0.1 pins a V-next
-   * deployment record and S1.1 prepares the TTL, both are null and the activation is refused
-   * (expected_chain_unavailable). No record store is configured in production (Q9), so there no
-   * record exists, neither input is read, and this answers exactly what it answered before.
+   * paidScopeActivationTerms supplies reconcilePaidScope's expected chain and post-activation TTL
+   * (the steward's rulings 4 and 5; see its module comment). The configured chain needs an explicit
+   * canonical record selection; the configured TTL is null until S1.1. No record store is configured
+   * in production (Q9), so there no record exists, neither input is read, and this answers exactly
+   * what it answered before.
    */
   app.post<{ Params: { scopeId: string } }>("/api/operator/scopes/:scopeId/accept", async (req, reply) => {
     const authority = authorityOf(req);

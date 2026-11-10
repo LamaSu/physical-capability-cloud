@@ -1052,6 +1052,7 @@ describe("POST /api/contributors/quickstart", () => {
     expect(body.walletProviderUserId).toBe("alice@example.com");
     expect(body.mnemonic).toMatch(/^\w+( \w+){11}$/); // 12 BIP-39 words
     expect(body.mnemonicWarning).toContain("Save this");
+    expect(body.mnemonicWarning).not.toMatch(/royalt|payout/i);
 
     // API key
     expect(body.apiKey).toMatch(/^pcc_(live|test)_/);

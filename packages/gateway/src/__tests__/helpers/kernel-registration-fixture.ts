@@ -63,6 +63,10 @@ export async function registrationFixture() {
       authority.provenWallet = proven;
       authority.provenWalletVia = typeof req.headers["x-test-proven-wallet-via"] === "string"
         ? req.headers["x-test-proven-wallet-via"] : "self-link:agent";
+      const carrier = req.headers["x-test-proven-wallet-carrier"];
+      if (carrier === "none") delete req.provenWalletCarrier;
+      else req.provenWalletCarrier = carrier === "key" || carrier === "bearer-session" || carrier === "cookie"
+        ? carrier : "key";
     }
   });
   await app.register(apiGate);

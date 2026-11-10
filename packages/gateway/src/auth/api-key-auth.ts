@@ -87,6 +87,25 @@ export function resolveApiKey(req: FastifyRequest) {
 }
 
 /**
+ * F3 owner proof: only an active key minted by SIWE carries its stored session identity.
+ * Valid only while every session deletion revokes its keys (logout revokes in the
+ * same transaction; other deletions happen only after expiry); a new session-ending
+ * path must revoke the session's keys too.
+ */
+export function siweSessionKeyAddress(key: ReturnType<typeof resolveApiKey>): string | null {
+  if (!key || key.revokedAt || (key.expiresAt !== null && !(Date.parse(key.expiresAt) > Date.now()))) {
+    return null;
+  }
+  try {
+    return JSON.parse(key.metadata ?? "null")?.source === "siwe-session"
+      ? key.operatorId.toLowerCase()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Provision a new API key for an operator.
  * Returns the raw key (shown once) + key record.
  */

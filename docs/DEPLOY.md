@@ -15,19 +15,19 @@ Implications:
 
 ## Rollout Progress (as of 2026-04-15)
 
-The pipeline is **wired but not yet running end-to-end**. Remaining steps, in order:
+The pipeline is **running end-to-end**. Remaining steps, in order:
 
 - [x] PR #1 merged (2026-04-15) — workflow files + release-please config + docs + CLAUDE.md rules on master.
 - [x] GitHub environments `staging` + `production` created (no protection rules; manual workflow_dispatch is the prod gate).
-- [x] Railway `staging` environment duplicated from `production` (still Dockerfile source; secrets cloned from prod).
+- [x] Railway `staging` environment duplicated from `production` (runs the GHCR `:staging` image, checked 2026-11-06 by /api/health's buildArg PCC_BUILD_SHA; secrets cloned from prod).
 - [x] Lockfile sync (`fix(deps):` commit `e8c664a`) — unblocked `pnpm install --frozen-lockfile`.
 - [x] Dockerfile: COPY kernel-sdk/package.json (commit `2d9b4b6`) — unblocked `turbo build` of kernel-sdk inside the image.
 - [x] GHCR lowercase image refs in retag steps (commit `97c489f`) — Docker image names must be lowercase; `${{ github.repository }}` returns `LamaSu/...`.
 - [x] Full-SHA tag format via `format=long` (commit `0e59f16`) — aligned `docker/metadata-action` (was short SHA) with `${{ github.sha }}` (full SHA) so the retag source is findable.
 - [x] **First green CI run** on master (`0e59f16`, run `24445868832`) — all 4 jobs success. `ghcr.io/lamasu/physical-capability-cloud:<full-sha>`, `:latest`, and `:staging` tags now exist on GHCR.
-- [ ] **Swap Railway `staging` source** from Dockerfile → Docker Image. **CLI does NOT work on existing envs** — `railway environment edit --service-config pcc-gateway source.image ...` silently no-ops when `source.repo`/`source.branch` are already set (tried dot-path, JSON-object, empty-string-then-set — all ignored). Do it in the Railway UI: project `diplomatic-compassion` → environment `staging` → service `pcc-gateway` → Settings → Source → switch to "Docker Image" → `ghcr.io/lamasu/physical-capability-cloud:staging` → enable "Redeploy on image change" → Save. Confirm staging boots via its `*.up.railway.app` URL.
-- [ ] Run the **Deploy to Prod** workflow manually (GitHub → Actions → Deploy to Prod → Run workflow → paste master SHA — **full 40-char SHA**, not short). Confirms `:prod` tag is produced and `capability.network/api/health` still returns 200.
-- [ ] Swap Railway `production` service source Dockerfile → Docker Image `ghcr.io/lamasu/physical-capability-cloud:prod` via the Railway UI (same path as staging — CLI doesn't work here either). This is the "live" cutover; verify `capability.network` stays green.
+- [x] **Swap Railway `staging` source** from Dockerfile → Docker Image. **CLI does NOT work on existing envs** — `railway environment edit --service-config pcc-gateway source.image ...` silently no-ops when `source.repo`/`source.branch` are already set (tried dot-path, JSON-object, empty-string-then-set — all ignored). Do it in the Railway UI: project `diplomatic-compassion` → environment `staging` → service `pcc-gateway` → Settings → Source → switch to "Docker Image" → `ghcr.io/lamasu/physical-capability-cloud:staging` → enable "Redeploy on image change" → Save. Confirm staging boots via its `*.up.railway.app` URL. (done; checked 2026-11-06: /api/health reports buildArg PCC_BUILD_SHA)
+- [x] Run the **Deploy to Prod** workflow manually (GitHub → Actions → Deploy to Prod → Run workflow → paste master SHA — **full 40-char SHA**, not short). Confirms `:prod` tag is produced and `capability.network/api/health` still returns 200. (done; checked 2026-11-06: Deploy to Prod runs by workflow_dispatch)
+- [x] Swap Railway `production` service source Dockerfile → Docker Image `ghcr.io/lamasu/physical-capability-cloud:prod` via the Railway UI (same path as staging — CLI doesn't work here either). This is the "live" cutover; verify `capability.network` stays green. (done; checked 2026-11-06: /api/health reports buildArg PCC_BUILD_SHA)
 - [ ] Delete stale Dockerfile builder config from Railway once GHCR-pull is proven stable (leave `railway.toml` as-is — Railway ignores it when service source is Image).
 
 ### Nice-to-haves (not blocking)
@@ -134,7 +134,7 @@ Your commits should follow Conventional Commits (`feat:`, `fix:`, `feat(scope)!:
 To promote a build to prod:
 1. Find the SHA you want to promote in the staging deploy run (it's the commit SHA of the master push).
 2. GitHub → Actions → **Deploy to Prod** → **Run workflow** → paste the SHA → **Run**.
-3. The workflow verifies the image exists, retags it as `:prod`, and smoke-tests `https://capability.network/api/health`.
+3. The workflow checks the sha input, verifies the image exists, retags it as `:prod`, forces a Railway redeploy and waits for the new deployment's SUCCESS, then polls https://capability.network/api/health until it serves the promoted commit with buildArg PCC_BUILD_SHA, failing after 3 minutes otherwise.
 
 If you upgrade to GitHub Pro ($4/mo) later, you can add a required-reviewer rule to the `production` environment and move the deploy-prod job back into `ci.yml` as an automatic push-to-master job — the Dockerfile/YAML is ready for that switch.
 
@@ -220,6 +220,108 @@ Ship to S3/Storacha on a daily cron. Whole-file size stays under 100 MB even wit
 ### Reference
 
 Full rationale, growth math, vacuum guidance, and recovery semantics: [`docs/WORKFLOW_RUNTIME.md`](./WORKFLOW_RUNTIME.md) §5 (Operational notes). Public API: [`packages/workflow/README.md`](../packages/workflow/README.md).
+
+## Local job dispatch on the production image (self-hosted labs)
+
+The image sets `NODE_ENV=production` (Dockerfile). **In production the gateway never runs a submitted job on a device it hosts.** It holds no kernel signing key: its own kernel's evidence emitter has only the test-only zero-address key. So in production a job that passes every check below is queued too, with reason `no_kernel_signer`, for a node that signs with the kernel's registered key to pick up. A job that fails a check keeps that check's reason.
+
+Outside production, a gateway runs a submitted job on a device it hosts only when ALL of these hold. Every other submitted job is queued for a remote node to pick up.
+
+1. **Queue-only is off.** Outside production that's the default: only an exact `PCC_JOB_SUBMIT_QUEUE_ONLY=true` turns it on. In production it's the reverse: an unset variable or any value but an exact `false` means queue-only, and its reason, `queue_only`, comes before `no_kernel_signer` (a gateway with no explicit kernel config, items 2 and 3, reports `no_configured_local_kernel` first).
+2. **An explicit kernel config:** `KERNEL_CONFIG` (the config JSON, inline) or `KERNEL_CONFIG_FILE` (a path to a JSON file). If both are set, `KERNEL_CONFIG` wins. With neither, the gateway generates a mock config, and a generated config never authorizes a local job.
+3. **The config's `kernelId` isn't the placeholder `kernel_dev_001`.**
+4. **The job is for that `kernelId`,** and that kernel's emergency stop reads clear. A stop that is engaged, or that can't be read, queues the job instead.
+
+A submit can also send `queueOnly: true` to queue a job that would otherwise run locally.
+
+`KERNEL_ID` names the generated mock config's kernel (default `kernel_dev_001`), and the setup routes use it when they generate or validate a config that names no kernel. It never turns local dispatch on by itself.
+
+Enable local dispatch only on a gateway that untrusted callers can't reach.
+
+Outside production, a lab that runs its devices in the gateway process sets an explicit kernel config, for example `KERNEL_CONFIG_FILE=/app/data/kernel-config.json`. In production its jobs wait in the queue for a node that signs with the kernel's registered key. pcc-node registers its signing key when it starts, but it takes no jobs yet (`pcc-node start` says so), so it doesn't run them.
+
+To check the effective policy:
+- The boot log prints `[jobs] Effective local dispatch policy` with `queueOnly`, `localDispatch` and, when local dispatch is off, the `reason`. In production, when the checks above pass, the reason is `no_kernel_signer`.
+- `GET /api/setup/detect` (API key required) returns `jobs: { queueOnly, localDispatch }`. Its `localDispatch` is true only when the checks above pass for the config's own kernel AND at least one machine device has a loaded runner. In production it's false.
+
+## Demo surfaces in production
+
+In production the gateway serves no demo routes and starts no demo agent. The pizza demo's routes (`/api/demo/*` and `/sse/demo/*`) aren't registered, and the agent bridge starts its user and broker agents without its demo kernel agent, `kernel-gateway`. The dashboard's demo pages (`order.html`, `operator.html`, `driver.html`, `operator-capture.html` and the `pizza-*.html` pages) call those routes, so in production they don't work.
+
+`PCC_DEMOS_ENABLED=true`, exactly, turns both back on in production, for a demo deployment. Unset, or any other value, leaves them off. Outside production they're on, whatever the variable says. The gateway reads it at boot.
+
+## Buyer-funding V-next record: operator-approved live window
+
+On production, keep all three variables **unset**: `PCC_VNEXT_RECORD_NETWORK`,
+`PCC_VNEXT_ALLOW_TESTNET_RECORD`, and `PCC_VNEXT_TESTNET_BUYERS`. Leaving them unset
+keeps testnet-record activation disabled; do not configure them as persistent production settings.
+
+For **one operator-approved live window**, with an explicit go, set all three:
+
+- `PCC_VNEXT_RECORD_NETWORK=base-sepolia` selects the pinned canonical deployment record.
+- `PCC_VNEXT_ALLOW_TESTNET_RECORD=1` opts into a testnet-only record; only exact `1` works.
+- `PCC_VNEXT_TESTNET_BUYERS=<list>` supplies the closed comma-separated buyer allow-list.
+
+List entries must be lowercase Ethereum addresses or correctly EIP-55 checksummed addresses:
+`0x` and 40 hex digits, written all in lowercase or exactly in the address's EIP-55 checksum case.
+Any other entry invalidates the **entire** list: a bad checksum, an all-uppercase entry (unless
+that spelling happens to be its checksum), an empty entry, whitespace, or an invalid address.
+An empty or unset list permits nobody. A testnet-only activation for a verified buyer the list
+does not allow is refused; once the record's own checks pass, the refusal is
+`testnet_buyer_not_allowed`. After the live window, **unset all three variables** again; do not
+leave the opt-in on production.
+
+Keep `PCC_VNEXT_RECORD_LABEL` unset as well. If it is set to anything, even an empty value, the
+reader refuses every record without a warning.
+
+When the reader refuses a record it has read, the gateway logs one warning for that read,
+`vnext_record_refused <code>`, naming the first rule the record fails. No funding then binds or
+activates, because the expected chain is unavailable:
+
+- `R-a`: the record's `specVersion` is not 2.
+- `R-b`: `scheduleTestnetOnly` is missing or not a boolean, or it is true on a chain other than
+  84532 or 31337.
+- `R-c`: the record is testnet-only and `PCC_VNEXT_ALLOW_TESTNET_RECORD` is not exactly `1`.
+- `R-d`: the file is not a JSON object; or a field the gateway reads fails its check (`mode`,
+  `label`, `canonical`, `doNotPin`, `broadcast`, `factory`, `implementation`, `usdc`, `chainId`,
+  `blockNumber`); or the schedule is not exactly one of the schema's two tuples: `scheduleId` is
+  unknown, or `scheduleTestnetOnly` or a window (`challengeWindowSec`, `appealWindowSec`,
+  `backupWindowSec`, `emergencyReviewWindowSec`, `minReclaimDelaySec`, `maxReclaimDelaySec`)
+  differs from that `scheduleId`'s tuple; or `chainId` is not the chain of the
+  `PCC_VNEXT_RECORD_NETWORK` directory.
+
+The reader also refuses, with no warning, when `PCC_VNEXT_RECORD_NETWORK` is unset or is not
+`base`, `base-sepolia`, `anvil` or `chain-<id>`; when the gateway cannot find the `@pcc/contracts`
+package; or when the record file or one of its directories is missing, unreadable, a symlink, or
+not a regular file or directory.
+
+The `escrow_funding` and `funding_prepares` tables start empty. **Nothing activates** via this
+path until both S1.1 (prepared TTL terms) and S1.2 (the production funding-store wiring) land.
+
+### Buyer-funding verifier sweep (S1.2)
+
+One run first retries activation for finalized funding records whose scopes are awaiting funding
+inside their window. It then verifies eligible served or expired prepares, oldest first, at a
+finalized chain block. Each pass handles at most 25 rows. Funding evidence, the escrow's funded
+status and its milestones commit together; activation runs after that commit and is retried if
+it fails while the window remains open.
+
+The sweep starts only outside tests, when the deployment record resolves through the record
+opt-ins and the RPC URL is valid. With the record variables unset (the production default), it
+starts nothing, reads nothing and writes nothing.
+
+`PCC_VNEXT_RPC_URL` has no default. Use HTTPS, or HTTP on `127.0.0.1`, `[::1]` or `localhost`.
+Credentials in the user part and any `#` are refused. This is the window's fourth setting: unset
+it along with `PCC_VNEXT_RECORD_NETWORK`, `PCC_VNEXT_ALLOW_TESTNET_RECORD` and
+`PCC_VNEXT_TESTNET_BUYERS` after the window.
+
+`PCC_VNEXT_FUNDING_SWEEP_INTERVAL_SEC` is optional: a decimal integer from 60 to 180 seconds,
+default 60. The `escrows.version` value `vnext-buyer` marks a buyer-funded V-next row.
+
+For a `vnext-buyer` row, `POST /api/escrow/chain/:address/fund` answers HTTP 409
+`escrow_buyer_funded`, and the settlement crank answers `blocked` with that reason.
+The EAS release and attestation routes also answer HTTP 409 `escrow_buyer_funded` for these rows.
+An unrecognized escrow version answers HTTP 409 `escrow_version_unknown` on those EAS routes.
 
 ## Temporary compatibility flags
 

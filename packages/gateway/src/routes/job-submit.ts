@@ -15,6 +15,7 @@ import { gateJobRead, refuseJobRead } from "../readmodels/job-read-gate.js";
 import type { SubmitJobInput, RegisterDeviceInput } from "../facades/index.js";
 import { getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
+import { authorityOf, refuseKernelAction } from "../auth/kernel-authority.js";
 
 const { operatorPolicies, captureVerdicts, captureAnchors } = schema;
 
@@ -153,6 +154,7 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
           properties: {
             kernelId: { type: "string", description: "Target kernel ID." },
             capabilityId: { type: "string", description: "Capability to invoke." },
+            queueOnly: { description: "Only boolean true queues this submission without local dispatch." },
             capabilityType: {
               type: "string",
               description: "Type for fuzzy match if capabilityId omitted.",
@@ -229,8 +231,12 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
         }
       }
 
+      const localRunAuthority = typeof kernelId === "string" && kernelId.length > 0
+        && refuseKernelAction(req, authorityOf(req), kernelId, "decide") === null
+        ? "decide" : "none";
       const result = await facade.submit(
         req.body,
+        localRunAuthority,
         actorId,
         req.ip,
         req.headers["user-agent"],

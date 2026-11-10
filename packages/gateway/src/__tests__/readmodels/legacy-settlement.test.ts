@@ -375,6 +375,7 @@ describe("the legacy settlement routes on a real store", () => {
       const proven = req.headers["x-test-proven-wallet"];
       if (typeof proven === "string") {
         (req as any).provenWallet = proven;
+        req.provenWalletCarrier = "bearer-session";
         (req as any).provenWalletVia = "siwe-session";
       }
     });
@@ -483,7 +484,7 @@ describe("the legacy settlement routes on a real store", () => {
     });
     expect(created.statusCode).toBe(201);
     const { jobId } = created.json();
-    expect((await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} })).statusCode).toBe(200);
+    expect((await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: PARTY, payload: {} })).statusCode).toBe(200);
 
     const { jobs, settlement } = await both(jobId);
     expect(jobs.statusCode).toBe(200);

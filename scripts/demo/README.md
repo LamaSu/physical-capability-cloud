@@ -75,7 +75,7 @@ default keeps you on localhost.
 
 Pure helpers (`toOpenAiTool[s]`, `buildEndpointMap`, `buildToolRequest`,
 `extractDecomposition`, `deriveCapabilityType`, `buildAisaPayload`, …) are
-verified by `buyer-agent.test.mjs` — including the whole real 253-tool
+verified by `buyer-agent.test.mjs` — including the whole real
 `agent-package.json`. Run:
 
 ```bash

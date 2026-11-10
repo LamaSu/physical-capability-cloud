@@ -464,6 +464,7 @@ interface ViewNode {
   textContent: string | null;
   parentNode: { removeChild(child: ViewNode): void } | null;
   className: string;
+  setAttribute(name: string, value: string): void;
   appendChild(child: ViewNode): ViewNode;
 }
 interface ViewDocument {
@@ -887,6 +888,8 @@ export function renderGalleryIntoView(win: ViewWindow, entries: unknown[]): bool
   if (status && status.parentNode) status.parentNode.removeChild(status);
   if (!entries.length) {
     var empty = doc.createElement("p");
+    empty.className = "pcc-src-ephemeral";
+    empty.setAttribute("data-source", "ephemeral");
     empty.textContent = "No dashboards found.";
     root.appendChild(empty);
     return true;
@@ -1268,7 +1271,7 @@ export function buildMcpAppIrDashboardHtml(nonce: string = cspNonce()): string {
 /* PX-5 (build-controlled): manifest prose is agent-authored and is marked so; PCC's withheld
    notice (and every other PCC constant) is not. Bound values are data, not agent prose. */
 .pcc-agent{border-left:2px dashed currentColor;padding-left:6px}
-.pcc-text.pcc-agent::before,.pcc-heading.pcc-agent::before{content:"agent-authored";display:block;font-size:10px;letter-spacing:.06em;text-transform:uppercase;opacity:.6}
+.pcc-agent::before{content:"agent-authored";display:block;font-size:10px;letter-spacing:.06em;text-transform:uppercase;opacity:.6}
 .pcc-withheld{font-style:italic}
 /* PX-4 provenance (build-controlled; the design lane owns the final visual language).
    Authority is DERIVED, never manifest-chosen: agent-authored prose is also marked proposed
@@ -1276,6 +1279,7 @@ export function buildMcpAppIrDashboardHtml(nonce: string = cspNonce()): string {
    bound data carries a text "as of" line that says "stale" when it is. */
 .pcc-src-proposed{border-left:2px dashed currentColor;padding-left:6px}
 .pcc-text.pcc-src-proposed::before,.pcc-heading.pcc-src-proposed::before{content:"agent-authored";display:block;font-size:10px;letter-spacing:.06em;text-transform:uppercase;opacity:.6}
+.pcc-ir.pcc-src-proposed,.pcc-section.pcc-src-proposed,.pcc-grid.pcc-src-proposed,.pcc-form.pcc-src-proposed{border-left:0;padding-left:0}
 .pcc-fresh{font-size:12px}
 .pcc-stale,.pcc-unavail,.pcc-time-unknown{border-left:3px solid currentColor;padding-left:6px}
 .pcc-absent{font-style:italic}
@@ -1284,7 +1288,7 @@ export function buildMcpAppIrDashboardHtml(nonce: string = cspNonce()): string {
 </head>
 <body>
 <main id="pcc-ir-root">
-  <p class="pcc-invalid">Waiting for the host to hand off a dashboard&hellip;</p>
+  <p class="pcc-invalid pcc-src-ephemeral" data-source="ephemeral">Waiting for the host to hand off a dashboard&hellip;</p>
 </main>
 <script nonce="${nonce}">
 ${dashboardIrViewBootScript()}
@@ -1353,7 +1357,7 @@ function buildMcpAppDashboardHtml(nonce: string = cspNonce()): string {
 </head>
 <body>
 <main id="pcc-root">
-  <p id="pcc-kit-status">Waiting for the host to hand off a dashboard&hellip;</p>
+  <p id="pcc-kit-status" class="pcc-src-ephemeral" data-source="ephemeral">Waiting for the host to hand off a dashboard&hellip;</p>
 </main>
 <script type="application/json" id="pcc-manifest">null</script>
 <script nonce="${nonce}">
@@ -1387,7 +1391,7 @@ function buildMcpAppGalleryHtml(nonce: string = cspNonce()): string {
 </head>
 <body>
 <main id="pcc-root">
-  <p id="pcc-kit-status">Waiting for the host to hand off saved dashboards&hellip;</p>
+  <p id="pcc-kit-status" class="pcc-src-ephemeral" data-source="ephemeral">Waiting for the host to hand off saved dashboards&hellip;</p>
 </main>
 <script nonce="${nonce}">
 ${galleryViewBootScript()}
@@ -1433,7 +1437,7 @@ function buildMcpAppDashboardHtmlForManifest(
 </head>
 <body>
 <main id="pcc-root">
-  <p id="pcc-kit-status">Loading the PCC dashboard&hellip;</p>
+  <p id="pcc-kit-status" class="pcc-src-ephemeral" data-source="ephemeral">Loading the PCC dashboard&hellip;</p>
 </main>
 <script type="application/json" id="pcc-manifest">${manifestJson}</script>
 <script nonce="${nonce}">
@@ -1861,7 +1865,7 @@ export function mcpAppMirrorRefusal(host: string | undefined): { status: number;
 }
 
 export function registerMcpAppHttpRoute(app: FastifyInstance): void {
-  app.get(HTTP_MIRROR_PATH, async (request, reply) => {
+  app.get(HTTP_MIRROR_PATH, { config: { cspOwnPolicy: true } }, async (request, reply) => {
     const refusal = mcpAppMirrorRefusal(request.headers.host);
     if (refusal) {
       return reply.code(refusal.status).type("text/plain; charset=utf-8").send(refusal.message);

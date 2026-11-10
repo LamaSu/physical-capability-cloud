@@ -191,10 +191,9 @@ describe("W5 wallet-only owner emergency stop (steward #8754 and #8783)", () => 
     });
 
     describe("after ENGAGE", () => {
-      // The plain ENGAGE test above keeps that path covered while RESUME tracks N173.
       beforeEach(async () => { await engage(headers); });
 
-      it.fails("allows RESUME (it.fails until N173: SIWE session keys carry no proven wallet)", async () => {
+      it("allows RESUME (N173: the SIWE session key carries the owner's proven wallet)", async () => {
         await resume(headers);
       });
     });

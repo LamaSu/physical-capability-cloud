@@ -457,6 +457,7 @@ describe("GET /api/operator/work and /api/operator/income", () => {
       const w = req.headers["x-test-proven-wallet"];
       const proven = typeof w === "string" ? (w === "none" ? null : w) : typeof p === "string" ? p : null;
       (req as any).provenWallet = typeof proven === "string" && /^0x[0-9a-fA-F]{40}$/.test(proven) ? proven.toLowerCase() : null;
+      req.provenWalletCarrier = "key";
     });
     await app.register(operatorWorkRoutes);
     await app.ready();

@@ -34,6 +34,7 @@ import { z } from "zod";
 import { getRepos } from "../db.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { getEmbeddedWalletAdapter } from "../auth/embedded-wallet.js";
+import { refuseCookieCredentialWrite } from "../auth/explicit-session.js";
 import {
   RateSegmentSchema,
   assertScheduleIsWellFormed,
@@ -519,6 +520,8 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post("/api/contributors/quickstart", async (req, reply) => {
+    const refusal = refuseCookieCredentialWrite(req);
+    if (refusal) return reply.code(401).send(refusal);
     const parse = QuickstartBodySchema.safeParse(req.body);
     if (!parse.success) {
       return reply.code(400).send({
@@ -663,7 +666,7 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
       // this once with a "back this up before continuing" gate.
       mnemonic: wallet.mnemonic ?? null,
       mnemonicWarning: wallet.mnemonic
-        ? "Save this 12-word phrase NOW. It is the only way to recover your wallet. We do not store it. If you lose it, your wallet and all royalty payouts are gone forever."
+        ? "Save this 12-word phrase NOW. It is the only way to recover your wallet. We do not store it. If you lose it, your wallet is gone forever."
         : null,
       scheduleHash,
       ratePercent: body.ratePercent,

@@ -290,7 +290,7 @@ export async function capabilityRoutes(app: FastifyInstance) {
    * Accepts optional pagination query params (offset, limit).
    * Returns PaginatedResult<CapabilityDTO> for richer clients.
    *
-   * PUBLIC — no auth required (see middleware/api-gate.ts PUBLIC_EXACT).
+   * PUBLIC — no auth required (see middleware/api-gate.ts PUBLIC_READ_EXACT).
    */
   app.get<{ Querystring: { offset?: number; limit?: number; type?: string } }>(
     "/api/capabilities",

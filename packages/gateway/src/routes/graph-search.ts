@@ -57,6 +57,7 @@ import type {
 } from "@pcc/spec";
 import { schema, eq, sql } from "@pcc/store";
 import { getStore, initStore } from "../db.js";
+import { demoSurfacesEnabled } from "../config/demo-surfaces.js";
 
 // ---------------------------------------------------------------------------
 // Store access — see compose.ts for the lazy-init rationale.
@@ -688,35 +689,38 @@ export async function graphSearchRoutes(app: FastifyInstance): Promise<void> {
   // ── GET /api/capabilities/graph-stats ────────────────────────────────────
   app.get("/api/capabilities/graph-stats", async () => buildStats());
 
-  // ── POST /api/capabilities/graph/_dev/register-node ──────────────────────
-  // Scaffold-only injection. Production replaces this with a CapabilityFacade-
-  // backed graph rebuild. Gated behind the gateway apiGate in production.
-  app.post("/api/capabilities/graph/_dev/register-node", async (req, reply) => {
-    const parsed = RegisterGraphNodeSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return reply.status(400).send({
-        error: "invalid_body",
-        message: "Invalid node registration",
-        details: parsed.error.flatten(),
-      });
-    }
-    const node = upsertNode(parsed.data);
-    return reply.status(201).send({ ok: true, node });
-  });
+  // N314-B: dev registration routes are off in production unless PCC_DEMOS_ENABLED=true (N291's flag).
+  if (demoSurfacesEnabled()) {
+    // ── POST /api/capabilities/graph/_dev/register-node ──────────────────────
+    // Scaffold-only injection. Production replaces this with a CapabilityFacade-
+    // backed graph rebuild. Gated behind the gateway apiGate in production.
+    app.post("/api/capabilities/graph/_dev/register-node", async (req, reply) => {
+      const parsed = RegisterGraphNodeSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.status(400).send({
+          error: "invalid_body",
+          message: "Invalid node registration",
+          details: parsed.error.flatten(),
+        });
+      }
+      const node = upsertNode(parsed.data);
+      return reply.status(201).send({ ok: true, node });
+    });
 
-  // ── POST /api/capabilities/graph/_dev/register-edge ──────────────────────
-  app.post("/api/capabilities/graph/_dev/register-edge", async (req, reply) => {
-    const parsed = RegisterGraphEdgeSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return reply.status(400).send({
-        error: "invalid_body",
-        message: "Invalid edge registration",
-        details: parsed.error.flatten(),
-      });
-    }
-    const edge = upsertEdge(parsed.data);
-    return reply.status(201).send({ ok: true, edge });
-  });
+    // ── POST /api/capabilities/graph/_dev/register-edge ──────────────────────
+    app.post("/api/capabilities/graph/_dev/register-edge", async (req, reply) => {
+      const parsed = RegisterGraphEdgeSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.status(400).send({
+          error: "invalid_body",
+          message: "Invalid edge registration",
+          details: parsed.error.flatten(),
+        });
+      }
+      const edge = upsertEdge(parsed.data);
+      return reply.status(201).send({ ok: true, edge });
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -63,8 +63,8 @@ conversation.
 accept?*
 
 **Backed by**: Capability StructureDefinitions (CSDs). FHIR-inspired,
-inheritable via `baseDefinition`, versioned. Five base CSDs ship today
-(FDM, SLA, CNC 3-axis, laser cut, 2D print); the top-50 catalog is seeded.
+inheritable via `baseDefinition`, versioned. Built-in CSDs ship today
+(FDM, SLA, CNC 3-axis, laser cut and 2D print among them); no wider catalog is seeded.
 Anyone can register a new CSD via `POST /api/csd`; the registry talks back
 during onboarding via the `pcc-suggest-templates` A2A skill.
 
@@ -189,7 +189,7 @@ through `POST /a2a/tasks/send`:
 
 Plus the substrate also speaks **OpenAPI 3.0.3** at
 `https://capability.network/openapi.json` (700+ paths) and a generic
-**agent-package.json** (248 tools, v2.13) at
+**agent-package.json** (180+ tools, v2.13) at
 `https://capability.network/agent-package.json`. Any client picks the
 surface it understands; the network underneath is the same.
 
@@ -199,7 +199,7 @@ surface it understands; the network underneath is the same.
 
 The operator opens their own LLM agent (Claude / ChatGPT / Codex /
 Gemini / their tool-use loop of choice), pastes the
-[agent prompt template](https://capability.network/pizza-llm-agent-prompt.md)
+[agent prompt template](https://capability.network/skills/pcc.md)
 or equivalent, and tells the agent what they have:
 
 > "I want to onboard my pizza shop."

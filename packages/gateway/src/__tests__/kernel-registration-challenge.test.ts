@@ -147,8 +147,7 @@ describe("kernel registration challenges", () => {
     expect(response.json().kernel.signingKey).toEqual(EVM_SIGNER);
   });
 
-  it("URI-encodes special kernel ids in SIWE resources and round-trips the signed message", async () => {
-    const kernelId = 'k{|}^"<>`x';
+  it.each(['k{|}^"<>`x', "site:nyc/printer-1"])("URI-encodes special kernel id %s in SIWE resources and round-trips the signed message", async (kernelId) => {
     const challenge = await fixture.issue(kernelId, EVM_SIGNER);
     const parsed = parseSiweMessage(challenge.message);
     expect(parsed.resources).toEqual([
@@ -156,6 +155,9 @@ describe("kernel registration challenges", () => {
       `urn:pcc:kernel:${encodeURIComponent(kernelId)}`,
       "urn:pcc:env:prod",
     ]);
+    if (kernelId === "site:nyc/printer-1") {
+      expect(parsed.resources).toContain("urn:pcc:kernel:site%3Anyc%2Fprinter-1");
+    }
     expect(createSiweMessage(parsed as Parameters<typeof createSiweMessage>[0])).toBe(challenge.message);
     const signature = await EVM_A.signMessage({ message: challenge.message });
     const response = await fixture.register(kernelId, {

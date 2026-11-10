@@ -11,7 +11,8 @@
  */
 
 import * as Sentry from "@sentry/node";
-import { isWalletRequest } from "./services/telemetry-privacy.js";
+import { canonicalRequestPath, isWalletRequest } from "./services/telemetry-privacy.js";
+import { isOutboundSecretSentryEvent, isOutboundSecretUrl } from "./services/outbound-secrets.js";
 
 /** Remove only the wallet header and its Sentry HTTP span attribute. */
 function withoutWalletHeader<T>(value: T, seen = new WeakMap<object, object>()): T {
@@ -39,14 +40,25 @@ function withoutWalletHeader<T>(value: T, seen = new WeakMap<object, object>()):
   return output as T;
 }
 
+/** Beta signup requests carry a client's IP and user agent, so their events are dropped too. */
+function isBetaSignupRequest(rawUrl: string): boolean {
+  let path = rawUrl.replace(/^[A-Z]+\s+/, "");
+  if (/^https?:\/\//i.test(path)) {
+    try { path = new URL(path).pathname; } catch { return false; }
+  }
+  const canonical = canonicalRequestPath(path);
+  return canonical === "/api/beta-apply" || canonical === "/api/admin/beta-apply" || canonical.startsWith("/api/admin/beta-apply/");
+}
+
 /** Drop ceremony events before Sentry's transport receives request context. */
 export function walletSafeSentryEvent<T extends {
   request?: { url?: string; query_string?: unknown };
   extra?: Record<string, unknown>;
   transaction?: string;
 }>(event: T): T | null {
+  if (isOutboundSecretSentryEvent(event)) return null;
   const urls = [event.request?.url, event.extra?.url, event.transaction];
-  return urls.some((url) => typeof url === "string" && isWalletRequest(url)) ? null : withoutWalletHeader(event);
+  return urls.some((url) => typeof url === "string" && (isWalletRequest(url) || isBetaSignupRequest(url))) ? null : withoutWalletHeader(event);
 }
 
 // OTel and Sentry integrations use different request-target attribute names.
@@ -57,6 +69,7 @@ const WALLET_ROUTE_TEMPLATES = new Set([
   "/api/wallets", "/api/wallets/link-requests", "/api/wallets/link-requests/lookup",
   "/api/wallets/link-requests/:id", "/api/wallets/link-requests/:id/proof",
   "/api/wallets/link-requests/:id/approve", "/api/wallets/:linkId/revoke",
+  "/api/wallets/link-requests/:id/fund", "/api/wallets/:linkId/fund",
 ]);
 
 const SENTRY_DSN =
@@ -84,13 +97,16 @@ export function initSentry(): void {
     // 100 % sample rate for the hackathon demo; reduce in production
     tracesSampleRate: 1.0,
     profilesSampleRate: 0.1,
+    integrations: [Sentry.httpIntegration({ maxIncomingRequestBodySize: "none" })],
     beforeSend: walletSafeSentryEvent,
     beforeSendTransaction: walletSafeSentryEvent,
     beforeBreadcrumb(breadcrumb) {
+      if ([breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message].some(isOutboundSecretUrl)) return null;
       const urls = [breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message];
       return urls.some((url) => typeof url === "string" && isWalletRequest(url)) ? null : withoutWalletHeader(breadcrumb);
     },
     beforeSendSpan(span) {
+      if ([span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])].some(isOutboundSecretUrl)) return { ...span, description: "outbound/<redacted>", data: {} };
       const urls = [span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])];
       const route = span.data["http.route"];
       return urls.some((url) => typeof url === "string" && isWalletRequest(url))

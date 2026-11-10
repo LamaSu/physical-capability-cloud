@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Onboard a machine — Physical Capability Cloud</title>
 <meta property="og:title" content="Onboard a machine — PCC">
-<meta property="og:description" content="Bring your hardware online on the Physical Capability Cloud network in 60 seconds.">
+<meta property="og:description" content="Install pcc-node next to your machine to keep its kernel online on the Physical Capability Cloud network.">
 <style>
   * { box-sizing: border-box; }
   body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #0b0d10; color: #e6e9ef; margin: 0; padding: 24px; line-height: 1.55; }
@@ -106,7 +106,7 @@
 <body>
 <div class="wrap">
   <h1>Onboard a machine
-    <small>Bring your hardware online on capability.network in about 60 seconds.</small>
+    <small>Install pcc-node to keep your machine's kernel online on capability.network. Buyers find it only after you publish a capability.</small>
   </h1>
   <div class="grid">
     <div>
@@ -136,19 +136,18 @@
             <p style="margin-top:18px;color:#9aa3b2">It will:</p>
             <ol>
               <li>Check for python3 / pip / git</li>
-              <li>Install <code>pcc-node</code> from source (covers all current adapters)</li>
-              <li>Ask you for the instrument URL + credentials</li>
-              <li>Auto-provision a PCC API key</li>
-              <li>Generate a KERNEL_CONFIG and start the kernel daemon</li>
+              <li>Ask you for a PCC API key (it doesn't create one: <a href="/auth.md">how to get one</a>)</li>
+              <li>Install <code>pcc-node</code> from source, at a fixed commit</li>
+              <li>Start <code>pcc-node</code>, which finds the devices it can detect and registers your kernel</li>
             </ol>
-            <p style="margin-top:18px;color:#9aa3b2">When done, your kernel page will be at <code>capability.network/operator/&lt;your-kernel-id&gt;</code> and you'll be accepting jobs from any customer on the network.</p>
+            <p style="margin-top:18px;color:#9aa3b2">When done, the node has registered your kernel using your PCC API key. The node keeps your kernel online and does not take jobs: your devices run only through your operating agent's typed operations.</p>
           </div>
         </div>
       </div>
 
       <div class="card" style="margin-top:24px">
         <label>Or paste this into your LLM</label>
-        <p class="steps" style="margin:6px 0 14px;color:#c5cbd5">230+ tools, role-aware system prompt, install recipes baked in. Paste into Claude / ChatGPT / Cursor / any LLM with shell access — it bootstraps onboarding end-to-end.</p>
+        <p class="steps" style="margin:6px 0 14px;color:#c5cbd5">180+ tools, role-aware system prompt, install recipes baked in. Paste into Claude / ChatGPT / Cursor / any LLM with shell access — it bootstraps onboarding end-to-end.</p>
         <button class="big-copy" id="copy-agent-pkg-btn">📋 Copy agent-package.json</button>
         <p class="big-copy-hint">~207&nbsp;KB. Once copied, paste into the LLM and tell it what you have — for example <em>“I have a [your device] at <code>http://192.168.1.50</code>, here are the credentials. Register it and start the kernel daemon.”</em> The LLM picks the OPERATOR role from the prompt and walks the rest. If your device isn't on a first-class adapter yet, the LLM scaffolds one from the API docs.</p>
       </div>
@@ -198,7 +197,7 @@
 // Smart device resolver: free-text + optional photo → /api/onboard/identify-device
 // (Claude vision). Known adapters auto-fill the curl command. Unknown devices
 // get a prompt-handoff card pointing the user's LLM at the SDK + agent-package.
-const KNOWN_ADAPTERS = new Set(['hamilton','opentrons','octoprint','sila','modbus','opcua','mock']);
+const KNOWN_ADAPTERS = new Set(['hamilton','opentrons','octoprint','sila','mock']);
 const deviceTextEl = document.getElementById('device-text');
 const photoFileEl  = document.getElementById('device-photo');
 const photoBtn     = document.getElementById('photo-btn');

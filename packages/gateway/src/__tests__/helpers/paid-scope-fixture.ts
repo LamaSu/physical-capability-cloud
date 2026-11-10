@@ -18,6 +18,7 @@ import {
   type FundingVerificationRecord,
 } from "../../services/funding-record-port.js";
 import { escrowForJob, PAID_SCOPE_TTL_MS } from "../../services/scope-acceptance.js";
+import { testnetBuyerAllowance } from "../../services/funding-binding.js";
 import { projectFundingStatus, type FundingStatusDTO } from "../../readmodels/funding-status.js";
 import {
   __setPaidScopeActivationTermsForTest,
@@ -36,7 +37,7 @@ export const MIN = 60_000;
 export const CHAIN_ID = 84532;
 export const ACTIVATION_TTL = 6 * 60 * MIN;
 /** reconcilePaidScope's required inputs (rulings 4 and 5), as the tests give them explicitly. */
-export const TERMS: PaidScopeActivationTerms = { expectedChainId: CHAIN_ID, postActivationTtlMs: ACTIVATION_TTL };
+export const TERMS: PaidScopeActivationTerms = { expectedChainId: CHAIN_ID, postActivationTtlMs: ACTIVATION_TTL, testnetOnly: false };
 /** Installs the accept route's source of the expected chain and TTL (none by default: both null). */
 export const installActivationTerms = (terms: PaidScopeActivationTerms = TERMS) =>
   __setPaidScopeActivationTermsForTest(() => terms);
@@ -190,7 +191,12 @@ export async function paidScope(
  * The funding-status DTO a route would build now from the database: the scope row, the record the
  * store keeps for it, the escrow row of its job, the expected chain, and the clock's now.
  */
-export function fundingStatusNow(store: FundingRecordStore, scopeId: string, expectedChainId: number | null = CHAIN_ID): FundingStatusDTO {
+export function fundingStatusNow(
+  store: FundingRecordStore,
+  scopeId: string,
+  expectedChainId: number | null = CHAIN_ID,
+  terms: Pick<PaidScopeActivationTerms, "testnetOnly"> = TERMS,
+): FundingStatusDTO {
   const s = scopeRow(scopeId);
   const escrow = escrowForJob(s.jobId) ?? null;
   return projectFundingStatus(
@@ -199,6 +205,7 @@ export function fundingStatusNow(store: FundingRecordStore, scopeId: string, exp
     escrow ? { contractAddress: escrow.contractAddress, payer: escrow.payer, status: escrow.status } : null,
     expectedChainId,
     new Date().toISOString(),
+    testnetBuyerAllowance(terms),
   );
 }
 
@@ -208,9 +215,13 @@ export function verification(scopeId: string, over: Partial<FundingVerificationR
     scopeId,
     escrowAddress: ESCROW_A,
     buyer: BUYER,
+    operator: "0x1111111111111111111111111111111111111111",
     chainId: 84532,
     blockNumber: "31337000",
     blockHash: "0x" + "c3".repeat(32),
+    fundingBlockNumber: "31336999",
+    fundingBlockHash: "0x" + "d4".repeat(32),
+    fundedAt: Math.floor(T0 / 1000),
     verifierVersion: "verifier-test/1",
     verifiedAt: new Date().toISOString(),
     finality: "finalized",

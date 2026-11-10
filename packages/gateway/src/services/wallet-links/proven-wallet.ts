@@ -5,6 +5,7 @@ declare module "fastify" {
   interface FastifyRequest {
     provenWallet?: string | null;
     provenWalletVia?: string | null;
+    provenWalletCarrier?: "key" | "bearer-session" | "cookie";
   }
 }
 
@@ -23,6 +24,7 @@ async function bindProof(req: FastifyRequest, reply: FastifyReply): Promise<void
     if (role !== null) {
       req.provenWallet = address.toLowerCase();
       req.provenWalletVia = `self-link:${role}`;
+      req.provenWalletCarrier = "key";
     }
   } catch {
     await reply.code(503).send({ error: "wallet_link_unavailable" });

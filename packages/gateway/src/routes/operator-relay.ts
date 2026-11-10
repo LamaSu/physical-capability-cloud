@@ -33,6 +33,7 @@ import { v4 as uuidv4 } from "uuid";
 import { writeJobStatusGuarded, SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
 import { authorityOf, isAnonymous, refuseKernelAction, AUTHENTICATION_REQUIRED, type KernelAction } from "../auth/kernel-authority.js";
 import { emergencyStopState } from "./device-relay.js";
+import { jobFundingOf } from "../readmodels/job-funding.js";
 
 function isNonEmptyId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
@@ -89,6 +90,10 @@ interface JobStatusBody {
 }
 
 // ---------------------------------------------------------------------------
+// Job funding: synchronous readmodel, per listed job (never a chain query).
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // Route plugin
 // ---------------------------------------------------------------------------
 
@@ -102,7 +107,16 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
    *   kernelId  — filter by kernel (required)
    *   status    — filter by status (default: "queued")
    *
-   * Returns { jobs: Job[], emergencyStop: "clear" | "stopped" | "unavailable" }
+   * Returns { jobs: Job[], emergencyStop: "clear" | "stopped" | "unavailable" }.
+   * Each listed job gains funding: { read: "ok", scopes: FundingStatusDTO[] } or
+   * { read: "failed" } ONLY for a decide-strength caller (admin or a proven wallet
+   * matching this kernel's operator). Operate-only callers get the original job shape.
+   * A host takes fundedAt and operator only when funding.read is "ok" and exactly
+   * one scope is funded_verified with a non-null verification. It also checks that
+   * operator matches its operator wallet and escrowAddress/chainId match its own
+   * job-unit binding. Absent, failed or ambiguous funding means no fundedAt and
+   * no GAP-7 evidence session; the host never puts a clock reading or an estimated block time in fundedAt's place.
+   * Funding does not authorize execution: the claim route decides whether a job runs.
    */
   app.get<{
     Querystring: { kernelId?: string; status?: string };
@@ -122,8 +136,15 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
     const result = await jobFacade.list({ kernelId, status });
     if (!result.success) return { jobs: [], emergencyStop };
     const jobs = result.data.items ?? [];
+    const listedJobs = emergencyStop === "clear" ? jobs : jobs.filter((job) => executionPhaseOf(job.status) !== "queued");
+    // The poll itself permits operate, but its funding details require decide.
+    // Do not read funding for claimed-only callers or for withheld queued jobs.
+    if (refuseKernelAction(req, authorityOf(req), kernelId, "decide") !== null) {
+      return { jobs: listedJobs, emergencyStop };
+    }
+    const asOf = new Date().toISOString(); // Once per successful poll, after the facade returns.
     return {
-      jobs: emergencyStop === "clear" ? jobs : jobs.filter((job) => executionPhaseOf(job.status) !== "queued"),
+      jobs: listedJobs.map((job) => ({ ...job, funding: jobFundingOf(job.id, kernelId, asOf) })),
       emergencyStop,
     };
   });

@@ -111,7 +111,9 @@ describe("P2 (round 5, 239): TOOL_ALLOWLIST is the ONLY way a tool is offered", 
 
 describe("239 Q2: astra's 3 reproductions (unowned device/operator reads)", () => {
   it.each(["pcc_camera_latest", "pcc_chat_history", "get_operator_dashboard"])("%s is never offered", (name) => {
-    expect(level(name)).toBe("never");
+    // A name the current package no longer carries is checked through a synthetic spec, as below.
+    const t = pkg.tools.find((x) => x.name === name);
+    expect(classify(t ? spec(t) : { name, method: "GET", path: `/api/${name}` })).toBe("never");
     expect(DEFAULT_TOOL_POLICY.allowlist.has(name)).toBe(false);
   });
 });

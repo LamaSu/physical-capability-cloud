@@ -93,7 +93,7 @@ export function EconomicAgreementsPage() {
     <div className="space-y-4 max-w-5xl">
       <GlassPanel padding="md">
         <p className="text-xs text-white/50 mb-3">
-          A preview, computed by the server from its own fee and rate schedules. It shows the agreement as proposed: accepting re-checks it against PCC's records. Nothing here accepts, funds or pays anything.
+          A preview, computed by the server from its own rate schedules. It shows the agreement as proposed: accepting re-checks it against PCC's records. Nothing here accepts, funds or pays anything.
         </p>
         {templatesError ? (
           <p className="text-xs text-red-300">Templates are unavailable: {templatesError}</p>

@@ -102,6 +102,7 @@ export const navGroups: NavGroup[] = [
       { label: "Kernels", path: "/kernels", icon: <KernelsIcon /> },
       { label: "Leaderboard", path: "/kernels/leaderboard", icon: <KernelsIcon /> },
       { label: "Wallet", path: "/wallet", icon: <WalletIcon /> },
+      { label: "Wallets", path: "/wallets", icon: <WalletIcon /> },
       { label: "Escrow", path: "/escrow", icon: <EscrowIcon /> },
       { label: "Settlement", path: "/settlement", icon: <EscrowIcon /> },
     ],

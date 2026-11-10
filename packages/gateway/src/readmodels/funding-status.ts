@@ -1,8 +1,9 @@
 /**
  * FundingStatusDTO: where a paid write scope's buyer funding stands, for the UI (buyer funding plan
  * S2.4, research/buyer-funding-plan-20261008.md). A pure projection of three sources the caller read,
- * and the expected chain (the pinned V-next deployment record's, paid-scope-activation-terms.ts;
- * null when none is pinned, and then no record binds):
+ * the expected chain (the pinned V-next deployment record's, paid-scope-activation-terms.ts;
+ * null when none is pinned, and then no record binds), and one required testnet-buyer allowance
+ * derived from the same deployment terms as reconciliation:
  *   - the scope row (execution_scopes): its status and its own createdAt and expiresAt;
  *   - the funding verification record that names the scope (FundingRecordStore.findByScope), or
  *     null when there is none;
@@ -17,7 +18,7 @@
  *     escrow row's status to pass reconcile's precondition, by the same function reconcile activates
  *     by (activationRefusal; the steward's ruling 1). Once live the row's status is not read: it
  *     reads completed after settlement, and the funding that activated the scope stays verified
- *     (R1-a, rowStatusGatesFunding, approved by the steward under #7453(a)/(b)).
+ *     (R1-a, rowStatusGatesFunding, approved by the steward under #7453(a)).
  *   - A mock escrow never reads funded_verified, whatever the settlement mode: nothing here reads
  *     the mode, and a mock row's "mock-escrow-..." contract is never a 0x address, so no record binds
  *     to it (the steward's condition (iii), bulletin 7195).
@@ -26,17 +27,19 @@
  *     caller read the sources, not a change time.
  *   - No mock fallback: a scope that went live on a mock escrow has no record, so it is `unknown`.
  *
- * No route serves this yet (none sits next to an existing readmodels route trivially: a read needs
- * its own object authorization, the buyer, the kernel's operator or the admin), so it is the
- * projection only. A route that serves it passes paidScopeActivationTerms(scope).expectedChainId as
- * the expected chain: the input the accept route gives reconcilePaidScope, so the two read the same
- * chain. It reads no clock, database or environment: the same inputs give the same DTO.
+ * GET /api/operator/jobs serves this projection only for a decide-strength caller (admin or
+ * proven wallet matching the polled kernel's operator), and GET /api/jobs/:jobId/funding behind gateJobRead, after the job and scope kernel filters.
+ * When a record exists, the route supplies the testnet-only flag and buyer allowance from
+ * reconcile's terms, and paidScopeActivationTerms(scope).expectedChainId for the expected chain.
+ * Without a record it supplies nulls and an empty allowance without reading those sources.
+ * This projection itself reads no clock, database or environment: equal inputs give equal DTOs.
  */
 import {
   activationRefusal,
   fundingBindingRefusal,
   type BindingEscrowRow,
   type FundingBindingRefusal,
+  type TestnetBuyerAllowance,
 } from "../services/funding-binding.js";
 import type { FundingVerificationRecord } from "../services/funding-record-port.js";
 import { scopeExpiryMs } from "../services/scope-expiry.js";
@@ -56,6 +59,8 @@ export const FUNDING_STATUS_SCHEMA_ID = "pcc.funding-status/v1" as const;
  *   record_malformed                the record is not a well-formed, finalized verification record.
  *   record_chain_mismatch           it was verified on another chain than the expected one (ruling 4).
  *   record_scope_mismatch           it names another scope.
+ *   testnet_buyer_not_allowed       the testnet-only buyer is absent, or the list is unset, empty
+ *                                   or malformed (the entire list is then refused).
  *   record_buyer_not_scope_buyer    its verified payer is not the scope's buyer.
  *   escrow_missing                  the scope's job has no escrow row: never funded_verified.
  *   escrow_payer_not_buyer          the escrow row's payer label is not the scope's buyer.
@@ -68,7 +73,7 @@ export const FUNDING_STATUS_SCHEMA_ID = "pcc.funding-status/v1" as const;
  * funded_verified needs `bound` (and, before activation, the escrow row's status: FUNDING_STATES), and
  * only `bound` shows the verification. The members are reconcilePaidScope's refusal names, in the
  * binding rule's order; expected_chain_unavailable and record_chain_mismatch are the steward's ruling
- * 4's (the 9th and 10th members, approved by the steward under #7453(a)/(b)).
+ * 4's (the 9th and 10th members, approved by the steward under #7453(b)).
  */
 export const FUNDING_BINDINGS = [
   "no_record",
@@ -76,6 +81,7 @@ export const FUNDING_BINDINGS = [
   "record_malformed",
   "record_chain_mismatch",
   "record_scope_mismatch",
+  "testnet_buyer_not_allowed",
   "record_buyer_not_scope_buyer",
   "escrow_missing",
   "escrow_payer_not_buyer",
@@ -144,10 +150,10 @@ const ONCE_LIVE: ReadonlySet<string> = new Set(["active", "expired", "suspended_
 
 /**
  * R1-a: whether the escrow row's status gates funded_verified for a scope in `scopeStatus`. Approved
- * by the steward under #7453(a)/(b): only before activation, where reconcilePaidScope's activation
- * reads it (precondition (c)). Once live,
- * reconcile's idempotent answer does not read it either, and the row's later status (completed after
- * settlement) does not undo the verified funding that activated the scope.
+ * by the steward under #7453(a): only before activation, where reconcilePaidScope's activation
+ * reads it (precondition (c)). Once live, reconcile's idempotent answer does not read it either, and
+ * the row's later status (completed after settlement) does not undo the verified funding that
+ * activated the scope.
  */
 function rowStatusGatesFunding(scopeStatus: string): boolean {
   return PRE_ACTIVATION.has(scopeStatus);
@@ -199,9 +205,17 @@ export interface FundingStatusDTO {
    */
   verification: {
     escrowAddress: string;
+    /** The escrow's operator, as read on chain, a nonzero 0x address. */
+    operator: string;
     chainId: number;
     blockNumber: string;
     blockHash: string;
+    /** The block holding fund()'s UnitFunded logs, as a lossless uint64 decimal string. */
+    fundingBlockNumber: string;
+    /** The hash of the funding block, 0x and 64 hex digits. */
+    fundingBlockHash: string;
+    /** Evidence's fundedAt (#7537): the funding block's timestamp, in whole Unix seconds. */
+    fundedAt: number;
     verifierVersion: string;
     verifiedAt: string;
   } | null;
@@ -222,9 +236,10 @@ export function fundingBindingOf(
   record: FundingVerificationRecord | null,
   escrow: FundingEscrowRow,
   expectedChainId: number | null,
+  allowance: TestnetBuyerAllowance,
 ): FundingBinding {
   if (record === null) return "no_record";
-  return fundingBindingRefusal(record, scope, escrow, expectedChainId) ?? "bound";
+  return fundingBindingRefusal(record, scope, escrow, expectedChainId, allowance) ?? "bound";
 }
 
 /**
@@ -250,8 +265,9 @@ function readyToActivate(
   record: FundingVerificationRecord | null,
   escrow: FundingEscrowRow,
   expectedChainId: number | null,
+  allowance: TestnetBuyerAllowance,
 ): boolean {
-  return record !== null && activationRefusal(record, scope, escrow, expectedChainId) === null;
+  return record !== null && activationRefusal(record, scope, escrow, expectedChainId, allowance) === null;
 }
 
 /**
@@ -264,8 +280,9 @@ export function fundingStateOf(
   escrow: FundingEscrowRow,
   expectedChainId: number | null,
   asOf: string,
+  allowance: TestnetBuyerAllowance,
 ): FundingState {
-  return stateOf(scope, fundingBindingOf(scope, record, escrow, expectedChainId), readyToActivate(scope, record, escrow, expectedChainId), asOf);
+  return stateOf(scope, fundingBindingOf(scope, record, escrow, expectedChainId, allowance), readyToActivate(scope, record, escrow, expectedChainId, allowance), asOf);
 }
 
 /** The DTO: the state and the binding, with the sources' own values beside them. */
@@ -275,23 +292,28 @@ export function projectFundingStatus(
   escrow: FundingEscrowRow,
   expectedChainId: number | null,
   asOf: string,
+  allowance: TestnetBuyerAllowance,
 ): FundingStatusDTO {
-  const binding = fundingBindingOf(scope, record, escrow, expectedChainId);
+  const binding = fundingBindingOf(scope, record, escrow, expectedChainId, allowance);
   return {
     schemaId: FUNDING_STATUS_SCHEMA_ID,
     asOf,
     scopeId: scope.id,
     jobId: scope.jobId,
-    state: stateOf(scope, binding, readyToActivate(scope, record, escrow, expectedChainId), asOf),
+    state: stateOf(scope, binding, readyToActivate(scope, record, escrow, expectedChainId, allowance), asOf),
     binding,
     scope: { sourceStatus: scope.status, createdAt: scope.createdAt, expiresAt: scope.expiresAt },
     verification:
       binding === "bound" && record !== null
         ? {
             escrowAddress: record.escrowAddress,
+            operator: record.operator,
             chainId: record.chainId,
             blockNumber: record.blockNumber,
             blockHash: record.blockHash,
+            fundingBlockNumber: record.fundingBlockNumber,
+            fundingBlockHash: record.fundingBlockHash,
+            fundedAt: record.fundedAt,
             verifierVersion: record.verifierVersion,
             verifiedAt: record.verifiedAt,
           }

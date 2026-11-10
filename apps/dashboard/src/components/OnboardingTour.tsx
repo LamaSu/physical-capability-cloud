@@ -9,24 +9,15 @@ interface TourStep {
 }
 
 const tourSteps: TourStep[] = [
-  { id: "welcome", title: "Welcome to PCCP Command Center", content: "This is your command center for biotech and neurotech capabilities. Use the sidebar to navigate between sections." },
-  { id: "kpi-row", title: "Key Performance Indicators", content: "Monitor active jobs, online kernels, total value locked in escrow, and evidence events at a glance." },
-  { id: "discover", title: "Discover Capabilities", content: "Search and browse available biotech capabilities across all registered kernels. Filter by type, substrate, or instrument." },
-  { id: "compare", title: "Compare Capabilities", content: "Each capability card shows pricing, queue depth, supported tiers, and available substrates for easy comparison." },
-  { id: "process-select", title: "Build a Contract", content: "Select a capability type — HPLC, PCR, microscopy, sequencing, mass spectrometry, or any other registered process — to configure your job parameters." },
-  { id: "configure", title: "Configure Parameters", content: "Every process type has its own configurable parameters — substrates, protocols, detection limits, and more. Parameters are grouped and cross-parameter constraints resolve automatically." },
-  { id: "watch-price", title: "Live Pricing", content: "Watch the price update in real-time as you change parameters. The breakdown shows exactly how each option affects the total." },
-  { id: "review", title: "Review Contract", content: "The contract summary shows your validated selections, total price, CWM step output, and any validation errors." },
-  { id: "workflow", title: "Workflow Builder", content: "Build multi-step workflows by adding steps from the palette and connecting them with dependency edges. Each step is a DAG node." },
-  { id: "connect", title: "Connect Steps", content: "Drag between step handles to create dependency edges. Steps execute in topological order based on these connections." },
-  { id: "evidence", title: "Evidence & Proof", content: "Every job produces cryptographic evidence events — chromatograms, gel images, sensor readings, instrument logs, TEE attestations. Each assurance tier requires specific combinations of evidence." },
-  { id: "settlement", title: "Settlement & Escrow", content: "Funds are locked in milestone escrow. After evidence is submitted, a challenge window opens. If unchallenged, funds release to the operator." },
-  { id: "add-machine", title: "Add an Instrument", content: "Use the guided wizard to register any instrument — from HPLC systems to confocal microscopes and electrophysiology rigs. Our AI assistant helps every step of the way." },
-  { id: "ai-setup", title: "AI-Powered Setup", content: "Upload manufacturer datasheets and documentation. The AI extracts capabilities, substrates, detection limits, and parameters automatically — just review and accept." },
-  { id: "marketplace", title: "Instrument Marketplace", content: "Explore demand heatmaps, supply gaps across the network, price trends, and ROI projections. Find the most profitable instruments to bring online." },
-  { id: "find-space", title: "Find a Space", content: "Browse hosting locations that match your instrument's power, environmental, and safety requirements. Filter by price, access schedule, and amenities." },
-  { id: "operator-dash", title: "Operator Dashboard", content: "Monitor instrument health, track earnings over time, manage certifications, and schedule maintenance — all in one place." },
-  { id: "grow-network", title: "Growing the Network", content: "Every instrument you onboard expands the Physical Capability Cloud. Earn from every job your instrument completes on the network." },
+  { id: "welcome", title: "Welcome to the PCC dashboard", content: "This dashboard covers jobs, kernels, escrow and onboarding. Use the sidebar to navigate between sections." },
+  { id: "kpi-row", title: "Key Performance Indicators", content: "See how many jobs are active and how many kernels are online." },
+  { id: "discover", title: "Discover Capabilities", content: "Search the capabilities operators list on the network by name, type or description. Filter by type or by minimum assurance score." },
+  { id: "process-select", title: "Build a Contract", content: "Pick a process type, such as FDM printing, CNC milling or liquid handling, to see its parameters." },
+  { id: "configure", title: "Configure Parameters", content: "Every process type has its own configurable parameters. Parameters are grouped and cross-parameter constraints resolve automatically." },
+  { id: "review", title: "Review Contract", content: "After Build Contract, the summary shows whether the contract is valid, its total price, the CWM step output and any validation errors." },
+  { id: "workflow", title: "Workflow Builder", content: "Build multi-step workflows by adding steps from the palette and connecting them with dependency edges." },
+  { id: "connect", title: "Connect Steps", content: "Drag between step handles to create dependency edges." },
+  { id: "evidence", title: "Evidence & Proof", content: "Each assurance tier requires specific combinations of evidence." },
 ];
 
 export function OnboardingTour() {

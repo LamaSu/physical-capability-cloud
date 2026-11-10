@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="robots" content="noindex">
 <title>PCC · Pizza Observability</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -192,7 +193,7 @@ body.big .oc-id{font-size:19px}
 <div class="grid-bg"></div>
 
 <header>
-  <div class="brand"><span class="mark"></span><b>PCC</b><span>// pizza observability</span></div>
+  <div class="brand"><span class="mark"></span><b>PCC</b><span>// pizza demo</span></div>
   <div class="hstat">
     <span><span class="dot" id="connDot"></span> <span id="connTxt">connecting</span></span>
     <span style="color:var(--faint)" id="serverClock">—</span>
@@ -249,6 +250,7 @@ body.big .oc-id{font-size:19px}
   <div class="foot">PCC // capability.network · every leg of every order, in one surface · agents compose reality</div>
 </div>
 
+<script src="/demo-gate.js" data-base-param="base"></script>
 <script>
 "use strict";
 const $=s=>document.querySelector(s);
@@ -492,10 +494,10 @@ function renderStepDetail(o,step,at){
   if(det.blockNumber)rows.push(["block",`#${det.blockNumber}`]);
   if(det.contract)rows.push(["contract",esc(det.contract)]);
   if(det.amountUSDC)rows.push(["amount",`<span style="color:var(--lime)">${esc(det.amountUSDC)} USDC</span>`]);
-  if(det.evidenceHash)rows.push(["evidence",esc(det.evidenceHash)]);
+  if(det.evidenceHash)rows.push(["evidence",`${esc(det.evidenceHash)} <span class="tag mock">mock</span>`]);
   if(det.photo)rows.push(["photo",esc(det.photo)]);
-  if(det.gps)rows.push(["gps",`${det.gps.lat}, ${det.gps.lng}`]);
-  if(det.assuranceTier!=null)rows.push(["assurance tier",`T${det.assuranceTier}`]);
+  if(det.gps)rows.push(["gps",`${esc(det.gps.lat)}, ${esc(det.gps.lng)}`]);
+  if(det.assuranceTier!=null)rows.push(["assurance tier",`T${det.assuranceTier} <span class="tag mock">mock</span>`]);
   if(det.shopPayoutUSD!=null)rows.push(["shop payout",`$${det.shopPayoutUSD}`]);
   if(det.driverPayoutUSD!=null)rows.push(["driver payout",`$${det.driverPayoutUSD}`]);
   if(det.pccFeeUSD!=null)rows.push(["pcc fee",`$${det.pccFeeUSD}`]);
@@ -627,6 +629,8 @@ function renderChain(){
 }
 
 // ── live tickers (elapsed labels, no re-render) ─────────────────────────────
+Promise.resolve(window.pccDemoGate).then((state) => {
+if (state === "off") return;
 setInterval(()=>{
   document.querySelectorAll("[data-since]").forEach(el=>{
     const s=elapsedSince(el.dataset.since);
@@ -634,6 +638,7 @@ setInterval(()=>{
   });
   $("#serverClock").textContent=ts();
 },1000);
+});
 
 // ── data flow: poll + firehose ──────────────────────────────────────────────
 let refetchTimer=null;
@@ -689,6 +694,8 @@ function setConn(ok){
 }
 
 // filters
+Promise.resolve(window.pccDemoGate).then((state) => {
+if (state === "off") return;
 document.querySelectorAll(".chip").forEach(c=>c.onclick=()=>{
   document.querySelectorAll(".chip").forEach(x=>x.classList.remove("on"));
   c.classList.add("on"); ST.filter=c.dataset.f; renderFeed();
@@ -698,6 +705,7 @@ $("#feedSearch").oninput=e=>{ST.search=e.target.value.trim();renderFeed();};
 // boot
 loadAll(); connect();
 setInterval(loadAll,4000); // reconciliation safety net
+});
 </script>
 </body>
 </html>

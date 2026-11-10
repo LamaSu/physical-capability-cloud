@@ -22,6 +22,7 @@ import { z } from "zod";
 import { PCC_URL, pccFetch, pccFetchEach } from "./api.js";
 import { registerCaptureTools } from "./tools/capture.js";
 import { registerNegotiateTools } from "./tools/negotiate.js";
+import { buyerConfigFromEnv, registerBuyerTools } from "./tools/buyer.js";
 import { GET_EVIDENCE_DESCRIPTION, evidencePath } from "./tools/evidence.js";
 
 // ---------------------------------------------------------------------------
@@ -373,15 +374,12 @@ server.tool(
 
 server.tool(
   "pcc_get_reputation",
-  "Get reputation scores for a PCC kernel or agent — assurance tier, quality rating, uptime, response time, and evidence completeness.",
+  "Get the composition reputation PCC records for an agent or kernel: its score and its most recent changes. An id PCC has never seen reads as neutral.",
   {
     agentId: z.string().describe("Agent ID or kernel ID"),
-    tag: z.string().optional().describe("Filter by reputation tag (e.g. 'quality', 'uptime', 'assurance')"),
   },
-  async ({ agentId, tag }: { agentId: string; tag?: string }) => {
-    const data = await pccFetch(`/api/registry/entities/${encodeURIComponent(agentId)}/reputation`, {
-      query: { tag },
-    });
+  async ({ agentId }: { agentId: string }) => {
+    const data = await pccFetch(`/api/reputation/${encodeURIComponent(agentId)}`);
     return toolResult(data);
   },
 );
@@ -658,16 +656,16 @@ server.tool(
 
 server.tool(
   "pcc_setup_test_job",
-  "Submit a test job to verify the full PCC pipeline works end-to-end: job submission → adapter execution → evidence collection → (optional) settlement. Returns job result with evidence bundle ID.",
+  "Submit a test job for one device on a kernel (Step 4 of onboarding). The gateway runs it only for a kernel it operates in-process; for any other kernel it refuses and runs nothing. Every reply says whether the job ran and passed.",
   {
-    kernelId: z.string().optional().describe("Target kernel. Uses default if omitted."),
-    deviceId: z.string().optional().describe("Target device. Auto-selects if omitted."),
+    kernelId: z.string().optional().describe("Target kernel (required: the gateway answers 400 without it)."),
+    deviceId: z.string().optional().describe("Device on that kernel (required: the gateway answers 400 without it)."),
     assuranceTier: z
       .number()
       .min(0)
       .max(3)
       .optional()
-      .describe("Assurance tier 0-3. Default 0 (no challenge window, auto-settle)."),
+      .describe("Assurance tier 0-3 (a test job settles nothing)."),
   },
   async ({
     kernelId,
@@ -937,7 +935,7 @@ server.tool(
 
 server.tool(
   "pcc_ip_register_capability",
-  "Register a PCC Capability StructureDefinition (CSD) as a Story Protocol IP Asset. Returns an ipId, nftTokenId, licenseTermsId, and transaction hash. The IP Asset enables programmable royalties for all future jobs using this capability.",
+  "Record a PCC Capability StructureDefinition (CSD) as an IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. Any ipId, nftTokenId, licenseTermsId or transaction hash it returns is a placeholder, and no royalty is paid.",
   {
     capabilityId: z.string().describe("PCC capability ID (e.g. 'cap_cnc_001')"),
     capabilityName: z.string().describe("Human-readable capability name"),
@@ -1004,7 +1002,7 @@ server.tool(
 
 server.tool(
   "pcc_ip_revenue_snapshot",
-  "Get the current revenue snapshot for a Story Protocol IP Asset — total accumulated revenue, unclaimed balance, and per-holder claimable amounts. Use this to check how much an IP Royalty Vault has accumulated.",
+  "Get the revenue PCC has recorded for an IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. No revenue has been paid: any figure it returns is a placeholder.",
   {
     ipId: z.string().describe("Story Protocol IP Asset address (0x...)"),
   },
@@ -1020,7 +1018,7 @@ server.tool(
 
 server.tool(
   "pcc_ip_claim",
-  "Claim accumulated revenue from a Story Protocol IP Royalty Vault. Returns a transaction hash and the amount claimed. Optionally specify which Royalty Token IDs to claim; omit to claim all.",
+  "Claim an IP asset's recorded revenue. Optionally specify which Royalty Token IDs to claim; omit to claim all. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. Nothing is paid out: any amount or transaction hash it returns is a placeholder.",
   {
     ipId: z.string().describe("Story Protocol IP Asset address (0x...)"),
     tokenIds: z
@@ -1043,7 +1041,7 @@ server.tool(
 
 server.tool(
   "pcc_ip_lineage",
-  "Get the full IP lineage chain for a Story Protocol IP Asset — ancestors (parent CSDs this was derived from) and descendants (job evidence bundles and derivative CSDs). Shows the provenance graph of physical manufacturing work.",
+  "Get the IP lineage PCC has recorded for an IP asset: ancestors (parent CSDs) and descendants (job evidence records and derivative CSDs). Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain.",
   {
     ipId: z.string().describe("Story Protocol IP Asset address (0x...)"),
   },
@@ -1060,8 +1058,8 @@ server.tool(
 server.tool(
   "pcc_ip_set_splits",
   [
-    "Configure revenue splits (Royalty Token distribution) for a Story Protocol IP Asset.",
-    "Splits must sum to 100. Each collaborator's role determines their share of all future revenue from this IP.",
+    "Configure revenue splits (Royalty Token distribution) for an IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain.",
+    "Splits must sum to 100. No revenue is paid from them today.",
     "",
     "ContributorRole taxonomy (ADR-12 §4 — see role responsibility table):",
     "  • operator             — runs the physical machine; residual share (typically 80-95% after others)",
@@ -1073,15 +1071,14 @@ server.tool(
     "  • dataset-contributor  — pilot who collected training demonstrations; resolved via TrainingManifest",
     "  • curator              — organizes/audits a collection of contributions; 0-5%",
     "  • assembler            — composed multiple capabilities into a workflow; 0-50 bps",
-    "  • network-treasury     — per-network protocol treasury (verification, grants, security); 0-3%",
     "",
     "Legacy aliases kept for backward decoding only — prefer the canonical names above:",
     "  • `designer` → use `protocol-author` / `assembler` / `integrator` depending on CSD kind",
-    "  • `network`  → use `network-treasury`",
+    "  • `network`  → no name above replaces it; leave it out of new splits",
     "",
     "Recommended starting splits:",
-    "  • Standard job (no AI):   operator 92, verifier 3, protocol-author 2, integrator 2, network-treasury 1",
-    "  • Job with AI model:      operator 87, verifier 3, protocol-author 2, integrator 2, model-author 4, network-treasury 2",
+    "  • Standard job (no AI):   operator 93, verifier 3, protocol-author 2, integrator 2",
+    "  • Job with AI model:      operator 89, verifier 3, protocol-author 2, integrator 2, model-author 4",
   ].join("\n"),
   {
     ipId: z.string().describe("Story Protocol IP Asset address (0x...)"),
@@ -1766,6 +1763,7 @@ registerCaptureTools(server);
 // ---------------------------------------------------------------------------
 
 registerNegotiateTools(server);
+registerBuyerTools(server, buyerConfigFromEnv(process.env));
 
 // ---------------------------------------------------------------------------
 // Boot

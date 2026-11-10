@@ -72,6 +72,7 @@ COPY packages/template-data-product/package.json packages/template-data-product/
 # master image build since #64).
 COPY packages/a2a-signing/package.json packages/a2a-signing/
 COPY packages/adapter-pylabrobot/package.json packages/adapter-pylabrobot/
+COPY packages/adk/package.json packages/adk/
 COPY packages/aggregator/package.json packages/aggregator/
 COPY packages/bridge-directory/package.json packages/bridge-directory/
 COPY packages/connectors-airbyte-bridge/package.json packages/connectors-airbyte-bridge/
@@ -166,6 +167,8 @@ ENV PCC_NETWORK=base-sepolia
 ENV PCC_DB_PATH=/app/data/pcc.sqlite
 ENV SERVE_DASHBOARD=true
 ENV DASHBOARD_PATH=/app/apps/dashboard/dist
+
+RUN node packages/gateway/dist/env-reads-cli.js /app/packages/*/dist > /app/ENV_READS.json && chmod 0444 /app/ENV_READS.json
 
 # Build provenance (N5): the commit this image was built from, written into the image's FILES
 # (not an ENV), so no runtime variable can change what /api/health reports.

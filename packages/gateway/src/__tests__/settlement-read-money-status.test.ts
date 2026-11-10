@@ -24,13 +24,14 @@ import { UnitState } from "../settlement/unit-state-mapper.js";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const kitSrc = readFileSync(path.resolve(here, "../../../../apps/dashboard/public/ui-kit/v1/pcc-ui.js"), "utf8");
 const SNAP_HASH = "0x" + "cd".repeat(32);
+const DEPLOYMENT = { chainId: 84532, factory: "0x" + "fa".repeat(20), implementation: "0x" + "1e".repeat(20), recordSha256: "ab".repeat(32) };
 const UNIT = "0x" + "ab".repeat(32);
 
 function kitClassifier(): (r: unknown) => [string, string | null, string] {
   const m = kitSrc.match(/\/\/ <status-map v2>[^\n]*\n([\s\S]*?)\/\/ <\/status-map v2>/);
   if (!m) throw new Error("<status-map v2> markers not found in pcc-ui.js");
   const ctx: Record<string, unknown> = {};
-  vm.runInNewContext(m[1] + "\nthis.settlementRecordClass = settlementRecordClass;", ctx);
+  vm.runInNewContext(kitSrc.slice(kitSrc.indexOf("  function dataAt("), kitSrc.indexOf("  function dot(")) + m[1] + "\nthis.settlementRecordClass = settlementRecordClass;", ctx);
   return ctx.settlementRecordClass as (r: unknown) => [string, string | null, string];
 }
 const kit = kitClassifier();
@@ -39,8 +40,7 @@ function reader(state: UnitState): SettlementUnitReader {
   // A consistent same-block read: terminal -> no claims left; allocated -> one claim outstanding.
   const remainingClaimCount = state >= UnitState.SETTLED_RELEASED ? 0n : state >= UnitState.RELEASE_ALLOCATED ? 1n : undefined;
   return {
-    binding: () => ({ chainId: 84532, escrow: "0xEsCrOw" }),
-    windows: () => ({ challengeWindow: 3600n, appealWindow: 7200n }),
+    binding: async () => ({ chainId: 84532, escrow: "0xEsCrOw", deployment: DEPLOYMENT, windows: { challengeWindow: 3600n, appealWindow: 7200n } }),
     pinSnapshot: async () => ({ asOfBlock: 100n, asOfBlockHash: SNAP_HASH, finality: "finalized" as const, logCompleteness: "complete" as const }),
     readAnchors: async () => ({ state, remainingClaimCount }),
     readRefundWitness: async () => ({}),

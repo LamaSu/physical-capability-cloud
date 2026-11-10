@@ -11,8 +11,8 @@ export interface RawEscrow {
   id: string;
   jobId?: string;
   status: string;
-  totalAmount?: string | number;
-  currency?: string;
+  totalAmount: string | number;
+  currency: string;
   challengeWindowEnd?: string | null;
   [key: string]: unknown;
 }
@@ -43,10 +43,10 @@ export function populateEscrowDTO(
 
   return {
     id: escrow.id,
-    jobId: escrow.jobId ?? "",
+    ...(escrow.jobId !== undefined ? { jobId: escrow.jobId } : {}),
     status: escrow.status as EscrowSummaryDTO["status"],
-    totalAmount: String(escrow.totalAmount ?? "0"),
-    currency: (escrow.currency ?? ctx.currency ?? "USDC") as EscrowSummaryDTO["currency"],
+    totalAmount: String(escrow.totalAmount),
+    currency: escrow.currency as EscrowSummaryDTO["currency"],
     milestoneCount: milestones.length,
     releasedCount,
     disputedCount,
