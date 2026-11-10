@@ -291,54 +291,181 @@ describe("resume-settlement routes the chain re-drive through driveSettlement", 
 });
 
 describe("/complete routes the on-chain settle through driveSettlement", () => {
-  it("calls driveSettlement for the evidence leg then the attestation leg", async () => {
+  it("one drive binds evidence and attestation, and the reply reports it", async () => {
     const { jobId } = await makeJobWithRealEscrow("wire-complete");
 
     h.isWriteEnabled.mockReturnValue(true);
     process.env.PCC_USE_EAS_V2 = "true";
     process.env.MOCK_SETTLEMENT = "true"; // 4a/4c run regardless; keep settle simple
 
-    // 4a evidence leg → Evidenced+stepId; 4c attest leg → Attested.
-    h.driveSettlement
-      .mockResolvedValueOnce({
-        escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Evidenced",
-        outcome: "needs_input", needs: "eas_uid", settled: false,
-        steps: [{ action: "submitEvidence", result: "landed", txHash: "0xev" }],
-        stepId: "0x" + "11".repeat(32),
-      })
-      .mockResolvedValueOnce({
-        escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Attested",
-        outcome: "awaiting_challenge_window", settled: false, challengeWindowEnd: 9_999_999_999,
-        steps: [{ action: "submitAttestation", result: "landed", txHash: "0xat" }],
-      });
+    h.driveSettlement.mockResolvedValueOnce({
+      escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Attested",
+      outcome: "awaiting_challenge_window", settled: false, challengeWindowEnd: 9_999_999_999,
+      steps: [
+        { action: "submitEvidence", result: "landed", txHash: "0xev" },
+        { action: "submitAttestation", result: "landed", txHash: "0xat" },
+      ],
+    });
 
     const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: { "x-admin-key": ADMIN }, payload: {} });
 
     expect(res.statusCode).toBe(200);
-    expect(h.driveSettlement).toHaveBeenCalledTimes(2);
-    // Evidence leg: hash, no UID.
-    expect(h.driveSettlement.mock.calls[0][0]).toBe(REAL_ESCROW);
+    const request = vi.mocked(verifyWithOracle).mock.calls[0][0];
+    expect(request.evidenceHash).toMatch(/^sha256:/);
+    const digest = "0x" + request.evidenceHash.slice("sha256:".length);
+    expect(h.driveSettlement).toHaveBeenCalledTimes(1);
+    expect(h.driveSettlement).toHaveBeenCalledWith(REAL_ESCROW, 0, {
+      evidenceBundleHash: digest, easUid: h.easUid,
+    });
+    expect(res.json().eas).toMatchObject({
+      submitted: true,
+      evidenceTxHash: "0xev",
+      attestationTxHash: "0xat",
+      driveOutcome: "awaiting_challenge_window",
+      settledOnChain: false,
+    });
+  });
+
+  it("N1: without a UID one hash-only drive reports the evidence receipt", async () => {
+    const { jobId } = await makeJobWithRealEscrow("complete-no-uid");
+    h.isWriteEnabled.mockReturnValue(true);
+    process.env.PCC_USE_EAS_V2 = "true";
+    process.env.MOCK_SETTLEMENT = "true";
+    vi.mocked(verifyWithOracle).mockResolvedValueOnce({
+      result: { verified: true, reason: "mock", checks: [] },
+      attestation: { signature: "0xsig", nonce: "1", timestamp: 1 },
+    } as any);
+    h.driveSettlement.mockResolvedValueOnce({
+      escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Evidenced",
+      outcome: "needs_input", needs: "eas_uid", settled: false,
+      steps: [{ action: "submitEvidence", result: "landed", txHash: "0xev" }],
+    });
+
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: { "x-admin-key": ADMIN }, payload: {} });
+
+    expect(res.statusCode).toBe(200);
+    const request = vi.mocked(verifyWithOracle).mock.calls[0][0];
+    expect(request.evidenceHash).toMatch(/^sha256:/);
+    const digest = "0x" + request.evidenceHash.slice("sha256:".length);
+    expect(h.driveSettlement).toHaveBeenCalledTimes(1);
+    expect(h.driveSettlement).toHaveBeenCalledWith(REAL_ESCROW, 0, expect.objectContaining({ evidenceBundleHash: digest }));
     expect(h.driveSettlement.mock.calls[0][2].easUid).toBeUndefined();
-    // Attestation leg: hash + minted UID (self-healing drive carries the hash too).
-    expect(h.driveSettlement.mock.calls[1][2].evidenceBundleHash).toBeDefined();
-    expect(h.driveSettlement.mock.calls[1][2].easUid).toBe(h.easUid);
+    expect(res.json().eas).toMatchObject({
+      submitted: false, attestationUid: null, evidenceTxHash: "0xev",
+    });
+  });
+
+  it("N2: the body's UID reaches the one drive and the reply when the oracle has none", async () => {
+    const { jobId } = await makeJobWithRealEscrow("complete-body-uid");
+    const bodyUid = "0x" + "bb".repeat(32);
+    h.isWriteEnabled.mockReturnValue(true);
+    process.env.PCC_USE_EAS_V2 = "true";
+    process.env.MOCK_SETTLEMENT = "true";
+    vi.mocked(verifyWithOracle).mockResolvedValueOnce({
+      result: { verified: true, reason: "mock", checks: [] },
+      attestation: { signature: "0xsig", nonce: "1", timestamp: 1 },
+    } as any);
+    h.driveSettlement.mockResolvedValueOnce({
+      escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Attested",
+      outcome: "awaiting_challenge_window", settled: false, challengeWindowEnd: 9_999_999_999,
+      steps: [
+        { action: "submitEvidence", result: "landed", txHash: "0xev" },
+        { action: "submitAttestation", result: "landed", txHash: "0xat" },
+      ],
+    });
+
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: { "x-admin-key": ADMIN }, payload: { easUid: bodyUid } });
+
+    expect(res.statusCode).toBe(200);
+    const request = vi.mocked(verifyWithOracle).mock.calls[0][0];
+    expect(request.evidenceHash).toMatch(/^sha256:/);
+    const digest = "0x" + request.evidenceHash.slice("sha256:".length);
+    expect(h.driveSettlement).toHaveBeenCalledTimes(1);
+    expect(h.driveSettlement).toHaveBeenCalledWith(REAL_ESCROW, 0, {
+      evidenceBundleHash: digest, easUid: bodyUid,
+    });
+    expect(res.json().eas).toMatchObject({ submitted: true, attestationUid: bodyUid });
+  });
+
+  it("N3: the oracle UID takes precedence over the body's UID in the one drive", async () => {
+    const { jobId } = await makeJobWithRealEscrow("complete-uid-precedence");
+    const bodyUid = "0x" + "bb".repeat(32);
+    h.isWriteEnabled.mockReturnValue(true);
+    process.env.PCC_USE_EAS_V2 = "true";
+    process.env.MOCK_SETTLEMENT = "true";
+    h.driveSettlement.mockResolvedValueOnce({
+      escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Attested",
+      outcome: "awaiting_challenge_window", settled: false, challengeWindowEnd: 9_999_999_999,
+      steps: [
+        { action: "submitEvidence", result: "landed", txHash: "0xev" },
+        { action: "submitAttestation", result: "landed", txHash: "0xat" },
+      ],
+    });
+
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: { "x-admin-key": ADMIN }, payload: { easUid: bodyUid } });
+
+    expect(res.statusCode).toBe(200);
+    const request = vi.mocked(verifyWithOracle).mock.calls[0][0];
+    expect(request.evidenceHash).toMatch(/^sha256:/);
+    const digest = "0x" + request.evidenceHash.slice("sha256:".length);
+    expect(h.driveSettlement).toHaveBeenCalledTimes(1);
+    expect(h.driveSettlement).toHaveBeenCalledWith(REAL_ESCROW, 0, {
+      evidenceBundleHash: digest, easUid: h.easUid,
+    });
+    expect(res.json().eas.attestationUid).toBe(h.easUid);
+  });
+
+  it("N4: a blocked leg is reported without a second drive", async () => {
+    const { jobId } = await makeJobWithRealEscrow("complete-blocked");
+    h.isWriteEnabled.mockReturnValue(true);
+    process.env.PCC_USE_EAS_V2 = "true";
+    process.env.MOCK_SETTLEMENT = "true";
+    h.driveSettlement.mockResolvedValueOnce({
+      escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Locked",
+      outcome: "blocked", settled: false,
+      steps: [{ action: "submitEvidence", result: "blocked", txHash: "0xev", revert: "tx_reverted" }],
+    });
+
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: { "x-admin-key": ADMIN }, payload: {} });
+
+    expect(res.statusCode).toBe(200);
+    expect(h.driveSettlement).toHaveBeenCalledTimes(1);
+    expect(res.json().eas).toMatchObject({ submitted: false, driveOutcome: "blocked" });
+  });
+
+  it("N5: a leg that releases reports the attestation and on-chain settlement", async () => {
+    const { jobId } = await makeJobWithRealEscrow("complete-released");
+    h.isWriteEnabled.mockReturnValue(true);
+    process.env.PCC_USE_EAS_V2 = "true";
+    process.env.MOCK_SETTLEMENT = "true";
+    h.driveSettlement.mockResolvedValueOnce({
+      escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Released",
+      outcome: "released", settled: true,
+      steps: [
+        { action: "submitEvidence", result: "landed", txHash: "0xev" },
+        { action: "submitAttestation", result: "landed", txHash: "0xat" },
+        { action: "release", result: "landed", txHash: "0xrel" },
+      ],
+    });
+
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: { "x-admin-key": ADMIN }, payload: {} });
+
+    expect(res.statusCode).toBe(200);
+    expect(h.driveSettlement).toHaveBeenCalledTimes(1);
+    expect(res.json().eas).toMatchObject({ submitted: true, settledOnChain: true });
   });
 });
 
 describe("/complete settles on chain only after the oracle verifies the evidence, and sends the chain's bytes32 digest", () => {
   function mockEvidenceAndAttestationDrives(): void {
-    h.driveSettlement
-      .mockResolvedValueOnce({
-        escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Evidenced",
-        outcome: "needs_input", needs: "eas_uid", settled: false,
-        steps: [{ action: "submitEvidence", result: "landed", txHash: "0xev" }],
-        stepId: "0x" + "11".repeat(32),
-      })
-      .mockResolvedValueOnce({
-        escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Attested",
-        outcome: "awaiting_challenge_window", settled: false, challengeWindowEnd: 9_999_999_999,
-        steps: [{ action: "submitAttestation", result: "landed", txHash: "0xat" }],
-      });
+    h.driveSettlement.mockResolvedValueOnce({
+      escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Attested",
+      outcome: "awaiting_challenge_window", settled: false, challengeWindowEnd: 9_999_999_999,
+      steps: [
+        { action: "submitEvidence", result: "landed", txHash: "0xev" },
+        { action: "submitAttestation", result: "landed", txHash: "0xat" },
+      ],
+    });
   }
 
   it("a refused verdict answers 422 before any chain write", async () => {
@@ -394,7 +521,7 @@ describe("/complete settles on chain only after the oracle verifies the evidence
     expect(request.stepId).not.toMatch(/^0x/);
   });
 
-  it("both chain drives get the bytes32 digest", async () => {
+  it("the drive gets the bytes32 digest and the UID", async () => {
     const { jobId } = await makeJobWithRealEscrow("complete-chain-digest");
     h.isWriteEnabled.mockReturnValue(true);
     process.env.PCC_USE_EAS_V2 = "true";
@@ -407,11 +534,11 @@ describe("/complete settles on chain only after the oracle verifies the evidence
     const request = vi.mocked(verifyWithOracle).mock.calls[0][0];
     expect(request.evidenceHash).toMatch(/^sha256:/);
     const digest = "0x" + request.evidenceHash.slice("sha256:".length);
-    expect(h.driveSettlement).toHaveBeenCalledTimes(2);
-    for (const call of h.driveSettlement.mock.calls) {
-      expect(call[2].evidenceBundleHash).toBe(digest);
-      expect(call[2].evidenceBundleHash).toMatch(/^0x[0-9a-f]{64}$/);
-    }
+    expect(digest).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(h.driveSettlement).toHaveBeenCalledTimes(1);
+    expect(h.driveSettlement).toHaveBeenCalledWith(REAL_ESCROW, 0, {
+      evidenceBundleHash: digest, easUid: h.easUid,
+    });
   });
 
   it("with escrow writes off nothing is driven", async () => {
@@ -459,6 +586,7 @@ describe("/complete settles on chain only after the oracle verifies the evidence
       expect(res.statusCode).toBe(200);
       expect(h.driveSettlement).toHaveBeenCalledTimes(2);
       const request = vi.mocked(verifyWithOracle).mock.calls[0][0];
+      expect(h.driveSettlement.mock.calls[0][2].easUid).toBe(h.easUid);
       expect(h.driveSettlement.mock.calls[1][2].easUid).toBe(h.easUid);
       expect(request.evidenceHash).toMatch(/^sha256:/);
       expect(h.driveSettlement.mock.calls[1][2].evidenceBundleHash).toBe("0x" + request.evidenceHash.slice("sha256:".length));
@@ -485,6 +613,7 @@ describe("/complete settles on chain only after the oracle verifies the evidence
 
     expect(res.statusCode).toBe(200);
     expect(h.driveSettlement).toHaveBeenCalledTimes(1);
+    expect(h.driveSettlement.mock.calls[0][2]).toEqual({});
     expect(h.driveSettlement.mock.calls[0][2]).not.toHaveProperty("evidenceBundleHash");
     const request = vi.mocked(verifyWithOracle).mock.calls[0][0];
     expect(request.evidenceHash).toMatch(/^sha256:/);
