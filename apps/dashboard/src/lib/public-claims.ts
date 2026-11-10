@@ -13,6 +13,7 @@
 // ALONGSIDE_WINDOW characters of it. src/lib/__tests__/public-claims.test.ts
 // fails CI when a published surface uses a claim that is not `live`, or a
 // positioning claim without its companion.
+// A surface named in a claim's `alongsideOptionalOn` needs no companion.
 
 export type ClaimStatus =
   | "live"
@@ -34,6 +35,8 @@ export interface GuardedClaim {
   example: string;
   /** For `positioning`: the statement that must sit beside every occurrence. */
   alongside?: RegExp;
+  /** For `positioning`: published surfaces that may carry the claim without `alongside`. */
+  alongsideOptionalOn?: readonly string[];
 }
 
 /** How close (in characters, before or after) a positioning claim's companion must be. */
@@ -161,6 +164,7 @@ export const GUARDED_CLAIMS: readonly GuardedClaim[] = [
     pattern: /turn abilities and inventions into trusted, economically callable capacity/i,
     status: "positioning",
     alongside: /public beta: payments settle on a test network/i,
+    alongsideOptionalOn: ["apps/dashboard/public/whitepaper.md"],
     requires: "The public-beta status sentence beside it (steward #2807, product-steward #2574)",
     example:
       "Turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on.",
@@ -337,10 +341,12 @@ export interface ClaimViolation {
 /**
  * Guarded claims in `text` that are not yet `live`, plus positioning claims
  * that appear without their companion statement close by.
+ * `path` names the surface `text` comes from, for `alongsideOptionalOn`.
  */
 export function findClaimViolations(
   text: string,
   claims: readonly GuardedClaim[] = GUARDED_CLAIMS,
+  path?: string,
 ): ClaimViolation[] {
   const violations: ClaimViolation[] = [];
   for (const claim of claims) {
@@ -348,6 +354,7 @@ export function findClaimViolations(
     const flags = claim.pattern.flags.includes("g") ? claim.pattern.flags : `${claim.pattern.flags}g`;
     for (const match of text.matchAll(new RegExp(claim.pattern.source, flags))) {
       if (claim.status === "positioning" && claim.alongside) {
+        if (path !== undefined && claim.alongsideOptionalOn?.includes(path)) continue;
         const start = Math.max(0, match.index - ALONGSIDE_WINDOW);
         const nearby = text.slice(start, match.index + match[0].length + ALONGSIDE_WINDOW);
         if (claim.alongside.test(nearby)) continue;

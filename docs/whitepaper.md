@@ -4,8 +4,6 @@
 
 **Turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on.**
 
-Public beta: payments settle on a test network.
-
 ---
 
 ## 1. Why PCC
@@ -232,3 +230,9 @@ A new method becomes safely buyable in hours to days: its author gets a usable s
 - Ratings and evaluator signals can reward the wrong actors unless they are tied to authenticated participation and accepted outcomes.
 - Discovery can concentrate demand, assurance costs can shut out small operators, and evidence rules can become surveillance.
 - Some choices belong to the operator, not the code: how temporary organizations form and wind down, how contracts for several parties are combined, what competition optimizes, how rights feed payouts, and who finances work that runs in stages.
+
+---
+
+## 15. Join the private beta
+
+Buyers, operators and builders can sign up for PCC's private beta. The signup form is at the end of the whitepaper page, https://capability.network/whitepaper.

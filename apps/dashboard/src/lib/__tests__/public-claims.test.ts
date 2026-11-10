@@ -23,7 +23,7 @@ describe("public claims gate", () => {
   it.each(PUBLISHED_SURFACES.map((path) => [path]))(
     "%s makes no claim that is not live yet",
     (path) => {
-      expect(findClaimViolations(publishedText(path, read(path)))).toEqual([]);
+      expect(findClaimViolations(publishedText(path, read(path)), GUARDED_CLAIMS, path)).toEqual([]);
     },
   );
 
@@ -68,6 +68,22 @@ describe("public claims gate", () => {
     expect(findClaimViolations(`${thesis.example} ${status}`, [thesis])).toEqual([]);
     expect(findClaimViolations(`${status} ${thesis.example}`, [thesis])).toEqual([]);
     expect(findClaimViolations(`${thesis.example} ${"x".repeat(2000)} ${status}`, [thesis])).toHaveLength(1);
+  });
+
+  it("lets the whitepaper state the thesis without the public-beta status", () => {
+    const thesis = GUARDED_CLAIMS.find((claim) => claim.id === "thesis") as GuardedClaim;
+    const whitepaper = "apps/dashboard/public/whitepaper.md";
+    expect(thesis.alongsideOptionalOn).toEqual([whitepaper]);
+    expect(findClaimViolations(thesis.example, [thesis], whitepaper)).toEqual([]);
+    expect(findClaimViolations(thesis.example, [thesis], "apps/dashboard/public/about.md")).toHaveLength(1);
+    expect(findClaimViolations(thesis.example, [thesis])).toHaveLength(1);
+  });
+
+  it("still applies every other claim to the whitepaper", () => {
+    const whitepaper = "apps/dashboard/public/whitepaper.md";
+    for (const claim of GUARDED_CLAIMS.filter((candidate) => candidate.id !== "thesis")) {
+      expect(findClaimViolations(claim.example, [claim], whitepaper), claim.id).toHaveLength(1);
+    }
   });
 
   it("allows the whitepaper to reject a retired tagline but not to use one", () => {
