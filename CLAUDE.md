@@ -601,12 +601,13 @@ curl -X POST https://capability.network/api/wizard/sessions/$SESSION_ID/complete
 
 For operators who prefer CLI:
 ```bash
-pip install "pcc-node[crypto]>=0.1.1"
-# until 0.1.1 is on PyPI: python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node"
+python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node"
 pcc-node start
 ```
 
-This auto-detects hardware, generates Ed25519 keys, registers the kernel with the API key you give it (`PCC_API_KEY` or `--api-key`), and starts a daemon that keeps the kernel online. Without a key it stops: the gateway refuses to provision one without an email, so provision it first (`POST /api/auth/provision`). From 0.1.1 the daemon takes no jobs: jobs run through the operating agent's typed operations. Set `PCC_BASE` and `PCC_API_KEY` env vars if not using defaults.
+This auto-detects hardware, generates Ed25519 keys, registers the kernel with the API key you give it (`PCC_API_KEY` or `--api-key`), and starts a daemon that keeps the kernel online. Without a key it stops: the gateway refuses to provision one without an email, so provision it first (`POST /api/auth/provision`). The daemon takes no jobs: jobs run through the operating agent's typed operations. Set `PCC_BASE` and `PCC_API_KEY` env vars if not using defaults.
+
+After an earlier pcc-node install, pip may keep that copy, because both report the same version: run the install line again with `--force-reinstall --no-deps` after `install`.
 
 ---
 
@@ -1022,8 +1023,7 @@ curl -N -H "Authorization: Bearer $PCC_KEY" \
 ### Install and run
 
 ```bash
-pip install "pcc-node[crypto]>=0.1.1"
-# until 0.1.1 is on PyPI: python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node"
+python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node"
 pcc-node start
 ```
 
@@ -1032,7 +1032,9 @@ This single command:
 2. Generates Ed25519 signing keys
 3. Uses the API key you give it (`PCC_API_KEY` or `--api-key`); without one it stops, because the gateway refuses to provision a key without an email
 4. Registers a kernel
-5. Starts a daemon that keeps the kernel online. From 0.1.1 it takes no jobs: they run through the operating agent's typed operations
+5. Starts a daemon that keeps the kernel online. It takes no jobs: they run through the operating agent's typed operations
+
+After an earlier pcc-node install, pip may keep that copy, because both report the same version: run the install line again with `--force-reinstall --no-deps` after `install`.
 
 ### Commands
 
