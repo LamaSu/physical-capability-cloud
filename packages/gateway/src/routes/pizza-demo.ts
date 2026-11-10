@@ -230,6 +230,11 @@ function deriveSlug(refId: string): string {
   return refId.replace(/^cap_/, "").replace(/^skill_/, "");
 }
 
+/** A seeded kernel id is "k_<slug>"; any other kernel id is its own slug. */
+function kernelSlug(kernelId: string): string {
+  return kernelId.replace(/^k_/, "");
+}
+
 function pushJobToAssignee(jobId: string, slug: string): void {
   const list = jobsByAssignee.get(slug) ?? [];
   list.push(jobId);
@@ -243,7 +248,7 @@ function dispatchMakePizza(order: DemoOrder): DemoJob {
     jobId,
     orderId: order.orderId,
     type: "make-pizza",
-    assigneeSlug: deriveSlug(order.composition.shop.capabilityId),
+    assigneeSlug: kernelSlug(order.composition.shop.kernelId),
     status: "queued",
     details: {
       description: order.description,
@@ -272,7 +277,7 @@ function dispatchDelivery(order: DemoOrder): DemoJob {
     jobId,
     orderId: order.orderId,
     type: "deliver-pizza",
-    assigneeSlug: deriveSlug(order.composition.driver.capabilityId),
+    assigneeSlug: kernelSlug(order.composition.driver.kernelId),
     status: "queued",
     details: {
       description: `Deliver ${order.description}`,
