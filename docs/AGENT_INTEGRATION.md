@@ -10,7 +10,7 @@ Full API reference, DTOs, MCP tools, operator onboarding, and environment variab
 - §5. Safety & Compliance
 - §6. Settlement & Payments
 - §7. MCP Server (63 Tools)
-- §8. Agent Package (180+ Tools)
+- §8. Agent Package (170+ Tools)
 - §9. Environment Variables
 - §10. SSE Streams (Real-Time Events)
 - §11. pcc-node (Python Operator Node)
@@ -765,9 +765,9 @@ For the full contributor-economics surface (REST endpoints, DSL, walkthrough), s
 
 ---
 
-## 8. Agent Package (180+ Tools)
+## 8. Agent Package (170+ Tools)
 
-The agent package is a single JSON file any LLM can consume, containing 180+ tools with input schemas and endpoint mappings (v2.13.0 — bumped to 248 in June 2026 after adding 11 tools for the channels substrate, suggest-templates, operator status, and the composition engine surface; previous bumps: 237 trilobio operator helpers in May 2026; 218 contributor-economics consolidation; 226 metadata; 233 hamilton + role flows).
+The agent package is a single JSON file any LLM can consume, containing 170+ tools with input schemas and endpoint mappings (v2.13.0 — bumped to 248 in June 2026 after adding 11 tools for the channels substrate, suggest-templates, operator status, and the composition engine surface; previous bumps: 237 trilobio operator helpers in May 2026; 218 contributor-economics consolidation; 226 metadata; 233 hamilton + role flows).
 
 **Fetch it**:
 ```bash

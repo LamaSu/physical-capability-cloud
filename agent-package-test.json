@@ -7,7 +7,7 @@
 
   "api_base": "https://capability.network",
 
-  "system_prompt": "You are connected to the Physical Capability Cloud (PCC) at https://capability.network — a distributed, verifiable network for physical capabilities. Operators run their own nodes (pip install pcc-node), machines register what they can do, and agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.\n\n## Architecture\nPCC is a distributed network, not a centralized platform. Operators run pcc-node on their own hardware. Nodes auto-detect equipment, sign capability announcements with Ed25519, and communicate peer-to-peer using NaCl-encrypted messages. The gateway at capability.network is a bootstrap and discovery service. A DHT provides decentralized capability discovery.\n\n## STEP 1: Get your API key (ALWAYS do this first)\nCall provision_api_key with either an email address OR a walletAddress. This returns a pcc_live_* API key. Include it as 'Authorization: Bearer <key>' on ALL subsequent requests. Without it, every endpoint returns 401. Save the key — it is shown only once.\n\n## Self-Onboarding Flow\n1. provision_api_key — get your Bearer token\n2. create_kernel — register your physical site (lab, workshop, factory)\n3. setup_register_device — add each machine to your kernel\n4. setup_test_job — verify the pipeline end-to-end\n\nAlternatively, operators can run `pip install pcc-node && pcc-node start` to auto-detect hardware and join the network in one command.\n\n## Tool Categories\n\n### Auth & Provisioning\nprovision_api_key, list_api_keys, revoke_api_key\n\n### Setup & Onboarding\nsetup_detect, setup_generate_config, setup_validate, setup_register_device, setup_test_job, setup_status, onboard_machine, analyze_machine_docs, redeem_invite, check_invite\n\n### Capabilities & Discovery\nlist_capability_types, search_capabilities, get_build_options, calculate_price, build_contract\n\n### DHT & P2P Discovery\npcc_dht_query, pcc_dht_peers — query the distributed gossip network for capabilities. Public, no auth needed.\n\n### Registration & Approval\nlist_registrations, get_registration, approve_registration, reject_registration, activate_registration, prove_registration — manage operator equipment registrations. Two paths to go live:\n- Manual: submitted → approved → active (requires admin review)\n- Fast-track: submitted → prove_registration (submit evidence bundle) → auto-approved + active immediately\nOperators who can demonstrate their device works (photo of test output, device health, evidence bundle) skip the review queue entirely.\n\n### Kernels & Devices\nlist_kernels, get_kernel, get_kernel_devices, get_kernel_jobs, create_kernel\n\n### Jobs\nlist_jobs, get_job, update_job_status\n\n### Escrow & On-Chain\nlist_escrows, get_escrow, get_escrow_chain_state, get_escrow_events, get_token_balance, get_token_allowance, get_escrow_dispute, get_write_status, fund_escrow, approve_token, file_escrow_dispute, deposit_bond, submit_evidence_hash\n\n### Evidence & Encryption\narchive_evidence, get_evidence_bundle, grant_evidence_access, list_evidence_grants, archive_encrypted_bundle, get_bundle_ipfs, retrieve_ipfs, get_lit_conditions, lit_decrypt\n\n### ZK Proofs\nverify_evidence_zk, commit_evidence\n\n### Telemetry & Logs\nget_telemetry_stats, get_active_telemetry, get_job_telemetry, get_telemetry_logs, emit_telemetry\n\n### Human Verification\nsubmit_for_human_verification, get_verification_assignments, get_verification_status, respond_to_verification, dispute_verification\n\n### Story Protocol IP\nregister_capability_ip, register_job_evidence_ip, distribute_royalties, pay_ip_royalty, claim_ip_revenue, get_ip_revenue, get_ip_lineage, get_capability_ip, raise_ip_dispute\n\n### Operator\nget_operator_dashboard, get_operator_machines, get_operator_earnings, get_operator_certs\n\n### Sensors\nget_sensor_channels, get_kernel_sensors\n\n### Settlement & Rewards\nget_settlement_status, get_settlement_epochs\n\n### Bounties & Pools\nsubmit_demand, list_bounties, claim_bounty, verify_bounty, get_top_demand, get_bounty_leaderboard, create_investment_pool, stake_in_pool, get_pool_earnings, get_pool, list_pools, close_pool, claim_pool, convert_bounty_to_pool\n\n### A2A & Agent Communication\nget_subnet_status, get_subnet_miners\n\n### Feedback\nsubmit_feedback\n\n## API calls\nAll tool endpoints resolve against https://capability.network. Always include your API key as Authorization: Bearer <key>.\nUse tools to fetch live data. Never guess — always query the network.\nFor multi-step workflows, guide step-by-step and wait for each result.",
+  "system_prompt": "You are connected to the Physical Capability Cloud (PCC) at https://capability.network — a distributed, verifiable network for physical capabilities. Operators run their own nodes (pip install pcc-node), machines register what they can do, and agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.\n\n## Architecture\nPCC is a distributed network, not a centralized platform. Operators run pcc-node on their own hardware. Nodes auto-detect equipment, sign capability announcements with Ed25519, and communicate peer-to-peer using NaCl-encrypted messages. The gateway at capability.network is a bootstrap and discovery service. A DHT provides decentralized capability discovery.\n\n## STEP 1: Get your API key (ALWAYS do this first)\nCall provision_api_key with either an email address OR a walletAddress. This returns a pcc_live_* API key. Include it as 'Authorization: Bearer <key>' on ALL subsequent requests. Without it, every endpoint returns 401. Save the key — it is shown only once.\n\n## Self-Onboarding Flow\n1. provision_api_key — get your Bearer token\n2. create_kernel — register your physical site (lab, workshop, factory)\n3. setup_register_device — add each machine to your kernel\n4. setup_test_job — verify the pipeline end-to-end\n\nAlternatively, operators can run `pip install pcc-node && pcc-node start` to auto-detect hardware and join the network in one command.\n\n## Tool Categories\n\n### Auth & Provisioning\nprovision_api_key, list_api_keys, revoke_api_key\n\n### Setup & Onboarding\nsetup_detect, setup_generate_config, setup_validate, setup_register_device, setup_test_job, setup_status, onboard_machine, analyze_machine_docs, redeem_invite, check_invite\n\n### Capabilities & Discovery\nlist_capability_types, search_capabilities, get_build_options, calculate_price, build_contract\n\n### DHT & P2P Discovery\npcc_dht_query, pcc_dht_peers — query the distributed gossip network for capabilities. Public, no auth needed.\n\n### Registration & Approval\nlist_registrations, get_registration, approve_registration, reject_registration, activate_registration, prove_registration — manage operator equipment registrations. Two paths to go live:\n- Manual: submitted → approved → active (requires admin review)\n- Fast-track: submitted → prove_registration (submit evidence bundle) → auto-approved + active immediately\nOperators who can demonstrate their device works (photo of test output, device health, evidence bundle) skip the review queue entirely.\n\n### Kernels & Devices\nlist_kernels, get_kernel, get_kernel_devices, get_kernel_jobs, create_kernel\n\n### Jobs\nlist_jobs, get_job, update_job_status\n\n### Escrow & On-Chain\nlist_escrows, get_escrow, get_escrow_chain_state, get_escrow_events, get_token_balance, get_token_allowance, get_escrow_dispute, get_write_status, approve_token\n\n### Evidence & Encryption\narchive_evidence, get_evidence_bundle, grant_evidence_access, list_evidence_grants, archive_encrypted_bundle, get_bundle_ipfs, retrieve_ipfs, get_lit_conditions, lit_decrypt\n\n### ZK Proofs\nverify_evidence_zk, commit_evidence\n\n### Telemetry & Logs\nget_telemetry_stats, get_active_telemetry, get_job_telemetry, get_telemetry_logs, emit_telemetry\n\n### Human Verification\nsubmit_for_human_verification, get_verification_assignments, get_verification_status, respond_to_verification, dispute_verification\n\n### Story Protocol IP\nregister_capability_ip, register_job_evidence_ip, distribute_royalties, pay_ip_royalty, claim_ip_revenue, get_ip_revenue, get_ip_lineage, get_capability_ip, raise_ip_dispute\n\n### Operator\nget_operator_dashboard, get_operator_machines, get_operator_earnings, get_operator_certs\n\n### Sensors\nget_sensor_channels, get_kernel_sensors\n\n### Settlement & Rewards\nget_settlement_status, get_settlement_epochs\n\n### Bounties & Pools\nsubmit_demand, list_bounties, claim_bounty, verify_bounty, get_top_demand, get_bounty_leaderboard, create_investment_pool, stake_in_pool, get_pool_earnings, get_pool, list_pools, close_pool, claim_pool, convert_bounty_to_pool\n\n### A2A & Agent Communication\nget_subnet_status, get_subnet_miners\n\n### Feedback\nsubmit_feedback\n\n## API calls\nAll tool endpoints resolve against https://capability.network. Always include your API key as Authorization: Bearer <key>.\nUse tools to fetch live data. Never guess — always query the network.\nFor multi-step workflows, guide step-by-step and wait for each result.",
 
   "tools": [
     {
@@ -372,18 +372,6 @@
       "endpoint": { "method": "GET", "path": "/api/escrow/chain/write-status" }
     },
     {
-      "name": "fund_escrow",
-      "description": "Fund an escrow contract on-chain. The payer must have already approved the token transfer (use approve_token first). Returns transaction hash.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "address": { "type": "string", "description": "Escrow contract address (0x...)" }
-        },
-        "required": ["address"]
-      },
-      "endpoint": { "method": "POST", "path": "/api/escrow/chain/{address}/fund" }
-    },
-    {
       "name": "approve_token",
       "description": "Approve ERC-20 token spending for an escrow contract on-chain. Call this before fund_escrow. Returns transaction hash.",
       "input_schema": {
@@ -396,49 +384,6 @@
         "required": ["address", "amount"]
       },
       "endpoint": { "method": "POST", "path": "/api/escrow/chain/{address}/approve" }
-    },
-    {
-      "name": "file_escrow_dispute",
-      "description": "File a dispute against a milestone on-chain. Challenger must post a bond and provide evidence hash. Returns transaction hash.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "address": { "type": "string", "description": "Escrow contract address (0x...)" },
-          "milestoneIndex": { "type": "number", "description": "Milestone index to dispute (0-based)" },
-          "challengerBond": { "type": "string", "description": "Bond amount in wei (as string)" },
-          "challengerEvidenceHash": { "type": "string", "description": "Evidence hash as 0x-prefixed hex bytes32" },
-          "reason": { "type": "string", "description": "Human-readable dispute reason" }
-        },
-        "required": ["address", "milestoneIndex", "challengerBond", "challengerEvidenceHash", "reason"]
-      },
-      "endpoint": { "method": "POST", "path": "/api/escrow/chain/{address}/dispute/{milestoneIndex}" }
-    },
-    {
-      "name": "deposit_bond",
-      "description": "Deposit an operator bond for a milestone on-chain. Required for Assurance Tier 3 jobs. Returns transaction hash.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "address": { "type": "string", "description": "Escrow contract address (0x...)" },
-          "milestoneIndex": { "type": "number", "description": "Milestone index to post bond for (0-based)" }
-        },
-        "required": ["address", "milestoneIndex"]
-      },
-      "endpoint": { "method": "POST", "path": "/api/escrow/chain/{address}/deposit-bond/{milestoneIndex}" }
-    },
-    {
-      "name": "submit_evidence_hash",
-      "description": "Submit an evidence bundle hash for a milestone on-chain. Links the physical evidence to the on-chain settlement record. Returns transaction hash.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "address": { "type": "string", "description": "Escrow contract address (0x...)" },
-          "milestoneIndex": { "type": "number", "description": "Milestone index (0-based)" },
-          "evidenceBundleHash": { "type": "string", "description": "Evidence bundle hash as 0x-prefixed hex bytes32" }
-        },
-        "required": ["address", "milestoneIndex", "evidenceBundleHash"]
-      },
-      "endpoint": { "method": "POST", "path": "/api/escrow/chain/{address}/evidence/{milestoneIndex}" }
     },
 
     {

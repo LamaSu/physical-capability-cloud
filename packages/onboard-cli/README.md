@@ -70,7 +70,7 @@ shells only). Use `--persist` to save the resolved settings to
 │  onboard     │    │                                          │
 │              │    │  GET /agent-package.json                 │
 │ 1. fetch agent-pkg ──────────────────────────────────────→   │
-│ 2. read system_prompt + 180+ tools                           │
+│ 2. read system_prompt + 170+ tools                           │
 │                                                              │
 │ 3. send user msg to Anthropic ──→ Anthropic Messages API     │
 │    (model: claude-sonnet-4-6)                                │
