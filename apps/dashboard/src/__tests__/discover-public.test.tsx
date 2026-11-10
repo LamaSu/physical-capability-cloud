@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React, { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("wagmi", () => ({
   useAccount: () => ({ isConnected: false }),
@@ -50,6 +50,13 @@ let originalPath: string;
 let originalAuth: ReturnType<typeof useAuthStore.getState>;
 let originalUI: ReturnType<typeof useUIStore.getState>;
 let originalStorage: [string, string][];
+
+// App.tsx loads these pages with React.lazy, so the first test to render one
+// pays its module load inside a 1 s vi.waitFor, which under full-suite load
+// sometimes ran past 1 s. Preloading here keeps that cost out of assertions.
+beforeAll(async () => {
+  await import("../pages/DiscoverPage.js");
+}, 60_000);
 
 beforeEach(() => {
   originalPath = window.location.pathname + window.location.search + window.location.hash;

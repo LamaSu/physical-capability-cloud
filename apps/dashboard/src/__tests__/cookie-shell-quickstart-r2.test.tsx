@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React, { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const wallet = vi.hoisted(() => ({
   address: "0xAbCd12345678901234567890123456789012345678" as `0x${string}`,
@@ -79,6 +79,16 @@ const seen = (path: string) => calls.filter((call) => call.path === path);
 function button(label: string): HTMLButtonElement | undefined {
   return [...container.querySelectorAll("button")].find((node) => node.textContent?.trim() === label);
 }
+
+// App.tsx loads these pages with React.lazy, so the first test to render one
+// pays its module load inside a 1 s vi.waitFor, which under full-suite load
+// sometimes ran past 1 s. Preloading here keeps that cost out of assertions.
+beforeAll(async () => {
+  await Promise.all([
+    import("../pages/OperatorDashboardPage.js"),
+    import("../pages/EarnFromYourWorkPage.js"),
+  ]);
+}, 60_000);
 
 beforeEach(() => {
   originalPath = window.location.pathname + window.location.search + window.location.hash;
