@@ -6,6 +6,8 @@ import { AGENT_TOOLS } from "../agent-package.js";
 
 const REPO = resolve(dirname(SOURCE), "../../..");
 const read = (file: string) => readFileSync(resolve(REPO, file), "utf8");
+const PIN = "700dcfe9581bb75dad9206b8db49ae6f68ebe6e6";
+const INSTALL = /\b(?:pip3?|pipx|uv\s+pip|uv\s+tool)\b[^\n`;&|]*?\binstall\b[^\n`;&|]*pcc-node[^\n`;&|]*/gi;
 type Tool = { name: string; description: string; endpoint: { path: string } };
 type Pack = { system_prompt: string; tools: Tool[]; toolCount: number; metadata: { tool_count: number } };
 const pack = () => JSON.parse(readFileSync(SOURCE, "utf8")) as Pack;
@@ -287,12 +289,19 @@ describe("N240 public claims", () => {
       changed(id, text);
       expect(text).not.toContain("1d11f372");
     }
+    for (const id of ["A6", "A6m", "A6s1", "A6s2"] as const) {
+      const path = ROWS[id].path;
+      const text = read(path);
+      const pins = [...new Set([...text.matchAll(/physical-capability-cloud(?:\.git)?@([0-9a-f]{7,40})/g)].map((m) => m[1]))];
+      expect(pins, path).toEqual([PIN]);
+      expect([...text.matchAll(INSTALL)], path).toHaveLength(1);
+    }
   });
 
   it("PC15 no agent pack file names a pcc-node version", () => {
     for (const id of ["A6", "A6m", "A6s1", "A6s2"] as const) {
       const text = read(ROWS[id].path);
-      expect(text, ROWS[id].path).not.toMatch(/\b0\.1\.\d+\b/);
+      expect(text, ROWS[id].path).not.toMatch(/pcc-node(?:\[[a-z,]+\])?\s*(?:==|>=|<=|~=|!=|>|<|\s)\s*v?\d+\.\d+|(?<![\d.])\b0\.\d+(?:\.\d+)?\s+(?:daemon|node)\b|(?<![\d.])0\.1\.\d+\b/i);
     }
   });
 });

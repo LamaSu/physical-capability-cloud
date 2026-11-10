@@ -5,6 +5,7 @@ import errno
 import hashlib
 import http.client
 import json
+import logging
 import os
 import random
 import signal
@@ -26,6 +27,7 @@ KERNELS = "/api/kernels"
 API_KEY = "self-service-test-key"
 DEFAULT_404 = {"message": "Route POST:/api/kernels/registration-challenges not found",
                "error": "Not Found", "statusCode": 404}
+KELVIN = chr(0x212A)
 
 
 def node_key_pair(seed_hex):
@@ -388,6 +390,24 @@ def test_the_challenge_domain_must_equal_the_configured_host(gateway, base, doma
             signed(gateway, base=base)
         assert error.value.data["error"] == "registration_challenge_domain"
         assert not gateway.posts()
+
+
+def test_a_non_ascii_domain_that_lowercases_to_the_host_is_refused(gateway):
+    from pcc_node.register import RegistrationChallengeError
+    gateway.domain = "kernel.example.test"
+    swapped = []
+
+    def kelvin(raw):
+        out = raw.replace(b'"domain":"kernel.example.test"', ('"domain":"' + KELVIN + 'ernel.example.test"').encode("utf-8"))
+        swapped.append(out != raw)
+        return out
+
+    gateway.mutate_message = kelvin
+    with pytest.raises(RegistrationChallengeError) as error:
+        signed(gateway, base="https://kernel.example.test")
+    assert swapped == [True]
+    assert error.value.data["error"] == "registration_challenge_domain"
+    assert not gateway.posts()
 
 
 @pytest.mark.parametrize("base,kid,code", [
@@ -776,7 +796,7 @@ def test_a_malformed_challenge_answer_is_refused_without_signing(gateway, body):
     assert gateway.paths() == [CHALLENGES]
 
 
-def test_a_save_whose_directory_sync_fails_still_removes_the_challenge_before_it_is_sent(gateway, monkeypatch):
+def test_a_save_whose_directory_sync_fails_still_removes_the_challenge_before_it_is_sent(gateway, monkeypatch, caplog):
     from pcc_node import challenge_store
     real_sync = challenge_store._fsync_dir
     faults = 0
@@ -789,7 +809,9 @@ def test_a_save_whose_directory_sync_fails_still_removes_the_challenge_before_it
         return real_sync(directory)
 
     monkeypatch.setattr(challenge_store, "_fsync_dir", sync)
-    signed(gateway)
+    with caplog.at_level(logging.WARNING, logger="pcc-node.challenge-store"):
+        signed(gateway)
+    assert "cannot sync its directory" in caplog.text
     assert not os.path.exists(challenge_store.store_path())
     signed(gateway)
     assert faults == 1
@@ -809,10 +831,11 @@ def test_a_challenge_message_nested_too_deeply_to_parse_is_refused_unsigned(gate
 
 def test_a_challenge_field_nested_too_deeply_to_check_is_refused_unsigned(gateway):
     from pcc_node.register import RegistrationChallengeError
-    gateway.mutate_message = lambda raw: raw.replace(b'"env":"test"', b'"env":' + b"[" * 1300 + b"]" * 1300)
+    gateway.mutate_message = lambda raw: raw.replace(b'"env":"test"', b'"env":' + b"[" * 700 + b"]" * 700)
     with pytest.raises(RegistrationChallengeError) as error:
         signed(gateway)
     assert error.value.data["error"] == "registration_challenge_invalid"
+    assert "not in canonical form" in error.value.data["message"]
     assert gateway.paths() == [CHALLENGES]
 
 
@@ -822,7 +845,7 @@ def test_the_challenge_removal_is_synced_before_the_proof_is_sent(gateway, monke
     real_sync, real_unlink, request = challenge_store._fsync_dir, challenge_store.os.unlink, register.pcc_request
 
     def sync(directory):
-        events.append("sync")
+        events.append("sync " + os.path.abspath(directory))
         return real_sync(directory)
 
     def unlink(path, *args, **kwargs):
@@ -839,7 +862,8 @@ def test_the_challenge_removal_is_synced_before_the_proof_is_sent(gateway, monke
     signed(gateway)
     removed = events.index("registration-challenge.json")
     sent = events.index("POST " + KERNELS)
-    assert "sync" in events[removed + 1:sent]
+    store = os.path.abspath(challenge_store.store_path())
+    assert "sync " + os.path.dirname(store) in events[removed + 1:sent]
 
 
 def test_a_challenge_removal_that_cannot_be_synced_stops_before_the_proof_is_sent(gateway, monkeypatch):

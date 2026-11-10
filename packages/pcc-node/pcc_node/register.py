@@ -430,7 +430,8 @@ def register_kernel(pcc_base, api_key, config, signer=None, persist_challenge=Tr
     config : NodeConfig
         The node configuration.
     signer : tuple of (str, str), optional
-        (public hex, secret hex): when given, the kernel is registered with the gateway's registration challenge.
+        (public hex, secret hex): when given, the kernel is registered with the gateway's registration challenge,
+        or, for an older gateway without one, with a static signing proof.
     persist_challenge : bool, optional
         With signer only. True (the default) keeps a challenge the node has received but not sent beside the node key,
         for a restart. After a refusal that a restart cannot fix, it also leaves a refusal marker there, which the next
