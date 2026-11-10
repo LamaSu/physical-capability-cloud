@@ -281,6 +281,7 @@ export const PUBLISHED_SURFACES: readonly string[] = [
   "docs/ADAPTER_BOUNTIES.md",
   "starter/runbook/06-verify.md",
   "starter/runbook/08-publish.md",
+  "apps/dashboard/src/components/BetaSignupForm.tsx",
 ];
 
 /**

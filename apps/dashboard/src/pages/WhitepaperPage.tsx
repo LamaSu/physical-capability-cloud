@@ -1,4 +1,5 @@
 import React from "react";
+import { BetaSignupForm } from "../components/BetaSignupForm.js";
 
 export function WhitepaperPage() {
   const [html, setHtml] = React.useState("");
@@ -28,6 +29,7 @@ export function WhitepaperPage() {
         className="mx-auto max-w-3xl prose-pcc"
         dangerouslySetInnerHTML={{ __html: html }}
       />
+      <BetaSignupForm />
       <style>{`
         .prose-pcc {
           color: rgba(255,255,255,0.75);

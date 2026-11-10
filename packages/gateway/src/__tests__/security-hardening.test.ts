@@ -48,7 +48,7 @@ describe("security headers on isolated routes", () => {
 
   describe("production script CSP", () => {
     it("uses only self on the SPA shell and SPA routes", async () => {
-      for (const url of ["/index.html", "/dashboard", "/operator", "/unknown-spa-route"]) {
+      for (const url of ["/index.html", "/dashboard", "/operator", "/whitepaper", "/unknown-spa-route"]) {
         expect(await scriptSource(url), url).toBe("script-src 'self'");
       }
     });
