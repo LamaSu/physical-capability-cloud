@@ -24,7 +24,7 @@ export interface JobInputs {
   documentData: Buffer;
   jobName: string;
   totalPages: number;
-  unit: { settlementUnitId: string; challengeNonce: string; fundedAt: number; reclaimAt: number }
+  unit: { settlementUnitId: string; challengeNonce: string; fundedAt?: number; reclaimAt: number }
     & Partial<Omit<PackageUnitInputs, "evidenceTimeBounds">>
     & { evidenceTimeBounds?: Partial<PackageUnitInputs["evidenceTimeBounds"]> };
   program?: Partial<ProgramContext>;
@@ -42,6 +42,7 @@ export type JobInputCode = typeof JOB_INPUT_CODES[number];
 
 export type JobInputResult = { ok: true; value: JobInputs } | { ok: false; code: JobInputCode };
 export type JobInputSource = (jobId: string) => Promise<JobInputResult>;
+export type FundedAtRule = "required" | "optional";
 
 /**
  * The operator's inputs manifest is Thursday's only unit source (#7866).
@@ -90,13 +91,13 @@ const optionalPackageUnitFields = {
   evidenceTimeBounds: timeBoundsSchema.partial().refine((value) => value.start === undefined
     || value.end === undefined || Number(value.start) <= Number(value.end)).optional(),
 };
-const unitSchema = z.object({
+const unitSchemaFor = (rule: FundedAtRule) => z.object({
   settlementUnitId: z.string().regex(/^0x[0-9a-f]{64}$/),
   challengeNonce: z.string().regex(/^0x[0-9a-f]{64}$/),
-  fundedAt: fundingSeconds,
+  fundedAt: rule === "optional" ? fundingSeconds.optional() : fundingSeconds,
   reclaimAt: fundingSeconds,
   ...optionalPackageUnitFields,
-}).strict().refine((unit) => unit.reclaimAt > unit.fundedAt);
+}).strict().refine((unit) => unit.fundedAt === undefined || unit.reclaimAt > unit.fundedAt);
 const programSchema = z.object({ programHash: word, attestationSetRoot: word, workProductRoot: word }).strict();
 const completeUnitSchema = z.object({
   settlementUnitId: word, challengeNonce: word.refine(value => value !== `0x${"0".repeat(64)}`), fundedAt: fundingSeconds, reclaimAt: fundingSeconds,
@@ -104,19 +105,19 @@ const completeUnitSchema = z.object({
 }).strict().refine((unit) => unit.reclaimAt > unit.fundedAt);
 
 /** Custom input sources must meet the same unit binding requirements before claim. */
-export function isUnitBinding(value: unknown): value is JobInputs["unit"] {
-  return unitSchema.safeParse(value).success;
+export function isUnitBinding(value: unknown, fundedAt: FundedAtRule = "required"): value is JobInputs["unit"] {
+  return unitSchemaFor(fundedAt).safeParse(value).success;
 }
 
 /** Incomplete package contexts still permit print/relay evidence, never settlement. */
 export function hasPackageInputs(value: JobInputs): value is PackageJobInputs {
   return completeUnitSchema.safeParse(value.unit).success && programSchema.safeParse(value.program).success;
 }
-const manifestSchema = z.object({
+const manifestSchemaFor = (rule: FundedAtRule) => z.object({
   jobName: z.string().min(1).max(256).refine((value) => !/[\u0000-\u001f\u007f-\u009f]/.test(value)),
   totalPages: z.number().int().min(1).max(50),
   documentFile: plainFileName,
-  unit: unitSchema,
+  unit: unitSchemaFor(rule),
   program: programSchema.partial().optional(),
 }).strict();
 
@@ -160,7 +161,8 @@ async function readLocalFile(path: string, limit: number): Promise<Buffer> {
 }
 
 /** Local, operator-provided inputs with the funded unit binding; this never fetches a document. */
-export function fileJobInputSource(dir: string): JobInputSource {
+export function fileJobInputSource(dir: string, options: { fundedAt?: FundedAtRule } = {}): JobInputSource {
+  const manifestSchema = manifestSchemaFor(options.fundedAt ?? "required");
   return async (jobId) => {
     const stem = jobFileStem(jobId);
     if (stem === undefined) return { ok: false, code: "job_inputs_bad_id" };

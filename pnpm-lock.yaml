@@ -1234,6 +1234,9 @@ importers:
 
   packages/print-host:
     dependencies:
+      '@pcc/adk':
+        specifier: workspace:*
+        version: link:../adk
       '@pcc/contracts':
         specifier: workspace:*
         version: link:../contracts
