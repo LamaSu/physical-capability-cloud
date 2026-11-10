@@ -21,6 +21,9 @@ import Fastify, { type FastifyInstance } from "fastify";
 const h = vi.hoisted(() => ({
   isWriteEnabled: vi.fn().mockReturnValue(false),
   driveSettlement: vi.fn(),
+  submitEvidenceV3: vi.fn().mockResolvedValue({ transactionHash: "0xev3", status: "submitted" }),
+  submitAttestationV3: vi.fn().mockResolvedValue({ transactionHash: "0xat3", status: "submitted" }),
+  waitForReceipt: vi.fn().mockResolvedValue({ status: "success" }),
   easUid: ("0x" + "ea".repeat(32)) as `0x${string}`,
 }));
 
@@ -39,6 +42,9 @@ vi.mock("../contracts/escrow-client.js", () => ({
   submitEvidence: vi.fn().mockResolvedValue({ transactionHash: "0xev", status: "submitted" }),
   releaseMilestone: vi.fn().mockResolvedValue({ transactionHash: "0xrel", status: "submitted" }),
   isWriteEnabled: h.isWriteEnabled,
+  submitEvidenceV3: h.submitEvidenceV3,
+  submitAttestationV3: h.submitAttestationV3,
+  waitForReceipt: h.waitForReceipt,
   getSignerAddress: vi.fn().mockReturnValue(undefined),
   isBatchEnabled: vi.fn().mockReturnValue(false),
   getSmartAccountAddress: vi.fn().mockReturnValue(undefined),
@@ -82,6 +88,7 @@ import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js
 import { createHash } from "node:crypto";
 import { schema, eq } from "@pcc/store";
 import { verifyWithOracle } from "../services/oracle-client.js";
+import { pipelineTelemetry } from "../telemetry.js";
 
 const KERNEL = "kernel-biolab-01";
 const CAP = "liquid-handler";
@@ -107,7 +114,7 @@ async function buildApp(): Promise<FastifyInstance> {
 }
 
 /** A fast-track job (mock escrow, write disabled) with a session pointing at a REAL escrow. */
-async function makeJobWithRealEscrow(agent: string): Promise<{ jobId: string }> {
+async function makeJobWithRealEscrow(agent: string, version?: "v3"): Promise<{ jobId: string }> {
   const ft = await app.inject({
     method: "POST",
     url: "/api/jobs/submit-from-discovery",
@@ -128,6 +135,7 @@ async function makeJobWithRealEscrow(agent: string): Promise<{ jobId: string }> 
     .run();
   getRepos().escrows.insert({
     id: `esc-${agent}`,
+    ...(version ? { version } : {}),
     cwmId,
     contractAddress: REAL_ESCROW,
     payer: agent,
@@ -314,5 +322,178 @@ describe("/complete routes the on-chain settle through driveSettlement", () => {
     // Attestation leg: hash + minted UID (self-healing drive carries the hash too).
     expect(h.driveSettlement.mock.calls[1][2].evidenceBundleHash).toBeDefined();
     expect(h.driveSettlement.mock.calls[1][2].easUid).toBe(h.easUid);
+  });
+});
+
+describe("/complete settles on chain only after the oracle verifies the evidence, and sends the chain's bytes32 digest", () => {
+  function mockEvidenceAndAttestationDrives(): void {
+    h.driveSettlement
+      .mockResolvedValueOnce({
+        escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Evidenced",
+        outcome: "needs_input", needs: "eas_uid", settled: false,
+        steps: [{ action: "submitEvidence", result: "landed", txHash: "0xev" }],
+        stepId: "0x" + "11".repeat(32),
+      })
+      .mockResolvedValueOnce({
+        escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Attested",
+        outcome: "awaiting_challenge_window", settled: false, challengeWindowEnd: 9_999_999_999,
+        steps: [{ action: "submitAttestation", result: "landed", txHash: "0xat" }],
+      });
+  }
+
+  it("a refused verdict answers 422 before any chain write", async () => {
+    const { jobId } = await makeJobWithRealEscrow("complete-refused");
+    h.isWriteEnabled.mockReturnValue(true);
+    process.env.PCC_USE_EAS_V2 = "true";
+    process.env.MOCK_SETTLEMENT = "true";
+    vi.mocked(verifyWithOracle).mockResolvedValueOnce({
+      result: { verified: false, reason: "refused", checks: [] },
+    } as any);
+
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: { "x-admin-key": ADMIN }, payload: {} });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe("oracle_verification_failed");
+    expect(h.driveSettlement).not.toHaveBeenCalled();
+    expect(h.submitEvidenceV3).not.toHaveBeenCalled();
+    expect(h.waitForReceipt).not.toHaveBeenCalled();
+    expect(h.submitAttestationV3).not.toHaveBeenCalled();
+  });
+
+  it("an oracle error answers 500 before any chain write", async () => {
+    const { jobId } = await makeJobWithRealEscrow("complete-oracle-error");
+    h.isWriteEnabled.mockReturnValue(true);
+    process.env.PCC_USE_EAS_V2 = "true";
+    process.env.MOCK_SETTLEMENT = "true";
+    vi.mocked(verifyWithOracle).mockRejectedValueOnce(new Error("oracle down"));
+
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: { "x-admin-key": ADMIN }, payload: {} });
+
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe("completion_failed");
+    expect(h.driveSettlement).not.toHaveBeenCalled();
+    expect(h.submitEvidenceV3).not.toHaveBeenCalled();
+    expect(h.waitForReceipt).not.toHaveBeenCalled();
+    expect(h.submitAttestationV3).not.toHaveBeenCalled();
+  });
+
+  it("the oracle runs before the first chain write and gets the job's stepId string", async () => {
+    const { jobId } = await makeJobWithRealEscrow("complete-oracle-first");
+    h.isWriteEnabled.mockReturnValue(true);
+    process.env.PCC_USE_EAS_V2 = "true";
+    process.env.MOCK_SETTLEMENT = "true";
+    mockEvidenceAndAttestationDrives();
+
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: { "x-admin-key": ADMIN }, payload: {} });
+
+    expect(res.statusCode).toBe(200);
+    expect(h.driveSettlement.mock.invocationCallOrder[0]).toBeGreaterThan(vi.mocked(verifyWithOracle).mock.invocationCallOrder[0]);
+    const request = vi.mocked(verifyWithOracle).mock.calls[0][0];
+    expect(request.stepId).toBe(getRepos().jobs.findById(jobId)!.stepId);
+    expect(request.stepId).toMatch(/^step-/);
+    expect(request.stepId).not.toMatch(/^0x/);
+  });
+
+  it("both chain drives get the bytes32 digest", async () => {
+    const { jobId } = await makeJobWithRealEscrow("complete-chain-digest");
+    h.isWriteEnabled.mockReturnValue(true);
+    process.env.PCC_USE_EAS_V2 = "true";
+    process.env.MOCK_SETTLEMENT = "true";
+    mockEvidenceAndAttestationDrives();
+
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: { "x-admin-key": ADMIN }, payload: {} });
+
+    expect(res.statusCode).toBe(200);
+    const request = vi.mocked(verifyWithOracle).mock.calls[0][0];
+    expect(request.evidenceHash).toMatch(/^sha256:/);
+    const digest = "0x" + request.evidenceHash.slice("sha256:".length);
+    expect(h.driveSettlement).toHaveBeenCalledTimes(2);
+    for (const call of h.driveSettlement.mock.calls) {
+      expect(call[2].evidenceBundleHash).toBe(digest);
+      expect(call[2].evidenceBundleHash).toMatch(/^0x[0-9a-f]{64}$/);
+    }
+  });
+
+  it("with escrow writes off nothing is driven", async () => {
+    const { jobId } = await makeJobWithRealEscrow("complete-writes-off");
+    h.isWriteEnabled.mockReturnValue(false);
+    process.env.PCC_USE_EAS_V2 = "true";
+    process.env.MOCK_SETTLEMENT = "true";
+
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: { "x-admin-key": ADMIN }, payload: {} });
+
+    expect(res.statusCode).toBe(200);
+    expect(h.driveSettlement).not.toHaveBeenCalled();
+    expect(vi.mocked(verifyWithOracle).mock.calls[0][0].stepId).toBe(getRepos().jobs.findById(jobId)!.stepId);
+  });
+
+  it("with the EAS V2 path off nothing is driven and no stepId is sent", async () => {
+    const { jobId } = await makeJobWithRealEscrow("complete-v2-off");
+    h.isWriteEnabled.mockReturnValue(true);
+    delete process.env.PCC_USE_EAS_V2;
+    process.env.MOCK_SETTLEMENT = "true";
+
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: { "x-admin-key": ADMIN }, payload: {} });
+
+    expect(res.statusCode).toBe(200);
+    expect(h.driveSettlement).not.toHaveBeenCalled();
+    expect(vi.mocked(verifyWithOracle).mock.calls[0][0]).not.toHaveProperty("stepId");
+  });
+
+  it("a failed evidence leg is reported, and 4c still drives with the UID", async () => {
+    const { jobId } = await makeJobWithRealEscrow("complete-evidence-error");
+    h.isWriteEnabled.mockReturnValue(true);
+    process.env.PCC_USE_EAS_V2 = "true";
+    process.env.MOCK_SETTLEMENT = "true";
+    h.driveSettlement
+      .mockRejectedValueOnce(new Error("rpc down"))
+      .mockResolvedValueOnce({
+        escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Attested",
+        outcome: "awaiting_challenge_window", settled: false, challengeWindowEnd: 9_999_999_999,
+        steps: [{ action: "submitAttestation", result: "landed", txHash: "0xat" }],
+      });
+    const emit = vi.spyOn(pipelineTelemetry, "emit");
+    try {
+      const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: { "x-admin-key": ADMIN }, payload: {} });
+
+      expect(res.statusCode).toBe(200);
+      expect(h.driveSettlement).toHaveBeenCalledTimes(2);
+      const request = vi.mocked(verifyWithOracle).mock.calls[0][0];
+      expect(h.driveSettlement.mock.calls[1][2].easUid).toBe(h.easUid);
+      expect(request.evidenceHash).toMatch(/^sha256:/);
+      expect(h.driveSettlement.mock.calls[1][2].evidenceBundleHash).toBe("0x" + request.evidenceHash.slice("sha256:".length));
+      expect(h.driveSettlement.mock.calls[1][2].evidenceBundleHash).toMatch(/^0x[0-9a-f]{64}$/);
+      expect(emit).toHaveBeenCalledWith(jobId, "settlement_claim", "failed", {
+        metadata: expect.objectContaining({ path: "crank-evidence" }),
+      });
+    } finally {
+      emit.mockRestore();
+    }
+  });
+
+  it("a v3 escrow's evidence goes through the V3 calls, not the crank", async () => {
+    const { jobId } = await makeJobWithRealEscrow("complete-v3", "v3");
+    h.isWriteEnabled.mockReturnValue(true);
+    process.env.PCC_USE_EAS_V2 = "true";
+    process.env.MOCK_SETTLEMENT = "true";
+    h.driveSettlement.mockResolvedValueOnce({
+      escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Bonded",
+      outcome: "needs_input", needs: "evidence_hash", settled: false, steps: [],
+    });
+
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: { "x-admin-key": ADMIN }, payload: {} });
+
+    expect(res.statusCode).toBe(200);
+    expect(h.driveSettlement).toHaveBeenCalledTimes(1);
+    expect(h.driveSettlement.mock.calls[0][2]).not.toHaveProperty("evidenceBundleHash");
+    const request = vi.mocked(verifyWithOracle).mock.calls[0][0];
+    expect(request.evidenceHash).toMatch(/^sha256:/);
+    const digest = "0x" + request.evidenceHash.slice("sha256:".length);
+    expect(digest).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(h.submitEvidenceV3).toHaveBeenCalledWith(0, digest, REAL_ESCROW);
+    expect(h.waitForReceipt).toHaveBeenCalledWith("0xev3");
+    expect(h.submitAttestationV3).toHaveBeenCalledWith(0, h.easUid, REAL_ESCROW);
+    expect(h.waitForReceipt.mock.invocationCallOrder[0]).toBeGreaterThan(h.submitEvidenceV3.mock.invocationCallOrder[0]);
+    expect(h.submitAttestationV3.mock.invocationCallOrder[0]).toBeGreaterThan(h.waitForReceipt.mock.invocationCallOrder[0]);
   });
 });
