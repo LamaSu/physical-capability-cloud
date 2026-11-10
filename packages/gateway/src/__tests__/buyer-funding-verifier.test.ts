@@ -339,6 +339,7 @@ describe("N325 funding search by timestamp", () => {
       return [{ blockNumber: FUND, blockHash: hash(Number(FUND)) }];
     });
     await refuses(j, "funding_block_unproven");
+    expect(vi.mocked(j.reads.fundedLogs).mock.calls).toHaveLength(2);
     expect(await run(j)).toMatchObject({ kind: "recorded", record: { fundingBlockNumber: "900" } });
   });
 
@@ -350,5 +351,28 @@ describe("N325 funding search by timestamp", () => {
     await refuses(j, "not_funded_at_finalized");
     expect(vi.mocked(j.reads.blockByNumber).mock.calls).toHaveLength(0);
     expect(vi.mocked(j.reads.fundedLogs).mock.calls).toHaveLength(0);
+  });
+
+  it("C11: refuses an in-range funding log whose block hash is not canonical", async () => {
+    const j = await buyerFundingJob(f);
+    vi.mocked(j.reads.fundedLogs).mockImplementation(async (_address, from, to) => from <= FUND && FUND <= to
+      ? [{ blockNumber: FUND, blockHash: hash(999) }] : []);
+    await refuses(j, "funding_block_unproven");
+    expect(vi.mocked(j.reads.blockByNumber).mock.calls.some(([n]) => n === FUND)).toBe(true);
+  });
+
+  it("C12: no funding-log query reaches past the finalized head", async () => {
+    const j = await buyerFundingJob(f);
+    expect((await run(j)).kind).toBe("recorded");
+    for (const [, , to] of vi.mocked(j.reads.fundedLogs).mock.calls) expect(to).toBeLessThanOrEqual(B.number);
+  });
+
+  it("C13: a glitched bisection on one verify is not carried to the next", async () => {
+    const j = await buyerFundingJob(f); let glitch = true;
+    vi.mocked(j.reads.blockByNumber).mockImplementation(async n => glitch && n !== B.number && n <= 950n
+      ? { ...j.block(n), timestamp: t0 - 10_000n } : j.block(n));
+    await refuses(j, "funding_block_unproven");
+    glitch = false;
+    expect(await run(j)).toMatchObject({ kind: "recorded", record: { fundingBlockNumber: "900" } });
   });
 });
