@@ -69,8 +69,8 @@ describe("API key scope decisions are unchanged", () => {
     vi.unstubAllEnvs();
   });
 
-  it("covers all 57 matched pairs and six unscoped pairs", () => {
-    expect(SCOPE_COVERED_ROUTES).toHaveLength(57);
+  it("covers all 61 matched pairs and six unscoped pairs", () => {
+    expect(SCOPE_COVERED_ROUTES).toHaveLength(61);
     expect(UNSCOPED_ROUTES).toHaveLength(6);
   });
 
