@@ -477,7 +477,7 @@ describe("/complete settles on chain only after the oracle verifies the evidence
     process.env.PCC_USE_EAS_V2 = "true";
     process.env.MOCK_SETTLEMENT = "true";
     h.driveSettlement.mockResolvedValueOnce({
-      escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Bonded",
+      escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Locked",
       outcome: "needs_input", needs: "evidence_hash", settled: false, steps: [],
     });
 
