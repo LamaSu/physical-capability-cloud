@@ -2334,6 +2334,43 @@ export function migrateDatabase(sqlite: Database.Database): void {
           WHERE kernel_id = NEW.kernel_id AND chain_id = NEW.chain_id AND revoked_at IS NULL))
       BEGIN SELECT RAISE(ABORT, 'kernel_payout_bindings_no_replace'); END;
   `);
+
+  // Registration challenges preserve the exact message and issuing key identity.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS kernel_registration_challenges (
+      id TEXT PRIMARY KEY,
+      kernel_id TEXT NOT NULL,
+      algorithm TEXT NOT NULL CHECK (algorithm IN ('ed25519', 'secp256k1')),
+      signer TEXT NOT NULL,
+      created_by_key_id TEXT,
+      nonce TEXT NOT NULL,
+      env TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      domain TEXT NOT NULL,
+      message TEXT NOT NULL,
+      issued_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      consumed_at TEXT
+    );
+    CREATE TRIGGER IF NOT EXISTS kernel_registration_challenges_creator_immutable
+      BEFORE UPDATE OF created_by_key_id ON kernel_registration_challenges
+      WHEN NEW.created_by_key_id IS NOT OLD.created_by_key_id
+      BEGIN
+        SELECT RAISE(ABORT, 'Registration challenge creator is immutable');
+      END;
+  `);
+  // Session-issued challenges must retain the issuing identity on upgrades too.
+  safeAddColumn("kernel_registration_challenges", "created_by_session_identity", "TEXT");
+  sqlite.exec(`
+    CREATE TRIGGER IF NOT EXISTS kernel_registration_challenges_session_creator_immutable
+      BEFORE UPDATE OF created_by_session_identity ON kernel_registration_challenges
+      WHEN NEW.created_by_session_identity IS NOT OLD.created_by_session_identity
+      BEGIN
+        SELECT RAISE(ABORT, 'Registration challenge creator is immutable');
+      END;
+    CREATE INDEX IF NOT EXISTS kernel_registration_challenges_expires_at_idx
+      ON kernel_registration_challenges(expires_at);
+  `);
   scrubOperatorWalletPrivateKeys(sqlite);
 }
 

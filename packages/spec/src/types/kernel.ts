@@ -8,6 +8,36 @@
 
 // ── Device Adapter Types ────────────────────────────────────────────────────
 
+/**
+ * Request server-issued consent to bind a kernel signing key.
+ * A principal may hold at most five open challenges; the next request returns HTTP 429.
+ */
+export interface KernelRegistrationChallengeInput {
+  kernelId: string;
+  signer: { algorithm: "ed25519"; publicKey: string } | { algorithm: "secp256k1"; address: string };
+}
+
+/**
+ * Consent valid for 10 minutes. Only the API key or wallet-session principal that
+ * issued the challenge may redeem it.
+ */
+export interface KernelRegistrationChallenge {
+  challengeId: string;
+  /** EIP-4361 text for secp256k1, or base64-encoded message bytes for Ed25519. */
+  message: string;
+  expiresAt: string;
+}
+
+/**
+ * The challenge burns on its first verified use, whatever the response, including
+ * HTTP 403, 409 or 500. Request a fresh challenge before retrying after verification.
+ */
+export interface KernelRegistrationProof {
+  challengeId: string;
+  /** EIP-191 hex signature for secp256k1, or a raw detached hex signature for Ed25519. */
+  signature: string;
+}
+
 /** Supported device adapter protocols */
 export type AdapterType = "octoprint" | "modbus" | "opcua" | "sila" | "generic-http" | "opentrons";
 

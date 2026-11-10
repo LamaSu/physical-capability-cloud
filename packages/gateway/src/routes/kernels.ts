@@ -1,12 +1,11 @@
-import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { Result } from "@pcc/spec";
+import type { KernelRegistrationChallengeInput, Result } from "@pcc/spec";
 import { getKernelFacade } from "../facades/index.js";
 import { jobReadScopeOf, refuseJobRead, scopeAllows } from "../readmodels/job-read-gate.js";
 import type { CreateKernelInput, HeartbeatInput, CapabilityAnnouncementInput } from "../facades/index.js";
-import type { LocationOptInAuthority } from "../facades/kernel.facade.js";
 import { recordOperatorStage } from "../services/funnel-tracker.js";
 import { AUTHENTICATION_REQUIRED, authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
+import { issueKernelRegistrationChallenge, legacySigningProofAllowed } from "../auth/kernel-registration.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 
@@ -52,34 +51,6 @@ function buildCapabilityRegistrationHint(kernelId: string) {
 }
 
 /**
- * True only when X-Admin-Key equals PCC_ADMIN_KEY, compared in constant time (both SHA-256'd to
- * fixed-length digests). An unset or blank PCC_ADMIN_KEY, or a missing, empty or repeated header,
- * grants nothing in any environment: there is no development bypass. (WP-A #326 adds a shared
- * helper, auth/admin-key.ts; this route keeps its own until that merges.)
- */
-function hasAdminSecret(provided: unknown, expected: string | undefined = process.env.PCC_ADMIN_KEY): boolean {
-  if (typeof expected !== "string" || expected.trim().length === 0) return false;
-  if (typeof provided !== "string" || provided.length === 0) return false;
-  const a = createHash("sha256").update(provided, "utf8").digest();
-  const b = createHash("sha256").update(expected, "utf8").digest();
-  return a.length === b.length && timingSafeEqual(a, b);
-}
-
-/**
- * Board N68: what this request may do to a kernel's location visibility. Only a proven identity
- * counts: WP-A (#326) sets `provenWallet` for a SIWE session or a key minted from one, and nothing
- * sets it before that merges; `operatorId` is a claimed identity and never counts.
- */
-function locationOptInAuthority(req: FastifyRequest): LocationOptInAuthority {
-  const proven = (req as { provenWallet?: unknown }).provenWallet;
-  return {
-    admin: hasAdminSecret(req.headers["x-admin-key"]),
-    provenWallet: typeof proven === "string" && proven.length > 0 ? proven : null,
-    provenWalletCarrier: req.provenWalletCarrier ?? null,
-  };
-}
-
-/**
  * N31: the refusal for a write that runs the kernel ("operate" in auth/kernel-authority.ts), or
  * null when the caller is the kernel's own principal, its proven operator wallet or the admin.
  */
@@ -91,6 +62,26 @@ function refuseOperate(req: FastifyRequest, kernelId: string): { status: number;
 
 export async function kernelRoutes(app: FastifyInstance) {
   const facade = getKernelFacade();
+  app.log.info(`PCC_KERNEL_LEGACY_SIGNING_PROOF=${legacySigningProofAllowed() ? "allow" : "deny"}`);
+
+  app.post<{ Body: KernelRegistrationChallengeInput }>("/api/kernels/registration-challenges", async (req, reply) => {
+    if (isAnonymous(authorityOf(req))) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+    try {
+      const challenge = issueKernelRegistrationChallenge(req.body, authorityOf(req));
+      return reply.code(201).send(challenge);
+    } catch (error) {
+      if (error instanceof Error && error.name === "ForbiddenError") {
+        return reply.code(403).send({ error: "FORBIDDEN", message: error.message });
+      }
+      if (error instanceof Error && error.name === "RegistrationChallengeLimitError") {
+        return reply.code(429).send({ error: "registration_challenge_limit", message: error.message });
+      }
+      if (error instanceof Error && error.name === "BadRequestError") {
+        return reply.code(400).send({ error: "invalid_registration_challenge", message: error.message });
+      }
+      throw error;
+    }
+  });
 
   /**
    * List all kernels with staleness detection and capability type enrichment.
@@ -194,7 +185,7 @@ export async function kernelRoutes(app: FastifyInstance) {
       actorId,
       req.ip,
       req.headers["user-agent"],
-      locationOptInAuthority(req),
+      authorityOf(req),
     );
     if (!result.success) return sendResult(reply, result);
     const { kernel, created } = result.data;
