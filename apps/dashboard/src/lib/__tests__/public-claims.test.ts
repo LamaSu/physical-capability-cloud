@@ -86,6 +86,19 @@ describe("public claims gate", () => {
     }
   });
 
+  it("exempts only the exact path a claim lists, only for that claim, and only from the companion check", () => {
+    const thesis = GUARDED_CLAIMS.find((claim) => claim.id === "thesis") as GuardedClaim;
+    const whitepaper = "apps/dashboard/public/whitepaper.md";
+    for (const other of ["docs/whitepaper.md", `./${whitepaper}`, `${whitepaper}.bak`, "whitepaper.md"]) {
+      expect(findClaimViolations(thesis.example, [thesis], other), other).toHaveLength(1);
+    }
+    const unlisted: GuardedClaim = { ...thesis, id: "thesis-unlisted", alongsideOptionalOn: [] };
+    expect(findClaimViolations(thesis.example, [unlisted], whitepaper)).toHaveLength(1);
+    const forbidden = GUARDED_CLAIMS.find((claim) => claim.status === "forbidden") as GuardedClaim;
+    const listed: GuardedClaim = { ...forbidden, alongsideOptionalOn: [whitepaper] };
+    expect(findClaimViolations(forbidden.example, [listed], whitepaper)).toHaveLength(1);
+  });
+
   it("allows the whitepaper to reject a retired tagline but not to use one", () => {
     const retired = GUARDED_CLAIMS.find((claim) => claim.id === "retired-tagline") as GuardedClaim;
     expect(findClaimViolations('Not "AWS for the physical world" — the protocol…', [retired])).toEqual([]);
