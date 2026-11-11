@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import ts from "typescript";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { SOURCE } from "../../scripts/generate-agent-pin.mjs";
@@ -338,6 +339,38 @@ describe("N240 public claims", () => {
     expect(occurrences(published, "\n  \"starter/runbook/00-prerequisites.md\",")).toBe(1);
     expect(unchecked).not.toContain("packages/mcp-server/README.md");
     expect(unchecked).not.toContain("starter/runbook/00-prerequisites.md");
+    const sourceFile = ts.createSourceFile(CLAIMS, claims, ts.ScriptTarget.Latest, true);
+    const matching = sourceFile.statements.flatMap((statement) =>
+      ts.isVariableStatement(statement)
+        ? statement.declarationList.declarations
+            .filter((declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === "PUBLISHED_SURFACES")
+            .map((declaration) => ({ statement, declaration }))
+        : [],
+    );
+    expect(matching, "exactly one PUBLISHED_SURFACES declaration").toHaveLength(1);
+    expect(
+      matching[0].statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword),
+      "PUBLISHED_SURFACES is exported",
+    ).toBe(true);
+    let initializer = matching[0].declaration.initializer;
+    while (
+      initializer &&
+      (ts.isParenthesizedExpression(initializer) || ts.isAsExpression(initializer) || ts.isSatisfiesExpression(initializer))
+    ) {
+      initializer = initializer.expression;
+    }
+    expect(initializer, "PUBLISHED_SURFACES initializer is an array literal").toSatisfy(ts.isArrayLiteralExpression);
+    const texts = (initializer as ts.ArrayLiteralExpression).elements.flatMap((element) =>
+      ts.isStringLiteral(element) || ts.isNoSubstitutionTemplateLiteral(element) ? [element.text] : [],
+    );
+    expect(
+      texts.filter((entry) => entry === "packages/mcp-server/README.md"),
+      "packages/mcp-server/README.md in parsed PUBLISHED_SURFACES",
+    ).toHaveLength(1);
+    expect(
+      texts.filter((entry) => entry === "starter/runbook/00-prerequisites.md"),
+      "starter/runbook/00-prerequisites.md in parsed PUBLISHED_SURFACES",
+    ).toHaveLength(1);
   });
 
   it("PC18 onboarding marks claim only what a server answer confirmed", () => {
@@ -358,40 +391,42 @@ describe("N240 public claims", () => {
     const end = text.indexOf("\nfunction resolveBody", start);
     expect(end).toBeGreaterThan(start);
     const handlerSource = text.slice(start, end);
-    const urls: string[] = [];
-    const indices: number[] = [];
-    const mRun: { onclick?: () => Promise<void> } = {};
-    const dollar = (selector: string) => {
-      if (selector === "#mRun") return mRun;
-      if (selector === "#mBase") return { value: "https://example.invalid" };
-      if (selector === "#mKey") return { value: "" };
-      return { classList: { remove() {} } };
-    };
-    const buildPlan = () => [
-      { m: "POST", path: "/api/auth/provision" },
-      { m: "POST", path: "/api/onboard/analyze", opt: 1 },
-      { m: "POST", path: "/api/kernels" },
-      { m: "POST", path: "/api/skills", terminal: 1 },
-      { m: "POST", path: "/api/skills/${skillId}/verify", terminal: 1 },
-      { m: "GET", path: "/api/kernels/${kernelId}/agent-card.json", terminal: 1 },
-    ];
-    const fetch = (url: string) => {
-      urls.push(url);
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
-    };
-    const resolveBody = (body: unknown) => body;
-    const markCall = (index: number) => {
-      indices.push(index);
-    };
-    const toast = () => {};
-    const setTimeout = (callback: () => void) => {
-      callback();
-    };
-    const handler = new Function("$", "buildPlan", "toast", "fetch", "resolveBody", "markCall", "setTimeout", handlerSource) as (...args: unknown[]) => void;
-    handler(dollar, buildPlan, toast, fetch, resolveBody, markCall, setTimeout);
-    await mRun.onclick!();
-    expect(urls).toEqual(["https://example.invalid/api/auth/provision", "https://example.invalid/api/onboard/analyze", "https://example.invalid/api/kernels"]);
-    expect(indices).toEqual([0, 1, 2]);
+    for (const key of ["", "fixture-key"]) {
+      const urls: string[] = [];
+      const indices: number[] = [];
+      const mRun: { onclick?: () => Promise<void> } = {};
+      const dollar = (selector: string) => {
+        if (selector === "#mRun") return mRun;
+        if (selector === "#mBase") return { value: "https://example.invalid" };
+        if (selector === "#mKey") return { value: key };
+        return { classList: { remove() {} } };
+      };
+      const buildPlan = () => [
+        { m: "POST", path: "/api/auth/provision", b: { fixture: true } },
+        { m: "POST", path: "/api/onboard/analyze", opt: 1, b: { fixture: true } },
+        { m: "POST", path: "/api/kernels", b: { fixture: true } },
+        { m: "POST", path: "/api/skills", terminal: 1, b: { fixture: true } },
+        { m: "POST", path: "/api/skills/${skillId}/verify", terminal: 1, b: { fixture: true } },
+        { m: "GET", path: "/api/kernels/${kernelId}/agent-card.json", terminal: 1 },
+      ];
+      const fetch = (url: string) => {
+        urls.push(url);
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+      };
+      const resolveBody = (body: unknown) => body;
+      const markCall = (index: number) => {
+        indices.push(index);
+      };
+      const toast = () => {};
+      const setTimeout = (callback: () => void) => {
+        callback();
+      };
+      const handler = new Function("$", "buildPlan", "toast", "fetch", "resolveBody", "markCall", "setTimeout", handlerSource) as (...args: unknown[]) => void;
+      handler(dollar, buildPlan, toast, fetch, resolveBody, markCall, setTimeout);
+      await mRun.onclick!();
+      expect(urls, "key " + JSON.stringify(key)).toEqual(["https://example.invalid/api/auth/provision", "https://example.invalid/api/onboard/analyze", "https://example.invalid/api/kernels"]);
+      expect(indices, "key " + JSON.stringify(key)).toEqual([0, 1, 2]);
+    }
   });
 
   it("PC20 the prerequisites page says the daemon takes no jobs", () => {
