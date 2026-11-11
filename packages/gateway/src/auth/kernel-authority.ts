@@ -35,8 +35,12 @@ export interface KernelAuthority {
   admin: boolean;
   /** The wallet the caller proved control of (WP-A); null when none. */
   provenWallet: string | null;
-  /** Server-recorded proof origin; absence grants no buyer binding. */
+  /** Server-recorded proof origin; registration-owner and buyer writes require approved sources. */
   provenWalletVia?: string | null;
+  /** Authenticated API-key record, when the request uses a key. */
+  apiKeyId?: string | null;
+  /** Authenticated wallet-session identity, when the request uses a session. */
+  sessionIdentity?: string | null;
   /** The credential that actually supplied the proof; decisions require a key or bearer session. */
   provenWalletCarrier?: FastifyRequest["provenWalletCarrier"] | null;
   /** The caller's claimed identity: its API key's operator id, or its session's address. */
@@ -46,8 +50,7 @@ export interface KernelAuthority {
 /**
  * True only when X-Admin-Key equals PCC_ADMIN_KEY, compared in constant time (both SHA-256'd to
  * fixed-length digests). An unset or blank PCC_ADMIN_KEY, or a missing, empty or repeated header,
- * grants nothing in any environment. (Same rule as routes/kernels.ts; WP-A #326 adds the shared
- * helper, auth/admin-key.ts.)
+ * grants nothing in any environment. Kernel routes use this check through authorityOf.
  */
 function hasAdminSecret(provided: unknown, expected: string | undefined = process.env.PCC_ADMIN_KEY): boolean {
   if (typeof expected !== "string" || expected.trim().length === 0) return false;
@@ -58,12 +61,15 @@ function hasAdminSecret(provided: unknown, expected: string | undefined = proces
 }
 
 export function authorityOf(req: FastifyRequest): KernelAuthority {
-  const r = req as unknown as { provenWallet?: unknown; provenWalletVia?: unknown; provenWalletCarrier?: FastifyRequest["provenWalletCarrier"]; operatorId?: unknown; userId?: unknown };
+  const r = req as unknown as { provenWallet?: unknown; provenWalletVia?: unknown; provenWalletCarrier?: FastifyRequest["provenWalletCarrier"]; operatorId?: unknown; userId?: unknown; apiKeyId?: unknown };
   const text = (v: unknown) => (typeof v === "string" && v.trim().length > 0 ? v.trim() : null);
+  const apiKeyId = text(r.apiKeyId);
   return {
     admin: hasAdminSecret(req.headers["x-admin-key"]),
     provenWallet: text(r.provenWallet),
     provenWalletVia: typeof r.provenWalletVia === "string" ? r.provenWalletVia : null,
+    apiKeyId,
+    sessionIdentity: apiKeyId ? null : text(r.userId)?.toLowerCase() ?? null,
     provenWalletCarrier: r.provenWalletCarrier ?? null,
     claimed: text(r.operatorId) ?? text(r.userId),
   };
@@ -81,6 +87,8 @@ export function provenByCookieOnly(a: { admin: boolean; provenWallet: string | n
 }
 
 const WALLET_RE = /^0x[0-9a-fA-F]{40}$/;
+/** Proof sources explicitly approved for registration-owner writes; new sources grant nothing. */
+const OWNER_PROOF_SOURCES = new Set(["self-link:agent", "siwe-session"]);
 /** operatorAddress values that record no owner: the empty string and the legacy zero placeholder. */
 const UNOWNED = new Set(["", "0x0000000000000000000000000000000000000000"]);
 
@@ -91,11 +99,17 @@ export function ownerOf(operatorAddress: unknown): string | null {
 }
 
 /** The admin secret, or a proven wallet equal to the kernel's operator (both compared as addresses). */
-function mayDecide(a: KernelAuthority, operatorAddress: unknown): boolean {
+export function mayDecide(a: KernelAuthority, operatorAddress: unknown): boolean {
   if (a.admin) return true;
   const owner = ownerOf(operatorAddress);
   if (owner === null || !WALLET_RE.test(owner) || a.provenWallet === null || !WALLET_RE.test(a.provenWallet)) return false;
   return a.provenWallet.toLowerCase() === owner;
+}
+
+/** Registration owner writes require an explicitly approved proof source, or the admin secret. */
+export function mayWriteKernelAsOwner(a: KernelAuthority, operatorAddress: unknown): boolean {
+  if (a.admin) return true;
+  return OWNER_PROOF_SOURCES.has(a.provenWalletVia ?? "") && mayDecide(a, operatorAddress);
 }
 
 /** Anyone who may decide, or the caller whose claimed identity is the kernel's recorded operator. */

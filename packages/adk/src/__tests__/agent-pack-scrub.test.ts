@@ -84,6 +84,17 @@ const FIXTURE_AND_RELAY_REMOVED = [
   ["pcc_relay_generic_tool_call", "POST", "/api/relay/{kernelId}/tool-call"],
 ] as const;
 
+const ADMIN_ONLY_REMOVED = [
+  ["fund_escrow", "POST", "/api/escrow/chain/{address}/fund"],
+  ["file_escrow_dispute", "POST", "/api/escrow/chain/{address}/dispute/{milestoneIndex}"],
+  ["deposit_bond", "POST", "/api/escrow/chain/{address}/deposit-bond/{milestoneIndex}"],
+  ["submit_evidence_hash", "POST", "/api/escrow/chain/{address}/evidence/{milestoneIndex}"],
+] as const;
+const ESCROW_READS = [
+  "list_escrows", "get_escrow", "get_escrow_chain_state", "get_escrow_events",
+  "get_token_balance", "get_token_allowance", "get_escrow_dispute", "get_write_status",
+] as const;
+
 const REPO = resolve(dirname(SOURCE), "../../..");
 const packText = readFileSync(SOURCE, "utf8");
 const pack = JSON.parse(packText) as {
@@ -173,6 +184,35 @@ describe("agent pack scrub", () => {
       }
       if (testPack.tools.some((tool) => tool.name === name)) problems.push(`${name}: name remains in test pack tools`);
       if (testPack.system_prompt.includes(name)) problems.push(`${name}: name remains in test pack system prompt`);
+    }
+    expect(problems).toEqual([]);
+  });
+
+  it("AT5 the generic pack lists no admin-only tool: four escrow chain writes are gone from both packs and the pin, and the escrow reads stay", () => {
+    const problems: string[] = [];
+    for (const [name, method, path] of ADMIN_ONLY_REMOVED) {
+      if (pack.tools.some((tool) => tool.name === name)) problems.push(`${name}: name remains in pack tools`);
+      if (packText.includes(JSON.stringify(name))) problems.push(`${name}: quoted name remains in pack text`);
+      if (Object.prototype.hasOwnProperty.call(AGENT_TOOLS, name)) problems.push(`${name}: name remains in pin`);
+      const inPack = pack.tools.some((tool) => tool.endpoint.method === method && tool.endpoint.path === path);
+      const inPin = Object.values(AGENT_TOOLS).some((tool) => tool.method === method && tool.path === path);
+      if (inPack || inPin) {
+        problems.push(`${name}: ${method} ${path} remains in ${[inPack && "pack", inPin && "pin"].filter(Boolean).join(" and ")}`);
+      }
+      if (testPack.tools.some((tool) => tool.name === name)) problems.push(`${name}: name remains in test pack tools`);
+      if (testPack.system_prompt.includes(name)) problems.push(`${name}: name remains in test pack system prompt`);
+    }
+    const chainWrite = (method: string, path: string) => method !== "GET" && path.startsWith("/api/escrow/chain/");
+    for (const tool of pack.tools) {
+      if (chainWrite(tool.endpoint.method, tool.endpoint.path)) problems.push(`${tool.name}: pack tool writes ${tool.endpoint.method} ${tool.endpoint.path}`);
+    }
+    for (const [name, tool] of Object.entries(AGENT_TOOLS)) {
+      if (chainWrite(tool.method, tool.path)) problems.push(`${name}: pin entry writes ${tool.method} ${tool.path}`);
+    }
+    for (const name of ESCROW_READS) {
+      const tool = pack.tools.find((entry) => entry.name === name);
+      if (!tool || tool.endpoint.method !== "GET") problems.push(`${name}: escrow read is missing from the pack or is not a GET`);
+      if (!Object.prototype.hasOwnProperty.call(AGENT_TOOLS, name)) problems.push(`${name}: escrow read is missing from the pin`);
     }
     expect(problems).toEqual([]);
   });

@@ -24,7 +24,7 @@ Paid operation turns on only when the gateway can pay a wallet the human confirm
   - it runs as a service.
 - **Until then:** run the loop yourself, or as a small script you write in this folder, following the eight rules exactly.
 
-Do **not** run `pcc-node start` beside the loop. From 0.1.1 its daemon takes no jobs, and its heartbeat says so (`acceptingJobs: false`), so the gateway stops refreshing your listing and it ages out. The loop's own heartbeat (rule 7) keeps the kernel online and listed.
+Do **not** run `pcc-node start` beside the loop. Its daemon takes no jobs, and its heartbeat says so (`acceptingJobs: false`), so the gateway stops refreshing your listing and it ages out. The loop's own heartbeat (rule 7) keeps the kernel online and listed.
 
 ## Keep the listing honest
 - `GET $BASE/api/operators/<slug>/status` lists what is still missing. Fill what you can.

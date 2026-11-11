@@ -2,8 +2,9 @@
  * FundingStatusDTO: where a paid write scope's buyer funding stands, for the UI (buyer funding plan
  * S2.4, research/buyer-funding-plan-20261008.md). A pure projection of three sources the caller read,
  * the expected chain (the pinned V-next deployment record's, paid-scope-activation-terms.ts;
- * null when none is pinned, and then no record binds), and one required testnet-buyer allowance
- * derived from the same deployment terms as reconciliation:
+ * null when none is pinned), the recorded deployment that stands in when none is (or null;
+ * DEPLOYMENT, below), and one required testnet-buyer allowance derived from the same deployment
+ * terms as reconciliation:
  *   - the scope row (execution_scopes): its status and its own createdAt and expiresAt;
  *   - the funding verification record that names the scope (FundingRecordStore.findByScope), or
  *     null when there is none;
@@ -28,24 +29,41 @@
  *   - No mock fallback: a scope that went live on a mock escrow has no record, so it is `unknown`.
  *
  * GET /api/operator/jobs serves this projection only for a decide-strength caller (admin or
- * proven wallet matching the polled kernel's operator), and GET /api/jobs/:jobId/funding behind gateJobRead, after the job and scope kernel filters.
- * When a record exists, the route supplies the testnet-only flag and buyer allowance from
+ * proven wallet matching the polled kernel's operator), and GET /api/jobs/:jobId/funding serves
+ * it behind gateJobRead, after the job and scope kernel filters. Both read it through jobFundingOf.
+ * When a record exists, jobFundingOf supplies the testnet-only flag and buyer allowance from
  * reconcile's terms, and paidScopeActivationTerms(scope).expectedChainId for the expected chain.
+ * When that gives no chain id, it also supplies the recorded deployment (recorded-deployment.ts).
  * Without a record it supplies nulls and an empty allowance without reading those sources.
  * This projection itself reads no clock, database or environment: equal inputs give equal DTOs.
+ *
+ * DEPLOYMENT (N297; the steward's #12349, ECONOMICS' #12351):
+ *   - A configured deployment always wins: basis "configured", bound exactly as above. Only when
+ *     none resolves does a record bind against the recorded deployment: the one its scope's
+ *     funding_prepares row froze, joined on the record's (chainId, escrow), and only when that
+ *     row's whole identity is a deployment record this gateway ships. Check 4a then counts as
+ *     passed when the record was written; today's buyer list is not read. Readiness, 3(a), reads
+ *     the configured deployment only.
+ *   - funded_verified means the buyer's funding was verified at block verification.blockNumber.
+ *     It never means the funds are held now: nothing here reads the chain.
+ *   - deployment.chainClass comes from the chain id alone. Funding whose class is not "mainnet"
+ *     is never money.
  */
 import {
   activationRefusal,
   fundingBindingRefusal,
+  isChainId,
   type BindingEscrowRow,
   type FundingBindingRefusal,
   type TestnetBuyerAllowance,
 } from "../services/funding-binding.js";
 import type { FundingVerificationRecord } from "../services/funding-record-port.js";
 import { scopeExpiryMs } from "../services/scope-expiry.js";
+import { vnextNetworkSlug, type VNextScheduleId } from "../services/paid-scope-activation-terms.js";
+import { chainClassOf, type ChainClass, type RecordedDeployment } from "./recorded-deployment.js";
 
 /** Schema id for clients that pin a version. */
-export const FUNDING_STATUS_SCHEMA_ID = "pcc.funding-status/v1" as const;
+export const FUNDING_STATUS_SCHEMA_ID = "pcc.funding-status/v2" as const;
 
 /**
  * How the record stands against the scope and the escrow row of its job: `no_record`, the first
@@ -53,7 +71,9 @@ export const FUNDING_STATUS_SCHEMA_ID = "pcc.funding-status/v1" as const;
  *
  *   no_record                       no record was given.
  *   expected_chain_unavailable      no usable expected chain was given (no V-next deployment record is
- *                                   pinned, or not a positive safe integer): no record can be bound.
+ *                                   pinned, or not a positive safe integer), and no recorded
+ *                                   deployment stands in (DEPLOYMENT, in the header): no record
+ *                                   can be bound.
  *                                   reconcilePaidScope refuses the same case by the same name (the
  *                                   steward's ruling 4; r3 review LOW-1).
  *   record_malformed                the record is not a well-formed, finalized verification record.
@@ -219,7 +239,29 @@ export interface FundingStatusDTO {
     verifierVersion: string;
     verifiedAt: string;
   } | null;
+  /**
+   * The V-next deployment the record was bound against (DEPLOYMENT, in the header): "configured"
+   * when one resolves now, else "recorded"; null with no record (nothing is read) or when neither
+   * stands. chainClass comes from the chain id alone; funding whose class is not "mainnet" is never
+   * money. scheduleId and recordSha256 are the recorded basis's, null on the configured one.
+   */
+  deployment: {
+    basis: "configured" | "recorded";
+    chainId: number;
+    /** vnextNetworkSlug(chainId): base, base-sepolia, anvil or chain-<id>. */
+    network: string;
+    chainClass: ChainClass;
+    scheduleTestnetOnly: boolean;
+    scheduleId: VNextScheduleId | null;
+    recordSha256: string | null;
+  } | null;
 }
+
+/**
+ * Check 4a counted as passed when the record was written (VER:160, RPS:230); today's list is
+ * never re-read (Q3, #12349 and #12351).
+ */
+const RECORDED_BASIS_ALLOWANCE: TestnetBuyerAllowance = { testnetOnly: false, buyers: undefined };
 
 /**
  * asOf < expiresAt, both readable. Anything unreadable leaves the window closed: an unreadable asOf
@@ -281,8 +323,9 @@ export function fundingStateOf(
   expectedChainId: number | null,
   asOf: string,
   allowance: TestnetBuyerAllowance,
+  recorded: RecordedDeployment | null = null,
 ): FundingState {
-  return stateOf(scope, fundingBindingOf(scope, record, escrow, expectedChainId, allowance), readyToActivate(scope, record, escrow, expectedChainId, allowance), asOf);
+  return projectFundingStatus(scope, record, escrow, expectedChainId, asOf, allowance, recorded).state;
 }
 
 /** The DTO: the state and the binding, with the sources' own values beside them. */
@@ -293,8 +336,26 @@ export function projectFundingStatus(
   expectedChainId: number | null,
   asOf: string,
   allowance: TestnetBuyerAllowance,
+  recorded: RecordedDeployment | null = null,
 ): FundingStatusDTO {
-  const binding = fundingBindingOf(scope, record, escrow, expectedChainId, allowance);
+  const configured = isChainId(expectedChainId);
+  const basis = record === null ? null : configured ? "configured" : recorded !== null ? "recorded" : null;
+  const binding = basis === "recorded" && recorded !== null
+    ? fundingBindingOf(scope, record, escrow, recorded.chainId, RECORDED_BASIS_ALLOWANCE)
+    : fundingBindingOf(scope, record, escrow, expectedChainId, allowance);
+  const deployment: FundingStatusDTO["deployment"] = basis === "configured" && configured
+    ? {
+        basis, chainId: expectedChainId, network: vnextNetworkSlug(expectedChainId),
+        chainClass: chainClassOf(expectedChainId), scheduleTestnetOnly: allowance.testnetOnly,
+        scheduleId: null, recordSha256: null,
+      }
+    : basis === "recorded" && recorded !== null
+      ? {
+          basis, chainId: recorded.chainId, network: vnextNetworkSlug(recorded.chainId),
+          chainClass: chainClassOf(recorded.chainId), scheduleTestnetOnly: recorded.scheduleTestnetOnly,
+          scheduleId: recorded.scheduleId, recordSha256: recorded.recordSha256,
+        }
+      : null;
   return {
     schemaId: FUNDING_STATUS_SCHEMA_ID,
     asOf,
@@ -318,5 +379,6 @@ export function projectFundingStatus(
             verifiedAt: record.verifiedAt,
           }
         : null,
+    deployment,
   };
 }

@@ -42,7 +42,7 @@ SPEC_RE = re.compile(
     r"^pcc-node\[crypto\] @ git\+https://github\.com/LamaSu/physical-capability-cloud\.git@"
     r"([0-9a-f]{40})#subdirectory=packages/pcc-node$"
 )
-PIN = "1d11f37203f99eb1c9f2cfcd2b5ccf278e835820"
+PIN = "700dcfe9581bb75dad9206b8db49ae6f68ebe6e6"
 KEY_QUESTION = (r"PCC API key[^\r\n]*: ", PCC_KEY)
 KEY_GUIDANCE = (
     "  This installer doesn't create PCC API keys. How to get one: "
@@ -87,6 +87,7 @@ class Installer:
             "N210_ENSUREPIP": "1" if ensurepip else "0",
             "N210_PIP": pip,
             "N210_VENV_INSTALL": "",
+            "STUB_PIP3_INSTALL": "",
             "N210_NODE_STUB": str(stubs / "pcc-node"),
             "N210_VENV_PYTHON": str(stubs / "venv-python"),
             "PYTHONDONTWRITEBYTECODE": "1",
@@ -100,6 +101,16 @@ if [ "$N210_EM" = 1 ]; then
         fi
     done
 fi
+case "$STUB_PIP3_INSTALL" in
+    fail)
+        for arg in "$@"; do
+            if [ "$arg" = --upgrade ]; then exit 1; fi
+        done ;;
+    fail-reinstall)
+        for arg in "$@"; do
+            if [ "$arg" = --force-reinstall ]; then exit 1; fi
+        done ;;
+esac
 exit 0
 ''')
         self.stub("git", "exit 1\n")
@@ -463,6 +474,18 @@ def test_n210_R1_venv_install_failure(tmp_path, ensurepip, mode):
                        for call in case.calls("python3.calls"))
 
 
+@pytest.mark.parametrize("mode", ("fail", "fail-reinstall"))
+def test_a_failed_user_install_stops_the_installer(tmp_path, mode):
+    case = Installer(tmp_path)
+    case.env["STUB_PIP3_INSTALL"] = mode
+    code, output = case.no_terminal(["--vendor=mock", "--key=" + PCC_KEY])
+    assert code == 1, output
+    assert "pcc-node install failed" in output
+    assert not (case.log / "node.calls").exists()
+    installs = [call for call in case.calls("pip3.calls") if "install" in call.split()]
+    assert len(installs) == (1 if mode == "fail" else 2)
+
+
 def test_n210_T1b_pinned_crypto_spec(tmp_path):
     commits = []
     for label, managed, ensurepip in (("user", False, True), ("own-pip", True, True),
@@ -482,6 +505,17 @@ def test_n210_T1b_pinned_crypto_spec(tmp_path):
         assert "[3/4] installing pcc-node from source (commit " + commits[-1][:12] + ")" in output
     assert commits == [PIN] * 3
     assert SCRIPT.read_text().count(PIN) == 1
+
+
+def test_every_pinned_install_names_the_installer_commit():
+    pattern = re.compile(
+        r"pcc-node\[crypto\] @ git\+https://github\.com/LamaSu/physical-capability-cloud@"
+        r"([0-9a-f]{40})#subdirectory=packages/pcc-node"
+    )
+    for name, count in (("starter/runbook/00-prerequisites.md", 1), ("CLAUDE.md", 2)):
+        text = (ROOT / name).read_text()
+        assert pattern.findall(text) == [PIN] * count
+        assert "pcc-node[crypto]>=" not in text
 
 
 @pytest.mark.parametrize("stale_venv", (False, True), ids=("fresh", "stale-venv"))
@@ -662,7 +696,6 @@ def test_n210_T5d_printed_command(installer, cell):
          mock.patch("pcc_node.cli.provision_api_key", side_effect=AssertionError("unexpected provisioning")), \
          mock.patch("pcc_node.cli.register_kernel", return_value={"ok": True}) as register, \
          mock.patch("pcc_node.cli.register_devices"), \
-         mock.patch("pcc_node.cli.register_signing_key", return_value=(200, {})), \
          mock.patch("pcc_node.cli.run_daemon") as daemon, \
          mock.patch("pcc_node.register.pcc_request", side_effect=AssertionError("unexpected request")), \
          mock.patch("pcc_node.http_util.pcc_request", side_effect=AssertionError("unexpected request")):

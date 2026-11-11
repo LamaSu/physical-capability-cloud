@@ -98,28 +98,29 @@ export function markBuyerFunded(tx: FundingTx, escrowId: string, milestoneCount:
   if (milestones.changes !== milestoneCount) throw new RowNotAwaiting();
 }
 
-/** Find the first block at created_at minus skew, then locate the one Funded event in bounded chunks. */
-async function fundingBlock(reads: VNextChainReads, escrow: Address, createdMs: number, b: VNextBlock): Promise<VNextBlock | null> {
+const FUNDING_LOG_CHUNK_BLOCKS = 199n;
+const FUNDING_LOG_CHUNK_LIMIT = 101;
+
+/** Find the first block at created_at minus skew by timestamp, then the one Funded event in at most 101 chunks of 199 blocks; the factory refuses funding after the signed expiry. */
+async function fundingBlock(reads: VNextChainReads, escrow: Address, createdMs: number, expiry: bigint, b: VNextBlock): Promise<VNextBlock | null> {
   const threshold = BigInt(Math.ceil(createdMs / 1000) - 120);
-  let low = b.number > 20_000n ? b.number - 20_000n : 0n;
+  if (b.timestamp < threshold) return null;
+  let low = 0n;
   let high = b.number;
-  const lowest = await reads.blockByNumber(low);
-  if (lowest.timestamp > threshold || b.timestamp < threshold) return null;
   while (low < high) {
     const mid = (low + high) / 2n;
     if ((await reads.blockByNumber(mid)).timestamp >= threshold) high = mid;
     else low = mid + 1n;
   }
-  if (b.number - low + 1n > 20_000n) return null;
-  for (let from = low; from <= b.number; from += 199n) {
-    const to = from + 198n < b.number ? from + 198n : b.number;
+  for (let from = low, chunks = 0; from <= b.number && chunks < FUNDING_LOG_CHUNK_LIMIT; from += FUNDING_LOG_CHUNK_BLOCKS, chunks++) {
+    const to = from + FUNDING_LOG_CHUNK_BLOCKS - 1n < b.number ? from + FUNDING_LOG_CHUNK_BLOCKS - 1n : b.number;
     const logs = await reads.fundedLogs(escrow, from, to);
     if (!logs.length) continue;
     if (logs.length !== 1) return null;
     const log = logs[0]!;
     if (log.blockNumber < from || log.blockNumber > to || log.blockNumber > b.number) return null;
     const block = await reads.blockByNumber(log.blockNumber);
-    return block.hash === log.blockHash ? block : null;
+    return block.hash === log.blockHash && block.timestamp <= expiry ? block : null;
   }
   return null;
 }
@@ -205,7 +206,7 @@ export async function verifyBuyerFunding(target: { chainId: number; escrow: stri
     if (!units.units.every(({ config: c }) => c.reclaimAt >= BigInt(p.reclaimAtEarliest) && c.reclaimAt <= BigInt(p.reclaimAtLatest)
       && BigInt(p.reconcileUntil) + BigInt(p.finalityFS) <= c.reclaimAt
       && (p.s01ScheduleTestnetOnly === 1 || BigInt(p.reconcileUntil) <= c.reclaimAt - 777600n))) return refused("reclaim_before_deadline");
-    const funded = await fundingBlock(reads, escrow, createdMs, b);
+    const funded = await fundingBlock(reads, escrow, createdMs, BigInt(p.expiry), b);
     if (!funded) return refused("funding_block_unproven");
     if ((await reads.blockByNumber(b.number)).hash !== b.hash) return refused("pinned_block_reorged");
     if (await reads.chainId() !== deployment.chainId) return refused("rpc_chain_mismatch");

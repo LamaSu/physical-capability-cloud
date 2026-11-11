@@ -5,7 +5,7 @@ import { jobFundingOf } from "../readmodels/job-funding.js";
 const schema = {
   tags: ["jobs"],
   summary: "Read a job's paid-scope funding status",
-  description: "The recorded buyer's, kernel operator's or admin's funding view of a job. Reads stored records without a chain call. Responses are not cached.",
+  description: "The recorded buyer's, kernel operator's or admin's funding view of a job. Reads stored records without a chain call, so funded_verified means the funding was verified at block verification.blockNumber, never that it is held now. Funding whose deployment.chainClass is not mainnet is never money. Responses are not cached.",
   params: {
     type: "object",
     required: ["jobId"],

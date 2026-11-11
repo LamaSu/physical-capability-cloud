@@ -6,9 +6,9 @@ import { deepFreeze } from "../deep-freeze.js";
 
 export const AGENT_PACKAGE_PIN = deepFreeze({
   schema: "pcc-agent-package/2.0",
-  version: "2.19.7",
-  toolCount: 183,
-  sha256: "sha256:debd2b3c631f5f162401df3bdf3a0b17de6c90e664b5e902abb0ebc707c1ff31",
+  version: "2.19.9",
+  toolCount: 179,
+  sha256: "sha256:79e33cb9d5ab25aa325cbaa3ef9675705e65d18f68e7ce331c304df75e295d69",
 } as const);
 
 export const AGENT_TOOLS = deepFreeze({
@@ -32,14 +32,11 @@ export const AGENT_TOOLS = deepFreeze({
   "create_investment_pool": { method: "POST", path: "/api/pool/create", required: ["capabilityType","description"] },
   "create_kernel": { method: "POST", path: "/api/kernels", required: ["name"] },
   "delete_operator_channel": { method: "DELETE", path: "/api/operators/channels/{id}", required: ["id"] },
-  "deposit_bond": { method: "POST", path: "/api/escrow/chain/{address}/deposit-bond/{milestoneIndex}", required: ["address","milestoneIndex"] },
   "dispute_verification": { method: "POST", path: "/api/verification/{requestId}/dispute", required: ["disputerId","evidenceCid","reason","requestId"] },
   "distribute_royalties": { method: "POST", path: "/api/ip/distribute-royalties", required: ["ipId","splits"] },
   "emit_telemetry": { method: "POST", path: "/api/telemetry/emit", required: ["jobId","phase","status"] },
   "execute_composition": { method: "POST", path: "/api/compose/{id}/execute", required: ["id"] },
-  "file_escrow_dispute": { method: "POST", path: "/api/escrow/chain/{address}/dispute/{milestoneIndex}", required: ["address","challengerBond","challengerEvidenceHash","milestoneIndex","reason"] },
   "fork_dashboard": { method: "POST", path: "/api/artifacts/{id}/fork", required: ["id"] },
-  "fund_escrow": { method: "POST", path: "/api/escrow/chain/{address}/fund", required: ["address"] },
   "get_active_telemetry": { method: "GET", path: "/api/telemetry/active", required: [] },
   "get_agent_anomalies": { method: "GET", path: "/api/anomaly/by-agent/{agentId}", required: ["agentId"] },
   "get_anomaly_stats": { method: "GET", path: "/api/anomaly/stats", required: [] },
@@ -184,7 +181,6 @@ export const AGENT_TOOLS = deepFreeze({
   "setup_validate": { method: "POST", path: "/api/setup/validate", required: ["config"] },
   "stake_in_pool": { method: "POST", path: "/api/pool/stake", required: ["amount","poolId","staker"] },
   "submit_demand": { method: "POST", path: "/api/bounty/demand", required: ["capabilityType","description","requesterId"] },
-  "submit_evidence_hash": { method: "POST", path: "/api/escrow/chain/{address}/evidence/{milestoneIndex}", required: ["address","evidenceBundleHash","milestoneIndex"] },
   "submit_feedback": { method: "POST", path: "/api/feedback", required: ["message"] },
   "submit_for_human_verification": { method: "POST", path: "/api/verification/submit", required: ["bundleHash","photoRef","referenceRef"] },
   "suggest_csd_templates": { method: "GET", path: "/api/csd/suggest", required: [] },

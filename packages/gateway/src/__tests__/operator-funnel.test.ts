@@ -138,6 +138,7 @@ const ORIGINAL_ENV = {
   PCC_OBSERVABILITY_ADMINS: process.env.PCC_OBSERVABILITY_ADMINS,
   NODE_ENV: process.env.NODE_ENV,
   PCC_OBSERVABILITY_DEV_OPEN: process.env.PCC_OBSERVABILITY_DEV_OPEN,
+  PCC_ADMIN_KEY: process.env.PCC_ADMIN_KEY,
 };
 function restoreEnv(): void {
   for (const [k, v] of Object.entries(ORIGINAL_ENV)) {
@@ -425,7 +426,8 @@ describe("operator funnel call sites (Fastify inject)", () => {
     expect(rows[0]).toMatchObject({ resourceId: "kernel-of-1", action: "kernel_created" });
   });
 
-  it("POST /api/kernels does NOT re-record kernel_created on a heartbeat update (created:false)", async () => {
+  it("POST /api/kernels records kernel_created only once across an authorized update", async () => {
+    // buildFullApp's onRequest hook sends its admin key on every request, so the update below is authorized.
     await app.inject({
       method: "POST",
       url: "/api/kernels",

@@ -250,7 +250,7 @@ class TestRunDaemonLoop:
     def test_daemon_registers_kernel_on_startup(self):
         config = self._config(kernel_id="k-reg", devices=[])
         _, register, _ = self._run_once(config)
-        register.assert_called_once_with("http://pcc-test", "key", config)
+        register.assert_called_once_with("http://pcc-test", "key", config, signer=("pub", "sec"))
 
 
 class TestDaemonRefusesToRunWithoutItsKey:

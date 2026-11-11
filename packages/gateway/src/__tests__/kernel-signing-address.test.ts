@@ -30,6 +30,11 @@ const PK_B = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
 const accountA = privateKeyToAccount(PK_A);
 const accountB = privateKeyToAccount(PK_B);
 
+const PREVIOUS_LEGACY_PROOF = process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF;
+const PREVIOUS_ADMIN_KEY = process.env.PCC_ADMIN_KEY;
+const ADMIN_KEY = "kernel-signing-test-admin";
+const adminHeaders = { "x-admin-key": ADMIN_KEY };
+
 interface KernelBody {
   kernel: { signingAddress?: string | null };
 }
@@ -38,6 +43,8 @@ describe("POST /api/kernels — signing-address proof-of-possession (primitive #
   let app: FastifyInstance;
 
   beforeAll(async () => {
+    process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF = "allow";
+    process.env.PCC_ADMIN_KEY = ADMIN_KEY;
     process.env.PCC_DB_PATH = ":memory:";
     initStore({ seed: false });
     app = Fastify({ logger: false });
@@ -48,6 +55,10 @@ describe("POST /api/kernels — signing-address proof-of-possession (primitive #
   afterAll(async () => {
     await app.close();
     closeStore();
+    if (PREVIOUS_LEGACY_PROOF === undefined) delete process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF;
+    else process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF = PREVIOUS_LEGACY_PROOF;
+    if (PREVIOUS_ADMIN_KEY === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = PREVIOUS_ADMIN_KEY;
   });
 
   it("persists a signing address proven by a matching EIP-191 signature", async () => {
@@ -59,6 +70,7 @@ describe("POST /api/kernels — signing-address proof-of-possession (primitive #
     const create = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Signed Kernel",
@@ -97,6 +109,7 @@ describe("POST /api/kernels — signing-address proof-of-possession (primitive #
     const create = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Mismatch Kernel",
@@ -117,6 +130,7 @@ describe("POST /api/kernels — signing-address proof-of-possession (primitive #
     const create = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Unproven Kernel",
@@ -136,6 +150,7 @@ describe("POST /api/kernels — signing-address proof-of-possession (primitive #
     const create = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Garbage Proof Kernel",
@@ -161,6 +176,7 @@ describe("POST /api/kernels — signing-address proof-of-possession (primitive #
     const create = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Replay Kernel",
@@ -181,6 +197,7 @@ describe("POST /api/kernels — signing-address proof-of-possession (primitive #
     const create = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "No Signing Kernel",
@@ -203,6 +220,7 @@ describe("POST /api/kernels — signing-address proof-of-possession (primitive #
     const first = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Set-Once Kernel",
@@ -220,6 +238,7 @@ describe("POST /api/kernels — signing-address proof-of-possession (primitive #
     const second = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Hijack Attempt",

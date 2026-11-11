@@ -130,7 +130,6 @@ def test_start_without_a_terminal_runs_with_diagnostics_off(tmp_path, monkeypatc
          mock.patch("pcc_node.cli.provision_api_key", side_effect=AssertionError), \
          mock.patch("pcc_node.cli.register_kernel", return_value={"ok": True}), \
          mock.patch("pcc_node.cli.register_devices"), \
-         mock.patch("pcc_node.cli.register_signing_key", return_value=(200, {})), \
          mock.patch("pcc_node.cli.run_daemon") as run_daemon:
         result = runner.invoke(
             cli.main, ["start", "-c", str(config_path), "--api-key", "k"],

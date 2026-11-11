@@ -229,7 +229,6 @@ class TestConfigHoldsTheApiKey:
              mock.patch("pcc_node.cli.provision_api_key", return_value="test-key"), \
              mock.patch("pcc_node.cli.register_kernel", return_value={"ok": True}), \
              mock.patch("pcc_node.cli.register_devices", return_value=None), \
-             mock.patch("pcc_node.cli.register_signing_key", return_value=(200, {})), \
              mock.patch("pcc_node.cli.announce_capabilities", create=True), \
              mock.patch("pcc_node.cli.run_daemon") as daemon:
             result = CliRunner().invoke(main, ["start", "-c", str(link), "--api-key", "k"])

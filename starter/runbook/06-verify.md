@@ -34,7 +34,7 @@ While the stop is set, send the device its own stop: for this device `POST $DEV/
 
 **What this drill shows, and what it doesn't.** It shows that the stop reads `STOPPED`, and that the device's own stop works. It does **not** show that anything else refuses work for a stopped kernel:
 - the current gateway still accepts and queues a job submitted for a stopped kernel, and still lists it to the node (fixing that is gateway work);
-- pcc-node 0.1.1 does not read the stop (that feature is held for a later release).
+- pcc-node's daemon does not read the stop (that feature is held for a later release).
 
 So the only guard is yours: read the stop immediately before every run (section 3 step 5, and the operating loop's rules 1 and 5 in phase 7).
 

@@ -137,7 +137,7 @@ API base: the gateway you were given (`PCC_BASE`). Production is `https://capabi
 | GET | `/api/job-offers/open?capabilityType=` | Open offers operators can claim. |
 | GET | `/api/storage/:cid?public=true` | Retrieve a public blob (STL, photo, etc.). |
 | POST | `/api/auth/provision` | Provision a Bearer key. Body: `{ email }` or `{ walletAddress }`. |
-| GET | `/agent-package.json` | The full spec — 180+ tools + system_prompt + examples. |
+| GET | `/agent-package.json` | The full spec — 170+ tools + system_prompt + examples. |
 | GET | `/skills/pcc.md` | This file. |
 
 ### Bearer-required endpoints
@@ -184,7 +184,7 @@ User: "I have an STL file. Print it on an FDM printer near me."
 
 User: "I run a 3D-print shop. Tell me when there's an FDM job in my area."
 
-> "I can show what's open right now. pcc-node keeps a machine's kernel online, but from 0.1.1 it takes no jobs itself: jobs run through the operating agent's typed operations (coming, ADK item 12)."
+> "I can show what's open right now. pcc-node keeps a machine's kernel online, but it takes no jobs itself: jobs run through the operating agent's typed operations (coming, ADK item 12)."
 
 1. `GET /api/job-offers/open?capabilityType=manufacturing.fdm&within=<their-coords>,50` — list current offers.
 2. Format the list with price, deadline, requirements summary.
@@ -193,7 +193,7 @@ User: "I run a 3D-print shop. Tell me when there's an FDM job in my area."
 
 ## When the user is an operator (not a buyer)
 
-If the user opens with "I run a 3D-print shop" or "I'm a courier" or "I have an OT-2", they're an operator. Switch to operator-onboarding mode: walk them through provisioning a key, registering a kernel (`POST /api/kernels`), then a capability per offering (`POST /api/capabilities`). The agentic onboarding session (`POST /api/onboard/start`, tool `pcc_onboard_session_start`) can't complete a registration yet (its register call sends no API key), so do these steps yourself. For a physical device, `pcc-node start` on the machine next to it registers the kernel and keeps it online. From 0.1.1 it takes no jobs itself: those run through the operating agent's typed operations (coming, ADK item 12). Install it with `pip install "pcc-node[crypto]>=0.1.1"`, or, until 0.1.1 is on PyPI, `python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@1d11f37203f99eb1c9f2cfcd2b5ccf278e835820#subdirectory=packages/pcc-node"`.
+If the user opens with "I run a 3D-print shop" or "I'm a courier" or "I have an OT-2", they're an operator. Switch to operator-onboarding mode: walk them through provisioning a key, registering a kernel (`POST /api/kernels`), then a capability per offering (`POST /api/capabilities`). The agentic onboarding session (`POST /api/onboard/start`, tool `pcc_onboard_session_start`) can't complete a registration yet (its register call sends no API key), so do these steps yourself. For a physical device, `pcc-node start` on the machine next to it registers the kernel and keeps it online. It takes no jobs itself: those run through the operating agent's typed operations (coming, ADK item 12). Install this pinned commit, not a release from PyPI: `python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node"`. After an earlier pcc-node install, pip may keep that copy, because both report the same version: run that command again with `--force-reinstall --no-deps` after `install`.
 
 ## When NOT to use PCC
 
@@ -208,8 +208,8 @@ Every response includes `x-pcc-trace-id`. Save it from `provision_api_key` (or `
 
 ## More
 
-- Full agent-package (180+ tools + schemas): https://capability.network/agent-package.json
+- Full agent-package (170+ tools + schemas): https://capability.network/agent-package.json
 - A2A agent card: https://capability.network/.well-known/agent-card.json
 - MCP server: see docs/quickstart/claude-desktop.md (or run `node packages/mcp-server/dist/index.js`)
-- Operator node for physical devices (Python): `pip install "pcc-node[crypto]>=0.1.1"`, then `pcc-node start` (it keeps the kernel online and takes no jobs; see the pinned install above until 0.1.1 is on PyPI)
+- Operator node for physical devices (Python): install the pinned commit above, then `pcc-node start` (it keeps the kernel online and takes no jobs)
 - Status: https://capability.network/health

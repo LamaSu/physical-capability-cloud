@@ -182,6 +182,25 @@ describe("rehearsal R0: the pack matches the gateway it describes", () => {
     }
   });
 
+  // P9: pcc_job_complete's route lets only the job's parties or the admin complete the job, and a
+  // party must send an explicit credential (paid-job-flow.ts, the PUT /api/jobs/:jobId/complete handler).
+  it("P9: pcc_job_complete names who may call it, as the route decides", () => {
+    expect(tool("pcc_job_complete").description).toContain(
+      "Only the job's buyer, its kernel's operator or the gateway admin may call it: a buyer or operator must send an API key or session key in the Authorization header (a sign-in cookie alone gets 403), and any other proven wallet gets 404 (\"Job not found\").",
+    );
+    const flow = readFileSync(join(REPO, "packages/gateway/src/routes/paid-job-flow.ts"), "utf8");
+    const route = '"/api/jobs/:jobId/complete"';
+    expect(flow.split(route)).toHaveLength(2);
+    const start = flow.indexOf(route);
+    const handler = flow.slice(start, flow.indexOf("const body", start));
+    for (const part of [
+      "gateJobRead(req, jobId)",
+      'refuseJobRead(reply, gate, { error: "Job not found" })',
+      'gate.as !== "admin" && provenByCookieOnly(authorityOf(req))',
+      "reply.status(403).send(EXPLICIT_CREDENTIAL_REQUIRED)",
+    ]) expect(handler, part).toContain(part);
+  });
+
   it("G8: register-device requires exactly what POST /api/setup/register-device requires", () => {
     // setup.ts: if (!kernelId || !deviceId || !type || !adapterType) -> 400 missing_required_fields
     expect([...(tool("setup_register_device").input_schema.required ?? [])].sort()).toEqual(

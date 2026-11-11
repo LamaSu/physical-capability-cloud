@@ -107,7 +107,7 @@ fi
 green "  ✓ PCC_API_KEY ready"
 
 # ── 3. install pcc-node ────────────────────────────────────────────────────
-PCC_NODE_COMMIT="1d11f37203f99eb1c9f2cfcd2b5ccf278e835820"
+PCC_NODE_COMMIT="700dcfe9581bb75dad9206b8db49ae6f68ebe6e6"
 SPEC="pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud.git@${PCC_NODE_COMMIT}#subdirectory=packages/pcc-node"
 cyan "[3/4] installing pcc-node from source (commit ${PCC_NODE_COMMIT:0:12})"
 EXTERNAL_MANAGEMENT=$(python3 -c '
