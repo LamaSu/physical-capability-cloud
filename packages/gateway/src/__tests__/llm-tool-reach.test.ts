@@ -207,7 +207,7 @@ export function scanToolReach(root: string, files: string[]): ToolScan {
             && propertyName(item.name) !== undefined && propertyName(item.name) !== "__proto__")) {
             const input = config.properties.find(item => (ts.isPropertyAssignment(item) || ts.isShorthandPropertyAssignment(item)) && propertyName(item.name) === "inputSchema");
             shape = input && ts.isPropertyAssignment(input) ? input.initializer
-              : input && ts.isShorthandPropertyAssignment(input) ? input.name : ts.factory.createObjectLiteralExpression();
+              : input && ts.isShorthandPropertyAssignment(input) ? input.name : ts.isIdentifier(unwrap(shape)) ? undefined : ts.factory.createObjectLiteralExpression();
           } else shape = undefined;
         }
         if (!shape) {
@@ -730,5 +730,26 @@ describe("delta verdict controls for E4b", () => {
   ]) it(`delta V4 ${name}: unknown input schemas still fail loudly`, () => {
     const t = synthetic([], text);
     expect(scanToolReach(t.root, t.files).findings.some(hit => hit.rule === "E4b-R1")).toBe(true);
+  });
+});
+
+describe("N289 X21 registerTool configs passed by name", () => {
+  for (const [name, text] of [
+    ["R4-assign", 'const cfg = { description: "x" }; Object.assign(cfg, { inputSchema: { calldata: z.string(), recipient: z.string() } }); server.registerTool("pcc_x", cfg, cb);'],
+    ["R4-mut", 'const cfg: any = { description: "x" }; cfg.inputSchema = { calldata: z.string(), recipient: z.string() }; server.registerTool("pcc_x", cfg, cb);'],
+    ["R4-idzero", 'const cfg = { description: "Ping" }; server.registerTool("pcc_ping", cfg, cb);'],
+  ]) it(`N289 X21 ${name}: a config passed by name without inputSchema fails loudly`, () => {
+    const t = synthetic([], text);
+    const scan = scanToolReach(t.root, t.files);
+    expect(scan.findings, formatFindings(scan.findings)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rule: "E4b-R1", detail: expect.stringContaining("missing or opaque input shape") }),
+    ]));
+  });
+
+  it("N289 X21 R4-idschema: a config passed by name with an explicit inputSchema is inspected", () => {
+    const t = synthetic([], 'const cfg = { description: "Ok", inputSchema: { safe: z.string() } }; server.registerTool("pcc_ok", cfg, cb);');
+    const scan = scanToolReach(t.root, t.files);
+    expect(scan.findings, formatFindings(scan.findings)).toEqual([]);
+    expect(scan.parameters.map(parameter => parameter.path)).toEqual(["safe"]);
   });
 });
