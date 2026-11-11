@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type HTTPMethods } from "fastify";
 import fastifySwagger from "@fastify/swagger";
+import ts from "typescript";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -225,17 +226,9 @@ describe("reputation profile", () => {
     seedKernel("K3", { status: "online", lastHeartbeat: heartbeat, maxAssuranceTier: 1 });
     seedCapability("C3", "K3");
     const inw = inWindowIso();
-    for (let i = 1; i <= 4; i++) {
-      seedJob(`KJ${i}`, "K3", "C3", { status: "completed", assuranceTier: 0, completedAt: inw });
-      seedBundle(`KB${i}`, `KJ${i}`, "K3", 0, inw);
-      await createAndClaim(Date.now() - 2 * DAY, 30, "K3");
-    }
-    let res = await getProfile("K3");
-    expect(res.statusCode).toBe(200);
-    let body = res.json();
     const asOf = new Date(NOW).toISOString();
     const from = new Date(NOW - 30 * DAY).toISOString();
-    expect(body).toEqual({
+    const belowFloor = {
       subject: { id: "K3", kind: "kernel" },
       asOf,
       window: { days: 30, from, to: asOf },
@@ -246,12 +239,23 @@ describe("reputation profile", () => {
       uptime: { state: "unavailable", reason: "no_heartbeat_history", liveness: { status: "online", lastHeartbeat: heartbeat, isStale: false, rule: RULE_LIVENESS } },
       responseTime: { state: "unavailable", reason: "insufficient_sample" },
       evidenceCompleteness: { state: "unavailable", reason: "insufficient_sample" },
-    });
+    };
+    let res = await getProfile("K3");
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual(belowFloor);
+    for (let i = 1; i <= 4; i++) {
+      seedJob(`KJ${i}`, "K3", "C3", { status: "completed", assuranceTier: 0, completedAt: inw });
+      seedBundle(`KB${i}`, `KJ${i}`, "K3", 0, inw);
+      await createAndClaim(Date.now() - 2 * DAY, 30, "K3");
+      res = await getProfile("K3");
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual(belowFloor);
+    }
     seedJob("KJ5", "K3", "C3", { status: "completed", assuranceTier: 0, completedAt: inw });
     seedBundle("KB5", "KJ5", "K3", 0, inw);
     await createAndClaim(Date.now() - 2 * DAY, 30, "K3");
     res = await getProfile("K3");
-    body = res.json();
+    const body = res.json();
     expect(body).toEqual({
       subject: { id: "K3", kind: "kernel" },
       asOf,
@@ -329,6 +333,48 @@ describe("reputation profile", () => {
     for (const s of specifiers) {
       expect(s).not.toMatch(/ethers|viem|web3|registry|erc8004|chain|rpc|contracts|wallet/i);
     }
+    function moduleLoads(source: string): { specifiers: string[]; loaders: string[] } {
+      const tree = ts.createSourceFile("m.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+      const specifiers: string[] = [];
+      const loaders: string[] = [];
+      const walk = (node: ts.Node): void => {
+        if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+          if (node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+            specifiers.push(node.moduleSpecifier.text);
+          }
+        } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
+          const expression = node.moduleReference.expression;
+          if (expression && ts.isStringLiteral(expression)) specifiers.push(expression.text);
+        } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) && ts.isStringLiteral(node.argument.literal)) {
+          specifiers.push(node.argument.literal.text);
+        }
+        if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+          loaders.push("import");
+        } else if (ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.ImportKeyword && node.name.text === "meta") {
+          loaders.push("import.meta");
+        } else if (ts.isIdentifier(node) && ["require", "eval", "Function", "createRequire"].includes(node.text)) {
+          loaders.push(node.text);
+        }
+        ts.forEachChild(node, walk);
+      };
+      walk(tree);
+      return { specifiers, loaders };
+    }
+    expect(moduleLoads(source)).toEqual({ specifiers: ["../facades/populators/staleness.js"], loaders: [] });
+    for (const control of [
+      'export const a = () => import /* c */ ("../x.js");',
+      'export const a = () => import // c\n("../x.js");',
+      'const p = "../x.js"; export const a = () => import(p);',
+      'export const a = () => require /* c */ ("../x.js");',
+      'export * from "../x.js";',
+      'import x = require("../x.js");',
+    ]) {
+      const loads = moduleLoads(control);
+      expect(loads.loaders.length > 0 || loads.specifiers.some((s) => s !== "../facades/populators/staleness.js")).toBe(true);
+    }
+    expect(moduleLoads('import { a } from "../facades/populators/staleness.js"; export const b = a;')).toEqual({
+      specifiers: ["../facades/populators/staleness.js"], loaders: [],
+    });
   });
 
   it("RP6 resolves subjects by kind", async () => {
@@ -386,6 +432,7 @@ describe("reputation profile", () => {
     const tablesBefore = snapshotTables();
     const totalBefore = (raw.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
     const offersBefore = new Map(offerIds.map((id) => [id, { offer: structuredClone(getJobOffersStore().get(id)), events: structuredClone(getJobOffersStore().getEvents(id)) }]));
+    const offerCountBefore = getJobOffersStore().size();
     for (const id of ["unknown-7", "agent-only", "K7"]) {
       await getProfile(id);
       await getProfile(id);
@@ -397,6 +444,7 @@ describe("reputation profile", () => {
     expect(snapshotTables()).toEqual(tablesBefore);
     const totalAfter = (raw.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
     expect(totalAfter - totalBefore).toBe(0);
+    expect(getJobOffersStore().size()).toBe(offerCountBefore);
     for (const id of offerIds) {
       expect(getJobOffersStore().get(id)).toEqual(offersBefore.get(id)?.offer);
       expect(getJobOffersStore().getEvents(id)).toEqual(offersBefore.get(id)?.events);
@@ -413,23 +461,87 @@ describe("reputation profile", () => {
     seedKernel("K8", { status: "online", lastHeartbeat: heartbeat, maxAssuranceTier: 2 });
     seedCapability("C8", "K8");
     const inw = inWindowIso();
-    for (let i = 1; i <= 5; i++) {
-      seedJob(`TJ${i}`, "K8", "C8", { status: "completed", assuranceTier: 0, completedAt: inw });
-      seedBundle(`TB${i}`, `TJ${i}`, "K8", 0, inw);
-      await createAndClaim(Date.now() - 2 * DAY, 30, "K8");
-    }
     const jobsSpy = vi.spyOn(getRepos().jobs, "findByKernel");
     const bundlesSpy = vi.spyOn(getRepos().evidence, "findByKernel");
     const offersSpy = vi.spyOn(getJobOffersStore(), "listClaimedBy");
+    const spies: Array<{ mockClear(): unknown; mockRestore(): unknown }> = [jobsSpy, bundlesSpy, offersSpy];
+    for (const target of [getRepos().jobs, getRepos().evidence, getJobOffersStore()]) {
+      const seen = new Set<PropertyKey>();
+      for (let current: object | null = target; current && current !== Object.prototype; current = Object.getPrototypeOf(current)) {
+        for (const key of Reflect.ownKeys(current)) {
+          if (seen.has(key)) continue;
+          seen.add(key);
+          if (key === "constructor") continue;
+          const descriptor = Object.getOwnPropertyDescriptor(current, key);
+          if (descriptor && "value" in descriptor && typeof descriptor.value === "function" && !vi.isMockFunction(descriptor.value)) {
+            spies.push(vi.spyOn(target as unknown as Record<PropertyKey, (...args: never[]) => unknown>, key));
+          }
+        }
+      }
+    }
     try {
-      let res = await getProfile("K8");
-      expect(res.statusCode).toBe(200);
+      const asOf = new Date(NOW).toISOString();
+      const from = new Date(NOW - 30 * DAY).toISOString();
+      const isolated = {
+        subject: { id: "K8", kind: "kernel" },
+        asOf,
+        window: { days: 30, from, to: asOf },
+        compositionScore: { state: "measured", score: 640, positiveContributions: 3, negativeContributions: 1, disputesUpheld: 0, disputesRejected: 1, lastUpdatedAt: compUpdated, basis: "composition_deltas", rule: RULE_COMPOSITION },
+        assuranceTier: { state: "declared", tier: 2, basis: "kernel_record", rule: RULE_ASSURANCE },
+        evidenceTiers: { state: "unavailable", reason: "tenant_scoped" },
+        qualityRating: { state: "unavailable", reason: "not_read", see: QUALITY_SEE },
+        uptime: { state: "unavailable", reason: "no_heartbeat_history", liveness: { status: "online", lastHeartbeat: heartbeat, isStale: false, rule: RULE_LIVENESS } },
+        responseTime: { state: "unavailable", reason: "tenant_scoped" },
+        evidenceCompleteness: { state: "unavailable", reason: "tenant_scoped" },
+      };
+      vi.stubEnv("TENANT_ENFORCE", "true");
+      for (const spy of spies) spy.mockClear();
+      const readA = await getProfile("K8");
+      expect(readA.statusCode).toBe(200);
+      expect(jobsSpy).not.toHaveBeenCalled();
+      expect(bundlesSpy).not.toHaveBeenCalled();
+      expect(offersSpy).not.toHaveBeenCalled();
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+      expect(readA.json()).toEqual(isolated);
+
+      for (let i = 1; i <= 5; i++) {
+        seedJob(`TJ${i}`, "K8", "C8", { status: "completed", assuranceTier: 0, completedAt: inw });
+        seedBundle(`TB${i}`, `TJ${i}`, "K8", 0, inw);
+        await createAndClaim(Date.now() - 2 * DAY, 30, "K8");
+      }
+      seedKernel("K9", { status: "online", lastHeartbeat: heartbeat, maxAssuranceTier: 2 });
+      seedCapability("C9", "K9");
+      for (let i = 1; i <= 2; i++) {
+        seedJob(`T9J${i}`, "K9", "C9", { status: "completed", assuranceTier: 0, completedAt: inw });
+        seedBundle(`T9B${i}`, `T9J${i}`, "K9", 0, inw);
+        await createAndClaim(Date.now() - 2 * DAY, 30, "K9");
+      }
+      for (const spy of spies) spy.mockClear();
+      const readB = await getProfile("K8");
+      expect(readB.statusCode).toBe(200);
+      expect(jobsSpy).not.toHaveBeenCalled();
+      expect(bundlesSpy).not.toHaveBeenCalled();
+      expect(offersSpy).not.toHaveBeenCalled();
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+      const bodyOn = readB.json();
+      expect(bodyOn).toEqual(isolated);
+      const withoutHeaders = (headers: typeof readA.headers, excluded: string[]) =>
+        Object.fromEntries(Object.entries(headers).filter(([name]) => !excluded.includes(name)));
+      expect({ status: readB.statusCode, body: bodyOn, headers: withoutHeaders(readB.headers, ["date"]) }).toEqual({
+        status: readA.statusCode, body: readA.json(), headers: withoutHeaders(readA.headers, ["date"]),
+      });
+      expect(withoutHeaders(readB.headers, ["date", "connection", "keep-alive", "content-length"])).toEqual({
+        "content-type": "application/json; charset=utf-8", "cache-control": "no-store",
+      });
+
+      vi.stubEnv("TENANT_ENFORCE", "");
+      for (const spy of spies) spy.mockClear();
+      const readC = await getProfile("K8");
+      expect(readC.statusCode).toBe(200);
       expect(jobsSpy).toHaveBeenCalled();
       expect(bundlesSpy).toHaveBeenCalled();
       expect(offersSpy).toHaveBeenCalled();
-      const asOf = new Date(NOW).toISOString();
-      const from = new Date(NOW - 30 * DAY).toISOString();
-      const bodyOff = res.json();
+      const bodyOff = readC.json();
       expect(bodyOff).toEqual({
         subject: { id: "K8", kind: "kernel" },
         asOf,
@@ -442,32 +554,8 @@ describe("reputation profile", () => {
         responseTime: { state: "measured", medianSeconds: 30, p90Seconds: 30, sampleSize: 5, basis: "job_offer_claims", rule: RULE_RESPONSE },
         evidenceCompleteness: { state: "measured", completed: 5, withEvidence: 5, ratio: 1, basis: "stored_records", rule: RULE_COMPLETENESS },
       });
-      jobsSpy.mockClear();
-      bundlesSpy.mockClear();
-      offersSpy.mockClear();
-      vi.stubEnv("TENANT_ENFORCE", "true");
-      res = await getProfile("K8");
-      expect(res.statusCode).toBe(200);
-      expect(jobsSpy).not.toHaveBeenCalled();
-      expect(bundlesSpy).not.toHaveBeenCalled();
-      expect(offersSpy).not.toHaveBeenCalled();
-      const bodyOn = res.json();
-      expect(bodyOn).toEqual({
-        subject: { id: "K8", kind: "kernel" },
-        asOf,
-        window: { days: 30, from, to: asOf },
-        compositionScore: { state: "measured", score: 640, positiveContributions: 3, negativeContributions: 1, disputesUpheld: 0, disputesRejected: 1, lastUpdatedAt: compUpdated, basis: "composition_deltas", rule: RULE_COMPOSITION },
-        assuranceTier: { state: "declared", tier: 2, basis: "kernel_record", rule: RULE_ASSURANCE },
-        evidenceTiers: { state: "unavailable", reason: "tenant_scoped" },
-        qualityRating: { state: "unavailable", reason: "not_read", see: QUALITY_SEE },
-        uptime: { state: "unavailable", reason: "no_heartbeat_history", liveness: { status: "online", lastHeartbeat: heartbeat, isStale: false, rule: RULE_LIVENESS } },
-        responseTime: { state: "unavailable", reason: "tenant_scoped" },
-        evidenceCompleteness: { state: "unavailable", reason: "tenant_scoped" },
-      });
     } finally {
-      jobsSpy.mockRestore();
-      bundlesSpy.mockRestore();
-      offersSpy.mockRestore();
+      for (const spy of spies) spy.mockRestore();
     }
   });
 
@@ -639,7 +727,7 @@ describe("reputation profile", () => {
     ];
     const bundles = [
       ...[1, 2, 3].map((i) => ({ jobId: `J${i}`, kernelId: "KX", assuranceTier: 0, createdAt: inWin })),
-      ...[4, 5].map((i) => ({ jobId: `J${i}`, kernelId: "KY", assuranceTier: 0, createdAt: inWin })),
+      ...[4, 5].flatMap((i) => [0, 1, 2, 3].map((tier) => ({ jobId: `J${i}`, kernelId: "KY", assuranceTier: tier, createdAt: inWin }))),
       ...[1, 2, 3, 4, 5].map((i) => ({ jobId: `F${i}`, kernelId: "KY", assuranceTier: 0, createdAt: inWin })),
     ];
     const claimedOffers = [
@@ -658,6 +746,20 @@ describe("reputation profile", () => {
     expect(dto?.evidenceTiers).toEqual({ state: "unavailable", reason: "insufficient_sample" });
     expect(dto?.evidenceCompleteness).toEqual({ state: "measured", completed: 5, withEvidence: 3, ratio: 0.6, basis: "stored_records", rule: RULE_COMPLETENESS });
     expect(dto?.responseTime).toEqual({ state: "measured", medianSeconds: 30, p90Seconds: 30, sampleSize: 5, basis: "job_offer_claims", rule: RULE_RESPONSE });
+
+    const oldTimes = [NOW - 31 * DAY, NOW - 400 * DAY, NOW - 5 * 365 * DAY, NOW - 30 * 365 * DAY, 0];
+    const oldEvidence = buildReputationProfile("KO", {
+      kernel: () => ({ id: "KO", status: "online", lastHeartbeat: iso(NOW - 60_000), maxAssuranceTier: 1 }),
+      reputation: () => undefined,
+      capabilityCount: () => 0,
+      jobs: () => [1, 2, 3, 4, 5].map((i) => ({ id: `O${i}`, kernelId: "KO", status: "completed", completedAt: inWin, assuranceTier: 0 })),
+      bundles: () => oldTimes.map((ms, i) => ({ jobId: `O${i + 1}`, kernelId: "KO", assuranceTier: 0, createdAt: new Date(ms).toISOString() })),
+      claimedOffers: () => [],
+      tenantEnforced: false,
+    }, new Date(NOW));
+    expect(oldEvidence?.evidenceCompleteness).toEqual({ state: "measured", completed: 5, withEvidence: 5, ratio: 1, basis: "stored_records", rule: RULE_COMPLETENESS });
+    expect(oldEvidence?.evidenceTiers).toEqual({ state: "unavailable", reason: "insufficient_sample" });
+    expect(oldEvidence?.responseTime).toEqual({ state: "unavailable", reason: "insufficient_sample" });
   });
 
   it("RP14 the liveness rule edges", async () => {
@@ -666,14 +768,23 @@ describe("reputation profile", () => {
     const cases: Array<{ status: string; lastHeartbeat: string | null; hasCap: boolean; isStale: boolean }> = [
       { status: "online", lastHeartbeat: iso(NOW - 5 * 60_000), hasCap: false, isStale: false },
       { status: "online", lastHeartbeat: iso(NOW - 5 * 60_000 - 1), hasCap: false, isStale: true },
+      { status: "online", lastHeartbeat: iso(NOW - 5 * 60_000 - 1), hasCap: true, isStale: false },
       { status: "online", lastHeartbeat: iso(NOW - 24 * 60 * 60_000), hasCap: true, isStale: false },
       { status: "online", lastHeartbeat: iso(NOW - 24 * 60 * 60_000 - 1), hasCap: true, isStale: true },
       { status: "online", lastHeartbeat: iso(NOW + 60_000), hasCap: false, isStale: false },
+      { status: "online", lastHeartbeat: iso(NOW + 60_000), hasCap: true, isStale: false },
       { status: "online", lastHeartbeat: null, hasCap: false, isStale: true },
+      { status: "online", lastHeartbeat: null, hasCap: true, isStale: true },
       { status: "online", lastHeartbeat: "not-a-time", hasCap: false, isStale: true },
+      { status: "online", lastHeartbeat: "not-a-time", hasCap: true, isStale: true },
+      { status: "online", lastHeartbeat: "", hasCap: false, isStale: true },
+      { status: "online", lastHeartbeat: "", hasCap: true, isStale: true },
       { status: "offline", lastHeartbeat: null, hasCap: false, isStale: false },
+      { status: "offline", lastHeartbeat: null, hasCap: true, isStale: false },
       { status: "ONLINE", lastHeartbeat: null, hasCap: false, isStale: false },
+      { status: "ONLINE", lastHeartbeat: null, hasCap: true, isStale: false },
       { status: "maintenance", lastHeartbeat: iso(NOW - 2 * DAY), hasCap: false, isStale: false },
+      { status: "maintenance", lastHeartbeat: iso(NOW - 2 * DAY), hasCap: true, isStale: false },
     ];
     for (const c of cases) {
       const dto = buildReputationProfile("KL", {
@@ -691,7 +802,19 @@ describe("reputation profile", () => {
 
   it("RP15 no-store on a 500 before the handler", async () => {
     const app2 = Fastify({ logger: false });
-    app2.addHook("onRequest", async () => {
+    const routes: Array<{ method: HTTPMethods | HTTPMethods[]; url: string }> = [];
+    app2.addHook("onRoute", (route) => {
+      routes.push({ method: route.method, url: route.url });
+    });
+    app2.addHook("onRequest", async (req, reply) => {
+      const status = req.headers["x-test-status"];
+      if (status !== undefined) {
+        const statusCode = Number(status);
+        if (req.headers["x-test-mode"] === "send") {
+          return reply.code(statusCode).send({ error: "test_refusal", message: "refused before the handler" });
+        }
+        throw Object.assign(new Error("key lookup failed"), { statusCode });
+      }
       throw new Error("key lookup failed");
     });
     await app2.register(reputationRoutes);
@@ -703,6 +826,40 @@ describe("reputation profile", () => {
       const resBoard = await app2.inject({ method: "GET", url: "/api/reputation/leaderboard" });
       expect(resBoard.statusCode).toBe(500);
       expect(resBoard.headers["cache-control"]).toBeUndefined();
+
+      for (const status of [500, 401, 403, 429, 503]) {
+        const headers = { "x-test-status": String(status) };
+        const profile = await app2.inject({ method: "GET", url: "/api/reputation/KZ/profile", headers });
+        const board = await app2.inject({ method: "GET", url: "/api/reputation/leaderboard", headers });
+        expect(profile.statusCode).toBe(status);
+        expect(profile.headers["cache-control"]).toBe("no-store");
+        expect(profile.json()).toEqual(board.json());
+        expect(profile.json().message).toBe("key lookup failed");
+        expect(board.statusCode).toBe(status);
+        expect(board.headers["cache-control"]).toBeUndefined();
+      }
+      for (const status of [401, 429]) {
+        const headers = { "x-test-status": String(status), "x-test-mode": "send" };
+        const profile = await app2.inject({ method: "GET", url: "/api/reputation/KZ/profile", headers });
+        const board = await app2.inject({ method: "GET", url: "/api/reputation/leaderboard", headers });
+        expect(profile.statusCode).toBe(status);
+        expect(profile.headers["cache-control"]).toBe("no-store");
+        expect(profile.json()).toEqual({ error: "test_refusal", message: "refused before the handler" });
+        expect(board.statusCode).toBe(status);
+        expect(board.json()).toEqual(profile.json());
+        expect(board.headers["cache-control"]).toBeUndefined();
+      }
+      expect(routes.map((route) => route.url)).toEqual(expect.arrayContaining([
+        "/api/reputation/:subjectId/profile", "/api/reputation/leaderboard", "/api/reputation/:agentId/deltas", "/api/reputation/:agentId",
+      ]));
+      for (const route of routes) {
+        if (route.url === "/api/reputation/:subjectId/profile") continue;
+        for (const method of Array.isArray(route.method) ? route.method : [route.method]) {
+          const res = await app2.inject({ method, url: route.url.replace(/:[^/]+/g, "KZ") });
+          expect(res.statusCode).toBe(500);
+          expect(res.headers["cache-control"]).toBeUndefined();
+        }
+      }
     } finally {
       await app2.close();
     }
