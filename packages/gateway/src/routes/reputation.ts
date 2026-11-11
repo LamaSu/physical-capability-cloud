@@ -46,7 +46,10 @@ import {
 } from "@pcc/spec";
 import { z } from "zod";
 import { schema, eq, and, desc } from "@pcc/store";
-import { getStore, initStore } from "../db.js";
+import { getRepos, getStore, initStore } from "../db.js";
+import { isTenantEnforceOn } from "../config/tenant-enforce.js";
+import { getJobOffersStore } from "../services/job-offers-store.js";
+import { buildReputationProfile } from "../readmodels/reputation-profile.js";
 
 // ---------------------------------------------------------------------------
 // Store access — see compose.ts for the lazy-init rationale.
@@ -529,6 +532,63 @@ export async function reputationRoutes(app: FastifyInstance): Promise<void> {
       kind: kind ?? null,
     };
   });
+
+  // ── GET /api/reputation/:subjectId/profile ──────────────────────────
+  app.get<{ Params: { subjectId: string } }>(
+    "/api/reputation/:subjectId/profile",
+    {
+      schema: {
+        tags: ["reputation"],
+        summary: "One reputation read for a kernel or composition agent",
+        description: "Reports, field by field, what PCC records about a kernel or composition agent: its composition score, declared assurance tier, evidence bundles by tier, liveness, offer response time and evidence completeness. Each field names its basis and rule, or says why it is unavailable; there is no blended score. Fields drawn from job, offer and evidence records cover the last 30 days, need at least 5 records, and are withheld while tenant isolation is on. Quality rating is not read here, and uptime is not measured yet. This read writes nothing and reads no chain.",
+        params: { type: "object", required: ["subjectId"], properties: { subjectId: { type: "string", minLength: 1 } } },
+        response: {
+          200: {
+            type: "object",
+            required: ["subject", "asOf", "window", "compositionScore", "assuranceTier", "evidenceTiers", "qualityRating", "uptime", "responseTime", "evidenceCompleteness"],
+            properties: {
+              subject: { type: "object", additionalProperties: true },
+              asOf: { type: "string" },
+              window: { type: "object", additionalProperties: true },
+              compositionScore: { type: "object", additionalProperties: true },
+              assuranceTier: { type: "object", additionalProperties: true },
+              evidenceTiers: { type: "object", additionalProperties: true },
+              qualityRating: { type: "object", additionalProperties: true },
+              uptime: { type: "object", additionalProperties: true },
+              responseTime: { type: "object", additionalProperties: true },
+              evidenceCompleteness: { type: "object", additionalProperties: true },
+            },
+          },
+          404: {
+            type: "object",
+            required: ["error", "message"],
+            properties: { error: { type: "string" }, message: { type: "string" } },
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      const repos = getRepos();
+      const dto = buildReputationProfile(
+        req.params.subjectId,
+        {
+          kernel: (id) => repos.kernels.findById(id),
+          reputation: (id) => loadReputation(id),
+          capabilityCount: (kid) => repos.capabilities.findByKernel(kid).length,
+          jobs: (kid) => repos.jobs.findByKernel(kid),
+          bundles: (kid) => repos.evidence.findByKernel(kid),
+          claimedOffers: (kid) => getJobOffersStore().listClaimedBy(new Set([kid])),
+          tenantEnforced: isTenantEnforceOn(),
+        },
+        new Date(),
+      );
+      if (dto === null) {
+        return reply.status(404).send({ error: "unknown_subject", message: "No kernel or composition reputation record has this id." });
+      }
+      return dto;
+    },
+  );
 
   // ── GET /api/reputation/:agentId/deltas ─────────────────────────────
   app.get<{ Params: { agentId: string } }>(
