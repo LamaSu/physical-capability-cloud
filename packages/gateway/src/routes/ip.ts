@@ -175,7 +175,7 @@ export async function ipRoutes(app: FastifyInstance) {
           return reply.code(501).send({
             error: "not_executed",
             operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
-            message: err instanceof Error ? err.message : String(err),
+            message: (err as { message?: string }).message,
           });
         }
         return reply.code(500).send({
@@ -239,7 +239,7 @@ export async function ipRoutes(app: FastifyInstance) {
           return reply.code(501).send({
             error: "not_executed",
             operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
-            message: err instanceof Error ? err.message : String(err),
+            message: (err as { message?: string }).message,
           });
         }
         return reply.code(500).send({
@@ -405,7 +405,7 @@ export async function ipRoutes(app: FastifyInstance) {
           return reply.code(501).send({
             error: "not_executed",
             operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
-            message: err instanceof Error ? err.message : String(err),
+            message: (err as { message?: string }).message,
           });
         }
         return reply.code(500).send({
@@ -431,7 +431,7 @@ export async function ipRoutes(app: FastifyInstance) {
           return reply.code(501).send({
             error: "not_executed",
             operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
-            message: err instanceof Error ? err.message : String(err),
+            message: (err as { message?: string }).message,
           });
         }
         return reply.code(500).send({
@@ -475,7 +475,7 @@ export async function ipRoutes(app: FastifyInstance) {
           return reply.code(501).send({
             error: "not_executed",
             operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
-            message: err instanceof Error ? err.message : String(err),
+            message: (err as { message?: string }).message,
           });
         }
         return reply.code(500).send({
@@ -506,7 +506,7 @@ export async function ipRoutes(app: FastifyInstance) {
           return reply.code(501).send({
             error: "not_executed",
             operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
-            message: err instanceof Error ? err.message : String(err),
+            message: (err as { message?: string }).message,
           });
         }
         return reply.code(500).send({

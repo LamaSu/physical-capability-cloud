@@ -19,7 +19,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { ipRoutes } from "../routes/ip.js";
 import { initStore, closeStore } from "../db.js";
-import { resetStoryIPService, StoryIPService } from "@pcc/contracts";
+import { getLicensingEngine, resetStoryIPService, StoryIPService, StoryNotExecutedError } from "@pcc/contracts";
 import { getRepos } from "../db.js";
 
 // Ensure mock mode for all tests
@@ -1008,6 +1008,7 @@ describe("C2 (R1) refusals write and delete nothing", () => {
   });
 
   it("distribute-royalties refusing leaves seeded split row intact", async () => {
+    const before = getRepos().story.findRoyaltySplitsByIp(ipId);
     const res = await app.inject({
       method: "POST",
       url: "/api/ip/distribute-royalties",
@@ -1023,6 +1024,7 @@ describe("C2 (R1) refusals write and delete nothing", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe("split-seeded-1");
     expect(rows[0].address).toBe("0xAAAA");
+    expect(rows).toEqual(before);
   });
 
   it("claim refusing writes no revenue claim", async () => {
@@ -1064,6 +1066,7 @@ describe("C3 (R1) refusals call no Story service method", () => {
       const distributeSpy = vi.spyOn(StoryIPService.prototype, "distributeRoyaltyTokens");
       const paySpy = vi.spyOn(StoryIPService.prototype, "payJobRoyalty");
       const claimSpy = vi.spyOn(StoryIPService.prototype, "claimRevenue");
+      const distributionSpy = vi.spyOn(getLicensingEngine(), "getRoyaltyDistribution");
 
       const ipId = "0x5555555555555555555555555555555555555555";
       const results = [
@@ -1093,6 +1096,7 @@ describe("C3 (R1) refusals call no Story service method", () => {
       expect(distributeSpy).not.toHaveBeenCalled();
       expect(paySpy).not.toHaveBeenCalled();
       expect(claimSpy).not.toHaveBeenCalled();
+      expect(distributionSpy).not.toHaveBeenCalled();
     },
   );
 });
@@ -1572,6 +1576,153 @@ describe("C11 (R3) revenue sets its own simulated flag", () => {
     expect(res.statusCode).toBe(200);
     const body = res.json<{ ipId: string; simulated: unknown }>();
     expect(body.ipId).toBe(ipId);
+    expect(body.simulated).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Refusal messages, instance recognition, and revenue flag precedence
+// ---------------------------------------------------------------------------
+
+describe("Story refusal messages and revenue flag", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    process.env.STORY_MOCK = "true";
+    resetStoryIPService();
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    await app.close();
+    closeStore();
+    process.env.STORY_MOCK = "true";
+    resetStoryIPService();
+    vi.restoreAllMocks();
+  });
+
+  const cases: Array<{
+    operation: "registerCapabilityAsIP" | "registerJobAsDerivative" | "getRevenueSnapshot" | "getLineage" | "getIPRegistration" | "raiseDispute";
+    method: "GET" | "POST";
+    url: string;
+    payload?: Record<string, unknown>;
+  }> = [
+    {
+      operation: "registerCapabilityAsIP",
+      method: "POST",
+      url: "/api/ip/register-capability",
+      payload: CAPABILITY_BODY,
+    },
+    {
+      operation: "registerJobAsDerivative",
+      method: "POST",
+      url: "/api/ip/register-job-evidence",
+      payload: {
+        parentIpId: "0x1111111111111111111111111111111111111111",
+        jobId: "job-001",
+        evidenceBundleHash: "sha256:test",
+        operatorAddress: "0xOP",
+        operatorName: "Operator",
+      },
+    },
+    {
+      operation: "getRevenueSnapshot",
+      method: "GET",
+      url: "/api/ip/0x1111111111111111111111111111111111111111/revenue",
+    },
+    {
+      operation: "getLineage",
+      method: "GET",
+      url: "/api/ip/0x1111111111111111111111111111111111111111/lineage",
+    },
+    {
+      operation: "getIPRegistration",
+      method: "GET",
+      url: "/api/ip/capability/cap-nyc-fdm",
+    },
+    {
+      operation: "raiseDispute",
+      method: "POST",
+      url: "/api/ip/0x1111111111111111111111111111111111111111/dispute",
+      payload: { evidenceHash: "sha256:test", reason: "bad" },
+    },
+  ];
+
+  it.each(cases)("C12 coded plain object preserves message for $operation", async (c) => {
+    const error = {
+      code: "STORY_NOT_EXECUTED",
+      operation: c.operation,
+      message: "Story operation was refused",
+    };
+    expect(error).not.toBeInstanceOf(Error);
+    const spy = vi.spyOn(StoryIPService.prototype, c.operation).mockRejectedValueOnce(error);
+
+    const res = await app.inject({ method: c.method, url: c.url, payload: c.payload });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(res.statusCode).toBe(501);
+    expect(res.json()).toEqual({
+      error: "not_executed",
+      operation: c.operation,
+      message: "Story operation was refused",
+    });
+  });
+
+  it("C12 coded plain object without message omits message", async () => {
+    const error = { code: "STORY_NOT_EXECUTED", operation: "getRevenueSnapshot" };
+    expect(error).not.toBeInstanceOf(Error);
+    const spy = vi.spyOn(StoryIPService.prototype, "getRevenueSnapshot").mockRejectedValueOnce(error);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/ip/0x1111111111111111111111111111111111111111/revenue",
+    });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(res.statusCode).toBe(501);
+    expect(res.json()).toEqual({ error: "not_executed", operation: "getRevenueSnapshot" });
+  });
+
+  it("C13 instance without code still returns not_executed", async () => {
+    const error = new StoryNotExecutedError("getRevenueSnapshot", "revenue read unavailable");
+    delete (error as { code?: string }).code;
+    expect(error).toBeInstanceOf(StoryNotExecutedError);
+    expect(error).not.toHaveProperty("code");
+    vi.spyOn(StoryIPService.prototype, "getRevenueSnapshot").mockRejectedValueOnce(error);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/ip/0x1111111111111111111111111111111111111111/revenue",
+    });
+
+    expect(res.statusCode).toBe(501);
+    expect(res.json()).toEqual({
+      error: "not_executed",
+      operation: error.operation,
+      message: error.message,
+    });
+  });
+
+  it("C14 revenue forces simulated true over service false", async () => {
+    const snapshot = {
+      ipId: "0x2222222222222222222222222222222222222222",
+      vaultAddress: "0x00000000000000000000000000000000000000ab",
+      totalRevenue: "0",
+      unclaimedRevenue: "0",
+      tokenHolders: [],
+      lastPaymentAt: "2026-01-01T00:00:00.000Z",
+      simulated: false,
+    };
+    vi.spyOn(StoryIPService.prototype, "getRevenueSnapshot").mockResolvedValueOnce(snapshot);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/ip/0x1111111111111111111111111111111111111111/revenue",
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{ ipId: string; simulated: unknown }>();
+    expect(body.ipId).toBe(snapshot.ipId);
     expect(body.simulated).toBe(true);
   });
 });

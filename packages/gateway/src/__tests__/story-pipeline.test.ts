@@ -11,10 +11,10 @@
  * External calls (IPFS, escrow) also mocked.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { csdRoutes, resetCsdRegistry } from "../routes/csd.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, type getRepos } from "../db.js";
 import {
   resetSettlementService,
   getSettlementService,
@@ -641,9 +641,12 @@ describe("releaseMilestone → Auto Story Royalty Payment", () => {
 // ---------------------------------------------------------------------------
 
 describe("R5 automatic derivative operator and recording", () => {
-  let emitSpy: ReturnType<typeof vi.spyOn> | undefined;
-  let auditSpy: ReturnType<typeof vi.spyOn> | undefined;
-  let insertSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let emitSpy: MockInstance<Parameters<typeof pipelineTelemetry.emit>, ReturnType<typeof pipelineTelemetry.emit>> | undefined;
+  let auditSpy: MockInstance<Parameters<typeof auditService.log>, ReturnType<typeof auditService.log>> | undefined;
+  let insertSpy: MockInstance<
+    Parameters<ReturnType<typeof getRepos>["story"]["insertDerivativeLink"]>,
+    ReturnType<ReturnType<typeof getRepos>["story"]["insertDerivativeLink"]>
+  > | undefined;
 
   beforeEach(() => {
     process.env.PCC_DB_PATH = ":memory:";
@@ -735,6 +738,12 @@ describe("R5 automatic derivative operator and recording", () => {
     expect(failedMetadata?.reason).toBe("derivative_unrecorded");
     expect(failedMetadata?.derivativeIpId).toBeDefined();
     expect(failedMetadata?.parentIpId).toBeDefined();
+    const expectedMetadata = {
+      reason: "derivative_unrecorded",
+      derivativeIpId: "0xmock_child_ip_001",
+      parentIpId: "0xmock_parent_ip",
+    };
+    expect(failedMetadata).toEqual(expectedMetadata);
 
     const auditCalls = auditSpy.mock.calls.map((c) => c[0] as { eventType: string; metadata?: Record<string, unknown> });
     expect(auditCalls.some((a) => a.eventType === "settlement.story_unrecorded")).toBe(true);
@@ -743,6 +752,12 @@ describe("R5 automatic derivative operator and recording", () => {
     expect(unrecorded?.metadata?.reason).toBe("derivative_unrecorded");
     expect(unrecorded?.metadata?.derivativeIpId).toBe(failedMetadata?.derivativeIpId);
     expect(unrecorded?.metadata?.parentIpId).toBe(failedMetadata?.parentIpId);
+    expect(unrecorded).toMatchObject({
+      resourceType: "job",
+      resourceId: "job-004",
+      action: "register_derivative",
+    });
+    expect(unrecorded?.metadata).toEqual(expectedMetadata);
   });
 
   it("N3 completed telemetry and story_registered audit carry simulated true when mock link is simulated", async () => {
