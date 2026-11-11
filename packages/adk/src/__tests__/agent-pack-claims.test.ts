@@ -15,6 +15,9 @@ const CLI = "packages/mcp-server/src/cli.ts";
 const CARD = "apps/dashboard/public/.well-known/mcp/server-card.json";
 const PCC = "apps/dashboard/public/skills/pcc.md";
 const ONBOARD = "apps/dashboard/public/onboard.html";
+const README = "packages/mcp-server/README.md";
+const PREREQ = "starter/runbook/00-prerequisites.md";
+const CLAIMS = "apps/dashboard/src/lib/public-claims.ts";
 const STORY = "Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain.";
 const ROWS = {
   "A1a": {"path": "apps/dashboard/public/agent-package.json", "old": "`GET /api/capabilities/search?q=<plain-English need>` finds operators by natural-language match.", "new": "`GET /api/capabilities/search?q=<word>` returns unexpired listings whose name, type or one of whose materials contains that exact text, ignoring case."},
@@ -107,6 +110,26 @@ const ROWS = {
   "A6m": {"path": "apps/dashboard/public/skills/pcc.md", "old": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@1d11f37203f99eb1c9f2cfcd2b5ccf278e835820#subdirectory=packages/pcc-node\"`", "new": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node\"`"},
   "A6s1": {"path": "skills/pcc/SKILL.md", "old": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@1d11f37203f99eb1c9f2cfcd2b5ccf278e835820#subdirectory=packages/pcc-node\"`", "new": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node\"`"},
   "A6s2": {"path": ".claude/skills/pcc/SKILL.md", "old": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@1d11f37203f99eb1c9f2cfcd2b5ccf278e835820#subdirectory=packages/pcc-node\"`", "new": "`python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node\"`"},
+  "A32a": {"path": "packages/mcp-server/src/cli.ts", "old": "pcc ip splits <ipId> --splits='[{\"address\":\"0x...\",\"role\":\"protocol-author\",\"percentage\":2,\"label\":\"CSD Author\"},{\"address\":\"0x...\",\"role\":\"integrator\",\"percentage\":2,\"label\":\"Adapter Integrator\"},{\"address\":\"0x...\",\"role\":\"operator\",\"percentage\":92,\"label\":\"Machine Operator\"},{\"address\":\"0x...\",\"role\":\"verifier\",\"percentage\":3,\"label\":\"Evidence Verifier\"},{\"address\":\"0x...\",\"role\":\"network-treasury\",\"percentage\":1,\"label\":\"Network Treasury\"}]'\n  Configure revenue splits for an IP Asset. Splits must sum to 100.\n  Roles (ADR-12): operator, verifier, insurer, integrator, protocol-author,\n  model-author, dataset-contributor, curator, assembler, network-treasury.\n  Legacy aliases 'designer' and 'network' still decode for backward compat —\n  prefer the canonical names above.", "new": "pcc ip splits <ipId> --splits='[{\"address\":\"0x...\",\"role\":\"operator\",\"percentage\":93,\"label\":\"Machine Operator\"},{\"address\":\"0x...\",\"role\":\"verifier\",\"percentage\":3,\"label\":\"Evidence Verifier\"},{\"address\":\"0x...\",\"role\":\"protocol-author\",\"percentage\":2,\"label\":\"CSD Author\"},{\"address\":\"0x...\",\"role\":\"integrator\",\"percentage\":2,\"label\":\"Adapter Integrator\"}]'\n  Configure revenue splits for an IP Asset. Splits must sum to 100. No revenue is paid from them today.\n  Roles (ADR-12): operator, verifier, insurer, integrator, protocol-author,\n  model-author, dataset-contributor, curator, assembler.\n  Legacy aliases kept for backward decoding only — prefer the canonical names above:\n  'designer' → use 'protocol-author', 'assembler' or 'integrator', depending on CSD kind;\n  'network' → no name above replaces it; leave it out of new splits."},
+  "A32b": {"path": "packages/mcp-server/src/cli.ts", "old": "  Register a capability as a Story Protocol IP Asset.", "new": "  Record a capability as an IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. Any id it returns is a placeholder, and no royalty is paid."},
+  "A32c": {"path": "packages/mcp-server/src/cli.ts", "old": "  Get revenue snapshot for an IP Asset.", "new": "  Get the revenue PCC has recorded for an IP asset. No revenue has been paid: any figure it returns is a placeholder."},
+  "A32d": {"path": "packages/mcp-server/src/cli.ts", "old": "  Claim accumulated revenue from an IP Royalty Vault.", "new": "  Claim an IP asset's recorded revenue. Nothing is paid out: any amount or transaction hash it returns is a placeholder."},
+  "A32e": {"path": "packages/mcp-server/src/cli.ts", "old": "  Get IP lineage chain (ancestors + descendants).", "new": "  Get the IP lineage PCC has recorded for an IP asset: ancestors (parent CSDs) and descendants (job evidence records and derivative CSDs)."},
+  "A33a": {"path": "packages/mcp-server/README.md", "old": "PCC is AWS for the physical world. Shop Kernels are availability zones. ", "new": "PCC connects agents to Shop Kernels: the sites whose machines and people do physical work. "},
+  "A33b": {"path": "packages/mcp-server/README.md", "old": "| `pcc_get_reputation` | Reputation scores by agent/tag (quality, uptime, assurance). |", "new": "| `pcc_get_reputation` | The composition reputation PCC records for an agent or kernel: its score and its most recent changes. An id PCC has never seen reads as neutral. |"},
+  "A33c": {"path": "packages/mcp-server/README.md", "old": "| `pcc_setup_test_job` | Submit a test job end-to-end to verify the pipeline. |", "new": "| `pcc_setup_test_job` | Submit a test job for one device on a kernel. The gateway runs it only for a kernel it operates in-process; for any other kernel it refuses and runs nothing. Every reply says whether the job ran and passed. |"},
+  "A33d": {"path": "packages/mcp-server/README.md", "old": "### Story Protocol IP and royalties (5)", "new": "### IP records (5)\n\nStory Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain."},
+  "A33e": {"path": "packages/mcp-server/README.md", "old": "| `pcc_ip_register_capability` | Register a CSD as a Story Protocol IP Asset; enables programmable royalties. |", "new": "| `pcc_ip_register_capability` | Record a CSD as an IP asset. Any id or transaction hash it returns is a placeholder, and no royalty is paid. |"},
+  "A33f": {"path": "packages/mcp-server/README.md", "old": "| `pcc_ip_revenue_snapshot` | Total accumulated revenue + unclaimed balance for an IP Asset. |", "new": "| `pcc_ip_revenue_snapshot` | The revenue PCC has recorded for an IP asset. No revenue has been paid: any figure it returns is a placeholder. |"},
+  "A33g": {"path": "packages/mcp-server/README.md", "old": "| `pcc_ip_claim` | Claim accumulated revenue from an IP Royalty Vault. |", "new": "| `pcc_ip_claim` | Claim an IP asset's recorded revenue. Nothing is paid out: any amount or transaction hash it returns is a placeholder. |"},
+  "A33h": {"path": "packages/mcp-server/README.md", "old": "| `pcc_ip_lineage` | Full ancestor + descendant lineage graph for an IP Asset. |", "new": "| `pcc_ip_lineage` | The IP lineage PCC has recorded for an IP asset: ancestors (parent CSDs) and descendants (job evidence records and derivative CSDs). |"},
+  "A33i": {"path": "packages/mcp-server/README.md", "old": "| `pcc_ip_set_splits` | Configure revenue splits across the 10-role ContributorRole taxonomy. |", "new": "| `pcc_ip_set_splits` | Configure revenue splits for an IP asset. Splits must sum to 100. No revenue is paid from them today. |"},
+  "A34a": {"path": "apps/dashboard/public/onboard.html", "old": "${S.proof.test?'✓ test job passed':'▸ queue test job'}", "new": "${S.proof.test?'✓ in your plan (not run yet)':'▸ queue test job'}"},
+  "A34b": {"path": "apps/dashboard/public/onboard.html", "old": " Capture a photo + your GPS — that's a Tier 1 bundle.</p>", "new": " Capture a photo + your GPS.</p>"},
+  "A34c": {"path": "apps/dashboard/public/onboard.html", "old": "${S.proof.demand?'✓ demand posted, composed':'▸ post sample demand'}", "new": "${S.proof.demand?'✓ in your plan (not posted yet)':'▸ post sample demand'}"},
+  "A35a": {"path": "apps/dashboard/public/onboard.html", "old": "p.push({s:3,m:\"POST\",path:\"/api/skills\",lab:\"publish the human-node skill (PR #90)\",b:sk});", "new": "p.push({s:3,m:\"POST\",path:\"/api/skills\",terminal:1,lab:\"publish the human-node skill: no gateway route takes this call yet\",b:sk});"},
+  "A35b": {"path": "apps/dashboard/public/onboard.html", "old": "p.push({s:4,m:\"POST\",path:\"/api/skills/${skillId}/verify\",lab:\"photo + GPS evidence: no gateway route takes it yet\",", "new": "p.push({s:4,m:\"POST\",path:\"/api/skills/${skillId}/verify\",terminal:1,lab:\"photo + GPS evidence: no gateway route takes it yet\","},
+  "A36": {"path": "starter/runbook/00-prerequisites.md", "old": "pcc-node runs next to the device. It registers the kernel, signs its evidence and runs jobs.", "new": "pcc-node runs next to the device. It registers the kernel and signs its evidence; its daemon takes no jobs."},
 } as const;
 const SERVED_ROWS = ["A12", "A12o", "A14", "A14s1", "A14s2", "A15a", "A15b", "A15c", "A16a", "A16b", "A16c", "A17", "A18", "A19", "A20", "A21p", "A21d", "A23", "A24", "A25", "A25b", "R1a", "R1b", "I15p", "I16p", "I17p", "I15d", "I16d", "I17d"] as const;
 
@@ -183,7 +206,7 @@ describe("N240 public claims", () => {
       ["I13s", "I13c", "pcc_ip_lineage"],
       ["I14s", "I14c", "pcc_ip_set_splits"],
     ] as const) {
-      changed(sourceId, index);
+      changed(sourceId, toolBlock(index, name));
       expect(cards.find((tool) => tool.name === name)?.description).toBe(ROWS[cardId].new);
     }
     const texts = [...ipTools.map((tool) => tool.description), ...names.map((name) => toolBlock(index, name)), ...cards.map((tool) => tool.description)];
@@ -276,6 +299,64 @@ describe("N240 public claims", () => {
   it("PC13 the integration guide carries no unserved Trilobio tools", () => {
     changed("A31");
     expect(read(ROWS.A31.path)).not.toContain("pcc_trilobio_");
+  });
+
+  it("PC16 the CLI split help names no treasury share", () => {
+    const cli = read(CLI);
+    for (const id of ["A32a", "A32b", "A32c", "A32d", "A32e"] as const) changed(id, cli);
+    expect(cli).not.toContain("network-treasury");
+    expect(cli).not.toContain("Network Treasury");
+    const marker = "pcc ip splits <ipId> --splits='";
+    const start = cli.indexOf(marker);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const example = cli.slice(start + marker.length, cli.indexOf("'", start + marker.length));
+    const splits = JSON.parse(example) as { percentage: number; role: string; label: string }[];
+    expect(splits.reduce((sum, entry) => sum + entry.percentage, 0)).toBe(100);
+    for (const entry of splits) {
+      expect(entry.role).not.toBe("network");
+      expect(entry.role).not.toBe("network-treasury");
+      expect(entry.label).not.toMatch(/treasury/i);
+    }
+  });
+
+  it("PC17 the MCP README is a published surface and its rows match the stdio texts", () => {
+    const readme = read(README);
+    for (const id of ["A33a", "A33b", "A33c", "A33d", "A33e", "A33f", "A33g", "A33h", "A33i"] as const) changed(id, readme);
+    expect(readme).not.toContain("AWS for the physical world");
+    expect(readme).not.toContain("programmable royalties");
+    expect(readme).not.toContain("Royalty Vault");
+    const claims = read(CLAIMS);
+    const publishedStart = claims.indexOf("export const PUBLISHED_SURFACES");
+    const uncheckedStart = claims.indexOf("export const UNCHECKED_SURFACES");
+    expect(publishedStart).toBeGreaterThanOrEqual(0);
+    expect(uncheckedStart).toBeGreaterThanOrEqual(0);
+    const published = claims.slice(publishedStart, uncheckedStart);
+    const nextExport = claims.indexOf("\nexport ", uncheckedStart);
+    const unchecked = claims.slice(uncheckedStart, nextExport === -1 ? undefined : nextExport);
+    expect(occurrences(published, "\"packages/mcp-server/README.md\",")).toBe(1);
+    expect(occurrences(published, "\"starter/runbook/00-prerequisites.md\",")).toBe(1);
+    expect(unchecked).not.toContain("packages/mcp-server/README.md");
+    expect(unchecked).not.toContain("starter/runbook/00-prerequisites.md");
+  });
+
+  it("PC18 onboarding marks claim only what a server answer confirmed", () => {
+    const text = read(ONBOARD);
+    for (const id of ["A34a", "A34b", "A34c"] as const) changed(id, text);
+    expect(text).not.toContain("test job passed");
+    expect(text).not.toContain("demand posted, composed");
+    expect(text).not.toContain("Tier 1 bundle");
+  });
+
+  it("PC19 the human plan lists the unserved skill steps without calling them", () => {
+    const text = read(ONBOARD);
+    for (const id of ["A35a", "A35b"] as const) changed(id, text);
+    expect(occurrences(text, "if(c.terminal)continue;")).toBe(1);
+    expect(text).not.toContain("(PR #90)");
+  });
+
+  it("PC20 the prerequisites page says the daemon takes no jobs", () => {
+    changed("A36", read(PREREQ));
+    expect(read(PREREQ)).not.toMatch(/\bruns jobs\b/);
   });
 
   it("PC14 every agent install line pins pcc-node at 700dcfe9", () => {

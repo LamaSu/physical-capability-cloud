@@ -2,7 +2,7 @@
 
 MCP server for the Physical Capability Cloud — invoke physical capabilities, query Shop Kernels, build contracts, manage milestone escrow, and run the full Capture Verification Protocol from any MCP-compatible client (Claude Desktop, Claude Code, Cursor, Goose, ChatGPT Apps).
 
-PCC is AWS for the physical world. Shop Kernels are availability zones. Capabilities are billable units (3D printing, CNC milling, HPLC analysis). Assurance Tiers are SLAs. Settlement happens on-chain (Base Sepolia) when evidence meets tier requirements. This MCP server exposes 72 of the gateway's most-used endpoints over stdio so any agent can drive the network the same way a human dashboard would — discover a capability, negotiate a deal, commit it to escrow, and track settlement, all as tool calls.
+PCC connects agents to Shop Kernels: the sites whose machines and people do physical work. Capabilities are billable units (3D printing, CNC milling, HPLC analysis). Assurance Tiers are SLAs. Settlement happens on-chain (Base Sepolia) when evidence meets tier requirements. This MCP server exposes 72 of the gateway's most-used endpoints over stdio so any agent can drive the network the same way a human dashboard would — discover a capability, negotiate a deal, commit it to escrow, and track settlement, all as tool calls.
 
 Live gateway: **https://capability.network**
 
@@ -154,7 +154,7 @@ auto-expire after 30 minutes; committed sessions are immutable. Requires
 | `pcc_depin_stats` | DePIN reward epochs + kernel certificates + treasury balance. |
 | `pcc_subnet_status` | PCC agent network status — active agents, types, conversations. |
 | `pcc_get_agent_identity` | ERC-8004 identity for a kernel or agent. |
-| `pcc_get_reputation` | Reputation scores by agent/tag (quality, uptime, assurance). |
+| `pcc_get_reputation` | The composition reputation PCC records for an agent or kernel: its score and its most recent changes. An id PCC has never seen reads as neutral. |
 
 ### ERC-8004 agent registration (1)
 
@@ -171,7 +171,7 @@ auto-expire after 30 minutes; committed sessions are immutable. Requires
 | `pcc_setup_validate_config` | Validate a kernel config (or the currently loaded one). |
 | `pcc_setup_register_device` | Register a physical device under a kernel. |
 | `pcc_setup_health_check` | Health checks across devices (or a single device). |
-| `pcc_setup_test_job` | Submit a test job end-to-end to verify the pipeline. |
+| `pcc_setup_test_job` | Submit a test job for one device on a kernel. The gateway runs it only for a kernel it operates in-process; for any other kernel it refuses and runs nothing. Every reply says whether the job ran and passed. |
 | `pcc_setup_generate_env` | Generate a `.env` file (dev/testnet/mainnet profiles). Local, no gateway call. |
 | `pcc_setup_status` | Status across all categories — gateway, DB, adapters, chain, storage, identity. |
 
@@ -183,15 +183,17 @@ auto-expire after 30 minutes; committed sessions are immutable. Requires
 | `pcc_csd_get` | A CSD by canonical URI. |
 | `pcc_csd_register` | Register a new CSD; validates against the CSD schema. |
 
-### Story Protocol IP and royalties (5)
+### IP records (5)
+
+Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain.
 
 | Tool | One-line |
 |---|---|
-| `pcc_ip_register_capability` | Register a CSD as a Story Protocol IP Asset; enables programmable royalties. |
-| `pcc_ip_revenue_snapshot` | Total accumulated revenue + unclaimed balance for an IP Asset. |
-| `pcc_ip_claim` | Claim accumulated revenue from an IP Royalty Vault. |
-| `pcc_ip_lineage` | Full ancestor + descendant lineage graph for an IP Asset. |
-| `pcc_ip_set_splits` | Configure revenue splits across the 10-role ContributorRole taxonomy. |
+| `pcc_ip_register_capability` | Record a CSD as an IP asset. Any id or transaction hash it returns is a placeholder, and no royalty is paid. |
+| `pcc_ip_revenue_snapshot` | The revenue PCC has recorded for an IP asset. No revenue has been paid: any figure it returns is a placeholder. |
+| `pcc_ip_claim` | Claim an IP asset's recorded revenue. Nothing is paid out: any amount or transaction hash it returns is a placeholder. |
+| `pcc_ip_lineage` | The IP lineage PCC has recorded for an IP asset: ancestors (parent CSDs) and descendants (job evidence records and derivative CSDs). |
+| `pcc_ip_set_splits` | Configure revenue splits for an IP asset. Splits must sum to 100. No revenue is paid from them today. |
 
 ### Sovereign Wealth Fund (3)
 

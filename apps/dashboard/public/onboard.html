@@ -399,8 +399,8 @@ function buildPlan(){
     };
     if(S.mode==="scheduled")sk.slot={at:S.schedAt||"<datetime>",durationMin:+S.schedDur};
     if(S.mode==="recurring")sk.recurrence={every:S.recurEvery,at:S.recurAt};
-    p.push({s:3,m:"POST",path:"/api/skills",lab:"publish the human-node skill (PR #90)",b:sk});
-    p.push({s:4,m:"POST",path:"/api/skills/${skillId}/verify",lab:"photo + GPS evidence: no gateway route takes it yet",
+    p.push({s:3,m:"POST",path:"/api/skills",terminal:1,lab:"publish the human-node skill: no gateway route takes this call yet",b:sk});
+    p.push({s:4,m:"POST",path:"/api/skills/${skillId}/verify",terminal:1,lab:"photo + GPS evidence: no gateway route takes it yet",
       b:{evidence:{events:[{type:"execution_completed"}],deviceHealth:{status:"idle",model:"human-operator"},geo:S.proof.geo||"<lat,lng>",photoBase64:S.proof.photo?"<captured>":"<photo>"}}});
   }
   else if(S.lane==="asset"){
@@ -545,11 +545,11 @@ function renderStep(){
       <p class="sub">The gateway runs a test job only for a kernel it operates in-process. For a kernel your <code style="font-family:var(--mono);color:var(--cyan)">pcc-node</code> keeps online it refuses and runs nothing, and a test job activates nothing.</p>
       <div class="prove-card"><div class="ico" style="font-family:var(--mono);color:var(--cyan)">▣ TEST JOB</div>
         <div class="big">${esc(S.model||S.name||'Your machine')}</div>
-        <div class="evi"><button type="button" class="pill ${S.proof.test?'got':''}" data-ev="test">${S.proof.test?'✓ test job passed':'▸ queue test job'}</button></div>
+        <div class="evi"><button type="button" class="pill ${S.proof.test?'got':''}" data-ev="test">${S.proof.test?'✓ in your plan (not run yet)':'▸ queue test job'}</button></div>
         <div class="meta">POST /api/setup/test-job · runs only on a kernel the gateway operates in-process</div></div>`;
     } else if(S.lane==='human'){
       h=`<div class="kick">Step 05 · prove</div><div class="q" tabindex="-1">Prove a job.</div>
-      <p class="sub">No gateway route verifies a skill from its evidence yet, so this step activates nothing. Capture a photo + your GPS — that's a Tier 1 bundle.</p>
+      <p class="sub">No gateway route verifies a skill from its evidence yet, so this step activates nothing. Capture a photo + your GPS.</p>
       <div class="prove-card"><div class="ico" style="font-family:var(--mono);color:var(--amber)">◐ EVIDENCE</div>
         <div class="big">${esc(S.name||'Your skill')}</div>
         <div class="evi"><button type="button" class="pill ${S.proof.photo?'got':''}" data-ev="photo">${S.proof.photo?'✓ photo':'▸ capture photo'}</button>
@@ -560,7 +560,7 @@ function renderStep(){
       <p class="sub">Your first outbound demand exercises the loop end-to-end: the compose engine plans (single- or multi-step via graph-search), the asset is now bidding for capabilities.</p>
       <div class="prove-card"><div class="ico" style="font-family:var(--mono);color:var(--violet)">◈ SAMPLE DEMAND</div>
         <div class="big">${esc(S.name||'Your asset')}</div>
-        <div class="evi"><button type="button" class="pill ${S.proof.demand?'got':''}" data-ev="demand">${S.proof.demand?'✓ demand posted, composed':'▸ post sample demand'}</button></div>
+        <div class="evi"><button type="button" class="pill ${S.proof.demand?'got':''}" data-ev="demand">${S.proof.demand?'✓ in your plan (not posted yet)':'▸ post sample demand'}</button></div>
         <div class="meta">POST /api/assets/&lt;id&gt;/outbound-demand · composer plans path · status: <b>proposed</b></div></div>`;
     } else {
       h=`<div class="kick">Step 05 · prove</div><div class="q" tabindex="-1">Pick a lane first.</div>`;
