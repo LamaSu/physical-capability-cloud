@@ -1,18 +1,12 @@
 /**
- * Validator — verifies that an onboarding configuration is correct and complete.
- *
- * Checks:
- * 1. Capability types are valid PCC built-in types
- * 2. Pricing models have required fields
- * 3. Assurance tiers are valid (0-3)
- * 4. Adapters reference valid protocols
- * 5. Capabilities reference existing adapters
- * 6. Kernel config is complete
- * 7. Machine profiles match capability types
+ * Validator — checks onboarding config shape and local consistency.
  */
 
-import type { OnboardConfig } from "./types.js";
+import { COMMITTED_PROGRAM_REGISTRY, EVIDENCE_DEVICE_TYPES, isValidKernelId, registeredQuotePrice } from "@pcc/spec";
+import type { CapabilityDefinition, OnboardConfig } from "./types.js";
 import { scaffoldRuleProblems } from "./scaffold-rules.js";
+import { checkConfigShape } from "./config-shape.js";
+import { getKnownCapabilityTypes } from "./known-types.js";
 
 export interface ValidationCheck {
   name: string;
@@ -31,32 +25,16 @@ export interface ValidationResult {
 
 export interface ValidationOptions {
   config: OnboardConfig;
-  /** Skip adapter connection checks (default true) */
-  skipConnectionTest?: boolean;
 }
 
-const VALID_CAPABILITY_TYPES = new Set([
-  "cnc-3axis", "cnc-5axis", "fdm", "sla", "sls", "dmls",
-  "lathe", "laser-cut", "waterjet", "edm-wire", "edm-sinker",
-  "injection-mold", "sheet-metal-bend", "sheet-metal-punch",
-  "welding-mig", "welding-tig", "welding-laser",
-  "surface-grinding", "cylindrical-grinding", "polishing",
-  "anodizing", "plating", "heat-treat",
-  "cmm-inspection", "surface-profilometry", "xray-ct-inspection",
-  "courier-pickup", "courier-delivery",
-  "hplc", "gc-ms", "lc-ms", "pcr", "qpcr", "sequencing",
-  "mass-spec", "spectrophotometer", "cell-culture", "bioreactor",
-  "flow-cytometry", "centrifuge", "autoclave", "lyophilizer",
-  "liquid-handler", "plate-reader", "microscopy", "balance",
-]);
-
-const VALID_CURRENCIES = new Set(["USDC", "ETH", "DAI", "SOL"]);
 const VALID_PROTOCOLS = new Set(["http", "opcua", "modbus", "sila", "mqtt", "serial", "websocket", "custom"]);
 const VALID_ADAPTER_TYPES = new Set(["machine", "sensor", "camera"]);
+const WELL_FORMED_TYPE = /^[a-z0-9]+([.-][a-z0-9]+)*$/;
 
 export function validate(options: ValidationOptions): ValidationResult {
   const { config } = options;
-  const checks: ValidationCheck[] = [];
+  const checks: ValidationCheck[] = checkConfigShape(config);
+  if (checks.length > 0) return resultFor(config, checks);
 
   // ── Kernel config ───────────────────────────────────────────────
 
@@ -82,6 +60,43 @@ export function validate(options: ValidationOptions): ValidationResult {
     });
   }
 
+  if (config.kernel.kernelId !== "" && !isValidKernelId(config.kernel.kernelId)) {
+    checks.push({
+      name: "kernel.kernelId", passed: false, severity: "error",
+      message: `${JSON.stringify(config.kernel.kernelId)} cannot be named in a funded deal: use 1 to 128 printable ASCII characters, no spaces, not starting with eip155: or ed25519:`,
+    });
+  }
+
+  if (typeof config.kernel.gatewayUrl === "string") {
+    let url: URL | undefined;
+    try { url = new URL(config.kernel.gatewayUrl); } catch { /* Report without exposing credentials. */ }
+    if (!url || (url.protocol !== "http:" && url.protocol !== "https:")) {
+      checks.push({
+        name: "kernel.gatewayUrl", passed: false, severity: "warning",
+        message: "not an http or https URL",
+      });
+    } else if (url.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) {
+      checks.push({
+        name: "kernel.gatewayUrl", passed: false, severity: "warning",
+        message: `plain http to ${url.hostname}; operator sessions accept plain http only on loopback`,
+      });
+    }
+  }
+
+  if (!Number.isInteger(config.kernel.httpPort) || config.kernel.httpPort < 1 || config.kernel.httpPort > 65535) {
+    checks.push({
+      name: "kernel.httpPort", passed: false, severity: "error",
+      message: `${String(config.kernel.httpPort)} is not a port (1-65535)`,
+    });
+  }
+
+  if (typeof config.kernel.walletPrivateKeyEnvVar === "string" && config.kernel.walletPrivateKeyEnvVar !== "") {
+    checks.push({
+      name: "kernel.walletPrivateKeyEnvVar", passed: false, severity: "warning",
+      message: `the scaffolded agent never reads ${config.kernel.walletPrivateKeyEnvVar}; KernelAgent takes no wallet setting, so its wallet is a new random key each start`,
+    });
+  }
+
   // ── Adapters ────────────────────────────────────────────────────
 
   if (config.adapters.length === 0) {
@@ -95,7 +110,7 @@ export function validate(options: ValidationOptions): ValidationResult {
 
   const adapterIds = new Set<string>();
   for (const adapter of config.adapters) {
-    const prefix = `adapter[${adapter.adapterId}]`;
+    const prefix = `adapter[${text(adapter.adapterId)}]`;
 
     checks.push(checkRequired(`${prefix}.adapterId`, adapter.adapterId));
     checks.push(checkRequired(`${prefix}.className`, adapter.className));
@@ -108,10 +123,10 @@ export function validate(options: ValidationOptions): ValidationResult {
         name: `${prefix}.capabilityClass`,
         passed: classes.length === 1,
         message: classes.length === 0
-          ? `Adapter "${adapter.adapterId}": add exactly one capability class for it`
+          ? `Adapter "${text(adapter.adapterId)}": add exactly one capability class for it`
           : classes.length > 1
-            ? `Adapter "${adapter.adapterId}" has several capability classes: ${classes.join(", ")}; add exactly one capability class for it`
-            : `Adapter "${adapter.adapterId}" has capability class ${classes[0]}`,
+            ? `Adapter "${text(adapter.adapterId)}" has several capability classes: ${classes.join(", ")}; add exactly one capability class for it`
+            : `Adapter "${text(adapter.adapterId)}" has capability class ${classes[0]}`,
         severity: "error",
       });
     }
@@ -134,13 +149,26 @@ export function validate(options: ValidationOptions): ValidationResult {
       });
     }
 
+    if (!(EVIDENCE_DEVICE_TYPES as readonly string[]).includes(adapter.deviceType)) {
+      checks.push({
+        name: `${prefix}.deviceType`, passed: false, severity: "warning",
+        message: `${JSON.stringify(adapter.deviceType)} is not an evidence device type in @pcc/spec (for example controller, power_monitor, robot_arm); schema-checking verifiers refuse its events`,
+      });
+    }
+    if (adapter.adapterType === "machine" && adapter.protocol !== "http") {
+      checks.push({
+        name: `${prefix}.protocol`, passed: false, severity: "warning",
+        message: `the scaffold writes an HTTP adapter for every machine adapter; write the ${adapter.protocol} transport yourself`,
+      });
+    }
+
     checks.push(checkRequired(`${prefix}.connectionString`, adapter.connectionString));
 
     if (adapterIds.has(adapter.adapterId)) {
       checks.push({
         name: `${prefix}.uniqueId`,
         passed: false,
-        message: `Duplicate adapter ID "${adapter.adapterId}"`,
+        message: `Duplicate adapter ID "${text(adapter.adapterId)}"`,
         severity: "error",
       });
     }
@@ -185,23 +213,8 @@ export function validate(options: ValidationOptions): ValidationResult {
   const hasCameraAdapter = config.adapters.some(a => a.adapterType === "camera");
 
   for (const cap of config.capabilities) {
-    const prefix = `capability[${cap.type}]`;
-
-    if (!VALID_CAPABILITY_TYPES.has(cap.type)) {
-      checks.push({
-        name: `${prefix}.type`,
-        passed: false,
-        message: `Unknown capability type "${cap.type}". See AGENT_INSTRUCTIONS.md for valid types.`,
-        severity: "error",
-      });
-    } else {
-      checks.push({
-        name: `${prefix}.type`,
-        passed: true,
-        message: `Valid capability type: ${cap.type}`,
-        severity: "info",
-      });
-    }
+    const prefix = `capability[${text(cap.type)}]`;
+    checks.push(...typeChecks(cap.type, `${prefix}.type`));
 
     checks.push(checkRequired(`${prefix}.name`, cap.name));
 
@@ -214,34 +227,7 @@ export function validate(options: ValidationOptions): ValidationResult {
       });
     }
 
-    // Validate pricing
-    if (!VALID_CURRENCIES.has(cap.pricing.currency)) {
-      checks.push({
-        name: `${prefix}.pricing.currency`,
-        passed: false,
-        message: `Invalid currency "${cap.pricing.currency}". Must be: ${[...VALID_CURRENCIES].join(", ")}`,
-        severity: "error",
-      });
-    }
-
-    const baseCost = parseFloat(cap.pricing.baseCost);
-    const minimum = parseFloat(cap.pricing.minimum);
-    if (isNaN(baseCost) || baseCost < 0) {
-      checks.push({
-        name: `${prefix}.pricing.baseCost`,
-        passed: false,
-        message: `baseCost must be a non-negative number (got "${cap.pricing.baseCost}")`,
-        severity: "error",
-      });
-    }
-    if (isNaN(minimum) || minimum < 0) {
-      checks.push({
-        name: `${prefix}.pricing.minimum`,
-        passed: false,
-        message: `minimum must be a non-negative number (got "${cap.pricing.minimum}")`,
-        severity: "error",
-      });
-    }
+    checks.push(...pricingChecks(cap, prefix));
 
     // Validate assurance tiers
     for (const tier of cap.assuranceTiers) {
@@ -253,6 +239,19 @@ export function validate(options: ValidationOptions): ValidationResult {
           severity: "error",
         });
       }
+    }
+
+    const missingTiers = [...new Set(cap.assuranceTiers.filter(tier => tier > 0))]
+      .sort((a, b) => a - b)
+      .filter(tier => !COMMITTED_PROGRAM_REGISTRY.some(entry => entry.csd === cap.type && entry.tier === `tier${tier}`));
+    if (missingTiers.length > 0) {
+      const tiers = missingTiers.join(", ");
+      checks.push({
+        name: `${prefix}.fundableTiers`, passed: false, severity: "warning",
+        message: missingTiers.length === 1
+          ? `tier ${tiers} has no committed program for ${cap.type} in this kit, so a buyer can't fund this capability at tier ${tiers}`
+          : `tiers ${tiers} have no committed program for ${cap.type} in this kit, so a buyer can't fund this capability at tiers ${tiers}`,
+      });
     }
 
     // Only the FDM default ladder supplies these hints; other CSD ladders decide.
@@ -285,20 +284,21 @@ export function validate(options: ValidationOptions): ValidationResult {
     }
   }
 
+  const typeCounts = new Map<string, number>();
+  for (const cap of config.capabilities) typeCounts.set(cap.type, (typeCounts.get(cap.type) ?? 0) + 1);
+  for (const [type, count] of typeCounts) {
+    if (count > 1) checks.push({
+      name: `capability[${text(type)}]`, passed: false, severity: "error",
+      message: `more than one capability of type ${type} on one kernel; the gateway's quote refuses an ambiguous type (capability_ambiguous)`,
+    });
+  }
+
   // ── Profiles ────────────────────────────────────────────────────
 
   if (config.profiles) {
     for (const profile of config.profiles) {
-      const prefix = `profile[${profile.profileId}]`;
-
-      if (!VALID_CAPABILITY_TYPES.has(profile.capabilityType)) {
-        checks.push({
-          name: `${prefix}.capabilityType`,
-          passed: false,
-          message: `Profile references unknown capability type "${profile.capabilityType}"`,
-          severity: "error",
-        });
-      }
+      const prefix = `profile[${text(profile.profileId)}]`;
+      checks.push(...typeChecks(profile.capabilityType, `${prefix}.capabilityType`, true));
 
       if (!adapterIds.has(profile.adapterId)) {
         checks.push({
@@ -311,6 +311,10 @@ export function validate(options: ValidationOptions): ValidationResult {
     }
   }
 
+  return resultFor(config, checks);
+}
+
+function resultFor(config: OnboardConfig, checks: ValidationCheck[]): ValidationResult {
   for (const { name, message } of scaffoldRuleProblems(config)) {
     checks.push({ name, passed: false, message, severity: "error" });
   }
@@ -336,6 +340,108 @@ export function validate(options: ValidationOptions): ValidationResult {
 }
 
 // ── Helper functions ──────────────────────────────────────────────
+
+function text(value: unknown): string {
+  // JSON objects can have a non-callable toString property.
+  try { return String(value); } catch { return JSON.stringify(value); }
+}
+
+function typeChecks(type: string, name: string, profile = false): ValidationCheck[] {
+  if (type === "") return [{
+    name, passed: false, severity: "error",
+    message: profile ? "capabilityType is required" : "type is required (the gateway answers 400 when kernelId or type is missing)",
+  }];
+  if (getKnownCapabilityTypes().has(type)) return profile ? [] : [{
+    name, passed: true, severity: "info", message: `${type} has a template or CSD in this kit`,
+  }];
+  const hint = suggestType(type);
+  const suggestion = hint ? ` (did you mean ${hint}?)` : "";
+  const checks: ValidationCheck[] = [{
+    name, passed: false, severity: "warning",
+    message: profile
+      ? `${type} has no template or CSD in this kit${suggestion}`
+      : `${type} has no template or CSD in this kit, so buyers can't price it with the contract builder${suggestion}; the gateway accepts any type`,
+  }];
+  if (!WELL_FORMED_TYPE.test(type)) checks.push({
+    name, passed: false, severity: "warning",
+    message: `${JSON.stringify(type)} is not a slug (lowercase letters and digits joined by single "-" or "."); the gateway accepts any type`,
+  });
+  return checks;
+}
+
+function suggestType(type: string): string | undefined {
+  const lower = type.toLowerCase();
+  let nearest: string | undefined;
+  let bestDistance = Infinity;
+  for (const candidate of [...getKnownCapabilityTypes()].sort()) {
+    const known = candidate.toLowerCase();
+    const distance = levenshtein(lower, known);
+    if ((distance <= 2 || lower.startsWith(known) || known.startsWith(lower)) && distance < bestDistance) {
+      nearest = candidate;
+      bestDistance = distance;
+    }
+  }
+  return nearest;
+}
+
+function levenshtein(a: string, b: string): number {
+  let row = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 0; i < a.length; i++) {
+    const next = [i + 1];
+    for (let j = 0; j < b.length; j++) {
+      next.push(Math.min(next[j]! + 1, row[j + 1]! + 1, row[j]! + (a[i] === b[j] ? 0 : 1)));
+    }
+    row = next;
+  }
+  return row[b.length]!;
+}
+
+function pricingChecks(cap: CapabilityDefinition, prefix: string): ValidationCheck[] {
+  const price = registeredQuotePrice(cap.pricing);
+  if (!price.ok) {
+    let name = `${prefix}.pricing`;
+    let message: string;
+    switch (price.reason) {
+      case "unsupported-currency":
+        name += ".currency";
+        message = `Invalid currency ${JSON.stringify(price.currency)}: the gateway quotes only USDC, with no conversion (capability_price_unsupported_currency)`;
+        break;
+      case "invalid-currency":
+        name += ".currency";
+        message = `Invalid currency ${JSON.stringify(cap.pricing.currency)}: the gateway's discovery quote refuses it (capability_price_undeclared: invalid-currency)`;
+        break;
+      case "no-pricing":
+        message = "no usable pricing; the gateway's discovery quote refuses it (capability_price_undeclared: no-pricing)";
+        break;
+      case "invalid-price":
+        name += ".baseCost";
+        message = `${JSON.stringify(cap.pricing.baseCost)} is not an amount with at most two decimals; the gateway's discovery quote refuses it (capability_price_undeclared: invalid-price)`;
+        break;
+      case "zero-price":
+        name += ".baseCost";
+        message = `${JSON.stringify(cap.pricing.baseCost)} is zero; the gateway's discovery quote refuses a zero price (capability_price_undeclared: zero-price)`;
+        break;
+      case "invalid-minimum":
+        name += ".minimum";
+        message = `${JSON.stringify(cap.pricing.minimum)} is not an amount with at most two decimals; the gateway's discovery quote refuses it (capability_price_undeclared: invalid-minimum)`;
+        break;
+      case "invalid-usage":
+        message = "a usage rate (perMinute, perGram, perCm3) is not an amount with at most six decimals; the gateway's discovery quote refuses it (capability_price_undeclared: invalid-usage)";
+        break;
+    }
+    return [{ name, message, passed: false, severity: "error" }];
+  }
+  const checks: ValidationCheck[] = [];
+  if (Object.keys(price.usage).length > 0) checks.push({
+    name: `${prefix}.pricing`, passed: false, severity: "warning",
+    message: "a non-zero usage rate is set; the gateway's discovery quote discloses it without charging it, and the plan path refuses it",
+  });
+  if (price.minimumCents !== null && price.cents < price.minimumCents) checks.push({
+    name: `${prefix}.pricing`, passed: false, severity: "warning",
+    message: `baseCost ${JSON.stringify(cap.pricing.baseCost)} is below minimum ${JSON.stringify(cap.pricing.minimum)}; the discovery quote charges the minimum, and the plan path refuses a baseCost below the minimum`,
+  });
+  return checks;
+}
 
 function checkRequired(name: string, value: unknown): ValidationCheck {
   const passed = value !== undefined && value !== null && value !== "";

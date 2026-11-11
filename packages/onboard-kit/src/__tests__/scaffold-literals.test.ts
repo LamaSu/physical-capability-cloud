@@ -328,7 +328,7 @@ const PINS = [
       ]
     ],
     "scaffold": "1873cb270f3c5b5ade8092c0b848c7067fd1b8a5b949545f6797262ce5dddd2c",
-    "validate": "e55c734ef13a7eb4c39ccf8f32ae9be1a9e066d0af90175680945edf4c962382"
+    "validate": "d7dee0ed412ddde2e40dd3d670343b8289351f70cecfe75ec0217acb24538503"
   },
   {
     "files": [
@@ -370,7 +370,7 @@ const PINS = [
       ]
     ],
     "scaffold": "2d57bdf03f11b285be04fa1e3478c2d0c29e76bfc8ae0f3fe4901048ffdd1bf0",
-    "validate": "13c64d886b91dbf3e50b2e56e91a26ee4f4b3b2e6309541c1ff8b246920dab29"
+    "validate": "7966e53b067c88b59a08b1e72db9299a6bbe9a77a640c8f47ac86fb7a922cd06"
   },
   {
     "files": [
@@ -408,7 +408,7 @@ const PINS = [
       ]
     ],
     "scaffold": "3d7a6f1b0f57253127bfb1d43021ea9f9d78def061c007a196dadc081c20f0c6",
-    "validate": "10408f7843be1c86f93d84af30247e0aa5d3a540c20239f7f7f003947e208188"
+    "validate": "79accaab8838e89b08e423b49454f3e4021d344ab729748f78a0aaa7ad516cd6"
   },
   {
     "files": [
@@ -446,7 +446,7 @@ const PINS = [
       ]
     ],
     "scaffold": "654e4c8237ec7179d58cb49be3ae2ab56e7d62a4deed1f6f03cf8273381af8f4",
-    "validate": "4e93e8d07be96dab574ec872e686395f8fd7b3d2d175bc34453fd6c87b5af455"
+    "validate": "77e0baccdde24b6093d41d4b4fd7f1a22726be61b592b341b724b228e490f907"
   },
   {
     "files": [
@@ -484,7 +484,7 @@ const PINS = [
       ]
     ],
     "scaffold": "7cf0777f0b27fb54fd4b03c145a607af8c8c5c5e8a191bd452b24ca44821e73f",
-    "validate": "cbfa22c3fc1691df15afd475575248483c0197e0919744f8a83611bf252dfc4f"
+    "validate": "22fcfe345705701ab72aa8776078cf4e054f220df20202ef17ef0eb8fe02e8e7"
   }
 ];
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");

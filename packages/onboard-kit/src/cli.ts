@@ -1,82 +1,14 @@
 #!/usr/bin/env node
-/**
- * PCC Onboard CLI
- *
- * Usage:
- *   pcc-onboard scaffold --config ./onboard-config.json --output ./my-kernel
- *   pcc-onboard validate --config ./onboard-config.json
- */
+/** PCC Onboard CLI: local validation and project scaffolding. */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { scaffold } from "./scaffolder.js";
 import { validate } from "./validate.js";
 import type { OnboardConfig } from "./types.js";
 
-const args = process.argv.slice(2);
-const command = args[0];
-
-function getArg(name: string): string | undefined {
-  const idx = args.indexOf(name);
-  return idx >= 0 && idx + 1 < args.length ? args[idx + 1] : undefined;
-}
-
-function loadConfig(configPath: string): OnboardConfig {
-  const raw = readFileSync(configPath, "utf-8");
-  return JSON.parse(raw) as OnboardConfig;
-}
-
-switch (command) {
-  case "scaffold": {
-    const configPath = getArg("--config");
-    const outputDir = getArg("--output") ?? ".";
-
-    if (!configPath) {
-      console.error("Usage: pcc-onboard scaffold --config <path> [--output <dir>]");
-      process.exit(1);
-    }
-
-    const config = loadConfig(configPath);
-
-    // Validate first
-    const validation = validate({ config });
-    if (!validation.valid) {
-      console.error("Configuration validation failed:\n");
-      console.error(validation.summary);
-      process.exit(1);
-    }
-
-    // Scaffold
-    const result = scaffold({ config, outputDir });
-
-    for (const file of result.files) {
-      const fullPath = join(outputDir, file.path);
-      const dir = dirname(fullPath);
-      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-      writeFileSync(fullPath, file.content, "utf-8");
-      console.log(`  Created: ${file.path} — ${file.description}`);
-    }
-
-    console.log("\n" + result.summary);
-    break;
-  }
-
-  case "validate": {
-    const configPath = getArg("--config");
-
-    if (!configPath) {
-      console.error("Usage: pcc-onboard validate --config <path>");
-      process.exit(1);
-    }
-
-    const config = loadConfig(configPath);
-    const result = validate({ config });
-    console.log(result.summary);
-    process.exit(result.valid ? 0 : 1);
-  }
-
-  default:
-    console.log(`PCC Onboard Kit — Device onboarding for the Physical Capability Cloud
+const HELP = `PCC Onboard Kit — Device onboarding for the Physical Capability Cloud
 
 Commands:
   scaffold   Generate a complete kernel project from config
@@ -85,9 +17,140 @@ Commands:
 Options:
   --config <path>   Path to onboard-config.json
   --output <dir>    Output directory (scaffold only, default: .)
+  --json            Print the result as one JSON object (validate only)
 
 Example:
   pcc-onboard scaffold --config ./my-shop.json --output ./my-kernel
   pcc-onboard validate --config ./my-shop.json
-`);
+`;
+
+const CHECKED = ["config", "adapters", "capabilities"];
+const NOT_CHECKED = ["evidence bundles", "signing key", "wallet", "adapter modules", "kernel agent", "machine-profile template fit"];
+
+export function runCli(argv: string[], io: { log(line: string): void; error(line: string): void }): number {
+  if (argv.some(token => ["--signing-key", "--private-key", "--seed"].includes(token.split("=", 1)[0]!))) {
+    io.error("keys are read from files only");
+    return 2;
+  }
+
+  const command = argv[0];
+  if (command === undefined || ["help", "--help", "-h"].includes(command)) {
+    io.log(HELP);
+    return 0;
+  }
+  if (command !== "validate" && command !== "scaffold") {
+    io.error("Unknown command");
+    io.error(HELP);
+    return 2;
+  }
+
+  const usage = command === "validate"
+    ? "Usage: pcc-onboard validate --config <path> [--json]"
+    : "Usage: pcc-onboard scaffold --config <path> [--output <dir>]";
+  let configPath: string | undefined;
+  let outputDir: string | undefined;
+  let json = false;
+  for (let i = 1; i < argv.length; i++) {
+    const token = argv[i]!;
+    if (token === "--config" || (token === "--output" && command === "scaffold")) {
+      const value = argv[i + 1];
+      const duplicate = token === "--config" ? configPath !== undefined : outputDir !== undefined;
+      if (value === undefined || value.startsWith("-") || duplicate) {
+        io.error(usage);
+        return 2;
+      }
+      if (token === "--config") configPath = value;
+      else outputDir = value;
+      i++;
+    } else if (token === "--json" && command === "validate") {
+      if (json) {
+        io.error(usage);
+        return 2;
+      }
+      json = true;
+    } else if (token.startsWith("-")) {
+      const equals = token.indexOf("=");
+      io.error(`Unknown flag ${equals < 0 ? token : token.slice(0, equals + 1)}`);
+      return 2;
+    } else {
+      io.error("Unexpected argument");
+      return 2;
+    }
+  }
+  if (configPath === undefined) {
+    io.error(usage);
+    return 2;
+  }
+
+  let raw: string;
+  try {
+    if (statSync(configPath).size > 1_048_576) {
+      io.error(`Cannot read config ${configPath}: larger than 1 MiB`);
+      return 2;
+    }
+    raw = readFileSync(configPath, "utf-8");
+  } catch (error) {
+    const code = (error as { code?: string } | null)?.code ?? "unreadable";
+    io.error(`Cannot read config ${configPath}: ${code}`);
+    return 2;
+  }
+
+  let config: OnboardConfig;
+  try {
+    config = JSON.parse(raw) as OnboardConfig;
+  } catch (error) {
+    const position = /position (\d+)/.exec((error as Error).message)?.[1];
+    io.error(`Cannot read config ${configPath}: not valid JSON${position ? ` (position ${position})` : ""}`);
+    return 2;
+  }
+
+  const result = validate({ config });
+  if (command === "validate") {
+    if (json) {
+      const out = {
+        valid: result.valid,
+        scope: "local",
+        checked: CHECKED,
+        notChecked: NOT_CHECKED,
+        checks: result.checks,
+        errors: result.errors,
+        warnings: result.warnings,
+        summary: result.summary,
+      };
+      io.log(JSON.stringify(out, null, 2));
+    } else {
+      io.log(result.summary);
+      io.log(`Input: onboard config ${configPath} (not a kernel runtime config; see POST /api/setup/validate)`);
+      io.log(`Checked: ${CHECKED.join(", ")}`);
+      io.log(`Not checked: ${NOT_CHECKED.join(", ")}`);
+      io.log("This checks shape and local consistency by the rules in this copy of the kit. It registers nothing, and it does not show that a gateway will list, quote, fund or pay for anything.");
+    }
+    return result.valid ? 0 : 1;
+  }
+
+  if (!result.valid) {
+    io.error("Configuration validation failed:\n");
+    io.error(result.summary);
+    return 1;
+  }
+  const generated = scaffold({ config, outputDir: outputDir ?? "." });
+  for (const file of generated.files) {
+    const fullPath = join(outputDir ?? ".", file.path);
+    const dir = dirname(fullPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(fullPath, file.content, "utf-8");
+    io.log(`  Created: ${file.path} — ${file.description}`);
+  }
+  io.log("\n" + generated.summary);
+  return 0;
 }
+
+export function isMainModule(argv1: string | undefined, moduleUrl: string): boolean {
+  try {
+    return !!argv1 && realpathSync(argv1) === fileURLToPath(moduleUrl);
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule(process.argv[1], import.meta.url)) process.exitCode = runCli(process.argv.slice(2), { log: (l) => console.log(l), error: (l) => console.error(l) });
