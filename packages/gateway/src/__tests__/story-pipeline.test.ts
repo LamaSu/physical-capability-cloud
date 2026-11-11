@@ -19,6 +19,8 @@ import {
   resetSettlementService,
   getSettlementService,
 } from "../services/settlement-service.js";
+import { pipelineTelemetry } from "../telemetry.js";
+import { auditService } from "../services/audit-service.js";
 import type { EvidenceBundle } from "@pcc/spec";
 import type { OracleAttestation } from "@pcc/contracts";
 
@@ -228,39 +230,37 @@ describe("CSD Publish → Auto Story IP Registration", () => {
     });
 
     expect(res.statusCode).toBe(200);
-    const body = res.json<{ registered: boolean; url: string; storyIpId?: string }>();
+    const body = res.json<{ registered: boolean; url: string; storyIpId?: string; storyIpSkipped?: string }>();
     expect(body.registered).toBe(true);
     expect(body.url).toBe("pcc://capabilities/story-test/v1");
+    expect(body.storyIpSkipped).toBe("register_via_capability");
   });
 
-  it("POST /api/csd calls getStoryIPService and registerCapabilityAsIP", async () => {
+  it("POST /api/csd does not call getStoryIPService or registerCapabilityAsIP", async () => {
     await app.inject({
       method: "POST",
       url: "/api/csd",
       payload: VALID_CSD,
     });
 
-    expect(mockGetStoryIPService).toHaveBeenCalled();
-    expect(mockRegisterCapabilityAsIP).toHaveBeenCalledOnce();
-    const [capability, options] = mockRegisterCapabilityAsIP.mock.calls[0];
-    expect(capability.name).toBe("Story Test Capability");
-    expect(options.designerAddress).toBe("0xDESIGNER");
-    expect(options.designerName).toBe("Test Designer");
-    expect(options.commercialRevShare).toBe(5);
+    expect(mockGetStoryIPService).not.toHaveBeenCalled();
+    expect(mockRegisterCapabilityAsIP).not.toHaveBeenCalled();
   });
 
-  it("POST /api/csd returns storyIpId in response", async () => {
+  it("POST /api/csd returns no storyIpId and storyIpSkipped register_via_capability", async () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/csd",
       payload: VALID_CSD,
     });
 
-    const body = res.json<{ storyIpId?: string }>();
-    expect(body.storyIpId).toBe("0xmock_ip_id_csd_001");
+    const body = res.json<{ storyIpId?: string; storyIpSkipped?: string }>();
+    expect(body).not.toHaveProperty("storyIpId");
+    expect(body.storyIpId).toBeUndefined();
+    expect(body.storyIpSkipped).toBe("register_via_capability");
   });
 
-  it("POST /api/csd succeeds even when Story registration throws (best-effort)", async () => {
+  it("POST /api/csd succeeds when Story registration would throw and mock is not called", async () => {
     mockRegisterCapabilityAsIP.mockRejectedValueOnce(
       new Error("Story network unavailable"),
     );
@@ -273,10 +273,12 @@ describe("CSD Publish → Auto Story IP Registration", () => {
 
     // Primary flow must succeed
     expect(res.statusCode).toBe(200);
-    const body = res.json<{ registered: boolean; storyIpId?: string }>();
+    const body = res.json<{ registered: boolean; storyIpId?: string; storyIpSkipped?: string }>();
     expect(body.registered).toBe(true);
-    // storyIpId is absent when registration fails
-    expect(body.storyIpId).toBeUndefined();
+    expect(body.storyIpSkipped).toBe("register_via_capability");
+    expect(body).not.toHaveProperty("storyIpId");
+    expect(mockRegisterCapabilityAsIP).not.toHaveBeenCalled();
+    expect(mockGetStoryIPService).not.toHaveBeenCalled();
   });
 
   it("POST /api/csd returns 400 for invalid CSD regardless of Story service", async () => {
@@ -291,7 +293,7 @@ describe("CSD Publish → Auto Story IP Registration", () => {
     expect(mockRegisterCapabilityAsIP).not.toHaveBeenCalled();
   });
 
-  it("POST /api/csd uses default designerAddress when not provided", async () => {
+  it("POST /api/csd with no designerAddress makes no Story call at all", async () => {
     const csdWithoutDesigner = { ...VALID_CSD };
     // Remove designer fields - they come through req.body not the CSD schema
     delete (csdWithoutDesigner as Record<string, unknown>).designerAddress;
@@ -307,13 +309,9 @@ describe("CSD Publish → Auto Story IP Registration", () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(mockRegisterCapabilityAsIP).toHaveBeenCalledOnce();
-    const [, options] = mockRegisterCapabilityAsIP.mock.calls[0];
-    // Default address should be used
-    expect(options.designerAddress).toBe(
-      "0x0000000000000000000000000000000000000000",
-    );
-    expect(options.designerName).toBe("Unknown Designer");
+    expect(res.json<{ storyIpSkipped?: string }>().storyIpSkipped).toBe("register_via_capability");
+    expect(mockGetStoryIPService).not.toHaveBeenCalled();
+    expect(mockRegisterCapabilityAsIP).not.toHaveBeenCalled();
   });
 });
 
@@ -365,6 +363,7 @@ describe("processEvidence → Auto Story Derivative IP", () => {
     const [parentIpId, evidence] = mockRegisterJobAsDerivative.mock.calls[0];
     expect(parentIpId).toBe("0xmock_parent_ip");
     expect(evidence.jobId).toBe("job-004");
+    expect(evidence.operatorAddress).toBe("0x1111111111111111111111111111111111111111");
   });
 
   it("does NOT call registerJobAsDerivative when job has no Story IP registration", async () => {
@@ -459,7 +458,7 @@ describe("releaseMilestone → Auto Story Royalty Payment", () => {
     resetSettlementService();
   });
 
-  it("calls payJobRoyalty when job has a derivative IP link", async () => {
+  it("does not call payJobRoyalty when job has a derivative IP link and release succeeds", async () => {
     const escrowMod = await import("../contracts/escrow-client.js");
     vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
 
@@ -501,13 +500,7 @@ describe("releaseMilestone → Auto Story Royalty Payment", () => {
     expect(result.status).toBe("released");
     expect(result.txHash).toBe("0xrelease_tx");
 
-    // Story royalty payment should have been triggered
-    expect(mockPayJobRoyalty).toHaveBeenCalledOnce();
-    const [ipId, royaltyAmount] = mockPayJobRoyalty.mock.calls[0];
-    expect(ipId).toBe("0xchild_ip_royalty");
-    // royaltyAmount should be 5% of default milestone amount
-    const expectedAmount = String(Math.floor(1_000_000 * 5 / 100)); // 50000
-    expect(royaltyAmount).toBe(expectedAmount);
+    expect(mockPayJobRoyalty).not.toHaveBeenCalled();
   });
 
   it("does NOT call payJobRoyalty when no derivative IP link exists", async () => {
@@ -526,7 +519,7 @@ describe("releaseMilestone → Auto Story Royalty Payment", () => {
     expect(mockPayJobRoyalty).not.toHaveBeenCalled();
   });
 
-  it("releaseMilestone succeeds even when payJobRoyalty throws (best-effort)", async () => {
+  it("releaseMilestone succeeds and does not call payJobRoyalty even when payJobRoyalty would throw", async () => {
     const escrowMod = await import("../contracts/escrow-client.js");
     vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
 
@@ -568,10 +561,11 @@ describe("releaseMilestone → Auto Story Royalty Payment", () => {
       "0xDeAdBeEf00000000000000000000000000000001",
     );
 
-    // Escrow release must succeed despite Story royalty failure
+    // Escrow release must succeed; payJobRoyalty is never called
     expect(result.status).toBe("released");
     expect(result.txHash).toBe("0xrelease_tx");
     expect(result.error).toBeUndefined();
+    expect(mockPayJobRoyalty).not.toHaveBeenCalled();
   });
 
   it("releaseMilestone still fails when write is disabled (unrelated to Story)", async () => {
@@ -592,7 +586,7 @@ describe("releaseMilestone → Auto Story Royalty Payment", () => {
     expect(mockPayJobRoyalty).not.toHaveBeenCalled();
   });
 
-  it("respects STORY_ROYALTY_PERCENT env variable", async () => {
+  it("does not call payJobRoyalty with STORY_ROYALTY_PERCENT and STORY_MILESTONE_AMOUNT set", async () => {
     const escrowMod = await import("../contracts/escrow-client.js");
     vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
 
@@ -626,19 +620,191 @@ describe("releaseMilestone → Auto Story Royalty Payment", () => {
     process.env.STORY_MILESTONE_AMOUNT = "2000000";
 
     const service = getSettlementService();
-    await service.releaseMilestone(
+    const result = await service.releaseMilestone(
       "job-001",
       0,
       mkAttestation(),
       "0xDeAdBeEf00000000000000000000000000000001",
     );
 
-    const [, royaltyAmount] = mockPayJobRoyalty.mock.calls[0];
-    // 10% of 2000000 = 200000
-    expect(royaltyAmount).toBe("200000");
+    expect(result.status).toBe("released");
+    expect(mockPayJobRoyalty).not.toHaveBeenCalled();
 
     // Cleanup env vars
     delete process.env.STORY_ROYALTY_PERCENT;
     delete process.env.STORY_MILESTONE_AMOUNT;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// N1-N3 (R5) — automatic derivative operator, unrecorded link, labels
+// ---------------------------------------------------------------------------
+
+describe("R5 automatic derivative operator and recording", () => {
+  let emitSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let auditSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let insertSpy: ReturnType<typeof vi.spyOn> | undefined;
+
+  beforeEach(() => {
+    process.env.PCC_DB_PATH = ":memory:";
+    initStore({ seed: true });
+    resetSettlementService();
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    emitSpy?.mockRestore();
+    auditSpy?.mockRestore();
+    insertSpy?.mockRestore();
+    emitSpy = undefined;
+    auditSpy = undefined;
+    insertSpy = undefined;
+    closeStore();
+    resetSettlementService();
+  });
+
+  async function seedIpRegistration(ipId = "0xmock_parent_ip_r5") {
+    const { getRepos } = await import("../db.js");
+    getRepos().story.insertIpRegistration({
+      ipId,
+      nftTokenId: "1",
+      licenseTermsId: "1",
+      txHash: "0xtx_parent_r5",
+      capabilityId: "cap-nyc-fdm",
+      csdUrl: "pcc://capabilities/fdm/v2",
+      chain: "story-aeneid",
+      registeredAt: new Date().toISOString(),
+    });
+  }
+
+  it.each(["", "0x0000000000000000000000000000000000000000", "operator-alice"])(
+    "N1 ownerless kernel operator %j skips Story derivative with operator_unknown",
+    async (operatorValue) => {
+      await seedIpRegistration();
+      const { getRepos } = await import("../db.js");
+      getRepos().kernels.update("kernel-nyc", { operatorAddress: operatorValue });
+
+      emitSpy = vi.spyOn(pipelineTelemetry, "emit");
+      auditSpy = vi.spyOn(auditService, "log");
+
+      const service = getSettlementService();
+      const result = await service.processEvidence(makeBundle(), "job-004");
+
+      expect(result.evidenceBundleId).toBe("bundle-story-001");
+      expect(mockRegisterJobAsDerivative).not.toHaveBeenCalled();
+
+      const skipped = emitSpy.mock.calls.find(
+        (c) => c[0] === "job-004" && c[1] === "settlement_claim" && c[2] === "skipped",
+      );
+      expect(skipped).toBeDefined();
+      expect((skipped?.[3] as { metadata?: Record<string, unknown> })?.metadata?.reason).toBe("operator_unknown");
+
+      const storyAudits = auditSpy.mock.calls.filter((c) =>
+        String((c[0] as { eventType?: string }).eventType).startsWith("settlement.story_"),
+      );
+      expect(storyAudits).toEqual([]);
+    },
+  );
+
+  it("N2 unrecorded derivative link emits failed derivative_unrecorded and audits settlement.story_unrecorded", async () => {
+    await seedIpRegistration();
+    const { getRepos } = await import("../db.js");
+    insertSpy = vi.spyOn(getRepos().story, "insertDerivativeLink").mockImplementation(() => {
+      throw new Error("db insert failed");
+    });
+
+    emitSpy = vi.spyOn(pipelineTelemetry, "emit");
+    auditSpy = vi.spyOn(auditService, "log");
+
+    const service = getSettlementService();
+    const result = await service.processEvidence(makeBundle(), "job-004");
+
+    expect(result.evidenceBundleId).toBe("bundle-story-001");
+    expect(mockRegisterJobAsDerivative).toHaveBeenCalled();
+
+    const completed = emitSpy.mock.calls.filter(
+      (c) => c[0] === "job-004" && c[1] === "settlement_claim" && c[2] === "completed",
+    );
+    expect(completed).toEqual([]);
+
+    const failed = emitSpy.mock.calls.find(
+      (c) => c[0] === "job-004" && c[1] === "settlement_claim" && c[2] === "failed",
+    );
+    expect(failed).toBeDefined();
+    const failedMetadata = (failed?.[3] as { metadata?: Record<string, unknown> })?.metadata;
+    expect(failedMetadata?.reason).toBe("derivative_unrecorded");
+    expect(failedMetadata?.derivativeIpId).toBeDefined();
+    expect(failedMetadata?.parentIpId).toBeDefined();
+
+    const auditCalls = auditSpy.mock.calls.map((c) => c[0] as { eventType: string; metadata?: Record<string, unknown> });
+    expect(auditCalls.some((a) => a.eventType === "settlement.story_unrecorded")).toBe(true);
+    expect(auditCalls.some((a) => a.eventType === "settlement.story_registered")).toBe(false);
+    const unrecorded = auditCalls.find((a) => a.eventType === "settlement.story_unrecorded");
+    expect(unrecorded?.metadata?.reason).toBe("derivative_unrecorded");
+    expect(unrecorded?.metadata?.derivativeIpId).toBe(failedMetadata?.derivativeIpId);
+    expect(unrecorded?.metadata?.parentIpId).toBe(failedMetadata?.parentIpId);
+  });
+
+  it("N3 completed telemetry and story_registered audit carry simulated true when mock link is simulated", async () => {
+    await seedIpRegistration();
+    mockRegisterJobAsDerivative.mockResolvedValueOnce({
+      parentIpId: "0xmock_parent_ip_r5",
+      childIpId: "0xmock_child_r5",
+      licenseTokenId: "55",
+      jobId: "job-004",
+      evidenceBundleHash: "sha256:mock_bundle_hash",
+      txHash: "0xmock_deriv_tx",
+      linkedAt: new Date().toISOString(),
+      simulated: true,
+    });
+
+    emitSpy = vi.spyOn(pipelineTelemetry, "emit");
+    auditSpy = vi.spyOn(auditService, "log");
+
+    const service = getSettlementService();
+    await service.processEvidence(makeBundle(), "job-004");
+
+    const completed = emitSpy.mock.calls.find(
+      (c) => c[0] === "job-004" && c[1] === "settlement_claim" && c[2] === "completed",
+    );
+    expect(completed).toBeDefined();
+    expect((completed?.[3] as { metadata?: Record<string, unknown> })?.metadata?.simulated).toBe(true);
+
+    const audit = auditSpy.mock.calls
+      .map((c) => c[0] as { eventType: string; metadata?: Record<string, unknown> })
+      .find((a) => a.eventType === "settlement.story_registered");
+    expect(audit).toBeDefined();
+    expect(audit?.metadata?.simulated).toBe(true);
+  });
+
+  it("N3 completed telemetry and story_registered audit carry simulated false when mock link has no simulated key", async () => {
+    await seedIpRegistration();
+    mockRegisterJobAsDerivative.mockResolvedValueOnce({
+      parentIpId: "0xmock_parent_ip_r5",
+      childIpId: "0xmock_child_r5_nosim",
+      licenseTokenId: "55",
+      jobId: "job-004",
+      evidenceBundleHash: "sha256:mock_bundle_hash",
+      txHash: "0xmock_deriv_tx",
+      linkedAt: new Date().toISOString(),
+    });
+
+    emitSpy = vi.spyOn(pipelineTelemetry, "emit");
+    auditSpy = vi.spyOn(auditService, "log");
+
+    const service = getSettlementService();
+    await service.processEvidence(makeBundle(), "job-004");
+
+    const completed = emitSpy.mock.calls.find(
+      (c) => c[0] === "job-004" && c[1] === "settlement_claim" && c[2] === "completed",
+    );
+    expect(completed).toBeDefined();
+    expect((completed?.[3] as { metadata?: Record<string, unknown> })?.metadata?.simulated).toBe(false);
+
+    const audit = auditSpy.mock.calls
+      .map((c) => c[0] as { eventType: string; metadata?: Record<string, unknown> })
+      .find((a) => a.eventType === "settlement.story_registered");
+    expect(audit).toBeDefined();
+    expect(audit?.metadata?.simulated).toBe(false);
   });
 });

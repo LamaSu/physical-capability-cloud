@@ -143,7 +143,6 @@ export async function csdRoutes(app: FastifyInstance) {
 
   // ── POST /api/csd ───────────────────────────────────────────────
   // Register a new CSD; validates against schema first.
-  // After successful registration, auto-registers as Story Protocol IP Asset (best-effort).
   app.post<{
     Body: {
       designerAddress?: string;
@@ -168,42 +167,7 @@ export async function csdRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: message });
     }
 
-    // ── Best-effort: Auto-register as Story Protocol IP Asset ──────
-    let storyIpId: string | undefined;
-    try {
-      const { getStoryIPService } = await import("@pcc/contracts");
-      const storyIPService = getStoryIPService();
-
-      const designerAddress = req.body.designerAddress ?? "0x0000000000000000000000000000000000000000";
-      const designerName = req.body.designerName ?? "Unknown Designer";
-      const commercialRevShare = typeof req.body.commercialRevShare === "number" ? req.body.commercialRevShare : 5;
-
-      const csd = parsed.data;
-      const capabilityId = csd.url;
-
-      const registration = await storyIPService.registerCapabilityAsIP(
-        {
-          id: capabilityId,
-          name: csd.name,
-          type: csd.kind,
-          kernelId: "unknown",
-          description: csd.description,
-        },
-        {
-          designerAddress,
-          designerName,
-          commercialRevShare,
-        },
-      );
-
-      storyIpId = registration.ipId;
-
-      // DB persistence for Story IP is deferred to ip.ts routes (best-effort, Wave 2)
-    } catch (storyErr) {
-      console.warn("[csd] Story IP registration failed (best-effort):", storyErr instanceof Error ? storyErr.message : storyErr);
-    }
-
-    return { registered: true, url: parsed.data.url, storyIpId };
+    return { registered: true, url: parsed.data.url, storyIpSkipped: "register_via_capability" };
   });
 
   // ── GET /api/csd/:url ───────────────────────────────────────────
