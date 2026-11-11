@@ -164,6 +164,10 @@ describe("copy contract: build, settlement, IP routes and test job", () => {
       'description: "Submit a test job for one device on a kernel (Step 4 of onboarding). The gateway runs it only for a kernel it operates in-process; for any other kernel it refuses and runs nothing. Every reply from the test-job handler says whether the job ran and passed.",',
     );
     expect(setupAgent).not.toContain("verify the full pipeline end-to-end");
+    expect(setupAgent).toContain(
+      '"one device; the gateway runs it only on its in-process kernel. Returns whether registration succeeded and the test result.",',
+    );
+    expect(setupAgent).not.toContain("runs a test job to verify");
     const llms = readRepoFile("apps/dashboard/public/llms.txt");
     expect(llms).toContain("`POST /api/setup/test-job` (in-process kernel only; activates nothing).");
     expect(llms).not.toContain("auto-activate");
