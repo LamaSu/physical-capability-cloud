@@ -62,11 +62,15 @@ PCC_URL=http://localhost:3200 pcc jobs list
 |---|---|---|
 | `PCC_URL` | `https://pcc-gateway-production.up.railway.app` | Gateway base URL. Production is `https://capability.network`. |
 | `PCC_API_KEY` | none | Bearer token sent on every API call (provisioned via `POST /api/auth/provision`). Optional for public endpoints; required for write operations. |
+| `PCC_BUYER_CHAIN_ID` | `84532` | The buyer tools' chain. Only `84532` (Base Sepolia, a test network) and `31337` (a local anvil chain) are accepted. |
+| `PCC_BUYER_PRIVATE_KEY` | none | A dedicated test-network wallet's key, for the buyer tools. Never use a wallet that holds real funds. |
+| `PCC_BUYER_SIGNER_URL` | none | An external signer's JSON-RPC URL (https, or http on localhost), used with `PCC_BUYER_ADDRESS` instead of a key. |
+| `PCC_BUYER_ADDRESS` | none | The external signer's wallet address. |
 
 The server logs the resolved gateway URL to stderr on boot. MCP protocol
 traffic uses stdin/stdout — stderr is safe for logs.
 
-## Tool catalog (72 tools)
+## Tool catalog (80 tools)
 
 Organized by capability domain. Every tool name is prefixed `pcc_` so it does
 not collide with other MCP servers in the same client.
@@ -114,6 +118,10 @@ auto-expire after 30 minutes; committed sessions are immutable. Requires
 | `pcc_negotiate_review` | Generate on-chain-ready contract terms from the quote (→ reviewing). |
 | `pcc_negotiate_commit` | Lock in — creates the job, execution scope, and milestone escrow (→ committed). |
 | `pcc_negotiate_cancel` | Cancel a non-committed session. |
+
+### Buyer (3)
+
+`pcc_buyer_sign_in`, `pcc_buyer_sign_out` and `pcc_buyer_order_status`. Sign-in proves the buyer's wallet with Sign-In with Ethereum and keeps the gateway's session key in this process's memory only. While it is held, every call sends it in place of `PCC_API_KEY`, so a negotiation can name the proven wallet as its buyer, and a tool that needs an operator key is refused until sign-out. Sign-out asks the gateway to revoke the session. The order status reads the gateway's stored funding records; a verification is a past check at a block, not a live balance. These tools move no funds, and sign-in accepts only a test network.
 
 ### Workflows (1)
 
@@ -243,11 +251,11 @@ allowlist:
 | **exec** | `pcc_setup_test_job`, `pcc_discover_onboard`, `pcc_build_contract`, `pcc_compile_workflow`, `pcc_capture_challenge`, `pcc_negotiate_create`, `pcc_negotiate_commit` | Triggers gateway-side execution or compilation. `pcc_negotiate_commit` also creates a milestone escrow — treat as money-adjacent. |
 | **credential / network** | `pcc_create_onramp_session`, `pcc_submit_withdrawal`, `pcc_send_enterprise_payout`, `pcc_ip_claim`, `pcc_ip_set_splits`, `pcc_ip_register_capability` | Moves real money or sets royalty splits. Always require explicit user approval. |
 
+`pcc_buyer_sign_in` signs with the buyer's wallet and mints a session key: treat it as credential-class and require the user's approval. `pcc_buyer_sign_out` revokes that key.
+
 Tool inputs are validated twice — by Zod schemas in this server (which
 generates JSON Schema for MCP clients) and again by the gateway server-side.
-This server is a thin transport layer; it does not store credentials or
-hold session state. Bearer tokens flow from `PCC_API_KEY` through the
-request and are never persisted.
+This server is a thin transport layer and persists no credentials. The buyer tools hold one session key in memory while signed in; nothing else holds session state. Bearer tokens are never written to disk or logged.
 
 Every gateway call goes over HTTPS to `PCC_URL`. The server logs only the
 resolved gateway URL on boot — never request bodies or response payloads.

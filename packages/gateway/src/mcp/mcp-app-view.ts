@@ -464,6 +464,7 @@ interface ViewNode {
   textContent: string | null;
   parentNode: { removeChild(child: ViewNode): void } | null;
   className: string;
+  setAttribute(name: string, value: string): void;
   appendChild(child: ViewNode): ViewNode;
 }
 interface ViewDocument {
@@ -887,6 +888,8 @@ export function renderGalleryIntoView(win: ViewWindow, entries: unknown[]): bool
   if (status && status.parentNode) status.parentNode.removeChild(status);
   if (!entries.length) {
     var empty = doc.createElement("p");
+    empty.className = "pcc-src-ephemeral";
+    empty.setAttribute("data-source", "ephemeral");
     empty.textContent = "No dashboards found.";
     root.appendChild(empty);
     return true;
@@ -1354,7 +1357,7 @@ function buildMcpAppDashboardHtml(nonce: string = cspNonce()): string {
 </head>
 <body>
 <main id="pcc-root">
-  <p id="pcc-kit-status">Waiting for the host to hand off a dashboard&hellip;</p>
+  <p id="pcc-kit-status" class="pcc-src-ephemeral" data-source="ephemeral">Waiting for the host to hand off a dashboard&hellip;</p>
 </main>
 <script type="application/json" id="pcc-manifest">null</script>
 <script nonce="${nonce}">
@@ -1388,7 +1391,7 @@ function buildMcpAppGalleryHtml(nonce: string = cspNonce()): string {
 </head>
 <body>
 <main id="pcc-root">
-  <p id="pcc-kit-status">Waiting for the host to hand off saved dashboards&hellip;</p>
+  <p id="pcc-kit-status" class="pcc-src-ephemeral" data-source="ephemeral">Waiting for the host to hand off saved dashboards&hellip;</p>
 </main>
 <script nonce="${nonce}">
 ${galleryViewBootScript()}
@@ -1434,7 +1437,7 @@ function buildMcpAppDashboardHtmlForManifest(
 </head>
 <body>
 <main id="pcc-root">
-  <p id="pcc-kit-status">Loading the PCC dashboard&hellip;</p>
+  <p id="pcc-kit-status" class="pcc-src-ephemeral" data-source="ephemeral">Loading the PCC dashboard&hellip;</p>
 </main>
 <script type="application/json" id="pcc-manifest">${manifestJson}</script>
 <script nonce="${nonce}">

@@ -79,13 +79,6 @@ All endpoints are relative to the base URL above. Most return JSON.
 | GET | /api/escrow/chain/token/:tokenAddress/allowance/:owner/:spender | ERC-20 allowance |
 | GET | /api/escrow/chain/:address/dispute/:milestoneIndex | Dispute details |
 | GET | /api/escrow/chain/write-status | Chain write capability status |
-| POST | /api/escrow/chain/:address/fund | Fund an escrow |
-| POST | /api/escrow/chain/:address/approve | Approve token spending |
-| POST | /api/escrow/chain/:address/release/:milestoneIndex | Release milestone |
-| POST | /api/escrow/chain/:address/dispute/:milestoneIndex | File a dispute |
-| POST | /api/escrow/chain/:address/deposit-bond/:milestoneIndex | Deposit a bond |
-| POST | /api/escrow/chain/:address/evidence/:milestoneIndex | Submit evidence |
-| POST | /api/escrow/chain/:address/attestation/:milestoneIndex | Submit attestation |
 | GET | /api/settlement/status | Settlement pipeline status |
 | GET | /api/settlement/epochs | Settlement epochs |
 | GET | /api/settlement/:jobId | Job settlement status from the job's own escrow records (settled only when a settlement read confirms it; a recorded release is reported_released; mock escrows are simulated) |
@@ -365,10 +358,9 @@ AssuranceTier -- evidence depth + liability
 2. \`POST /api/build/options\` -- configure your order (body: \`{ type: "fdm_printing" }\`)
 3. \`POST /api/build/price\` -- get a quote (body: \`{ type, selections }\`)
 4. \`POST /api/build/contract\` -- create the contract (body: \`{ type, selections, assuranceTier }\`)
-5. Fund the escrow: \`POST /api/escrow/chain/:address/fund\`
-6. Track progress: \`GET /api/jobs/:jobId\` or SSE: \`GET /sse/stream/job/:jobId\`
-7. Evidence is collected automatically by the kernel
-8. Settlement happens when evidence meets tier requirements
+5. Track progress: \`GET /api/jobs/:jobId\` or SSE: \`GET /sse/stream/job/:jobId\`
+6. Evidence is collected automatically by the kernel
+7. Settlement happens when evidence meets tier requirements
 
 ### For Operators: "I want to offer my equipment"
 1. \`GET /api/setup/detect\` -- check what is already configured
@@ -414,7 +406,7 @@ When your user needs to SEE something (charts, tables, status dashboards), you s
 - Service Status: ${baseUrl}/api/status/live
 - Agent Registration (ERC-8004): ${baseUrl}/.well-known/agent-registration.json
 - Agent Card (Google A2A): ${baseUrl}/.well-known/agent-card.json
-- Full Agent Package (56 MCP tools): ${baseUrl}/agent-package.json
+- Full Agent Package (170+ MCP tools): ${baseUrl}/agent-package.json
 - Documentation: ${baseUrl}/docs
 - Source: https://capability.network
 
@@ -493,8 +485,6 @@ function buildStructuredPack(baseUrl: string): {
         endpoints: [
           { method: "GET", path: "/api/escrow", description: "List escrow contracts" },
           { method: "GET", path: "/api/escrow/:escrowId", description: "Get escrow details" },
-          { method: "POST", path: "/api/escrow/chain/:address/fund", description: "Fund an escrow" },
-          { method: "POST", path: "/api/escrow/chain/:address/release/:milestoneIndex", description: "Release milestone" },
           { method: "GET", path: "/api/settlement/status", description: "Settlement pipeline status" },
           { method: "GET", path: "/api/settlement/epochs", description: "Settlement epochs" },
         ],

@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifySwagger from "@fastify/swagger";
-import { readFileSync } from "node:fs";
 import { eq, schema } from "@pcc/store";
 import { getRepos, getStore } from "../db.js";
 import { createOperationIdTransform } from "../openapi/operation-id.js";
@@ -209,7 +208,7 @@ describe("GET /api/jobs/:jobId/funding (N268-4)", () => {
     expect(res.headers["cache-control"]).toBe("no-store");
   });
 
-  it("H2: only jobId and scopes are returned, preserving all eight DTO fields and verification fields", async () => {
+  it("H2: only jobId and scopes are returned, preserving all nine DTO fields and verification fields", async () => {
     installActivationTerms();
     const { jobId, scopeId } = await paidScope(fixture);
     const record = plantRecord(installTestFundingRecordStore(), scopeId);
@@ -218,8 +217,8 @@ describe("GET /api/jobs/:jobId/funding (N268-4)", () => {
     expect(Object.keys(res.json()).sort()).toEqual(["jobId", "scopes"]);
     expect(res.json().jobId).toBe(jobId);
     expect(res.json().scopes).toHaveLength(1);
-    expect(Object.keys(res.json().scopes[0]).sort()).toEqual(["asOf", "binding", "jobId", "schemaId", "scope", "scopeId", "state", "verification"]);
-    expect(res.json().scopes[0]).toMatchObject({ schemaId: "pcc.funding-status/v1", asOf: iso(T0), verification: { fundingBlockHash: record.fundingBlockHash } });
+    expect(Object.keys(res.json().scopes[0]).sort()).toEqual(["asOf", "binding", "deployment", "jobId", "schemaId", "scope", "scopeId", "state", "verification"]);
+    expect(res.json().scopes[0]).toMatchObject({ schemaId: "pcc.funding-status/v2", asOf: iso(T0), verification: { fundingBlockHash: record.fundingBlockHash } });
     const expected = jobFundingOf(jobId, KERNEL, iso(T0));
     expect(expected.read).toBe("ok");
     if (expected.read !== "ok") throw new Error("fixture funding read failed");
@@ -342,19 +341,4 @@ it("F4f (neg-testnet-buyer-not-listed): testnet-only terms without the buyer lis
   expectPassThrough(res.json(), jobId);
 });
 
-it("F3d: jobFundingOf is operator-relay.ts's fundingForListedJob, verbatim apart from its names", () => {
-  const text = (rel: string) => readFileSync(new URL(rel, import.meta.url), "utf8");
-  const cut = (src: string) => {
-    const start = src.indexOf("/** One listed job's buyer funding");
-    const end = src.indexOf("\n}\n", start);
-    expect(start).toBeGreaterThanOrEqual(0);
-    expect(end).toBeGreaterThan(start);
-    return src.slice(start, end + 3);
-  };
-  const norm = (s: string) => s.replace(/^export /gm, "").replaceAll("fundingForListedJob", "jobFundingOf").replaceAll("OperatorJobFunding", "JobFunding");
-  const relay = cut(text("../routes/operator-relay.ts"));
-  const copy = cut(text("../readmodels/job-funding.ts"));
-  expect(norm(relay)).toContain("function jobFundingOf(jobId: string, kernelId: string, asOf: string): JobFunding {");
-  expect(norm(copy)).toBe(norm(relay));
-});
 });

@@ -318,6 +318,7 @@ describe("FundingStatusDTO projection", () => {
         verifierVersion: "verifier-test/1",
         verifiedAt: "2026-10-08T12:20:00.000Z",
       },
+      deployment: { basis: "configured", chainId: 84532, network: "base-sepolia", chainClass: "testnet", scheduleTestnetOnly: false, scheduleId: null, recordSha256: null },
     });
   });
 

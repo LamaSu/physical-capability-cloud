@@ -3,39 +3,12 @@
   "entries": [
     {
       "source": "agent-package",
-      "tool": "deposit_bond",
-      "params": [
-        "address"
-      ],
-      "class": "money",
-      "why": "Escrow target receives the operator bond for a milestone."
-    },
-    {
-      "source": "agent-package",
       "tool": "distribute_royalties",
       "params": [
         "splits[].address"
       ],
       "class": "money",
       "why": "Each split address receives a share of IP royalty revenue."
-    },
-    {
-      "source": "agent-package",
-      "tool": "file_escrow_dispute",
-      "params": [
-        "address"
-      ],
-      "class": "money",
-      "why": "Escrow target holds the challenger bond and disputed milestone funds."
-    },
-    {
-      "source": "agent-package",
-      "tool": "fund_escrow",
-      "params": [
-        "address"
-      ],
-      "class": "money",
-      "why": "Escrow target receives the funding transfer."
     },
     {
       "source": "agent-package",
@@ -246,33 +219,6 @@
       ],
       "class": "money",
       "why": "Operator wallet owns the derivative IP and its royalty entitlement."
-    },
-    {
-      "source": "agent-package",
-      "tool": "release_milestone",
-      "params": [
-        "address"
-      ],
-      "class": "money",
-      "why": "Escrow target releases the milestone payment."
-    },
-    {
-      "source": "agent-package",
-      "tool": "submit_attestation",
-      "params": [
-        "address"
-      ],
-      "class": "money",
-      "why": "Escrow target records an attestation used to authorize settlement."
-    },
-    {
-      "source": "agent-package",
-      "tool": "submit_evidence_hash",
-      "params": [
-        "address"
-      ],
-      "class": "money",
-      "why": "Escrow target records evidence used to authorize settlement."
     },
     {
       "source": "mcp",

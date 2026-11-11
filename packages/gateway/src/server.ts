@@ -51,6 +51,7 @@ import { capabilityAvailabilityRoutes } from "./routes/capability-availability.j
 import { captureRoutes } from "./routes/capture.js";
 import { toolCatalogRoutes } from "./routes/tool-catalog.js";
 import { kitRoutes } from "./routes/kits.js";
+import { operatorBindingRoutes } from "./routes/operator-binding.js";
 import { composeRoutes } from "./routes/compose.js";
 import { agentPlanRoutes } from "./routes/agent-plans.js";
 import { registrySnapshotRoutes } from "./routes/registry-snapshot.js";
@@ -371,7 +372,7 @@ export async function createGateway(port = 3200) {
         version: process.env.npm_package_version ?? "0.1.0",
         description:
           "Agent-native API for discovering and invoking physical capabilities. " +
-          "See https://capability.network/agent-package.json for the 254-tool agent package.",
+          "See https://capability.network/agent-package.json for the agent package.",
       },
       servers: [{ url: gatewayUrlForOpenApi }],
       components: {
@@ -704,6 +705,7 @@ export async function createGateway(port = 3200) {
   await app.register(toolCatalogRoutes);
   // Capability Kit registry (kits K1 slice 1): write-once, verified, durable-volume backed.
   await app.register(kitRoutes);
+  await app.register(operatorBindingRoutes);
   await app.register(composeRoutes);
   // R9: externally authored plans. Validate is a live read; accept is money-path (the scope checker
   // default-denies it) and answers 503 until the R13 store, #349, the evidence map, the fee policy and

@@ -126,7 +126,7 @@ PCC's existing types focus on physical primitives (kernel, device, capture, evid
 | `ai-model` | "GPU-served inference for surface defect detection" | NEW (use `@pcc/digital-kit/templates/inference-endpoint`) |
 | `knowledge-worker` | "Automate the 'review purchase orders' workflow" | NEW (purely human-input-driven flow) |
 
-The PCC `agent-package` (218 tools today) needs minimal additions — mostly registry-side: `register_data_product`, `register_ai_model`, `match_digital_capabilities`. Most of the existing 218 tools (auth, escrow, evidence, settlement, reputation) work for digital just as well as physical.
+The PCC `agent-package` (170+ tools today) needs minimal additions — mostly registry-side: `register_data_product`, `register_ai_model`, `match_digital_capabilities`. Most of the existing 170+ tools (auth, escrow, evidence, settlement, reputation) work for digital just as well as physical.
 
 ---
 

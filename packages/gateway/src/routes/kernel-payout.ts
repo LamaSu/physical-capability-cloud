@@ -42,7 +42,11 @@ export async function kernelPayoutRoutes(app: FastifyInstance, opts: { publicCli
     // An admin secret never supplies binding authority, including beside an owner proof.
     const authority = { ...principal, admin: false };
     const refusal = refuseKernelAction(req, authority, req.params.kernelId, "decide");
-    if (refusal) return reply.code(refusal.status).send(refusal.body);
+    if (refusal) return reply.code(refusal.status).send(
+      refusal.status === 403 && refusal.body.reason === "operator_proof_required"
+        ? { ...refusal.body, message: "Recording a payout wallet needs a wallet sign-in proof that you control the kernel's operator wallet. The admin secret and wallet-link proofs don't record one." }
+        : refusal.body,
+    );
     const chainId = resolveChainConfig().chain.id;
     const body = (req.body ?? {}) as { chainId?: unknown; consentVersion?: unknown; consentSha256?: unknown };
     if (!Number.isSafeInteger(body.chainId) || body.chainId !== chainId) return reply.code(400).send(invalidChain(chainId));

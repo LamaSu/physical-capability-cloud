@@ -48,7 +48,7 @@ Pick whichever fits you:
 - **Start page (all surfaces):** <https://capability.network/start> — cards for Claude
   Code, Claude Desktop, and web.
 - **Any LLM / your own agent:** fetch the open agent package and hand it to your model.
-  It's a single JSON file (200+ tools, input schemas, endpoint mappings, and a ready
+  It's a single JSON file (170+ tools, input schemas, endpoint mappings, and a ready
   system prompt). No auth required to read it:
   ```bash
   curl https://capability.network/agent-package.json

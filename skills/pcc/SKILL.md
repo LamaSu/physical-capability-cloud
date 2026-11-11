@@ -51,7 +51,7 @@ export PCC_BASE="${PCC_BASE:-https://capability.network}"
 
 Every path below is relative to it. The full machine-readable surface is
 also published as an OpenAPI 3 document (`GET /openapi.json`) and as a
-single-file agent package (`GET /agent-package.json` — 230+ tools with
+single-file agent package (`GET /agent-package.json` — 170+ tools with
 JSON-Schema inputs and HTTP endpoint mappings, built for any LLM that isn't
 Claude and doesn't have this skill loaded).
 
@@ -269,13 +269,14 @@ Both surfaces expose read-only catalog tools without auth; write operations
 If the user says "I run a print shop" or "I have an OT-2" or "I'm a
 courier," they're offering capability, not buying it. Provision a key, then
 `POST /api/kernels` to register their site and `POST /api/capabilities` to
-publish what it offers. `pip install "pcc-node[crypto]>=0.1.1" && pcc-node start` does
+publish what it offers. `pcc-node start` does
 hardware auto-detection and kernel registration in one command for operators
 who'd rather run a CLI than call the API directly. It needs an API key: provision
 one first and pass it as `PCC_API_KEY` or `--api-key`. Without one it stops,
-because the gateway refuses to provision a key without an email. Until
-0.1.1 is on PyPI, install `python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@1d11f37203f99eb1c9f2cfcd2b5ccf278e835820#subdirectory=packages/pcc-node"`.
-From 0.1.1 the node keeps the kernel online but takes no jobs itself: jobs run
+because the gateway refuses to provision a key without an email. Install
+this pinned commit, not a release from PyPI: `python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node"`.
+After an earlier pcc-node install, pip may keep that copy, because both report the same version: run that command again with `--force-reinstall --no-deps` after `install`.
+The node keeps the kernel online but takes no jobs itself: jobs run
 through the operating agent's typed operations.
 
 ## When NOT to use PCC
@@ -291,7 +292,7 @@ through the operating agent's typed operations.
 ## Reference
 
 - Full OpenAPI 3 spec: `GET /openapi.json`
-- Full agent package (230+ tools, JSON-Schema inputs): `GET /agent-package.json`
+- Full agent package (170+ tools, JSON-Schema inputs): `GET /agent-package.json`
 - Agent Skills discovery index: `GET /.well-known/agent-skills/index.json`
 - A2A agent card: `GET /.well-known/agent-card.json`
 - Status: `GET /health`

@@ -652,7 +652,7 @@
       "args": "{ account: wallet.account, chain, to, data, nonceManager: wallet.account.nonceManager, }",
       "count": 1,
       "signer": "the payer's wallet",
-      "payload": "data parameter is locally encoded ERC20 approve(escrow, totalGross) or V-next ESCROW_ABI fund(configs, acceptance) from approveAndFund, or V-next FACTORY_ABI createEscrow(identity) to the pinned factory, for the predicted escrow, from ensureEscrow.",
+      "payload": "data parameter is locally encoded ERC20 approve(escrow, totalGross) or V-next ESCROW_ABI fund(configs, acceptance) from approveAndFund, or V-next FACTORY_ABI createEscrow(identity) to the pinned factory, for the predicted escrow, from ensureEscrow. reclaimUnits also passes V-next ESCROW_ABI reclaimAfterDeadline(unitId) data, for a verified clone whose payer() is the wallet, simulated at the pinned block before send.",
       "why": "Only the verified payer wallet funds the frozen prepared policy; send-time chain and local transaction checks bind the operation.",
       "bindings": {
         "data": "param"
@@ -665,7 +665,7 @@
       "args": "{ serializedTransaction }",
       "count": 1,
       "signer": "the payer's wallet",
-      "payload": "serializedTransaction is locally signed from exact simulated approve/fund data, or createEscrow data to the pinned factory for the predicted escrow, and parsed to check chain, target, data and zero value before broadcast.",
+      "payload": "serializedTransaction is locally signed from exact simulated approve/fund data, or createEscrow data to the pinned factory for the predicted escrow, and parsed to check chain, target, data and zero value before broadcast. reclaimUnits also passes V-next ESCROW_ABI reclaimAfterDeadline(unitId) data, for a verified clone whose payer() is the wallet, simulated at the pinned block before send.",
       "why": "Only the verified payer wallet funds the frozen prepared policy; send-time chain and local transaction checks bind the operation.",
       "bindings": {
         "serializedTransaction": "await wallet.signTransaction({ ...request, account: wallet.account, chain })"
@@ -678,7 +678,7 @@
       "args": "{ account: wallet.account!, chain, to, data, dataSuffix: \"0x\" }",
       "count": 1,
       "signer": "the payer's wallet",
-      "payload": "data parameter is locally encoded ERC20 approve, V-next ESCROW_ABI fund, or V-next FACTORY_ABI createEscrow to the pinned factory for the predicted escrow, simulated and bound to the frozen prepared policy before send.",
+      "payload": "data parameter is locally encoded ERC20 approve, V-next ESCROW_ABI fund, or V-next FACTORY_ABI createEscrow to the pinned factory for the predicted escrow, simulated and bound to the frozen prepared policy before send. reclaimUnits also passes V-next ESCROW_ABI reclaimAfterDeadline(unitId) data, for a verified clone whose payer() is the wallet, simulated at the pinned block before send.",
       "why": "Only the verified payer wallet funds the frozen prepared policy; send-time chain and local transaction checks bind the operation.",
       "bindings": {
         "data": "param"
@@ -691,7 +691,7 @@
       "args": "{ ...request, account: wallet.account, chain }",
       "count": 1,
       "signer": "the payer's wallet",
-      "payload": "request is locally prepared from the exact simulated approve/fund data, or createEscrow data to the pinned factory for the predicted escrow; signed bytes are checked for chain, target, data and zero value.",
+      "payload": "request is locally prepared from the exact simulated approve/fund data, or createEscrow data to the pinned factory for the predicted escrow; signed bytes are checked for chain, target, data and zero value. reclaimUnits also passes V-next ESCROW_ABI reclaimAfterDeadline(unitId) data, for a verified clone whose payer() is the wallet, simulated at the pinned block before send.",
       "why": "Only the verified payer wallet funds the frozen prepared policy; send-time chain and local transaction checks bind the operation.",
       "bindings": {
         "request": "await wallet.prepareTransactionRequest({ account: wallet.account, chain, to, data, nonceManager: wallet.account.nonceManager, })"

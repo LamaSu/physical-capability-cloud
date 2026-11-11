@@ -315,7 +315,7 @@ describe("negotiation + settlement correctness", () => {
     return res.json().jobId;
   }
   function complete(jobId: string) {
-    return app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} });
+    return app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: asAdmin, payload: {} });
   }
 
   describe("P1 — completion is idempotent and race-safe", () => {

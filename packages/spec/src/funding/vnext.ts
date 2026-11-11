@@ -56,6 +56,9 @@ export const MAX_PAYOUT_LEGS = 16;
 export const ECDSA_S_MAX = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0n;
 /** `UnitState.FUNDED_ACTIVE`. */
 export const UNIT_FUNDED_ACTIVE = 1;
+export const UNIT_STATE_NAMES = ["AWAITING_FUNDING", "FUNDED_ACTIVE", "PRIMARY_ASSERTED", "CHALLENGED", "BACKUP_PENDING", "BACKUP_ASSERTED", "RELEASE_ALLOCATED", "REFUND_ALLOCATED", "SETTLED_RELEASED", "SETTLED_REFUNDED"] as const;
+export const UNIT_REFUND_ALLOCATED = 7;
+export const UNIT_SETTLED_REFUNDED = 9;
 
 /**
  * EIP-1167 as the factory's Clones.sol builds it (its line 23). The 10-byte creation code copies the 45 bytes after
@@ -361,4 +364,14 @@ export const ESCROW_ABI = parseAbi([
   "error BadOperatorSignature()",
   "error NotActive()",
   "error UnitNotFound()",
+  "function payer() view returns (address)",
+  "function unitTerms(bytes32 unitId) view returns (uint256 milestoneIndex_, bytes32 stepId_, uint8 requestedTier_, uint256 reclaimAt_, bytes32 payoutConfigHash_, uint16 compositionSchemaVersion_, bool evidenceCommitted_)",
+  "function reclaimAfterDeadline(bytes32 unitId)",
+  "error TooEarlyToReclaim()",
+  "error AuthorizationUsed()",
+  "error Insolvent()",
+  "error RuntimeDomainMismatch()",
+  "error ContradictoryTokenState()",
+  "error NonCanonicalTransferReturn()",
+  "error WrongTransferDelta()",
 ]);

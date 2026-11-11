@@ -274,4 +274,18 @@ describe("MCP Apps lifecycle — gallery (search) view", () => {
     deliver(toolResult({ entries: [], total: 0 }));
     expect(document.body.textContent).toContain("No dashboards found.");
   });
+
+  it("marks the empty state for zero entries ephemeral", () => {
+    setupGalleryDom();
+    const { win, posted, deliver } = makeWin();
+    runGalleryViewBoot(win as any);
+    completeInit(posted, deliver);
+    deliver(toolResult({ entries: [], total: 0 }));
+    const empty = Array.from(document.querySelectorAll("p")).find(
+      (node) => node.textContent === "No dashboards found.",
+    );
+    expect(document.querySelectorAll("#pcc-root > p")).toHaveLength(1);
+    expect(empty?.className).toBe("pcc-src-ephemeral");
+    expect(empty?.getAttribute("data-source")).toBe("ephemeral");
+  });
 });

@@ -30,7 +30,12 @@ from pcc_node import daemon
 from pcc_node.cli import main
 from pcc_node.config import NodeConfig
 from pcc_node.register import RegistrationError
+from tests.test_register_challenge import node_key_pair
 
+CHALLENGES = "/api/kernels/registration-challenges"
+PAIR = node_key_pair("11" * 32)
+BOUND = {"kernel": {"id": "k1", "signingKey": {"algorithm": "ed25519", "publicKey": "0x" + PAIR[0]}}, "created": True}
+BOUND_BYTES = json.dumps(BOUND).encode()
 KERNELS = "/api/kernels"
 BANNER = "Node running"
 
@@ -48,7 +53,9 @@ class Gateway:
             def _serve(self):
                 self.rfile.read(int(self.headers.get("Content-Length", "0")))
                 gw.requests.append((self.command, self.path))
-                if self.command == "POST" and self.path == KERNELS:
+                if self.command == "POST" and self.path == CHALLENGES:
+                    code, answer = 404, {"error": "not_found"}
+                elif self.command == "POST" and self.path == KERNELS:
                     code, answer = gw.kernel_answers.pop(0)
                 else:
                     code, answer = 200, {}
@@ -86,7 +93,7 @@ def surroundings(tmp_path, monkeypatch):
     pid_file, state_file = str(tmp_path / "pcc-node.pid"), str(tmp_path / "pcc-node-state.json")
     monkeypatch.setattr(daemon, "PID_FILE", pid_file)
     monkeypatch.setattr(daemon, "STATE_FILE", state_file)
-    monkeypatch.setattr(daemon, "load_or_create_keys", lambda *a, **k: ("ab" * 32, "cd" * 32))
+    monkeypatch.setattr(daemon, "load_or_create_keys", lambda *a, **k: PAIR)
     monkeypatch.setattr(daemon, "discover_network", lambda timeout=0.5: [])
     monkeypatch.setattr(daemon, "detect_camera_device", lambda: None)
     monkeypatch.setattr("pcc_node.ui_server.start_ui_server", lambda **kwargs: None)
@@ -118,8 +125,7 @@ def _start(tmp_path, gateway, separate_stderr=False):
     with mock.patch("pcc_node.cli.is_running", return_value=(False, None)), \
          mock.patch("pcc_node.cli._interactive", return_value=False), \
          mock.patch("pcc_node.cli.detect_all", return_value=[]), \
-         mock.patch("pcc_node.cli.load_or_create_keys", return_value=("ab" * 32, "cd" * 32)), \
-         mock.patch("pcc_node.cli.register_signing_key", return_value=(200, {})):
+         mock.patch("pcc_node.cli.load_or_create_keys", return_value=PAIR):
         runner = _runner_with_separate_stderr() if separate_stderr else CliRunner()
         return runner.invoke(main, ["start", "-c", str(tmp_path / "node-config.json"), "--api-key", "k",
                                          "--pcc-base", gateway.url], env={"PCC_BASE": ""})
@@ -129,7 +135,7 @@ def test_start_exits_nonzero_when_the_daemons_own_registration_is_refused(surrou
     pid_file, state_file = surroundings
     with open(state_file, "w") as f:  # a stale state file from an earlier run
         json.dump({"kernel_id": "k-old", "pid": os.getpid()}, f)
-    gateway = Gateway((201, {"id": "k1"}), (401, {"error": "unauthorized"}))
+    gateway = Gateway((201, BOUND), (401, {"error": "unauthorized"}))
     try:
         result = _start(tmp_path, gateway, separate_stderr=True)
     finally:
@@ -146,20 +152,20 @@ def test_start_exits_nonzero_when_the_daemons_own_registration_is_refused(surrou
                      if r.name == "pcc-node.daemon" and r.levelno == logging.ERROR]
     assert daemon_errors == ["Kernel registration failed (kernel registration failed (HTTP 401): "
                              "{'error': 'unauthorized'}); daemon not started."]
-    assert gateway.paths() == [KERNELS, KERNELS]  # both registrations, then no heartbeat
+    assert gateway.paths() == [CHALLENGES, KERNELS, CHALLENGES, KERNELS]  # both registrations, then no heartbeat
     assert not os.path.exists(pid_file) and not os.path.exists(state_file)
 
 
 def test_start_says_the_node_is_running_once_the_daemon_is_up(surroundings, tmp_path):
     pid_file, state_file = surroundings
-    gateway = Gateway((201, {"id": "k1"}), (200, {"id": "k1"}))
+    gateway = Gateway((201, BOUND), (200, BOUND))
     try:
         result = _start(tmp_path, gateway)
     finally:
         gateway.close()
     assert result.exit_code == 0, result.output
     assert BANNER in result.output and "does not take jobs" in result.output, result.output
-    assert gateway.paths()[:3] == [KERNELS, KERNELS, "/api/operator/heartbeat"]
+    assert gateway.paths()[:5] == [CHALLENGES, KERNELS, CHALLENGES, KERNELS, "/api/operator/heartbeat"]
     assert not os.path.exists(pid_file) and not os.path.exists(state_file)  # stopped cleanly
 
 
@@ -175,7 +181,7 @@ def test_a_direct_caller_gets_the_refusal_raised_after_the_cleanup(surroundings)
     finally:
         gateway.close()
     assert refused.value.status == 503
-    assert gateway.paths() == [KERNELS]  # no heartbeat: the kernel was never put online
+    assert gateway.paths() == [CHALLENGES, KERNELS]  # no heartbeat: the kernel was never put online
     assert not os.path.exists(pid_file) and not os.path.exists(state_file)
 
 
@@ -192,12 +198,12 @@ def test_a_refused_daemon_never_reports_running(surroundings):
 
 def test_the_daemon_reports_running_only_after_its_registration_and_first_heartbeat(surroundings):
     seen = []
-    gateway = Gateway((201, {"id": "k1"}))
+    gateway = Gateway((201, BOUND))
     try:
         daemon.run_daemon(_config(gateway), on_running=lambda: seen.append(gateway.paths()))
     finally:
         gateway.close()
-    assert seen == [[KERNELS, "/api/operator/heartbeat"]], seen
+    assert seen == [[CHALLENGES, KERNELS, "/api/operator/heartbeat"]], seen
 
 
 def test_a_banner_that_cannot_be_printed_does_not_stop_the_daemon(surroundings):
@@ -206,7 +212,7 @@ def test_a_banner_that_cannot_be_printed_does_not_stop_the_daemon(surroundings):
     def broken_terminal():
         raise BrokenPipeError("stdout is gone")
 
-    gateway = Gateway((201, {"id": "k1"}))
+    gateway = Gateway((201, BOUND))
     try:
         daemon.run_daemon(_config(gateway), on_running=broken_terminal)
     finally:
@@ -290,7 +296,7 @@ def test_malformed_registration_stops_start(surroundings, tmp_path, monkeypatch,
     pid_file, state_file = surroundings
     with open(state_file, "w") as f:
         json.dump({"kernel_id": "k-old", "pid": os.getpid()}, f)
-    answers = ([_wire_answer(201, b'{"id":"k1"}')] if phase == "daemon" else []) + [answer]
+    answers = ([_wire_answer(404, b'{"error":"not_found"}'), _wire_answer(201, BOUND_BYTES)] if phase == "daemon" else []) + [_wire_answer(404, b'{"error":"not_found"}'), answer]
     gateway = WireGateway(monkeypatch, *answers)
     running = []
     real_daemon = daemon.run_daemon
@@ -307,7 +313,7 @@ def test_malformed_registration_stops_start(surroundings, tmp_path, monkeypatch,
     assert BANNER not in result.output and "Press Ctrl+C" not in result.output, result.output
     assert f"Registration failed (HTTP {expected_status})" in result.output, result.output
     assert running == []
-    assert gateway.paths() == [KERNELS] * (2 if phase == "daemon" else 1)
+    assert gateway.paths() == [CHALLENGES, KERNELS] * (2 if phase == "daemon" else 1)
     assert not os.path.exists(pid_file)
     if phase == "daemon":
         assert not os.path.exists(state_file)
@@ -332,12 +338,12 @@ def test_unexpected_registration_exception_cleans_up_and_never_runs(surroundings
 
 
 def test_complete_wire_registration_starts_normally(surroundings, tmp_path, monkeypatch):
-    gateway = WireGateway(monkeypatch, _wire_answer(201, b'{"id":"k1"}'),
-                          _wire_answer(200, b'{"id":"k1"}'))
+    gateway = WireGateway(monkeypatch, _wire_answer(404, b'{"error":"not_found"}'), _wire_answer(201, BOUND_BYTES),
+                          _wire_answer(404, b'{"error":"not_found"}'), _wire_answer(200, BOUND_BYTES))
     result = _start(tmp_path, gateway)
     assert result.exit_code == 0, result.output
     assert BANNER in result.output
-    assert gateway.paths()[:3] == [KERNELS, KERNELS, "/api/operator/heartbeat"]
+    assert gateway.paths()[:5] == [CHALLENGES, KERNELS, CHALLENGES, KERNELS, "/api/operator/heartbeat"]
 
 
 @pytest.mark.parametrize("heartbeat, raised", [
@@ -350,12 +356,12 @@ def test_unreadable_first_heartbeat_cleans_up_and_never_runs(surroundings, monke
     pid_file, state_file = surroundings
     with open(state_file, "w") as f:
         json.dump({"kernel_id": "k-old", "pid": os.getpid()}, f)
-    gateway = WireGateway(monkeypatch, _wire_answer(201, b'{"id":"k1"}'), heartbeat)
+    gateway = WireGateway(monkeypatch, _wire_answer(404, b'{"error":"not_found"}'), _wire_answer(201, BOUND_BYTES), heartbeat)
     running = []
     with pytest.raises(raised):
         daemon.run_daemon(_config(gateway), on_running=lambda: running.append(True))
     assert running == []
-    assert gateway.paths() == [KERNELS, "/api/operator/heartbeat"]
+    assert gateway.paths() == [CHALLENGES, KERNELS, "/api/operator/heartbeat"]
     assert not os.path.exists(pid_file)
     assert not os.path.exists(state_file)
 
@@ -370,12 +376,12 @@ def test_unreadable_first_heartbeat_stops_start(surroundings, tmp_path, monkeypa
     pid_file, state_file = surroundings
     with open(state_file, "w") as f:
         json.dump({"kernel_id": "k-old", "pid": os.getpid()}, f)
-    gateway = WireGateway(monkeypatch, _wire_answer(201, b'{"id":"k1"}'),
-                          _wire_answer(201, b'{"id":"k1"}'), heartbeat)
+    gateway = WireGateway(monkeypatch, _wire_answer(404, b'{"error":"not_found"}'), _wire_answer(201, BOUND_BYTES),
+                          _wire_answer(404, b'{"error":"not_found"}'), _wire_answer(201, BOUND_BYTES), heartbeat)
     result = _start(tmp_path, gateway)
     assert result.exit_code == 1, result.output
     assert BANNER not in result.output, result.output
-    assert gateway.paths() == [KERNELS, KERNELS, "/api/operator/heartbeat"]
+    assert gateway.paths() == [CHALLENGES, KERNELS, CHALLENGES, KERNELS, "/api/operator/heartbeat"]
     assert not os.path.exists(pid_file)
     assert not os.path.exists(state_file)
 
@@ -401,7 +407,7 @@ def test_an_unconfirmed_first_heartbeat_cleans_up_and_never_runs(surroundings, m
     pid_file, state_file = surroundings
     with open(state_file, "w") as f:
         json.dump({"kernel_id": "k-old", "pid": os.getpid()}, f)
-    gateway = WireGateway(monkeypatch, _wire_answer(201, b'{"id":"k1"}'), *answers())
+    gateway = WireGateway(monkeypatch, _wire_answer(404, b'{"error":"not_found"}'), _wire_answer(201, BOUND_BYTES), *answers())
     running = []
     caplog.set_level("INFO", logger="pcc-node.daemon")
     with pytest.raises(Exception) as unconfirmed:
@@ -409,7 +415,7 @@ def test_an_unconfirmed_first_heartbeat_cleans_up_and_never_runs(surroundings, m
     assert isinstance(unconfirmed.value, daemon.FirstHeartbeatError)
     assert str(unconfirmed.value) == "the first heartbeat was not confirmed on either heartbeat route"
     assert running == []
-    assert gateway.paths() == [KERNELS, "/api/operator/heartbeat", "/api/kernels/k1/heartbeat"]
+    assert gateway.paths() == [CHALLENGES, KERNELS, "/api/operator/heartbeat", "/api/kernels/k1/heartbeat"]
     assert not os.path.exists(pid_file)
     assert not os.path.exists(state_file)
     assert ("pcc-node.daemon", logging.ERROR,
@@ -422,8 +428,8 @@ def test_an_unconfirmed_first_heartbeat_stops_start(surroundings, tmp_path, monk
     pid_file, state_file = surroundings
     with open(state_file, "w") as f:
         json.dump({"kernel_id": "k-old", "pid": os.getpid()}, f)
-    gateway = WireGateway(monkeypatch, _wire_answer(201, b'{"id":"k1"}'),
-                          _wire_answer(201, b'{"id":"k1"}'), *answers())
+    gateway = WireGateway(monkeypatch, _wire_answer(404, b'{"error":"not_found"}'), _wire_answer(201, BOUND_BYTES),
+                          _wire_answer(404, b'{"error":"not_found"}'), _wire_answer(201, BOUND_BYTES), *answers())
     result = _start(tmp_path, gateway, separate_stderr=True)
     assert result.exit_code == 1, result.output
     assert isinstance(result.exception, SystemExit)
@@ -434,7 +440,7 @@ def test_an_unconfirmed_first_heartbeat_stops_start(surroundings, tmp_path, monk
         "then run pcc-node start again.\n"
     )
     config = json.loads((tmp_path / "node-config.json").read_text())
-    assert gateway.paths() == [KERNELS, KERNELS, "/api/operator/heartbeat",
+    assert gateway.paths() == [CHALLENGES, KERNELS, CHALLENGES, KERNELS, "/api/operator/heartbeat",
                                f"/api/kernels/{config['kernel_id']}/heartbeat"]
     assert not os.path.exists(pid_file)
     assert not os.path.exists(state_file)
@@ -447,13 +453,13 @@ def test_an_unconfirmed_first_heartbeat_stops_start(surroundings, tmp_path, monk
 def test_a_first_heartbeat_the_fallback_route_confirms_starts_the_node(surroundings, tmp_path, monkeypatch,
                                                                     caplog, heartbeat):
     caplog.set_level("INFO", logger="pcc-node.daemon")
-    gateway = WireGateway(monkeypatch, _wire_answer(201, b'{"id":"k1"}'),
-                          _wire_answer(201, b'{"id":"k1"}'), heartbeat, _wire_answer(200, b'{"ok":true}'))
+    gateway = WireGateway(monkeypatch, _wire_answer(404, b'{"error":"not_found"}'), _wire_answer(201, BOUND_BYTES),
+                          _wire_answer(404, b'{"error":"not_found"}'), _wire_answer(201, BOUND_BYTES), heartbeat, _wire_answer(200, b'{"ok":true}'))
     result = _start(tmp_path, gateway)
     assert result.exit_code == 0, result.output
     assert BANNER in result.output
     config = json.loads((tmp_path / "node-config.json").read_text())
-    assert gateway.paths()[:4] == [KERNELS, KERNELS, "/api/operator/heartbeat",
+    assert gateway.paths()[:6] == [CHALLENGES, KERNELS, CHALLENGES, KERNELS, "/api/operator/heartbeat",
                                   f"/api/kernels/{config['kernel_id']}/heartbeat"]
     assert ("pcc-node.daemon", logging.INFO,
             f"Daemon running. Kernel={config['kernel_id']}, PCC={WireGateway.url}, "
@@ -464,13 +470,13 @@ def test_an_unreadable_fallback_heartbeat_cleans_up_and_never_runs(surroundings,
     pid_file, state_file = surroundings
     with open(state_file, "w") as f:
         json.dump({"kernel_id": "k-old", "pid": os.getpid()}, f)
-    gateway = WireGateway(monkeypatch, _wire_answer(201, b'{"id":"k1"}'),
+    gateway = WireGateway(monkeypatch, _wire_answer(404, b'{"error":"not_found"}'), _wire_answer(201, BOUND_BYTES),
                           _wire_answer(401, b'{"error":"denied"}'), _wire_answer(200, b'{"ok":true}', 100))
     running = []
     with pytest.raises(http.client.IncompleteRead):
         daemon.run_daemon(_config(gateway), on_running=lambda: running.append(True))
     assert running == []
-    assert gateway.paths() == [KERNELS, "/api/operator/heartbeat", "/api/kernels/k1/heartbeat"]
+    assert gateway.paths() == [CHALLENGES, KERNELS, "/api/operator/heartbeat", "/api/kernels/k1/heartbeat"]
     assert not os.path.exists(pid_file)
     assert not os.path.exists(state_file)
 
@@ -500,7 +506,7 @@ def test_a_reset_while_reading_a_registration_refusal_stops_start(surroundings, 
     pid_file, _ = surroundings
     refusal_head = (b"HTTP/1.1 401 Answer\r\nContent-Type: application/json\r\n"
                     b"Content-Length: 40\r\nConnection: close\r\n\r\n")
-    answers = ([_wire_answer(201, b'{"id":"k1"}')] if phase == "daemon" else []) + [None]
+    answers = ([_wire_answer(404, b'{"error":"not_found"}'), _wire_answer(201, BOUND_BYTES)] if phase == "daemon" else []) + [_wire_answer(404, b'{"error":"not_found"}'), None]
     gateway = WireGateway(monkeypatch)
 
     def connect(conn):
@@ -522,5 +528,5 @@ def test_a_reset_while_reading_a_registration_refusal_stops_start(surroundings, 
     assert result.exit_code == 1, result.output
     assert "Registration failed (HTTP 0)" in result.output, result.output
     assert BANNER not in result.output, result.output
-    assert gateway.paths() == [KERNELS] * (2 if phase == "daemon" else 1)
+    assert gateway.paths() == [CHALLENGES, KERNELS] * (2 if phase == "daemon" else 1)
     assert not os.path.exists(pid_file)

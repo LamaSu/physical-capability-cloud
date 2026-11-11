@@ -676,7 +676,13 @@ describe("N176 batch operator decisions", () => {
     ] as InjectOptions[]) {
       const refused = await app.inject({ ...request, method: "POST", headers });
       expect(refused.statusCode, `${request.url}: ${refused.body}`).toBe(403);
-      expect(refused.json()).toMatchObject({ error: "explicit_credential_required" });
+      if (request.payload && (request.payload as { id?: string }).id === KERNEL) {
+        expect(refused.json()).toEqual({
+          error: "FORBIDDEN", message: `Kernel '${KERNEL}' requires owner authority or its bound signing key`,
+        });
+      } else {
+        expect(refused.json()).toMatchObject({ error: "explicit_credential_required" });
+      }
     }
     expect(getRepos().kernels.findById(KERNEL)).toEqual(kernel);
     expect(getRepos().kernels.findById(`${KERNEL}-carrierless`)).toBeUndefined();
@@ -783,7 +789,7 @@ describe("N176 exact-location decisions", () => {
     expect(row()?.location).toMatchObject({ visibility: "exact" });
   });
 
-  it("a non-owner update retains its existing FORBIDDEN body", async () => {
+  it("a non-owner update gets the owner-authority FORBIDDEN body", async () => {
     const app = await buildApp();
     await registerOwner(app);
     const foreign = await signIn(app, FOREIGN);
@@ -791,12 +797,12 @@ describe("N176 exact-location decisions", () => {
     const response = await register(app, sessionCookie(app, foreign.token), { id: KERNEL, locationVisibility: "exact" });
     expect(response.statusCode, response.body).toBe(403);
     expect(response.json()).toEqual({
-      error: "FORBIDDEN", message: `Authenticated actor does not own kernel '${KERNEL}'`,
+      error: "FORBIDDEN", message: `Kernel '${KERNEL}' requires owner authority or its bound signing key`,
     });
     expect(row()).toEqual(before);
   });
 
-  it("claimed-only exact create and update retain their existing refusal bodies", async () => {
+  it("claimed-only exact create keeps its refusal body, and the update needs owner authority", async () => {
     const app = await buildApp();
     await registerOwner(app);
     const claimed = provisionApiKey({ operatorId: OWNER.address.toLowerCase(), scopes: ["*"] });
@@ -804,7 +810,9 @@ describe("N176 exact-location decisions", () => {
     for (const id of [`${KERNEL}-claimed-create`, KERNEL]) {
       const response = await register(app, bearer(claimed.rawKey), { id, locationVisibility: "exact" });
       expect(response.statusCode, response.body).toBe(403);
-      expect(response.json()).toEqual({
+      expect(response.json()).toEqual(id === KERNEL ? {
+        error: "FORBIDDEN", message: `Kernel '${KERNEL}' requires owner authority or its bound signing key`,
+      } : {
         error: "FORBIDDEN",
         message: `Publishing the exact location of kernel '${id}' needs the X-Admin-Key header, ` +
           "or a wallet you proved (SIWE) that is the kernel's operator",

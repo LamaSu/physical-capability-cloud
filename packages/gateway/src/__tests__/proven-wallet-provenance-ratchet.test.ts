@@ -20,7 +20,7 @@ const WRITER_FILES = [
 const BOUNDARY_NAMES = ["authorityOf", "bindProof", "proveSelfLinkedWallet"];
 // Adding a member to this closed allow-list needs review. Admin headers use the exact shape below.
 const AUTHORITY_OF_ALLOWED_MEMBERS = new Set([
-  "provenWallet", "provenWalletVia", "provenWalletCarrier", "operatorId", "userId", "trim", "length",
+  "provenWallet", "provenWalletVia", "provenWalletCarrier", "operatorId", "userId", "trim", "length", "apiKeyId", "toLowerCase",
 ]);
 
 interface Write {

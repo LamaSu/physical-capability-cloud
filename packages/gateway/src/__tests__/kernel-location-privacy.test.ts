@@ -40,6 +40,7 @@ import { planComposition } from "../routes/compose.js";
 import { initStore, closeStore, getRepos } from "../db.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { geohashCenter } from "../facades/populators/public-location.js";
+import { ED_SIGNER, signEd, signerFields, type Challenge } from "./helpers/kernel-registration-fixture.js";
 
 const SITE = { lat: 47.6204931, lng: -122.3492447 };
 const CELL = "c22yz";
@@ -63,6 +64,23 @@ async function provision(email: string): Promise<{ key: string; operatorId: stri
 const bearer = (key: string) => ({ authorization: `Bearer ${key}` });
 const register = (payload: Record<string, unknown>, headers: Record<string, string> = bearer(ownerKey)) =>
   app.inject({ method: "POST", url: "/api/kernels", headers, payload });
+const fixture = {
+  async proof(kernelId: string) {
+    const issued = await app.inject({
+      method: "POST",
+      url: "/api/kernels/registration-challenges",
+      headers: bearer(ownerKey),
+      payload: { kernelId, signer: ED_SIGNER },
+    });
+    expect(issued.statusCode).toBe(201);
+    const challenge = issued.json() as Challenge;
+    return {
+      ...signerFields(ED_SIGNER),
+      registrationProof: { challengeId: challenge.challengeId, signature: signEd(challenge.message) },
+    };
+  },
+};
+const ownerRefusal = (kernelId: string) => `Kernel '${kernelId}' requires owner authority or its bound signing key`;
 const kernelIn = async (id: string) =>
   ((await app.inject({ method: "GET", url: "/api/kernels" })).json().kernels as Array<Record<string, unknown>>).find((k) => k.id === id)!;
 const capabilityOf = async (kernelId: string) =>
@@ -91,7 +109,10 @@ beforeAll(async () => {
 
   ({ key: ownerKey, operatorId: ownerId } = await provision("n68-owner@example.invalid"));
   strangerKey = (await provision("n68-stranger@example.invalid")).key;
-  expect((await register({ id: "kernel-n68-a", name: "N68 A", location: SITE, physicalAddress: ADDRESS })).statusCode).toBe(201);
+  expect((await register({
+    id: "kernel-n68-a", name: "N68 A", location: SITE, physicalAddress: ADDRESS,
+    ...await fixture.proof("kernel-n68-a"),
+  })).statusCode).toBe(201);
   const cap = await app.inject({
     method: "POST",
     url: "/api/capabilities",
@@ -165,8 +186,8 @@ describe("coarse by default: nobody reads the exact site or the street address",
     expect(JSON.stringify(pkg)).toContain(`the centre of geohash cell ${CELL}`);
   });
 
-  it("the owner's own reads are coarse too: the registration response and GET /api/kernels/:id", async () => {
-    const res = await register({ id: "kernel-n68-a", name: "N68 A" });
+  it("an authorized registration response and the owner's reads stay coarse", async () => {
+    const res = await register({ id: "kernel-n68-a", name: "N68 A" }, { ...bearer(ownerKey), "x-admin-key": ADMIN });
     expect(res.statusCode).toBe(200);
     expect(res.json().kernel).toMatchObject({ location: CENTRE, locationPrecision: "approximate", physicalAddress: null });
     const own = (await app.inject({ method: "GET", url: "/api/kernels/kernel-n68-a", headers: bearer(ownerKey) })).json();
@@ -241,13 +262,16 @@ describe("exact only by explicit opt-in, which needs the admin key or a proven w
   it("the owner's key alone cannot opt in (a key names an identity; it does not prove one)", async () => {
     const res = await register({ id: "kernel-n68-a", locationVisibility: "exact" });
     expect(res.statusCode).toBe(403);
+    expect(res.json().message).toBe(ownerRefusal("kernel-n68-a"));
     expect((await kernelIn("kernel-n68-a")).locationPrecision).toBe("approximate");
   });
 
   it("nor can a second key provisioned for the owner's email, which is how an impersonator would try", async () => {
     const twin = await provision("n68-owner@example.invalid");
     expect(twin.operatorId).toBe(ownerId);
-    expect((await register({ id: "kernel-n68-a", locationVisibility: "exact" }, bearer(twin.key))).statusCode).toBe(403);
+    const res = await register({ id: "kernel-n68-a", locationVisibility: "exact" }, bearer(twin.key));
+    expect(res.statusCode).toBe(403);
+    expect(res.json().message).toBe(ownerRefusal("kernel-n68-a"));
     expect((await kernelIn("kernel-n68-a")).locationPrecision).toBe("approximate");
   });
 
@@ -255,7 +279,9 @@ describe("exact only by explicit opt-in, which needs the admin key or a proven w
     const W = "0xabcdefabcdefabcdefabcdefabcdefabcdef0123";
     const claimed = provisionApiKey({ operatorId: W, name: "n68-claims-a-wallet" }).rawKey;
     expect((await register({ id: "kernel-n68-claimed", location: SITE }, bearer(claimed))).statusCode).toBe(201);
-    expect((await register({ id: "kernel-n68-claimed", locationVisibility: "exact" }, bearer(claimed))).statusCode).toBe(403);
+    const res = await register({ id: "kernel-n68-claimed", locationVisibility: "exact" }, bearer(claimed));
+    expect(res.statusCode).toBe(403);
+    expect(res.json().message).toBe(ownerRefusal("kernel-n68-claimed"));
     expect((await kernelIn("kernel-n68-claimed")).locationPrecision).toBe("approximate");
   });
 
@@ -268,6 +294,7 @@ describe("exact only by explicit opt-in, which needs the admin key or a proven w
         payload: { id: "kernel-n68-a", locationVisibility: "exact" },
       });
       expect(res.statusCode, JSON.stringify(admin)).toBe(403);
+      expect(res.json().message, JSON.stringify(admin)).toBe(ownerRefusal("kernel-n68-a"));
     }
     expect((await kernelIn("kernel-n68-a")).locationPrecision).toBe("approximate");
   });
@@ -278,8 +305,29 @@ describe("exact only by explicit opt-in, which needs the admin key or a proven w
       else process.env.PCC_ADMIN_KEY = unset;
       const res = await register({ id: "kernel-n68-a", locationVisibility: "exact" }, { ...bearer(ownerKey), "x-admin-key": unset ?? "" });
       expect(res.statusCode).toBe(403);
+      expect(res.json().message).toBe(ownerRefusal("kernel-n68-a"));
     }
     process.env.PCC_ADMIN_KEY = ADMIN;
+    expect((await kernelIn("kernel-n68-a")).locationPrecision).toBe("approximate");
+  });
+
+  it("a bound signer's fresh proof cannot opt in to exact location, and the stored row is unchanged", async () => {
+    const before = structuredClone(getRepos().kernels.findById("kernel-n68-a"));
+    const res = await register({
+      id: "kernel-n68-a",
+      name: "Must not be written",
+      location: { lat: 1, lng: 2 },
+      physicalAddress: "Must not be written",
+      maxAssuranceTier: 3,
+      locationVisibility: "exact",
+      ...await fixture.proof("kernel-n68-a"),
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().message).toBe(
+      "Publishing the exact location of kernel 'kernel-n68-a' needs the X-Admin-Key header, " +
+        "or a wallet you proved (SIWE) that is the kernel's operator",
+    );
+    expect(getRepos().kernels.findById("kernel-n68-a")).toEqual(before);
     expect((await kernelIn("kernel-n68-a")).locationPrecision).toBe("approximate");
   });
 
@@ -301,16 +349,16 @@ describe("exact only by explicit opt-in, which needs the admin key or a proven w
     ]);
   });
 
-  it("re-registering without naming the choice keeps it (pcc-node re-registers on every start)", async () => {
+  it("a bound signer's fresh re-registration without naming the choice keeps it exact", async () => {
     const moved = { lat: 47.6097, lng: -122.3331 };
-    expect((await register({ id: "kernel-n68-a", name: "N68 A", location: moved })).statusCode).toBe(200);
+    expect((await register({ id: "kernel-n68-a", name: "N68 A", location: moved, ...await fixture.proof("kernel-n68-a") })).statusCode).toBe(200);
     const k = await kernelIn("kernel-n68-a");
     expect([k.location, k.locationPrecision]).toEqual([moved, "exact"]);
-    expect((await register({ id: "kernel-n68-a", location: SITE })).statusCode).toBe(200);
+    expect((await register({ id: "kernel-n68-a", location: SITE, ...await fixture.proof("kernel-n68-a") })).statusCode).toBe(200);
   });
 
-  it("the owner can opt out with no admin key, and every read is coarse again", async () => {
-    const res = await register({ id: "kernel-n68-a", locationVisibility: "approximate" });
+  it("a bound signer's fresh proof can opt out, and every read is coarse again", async () => {
+    const res = await register({ id: "kernel-n68-a", locationVisibility: "approximate", ...await fixture.proof("kernel-n68-a") });
     expect(res.statusCode).toBe(200);
     const k = await kernelIn("kernel-n68-a");
     expect([k.location, k.locationPrecision, k.physicalAddress]).toEqual([CENTRE, "approximate", null]);
@@ -343,6 +391,7 @@ describe("a proven wallet (as WP-A #326 sets it) may opt in its own kernel, and 
       const proven = req.headers["x-test-proven"];
       if (typeof proven === "string") {
         (req as { provenWallet?: string }).provenWallet = proven;
+        (req as { provenWalletVia?: string }).provenWalletVia = "self-link:agent";
         req.provenWalletCarrier = "key";
       }
     });

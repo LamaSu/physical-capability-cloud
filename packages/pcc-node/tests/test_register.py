@@ -22,6 +22,7 @@ from pcc_node.register import (
 )
 from pcc_node.log_capture import LogSigningRefused, _HAS_NACL
 from pcc_node.config import NodeConfig
+from tests.test_register_challenge import node_key_pair
 
 
 class TestProvisionApiKey:
@@ -81,7 +82,7 @@ class Gateway:
     connection closes with no answer at all. Requests are recorded as (method, path, Authorization,
     JSON body)."""
 
-    def __init__(self, status=200, body=None, headers=(), hang_up=False):
+    def __init__(self, status=200, body=None, headers=(), hang_up=False, *, challenge_404=False):
         self.requests = []
         gw = self
 
@@ -93,8 +94,9 @@ class Gateway:
                 if hang_up:
                     self.close_connection = True
                     return
-                raw = json.dumps({} if body is None else body).encode()
-                self.send_response(status)
+                older = challenge_404 and self.command == "POST" and self.path == "/api/kernels/registration-challenges"
+                raw = json.dumps({"error": "not_found"} if older else ({} if body is None else body)).encode()
+                self.send_response(404 if older else status)
                 for name, value in headers:
                     self.send_header(name, value)
                 self.send_header("Content-Type", "application/json")
@@ -223,15 +225,14 @@ class TestStartKeepsTheRealRegistration:
             url, status = _refusing_url(), 0
         else:
             moved = [("Location", "http://127.0.0.1:9/elsewhere")] if 300 <= answer < 400 else ()
-            gateway = Gateway(status=answer, body=REFUSAL, headers=moved)
+            gateway = Gateway(status=answer, body=REFUSAL, headers=moved, challenge_404=True)
             url, status = gateway.url, answer
         config_path = tmp_path / "node-config.json"
         try:
             with mock.patch("pcc_node.cli.is_running", return_value=(False, None)), \
                  mock.patch("pcc_node.cli.detect_all", return_value=[{"id": "cam-1", "type": "camera"}]), \
-                 mock.patch("pcc_node.cli.load_or_create_keys", return_value=("ab" * 32, "cd" * 32)), \
+                 mock.patch("pcc_node.cli.load_or_create_keys", return_value=node_key_pair("11" * 32)), \
                  mock.patch("pcc_node.cli.register_devices") as devices, \
-                 mock.patch("pcc_node.cli.register_signing_key") as signing_key, \
                  mock.patch("pcc_node.cli.run_daemon") as daemon:
                 result = CliRunner().invoke(main, ["start", "-c", str(config_path), "--api-key", "k-test",
                                                    "--pcc-base", url], env={"PCC_BASE": ""})
@@ -243,11 +244,10 @@ class TestStartKeepsTheRealRegistration:
         for success in ("Node running", "Config saved"):
             assert success not in result.output, result.output
         devices.assert_not_called()
-        signing_key.assert_not_called()
         daemon.assert_not_called()
         assert not config_path.exists()
         if gateway is not None:
-            assert [(m, p) for m, p, _, _ in gateway.requests] == [("POST", "/api/kernels")]
+            assert [(m, p) for m, p, _, _ in gateway.requests] == [("POST", "/api/kernels/registration-challenges"), ("POST", "/api/kernels")]
 
 
 class TestAnnounceCapabilities:

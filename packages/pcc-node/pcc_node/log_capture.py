@@ -194,6 +194,15 @@ def assert_ed25519_available(public_hex, secret_hex):
         )
 
 
+def sign_ed25519_bytes(message_bytes, public_hex, secret_hex):
+    """Sign exactly the bytes of the gateway's registration challenge."""
+    if not isinstance(message_bytes, bytes):
+        raise TypeError("message_bytes must be bytes")
+    assert_ed25519_available(public_hex, secret_hex)
+    sk = nacl.signing.SigningKey(bytes.fromhex(secret_hex))
+    return sk.sign(message_bytes).signature.hex()
+
+
 def sign_ed25519_utf8(message, public_hex, secret_hex):
     """Detached Ed25519 signature over the UTF-8 bytes of ``message``, hex.
 

@@ -415,7 +415,7 @@ Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
 | GET | `/health` | Gateway healthcheck (bare alias of `/api/health`; same JSON payload — not the SPA shell). Also reports the served build: `commit` (the full git SHA a build argument named, recorded in the image at build time, or `null`), `commitSource` (`build_argument` or `unknown`), `buildArg`, `sourceDigest` (digest of the source the image was built from; CI checks it against the commit before pushing, and `scripts/verify-build-source.sh` checks any served gateway), `sourceDigestSpec`, and `deployMetadata.railwayGitCommitSha` (host metadata, never reported as `commit`); see `docs/DEPLOY.md`. |
 | GET | `/api/status` | Detailed status. |
 | GET | `/.well-known/agent-registration.json` | ERC-8004 Agent Registration File (PUBLIC). |
-| GET | `/agent-package.json` | The agent package (250+ tools) for any LLM (PUBLIC). |
+| GET | `/agent-package.json` | The agent package (170+ tools) for any LLM (PUBLIC). |
 | GET/POST | `/api/sensors/*` | Sensor channels, readings, anomalies. |
 | GET/POST | `/api/zk/*` | ZK proof creation and verification. |
 | GET/POST | `/api/batches/*` | Batch manifests (HPLC, multi-sample). |
@@ -601,12 +601,13 @@ curl -X POST https://capability.network/api/wizard/sessions/$SESSION_ID/complete
 
 For operators who prefer CLI:
 ```bash
-pip install "pcc-node[crypto]>=0.1.1"
-# until 0.1.1 is on PyPI: python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node"
+python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node"
 pcc-node start
 ```
 
-This auto-detects hardware, generates Ed25519 keys, registers the kernel with the API key you give it (`PCC_API_KEY` or `--api-key`), and starts a daemon that keeps the kernel online. Without a key it stops: the gateway refuses to provision one without an email, so provision it first (`POST /api/auth/provision`). From 0.1.1 the daemon takes no jobs: jobs run through the operating agent's typed operations. Set `PCC_BASE` and `PCC_API_KEY` env vars if not using defaults.
+This auto-detects hardware, generates Ed25519 keys, registers the kernel with the API key you give it (`PCC_API_KEY` or `--api-key`), and starts a daemon that keeps the kernel online. Without a key it stops: the gateway refuses to provision one without an email, so provision it first (`POST /api/auth/provision`). The daemon takes no jobs: jobs run through the operating agent's typed operations. Set `PCC_BASE` and `PCC_API_KEY` env vars if not using defaults.
+
+After an earlier pcc-node install, pip may keep that copy, because both report the same version: run the install line again with `--force-reinstall --no-deps` after `install`.
 
 ---
 
@@ -939,9 +940,9 @@ Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 
 ---
 
-## 10. Agent Package (250+ Tools)
+## 10. Agent Package (170+ Tools)
 
-The agent package is a single JSON file any LLM can consume, containing 250+ tools (the exact count is its `toolCount`) with input schemas and endpoint mappings. It is the load-bearing piece of the **Claude Max front door**: drop the JSON into a Claude conversation and Claude can transact on the user's behalf without further hand-holding.
+The agent package is a single JSON file any LLM can consume, containing 170+ tools (the exact count is its `toolCount`) with input schemas and endpoint mappings. It is the load-bearing piece of the **Claude Max front door**: drop the JSON into a Claude conversation and Claude can transact on the user's behalf without further hand-holding.
 
 > **Claude Max quickstart**: visit `https://capability.network/start` for the three-card landing (Code / Desktop / Web). Per-surface walkthroughs live in `docs/quickstart/`.
 
@@ -1022,8 +1023,7 @@ curl -N -H "Authorization: Bearer $PCC_KEY" \
 ### Install and run
 
 ```bash
-pip install "pcc-node[crypto]>=0.1.1"
-# until 0.1.1 is on PyPI: python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node"
+python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node"
 pcc-node start
 ```
 
@@ -1032,7 +1032,9 @@ This single command:
 2. Generates Ed25519 signing keys
 3. Uses the API key you give it (`PCC_API_KEY` or `--api-key`); without one it stops, because the gateway refuses to provision a key without an email
 4. Registers a kernel
-5. Starts a daemon that keeps the kernel online. From 0.1.1 it takes no jobs: they run through the operating agent's typed operations
+5. Starts a daemon that keeps the kernel online. It takes no jobs: they run through the operating agent's typed operations
+
+After an earlier pcc-node install, pip may keep that copy, because both report the same version: run the install line again with `--force-reinstall --no-deps` after `install`.
 
 ### Commands
 

@@ -25,10 +25,85 @@ const REMOVED = [
   ["protocol_create_escrow", "POST", "/api/protocol/create-escrow"],
 ] as const;
 
+const FIXTURE_AND_RELAY_REMOVED = [
+  ["list_protocols", "GET", "/api/protocols"],
+  ["get_protocol", "GET", "/api/protocols/{id}"],
+  ["create_protocol", "POST", "/api/protocols"],
+  ["update_protocol", "PUT", "/api/protocols/{id}"],
+  ["publish_protocol", "POST", "/api/protocols/{id}/publish"],
+  ["fork_protocol", "POST", "/api/protocols/{id}/fork"],
+  ["get_protocol_forks", "GET", "/api/protocols/{id}/forks"],
+  ["validate_protocol", "POST", "/api/protocols/{id}/validate"],
+  ["list_protocol_runs", "GET", "/api/protocol-runs"],
+  ["get_protocol_run", "GET", "/api/protocol-runs/{runId}"],
+  ["create_protocol_run", "POST", "/api/protocols/{id}/runs"],
+  ["start_protocol_run", "POST", "/api/protocol-runs/{runId}/start"],
+  ["pause_protocol_run", "POST", "/api/protocol-runs/{runId}/pause"],
+  ["resume_protocol_run", "POST", "/api/protocol-runs/{runId}/resume"],
+  ["cancel_protocol_run", "POST", "/api/protocol-runs/{runId}/cancel"],
+  ["get_workflows", "GET", "/api/orchestrator/workflows"],
+  ["get_workflow", "GET", "/api/orchestrator/workflows/{workflowId}"],
+  ["get_transfer_graphs", "GET", "/api/orchestrator/graphs"],
+  ["list_automation_status", "GET", "/api/automation-status"],
+  ["get_automation_status", "GET", "/api/automation-status/{fromNodeId}/{toNodeId}"],
+  ["record_episode", "POST", "/api/automation-status/{fromNodeId}/{toNodeId}/episode"],
+  ["advance_automation", "POST", "/api/automation-status/{fromNodeId}/{toNodeId}/advance"],
+  ["list_transfer_agents", "GET", "/api/transfer-agents"],
+  ["get_logistics_overview", "GET", "/api/logistics"],
+  ["get_shipments", "GET", "/api/logistics/shipments"],
+  ["create_shipment", "POST", "/api/logistics/shipments"],
+  ["get_shipment_quote", "POST", "/api/logistics/shipments/quote"],
+  ["get_installations", "GET", "/api/logistics/installations"],
+  ["get_space_bookings", "GET", "/api/logistics/bookings"],
+  ["search_spaces", "GET", "/api/spaces"],
+  ["get_space", "GET", "/api/spaces/{id}"],
+  ["match_spaces", "POST", "/api/spaces/match"],
+  ["get_marketplace_overview", "GET", "/api/marketplace"],
+  ["get_equipment_classes", "GET", "/api/marketplace/classes"],
+  ["get_demand_supply", "GET", "/api/marketplace/demand-supply"],
+  ["calculate_roi", "POST", "/api/marketplace/roi"],
+  ["marketplace_categories", "GET", "/api/marketplace/categories"],
+  ["marketplace_list_listings", "GET", "/api/marketplace/listings"],
+  ["marketplace_get_listing", "GET", "/api/marketplace/listings/{id}"],
+  ["marketplace_list_orders", "GET", "/api/marketplace/orders"],
+  ["marketplace_get_order", "GET", "/api/marketplace/orders/{id}"],
+  ["list_conversations", "GET", "/api/agents/conversations"],
+  ["get_depin_stats", "GET", "/api/rewards"],
+  ["mint_certificate", "POST", "/api/certificates/mint"],
+  ["release_milestone", "POST", "/api/escrow/chain/{address}/release/{milestoneIndex}"],
+  ["submit_attestation", "POST", "/api/escrow/chain/{address}/attestation/{milestoneIndex}"],
+  ["pcc_create_scope", "POST", "/api/ot2/scope"],
+  ["pcc_revoke_scope", "POST", "/api/ot2/scope/{scopeId}/revoke"],
+  ["pcc_scope_audit", "GET", "/api/ot2/scope/{scopeId}/audit"],
+  ["pcc_relay_tool_call", "POST", "/api/ot2/tool-call"],
+  ["pcc_get_tool_result", "GET", "/api/ot2/tool-result/{callId}"],
+  ["pcc_camera_latest", "GET", "/api/ot2/camera/snapshot"],
+  ["pcc_chat_send", "POST", "/api/ot2/chat"],
+  ["pcc_chat_history", "GET", "/api/ot2/chat/messages"],
+  ["pcc_get_tool_manifest", "GET", "/api/relay/{kernelId}/manifest"],
+  ["pcc_relay_generic_tool_call", "POST", "/api/relay/{kernelId}/tool-call"],
+] as const;
+
+const ADMIN_ONLY_REMOVED = [
+  ["fund_escrow", "POST", "/api/escrow/chain/{address}/fund"],
+  ["file_escrow_dispute", "POST", "/api/escrow/chain/{address}/dispute/{milestoneIndex}"],
+  ["deposit_bond", "POST", "/api/escrow/chain/{address}/deposit-bond/{milestoneIndex}"],
+  ["submit_evidence_hash", "POST", "/api/escrow/chain/{address}/evidence/{milestoneIndex}"],
+] as const;
+const ESCROW_READS = [
+  "list_escrows", "get_escrow", "get_escrow_chain_state", "get_escrow_events",
+  "get_token_balance", "get_token_allowance", "get_escrow_dispute", "get_write_status",
+] as const;
+
 const REPO = resolve(dirname(SOURCE), "../../..");
 const packText = readFileSync(SOURCE, "utf8");
 const pack = JSON.parse(packText) as {
   tools: Array<{ name: string; endpoint: { method: string; path: string } }>;
+};
+
+const testPack = JSON.parse(readFileSync(resolve(REPO, "agent-package-test.json"), "utf8")) as {
+  system_prompt: string;
+  tools: Array<{ name: string }>;
 };
 
 /** Decode every string value, including strings nested in schemas and examples. */
@@ -92,6 +167,52 @@ describe("agent pack scrub", () => {
       if (inPack || inPin) {
         problems.push(`${name}: ${method} ${path} remains in ${[inPack && "pack", inPin && "pin"].filter(Boolean).join(" and ")}`);
       }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  it("AT4 the 56 fixture and relay-gated tools are gone from both packs and the pin", () => {
+    const problems: string[] = [];
+    for (const [name, method, path] of FIXTURE_AND_RELAY_REMOVED) {
+      if (pack.tools.some((tool) => tool.name === name)) problems.push(`${name}: name remains in pack tools`);
+      if (packText.includes(JSON.stringify(name))) problems.push(`${name}: quoted name remains in pack text`);
+      if (Object.prototype.hasOwnProperty.call(AGENT_TOOLS, name)) problems.push(`${name}: name remains in pin`);
+      const inPack = pack.tools.some((tool) => tool.endpoint.method === method && tool.endpoint.path === path);
+      const inPin = Object.values(AGENT_TOOLS).some((tool) => tool.method === method && tool.path === path);
+      if (inPack || inPin) {
+        problems.push(`${name}: ${method} ${path} remains in ${[inPack && "pack", inPin && "pin"].filter(Boolean).join(" and ")}`);
+      }
+      if (testPack.tools.some((tool) => tool.name === name)) problems.push(`${name}: name remains in test pack tools`);
+      if (testPack.system_prompt.includes(name)) problems.push(`${name}: name remains in test pack system prompt`);
+    }
+    expect(problems).toEqual([]);
+  });
+
+  it("AT5 the generic pack lists no admin-only tool: four escrow chain writes are gone from both packs and the pin, and the escrow reads stay", () => {
+    const problems: string[] = [];
+    for (const [name, method, path] of ADMIN_ONLY_REMOVED) {
+      if (pack.tools.some((tool) => tool.name === name)) problems.push(`${name}: name remains in pack tools`);
+      if (packText.includes(JSON.stringify(name))) problems.push(`${name}: quoted name remains in pack text`);
+      if (Object.prototype.hasOwnProperty.call(AGENT_TOOLS, name)) problems.push(`${name}: name remains in pin`);
+      const inPack = pack.tools.some((tool) => tool.endpoint.method === method && tool.endpoint.path === path);
+      const inPin = Object.values(AGENT_TOOLS).some((tool) => tool.method === method && tool.path === path);
+      if (inPack || inPin) {
+        problems.push(`${name}: ${method} ${path} remains in ${[inPack && "pack", inPin && "pin"].filter(Boolean).join(" and ")}`);
+      }
+      if (testPack.tools.some((tool) => tool.name === name)) problems.push(`${name}: name remains in test pack tools`);
+      if (testPack.system_prompt.includes(name)) problems.push(`${name}: name remains in test pack system prompt`);
+    }
+    const chainWrite = (method: string, path: string) => method !== "GET" && path.startsWith("/api/escrow/chain/");
+    for (const tool of pack.tools) {
+      if (chainWrite(tool.endpoint.method, tool.endpoint.path)) problems.push(`${tool.name}: pack tool writes ${tool.endpoint.method} ${tool.endpoint.path}`);
+    }
+    for (const [name, tool] of Object.entries(AGENT_TOOLS)) {
+      if (chainWrite(tool.method, tool.path)) problems.push(`${name}: pin entry writes ${tool.method} ${tool.path}`);
+    }
+    for (const name of ESCROW_READS) {
+      const tool = pack.tools.find((entry) => entry.name === name);
+      if (!tool || tool.endpoint.method !== "GET") problems.push(`${name}: escrow read is missing from the pack or is not a GET`);
+      if (!Object.prototype.hasOwnProperty.call(AGENT_TOOLS, name)) problems.push(`${name}: escrow read is missing from the pin`);
     }
     expect(problems).toEqual([]);
   });

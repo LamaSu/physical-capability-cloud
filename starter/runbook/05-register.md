@@ -7,41 +7,50 @@ BASE=$(cat .pcc/base)
 ```
 
 ## 1. The kernel (the site)
+Choose the kernel's id, and write down what the kernel says about itself. Nothing is sent yet: step 2 creates the kernel and registers its signing key in one call. If `.pcc/kernel-id` already holds an id, it is kept.
 ```bash
-curl -s -X POST "$BASE/api/kernels" -H @.pcc/auth.header -H 'Content-Type: application/json' -d '{
+[ -s .pcc/kernel-id ] || python3 -c "import secrets; print('kernel-' + secrets.token_hex(6))" > .pcc/kernel-id
+cat > .pcc/kernel-fields.json <<'JSON'
+{
   "name": "Bench plate reader",
   "description": "Veriswell SIM-PR1 absorbance plate reader, 96-well, 405/450/600 nm",
   "location": {"lat": 37.80, "lng": -122.27},
   "physicalAddress": "Oakland, US"
-}' > .pcc/kernel.json
-python3 -c "import json; print(json.load(open('.pcc/kernel.json'))['kernel']['id'])" > .pcc/kernel-id
+}
+JSON
+python3 -c "import json; json.load(open('.pcc/kernel-fields.json')); print('kernel id', open('.pcc/kernel-id').read().strip())"
 ```
-**Check:** HTTP 201, and `.pcc/kernel-id` holds an id such as `kernel_…`. The location comes from intake, as coarse as the human chose. The gateway reads only `lat` and `lng` from `location`, so a text address goes in `physicalAddress`.
+**Check:** `.pcc/kernel-id` holds an id such as `kernel-3f9a0c1b2d4e`, and the last command prints it. The location comes from intake, as coarse as the human chose. The gateway reads only `lat` and `lng` from `location`, so a text address goes in `physicalAddress`.
 
 ## 2. The kernel's signing key
-Register the node key you made in phase 0 (step 3) as the kernel's signing key. The node signs its evidence with it, so its work can be checked against the kernel. pcc-node proves possession by signing a challenge; the private half never leaves the selected key file. Use the default `~/.pcc-node/keys.json`, or set `PCC_NODE_KEY_PATH` (or the fallback `PCC_NODE_KEYS_FILE`) to an absolute path outside this folder and every source checkout. Use the same location as phase 0, keeping any override set. Keep this owner-only location outside every source checkout. Key persistence requires Linux; the location checks arrive with the first release containing #374 (see phase 0 step 3).
+Create the kernel and register the node key you made in phase 0 (step 3) as its signing key, in one call. The node signs its evidence with it, so its work can be checked against the kernel. pcc-node proves possession by signing a challenge; the private half never leaves the selected key file. Use the default `~/.pcc-node/keys.json`, or set `PCC_NODE_KEY_PATH` (or the fallback `PCC_NODE_KEYS_FILE`) to an absolute path outside this folder and every source checkout. Use the same location as phase 0, keeping any override set. Keep this owner-only location outside every source checkout. Key persistence requires Linux (see phase 0 step 3).
 
-**First, GET `$BASE/api/kernels/<id>`** and check it is the kernel you just created, with no signing key yet. A mistyped id would sign, and create, a different kernel.
+**First, GET `$BASE/api/kernels/<id>`.** It answers 404 for a new id. A 200 means a kernel already has this id, such as one an earlier run in this folder created; the call below then registers this node's key on it, or refuses it (see the Check below). Any other answer means the request itself failed: check `.pcc/base` and the API key first.
 ```bash
-curl -s "$BASE/api/kernels/$(cat .pcc/kernel-id)" -H @.pcc/auth.header | python3 -c "import json,sys; k=json.load(sys.stdin)['kernel']; assert k['id'] == open('.pcc/kernel-id').read().strip() and not k.get('signingKey'), k.get('id'); print('kernel', k['id'], 'ready for its key')"
+echo "GET kernel: $(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/kernels/$(cat .pcc/kernel-id)" -H @.pcc/auth.header)"
+```
+Then create the kernel and register its key:
+```bash
 python3 - <<'EOF'
-import os
+import json, os
 import nacl.signing                                 # refuses here if the crypto extra is missing
 from pcc_node.crypto import load_or_create_keys
-from pcc_node.register import register_signing_key
+from pcc_node.register import register_kernel_signed
 read = lambda name: open(".pcc/" + name).read().strip()
 key_path = os.environ.get("PCC_NODE_KEY_PATH") or os.environ.get("PCC_NODE_KEYS_FILE") or os.path.expanduser("~/.pcc-node/keys.json")
 if not os.path.isabs(key_path) or os.path.realpath(key_path).startswith(os.path.realpath(".") + os.sep):
     raise SystemExit("The node key location must be an absolute path outside this folder and every source checkout")
-os.makedirs(os.path.dirname(key_path), mode=0o700, exist_ok=True)  # 0.1.1 r2 does not create it
-pub, sec = load_or_create_keys(key_path)              # explicit: 0.1.1 r2 would otherwise write ./pcc-keys.json
-status, _ = register_signing_key(read("base"), read("api-key"), read("kernel-id"), pub, sec)
-print("signing key:", status)
+os.makedirs(os.path.dirname(key_path), mode=0o700, exist_ok=True)  # owner-only key directory
+pub, sec = load_or_create_keys(key_path)              # explicit: the key file from phase 0 step 3
+payload = dict(json.load(open(".pcc/kernel-fields.json")), id=read("kernel-id"))
+data = register_kernel_signed(read("base"), read("api-key"), payload, pub, sec)
+json.dump(data, open(".pcc/kernel.json", "w"))
+print("kernel", data["kernel"]["id"], "signing key", data["kernel"]["signingKey"]["publicKey"][:18] + "...")
 EOF
 ```
-**Check:** status 200 or 201. `GET $BASE/api/kernels/$(cat .pcc/kernel-id)` then shows a non-null `signingKey`.
+**Check:** it prints the kernel id and the start of its signing key, and `GET $BASE/api/kernels/$(cat .pcc/kernel-id)` then shows that `signingKey`. If the call refuses a kernel that already had this id, delete `.pcc/kernel-id` and run step 1 again: the kernel gets a new id. A line starting `Waiting` means pcc-node is waiting out an earlier registration attempt, for up to 11 minutes: let it finish.
 
-If it refuses with "pynacl" or `LogSigningRefused`:
+If it refuses with "pynacl" or `signing_key_unusable`:
 1. Install the crypto extra (phase 0 step 2).
 2. If an older pcc-node made an unregistered placeholder without pynacl, retire the selected key file and delete `.pcc/node-public-key`. The placeholder can never sign. Current pcc-node refuses to create a key without pynacl.
 3. Run phase 0 step 3 again for a real key, then this step.
@@ -88,7 +97,7 @@ curl -s "$BASE/api/operators/$SLUG/status" -H @.pcc/auth.header
 bin/pcc-report register ok "kernel, signing key, lab.absorbance capability, device registered" --kernel-id "$(cat .pcc/kernel-id)"
 ```
 **Not this path, on the current code:**
-- `pcc-node start`: from 0.1.1 its daemon takes no jobs, and its heartbeat tells the gateway so (`acceptingJobs: false`), which lets your listing age out.
+- `pcc-node start`: its daemon takes no jobs, and its heartbeat tells the gateway so (`acceptingJobs: false`), which lets your listing age out.
 - `onboard_machine` and `prove_registration` are self-attestation, not verification (board S3).
 
 Phase 6 exercises the device. Its evidence stays unverified until the operating agent signs it.

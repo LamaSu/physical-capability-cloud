@@ -16,16 +16,13 @@ Every PCCP capability is exposed as a REST API endpoint that any AI agent can ca
 | `get_capability` | GET | `/api/capabilities/:id` | Get details of a specific capability |
 | `list_kernels` | GET | `/api/kernels` | List all shop kernels (labs, print shops, couriers) |
 | `get_kernel` | GET | `/api/kernels/:id` | Get kernel details including devices and queue depth |
-| `search_spaces` | GET | `/api/spaces` | Find hosting spaces for equipment |
 
 ## Contract & Pricing Skills
 
 | Skill | Method | Endpoint | What It Does |
 |-------|--------|----------|-------------|
-| `get_build_options` | GET | `/api/build/options/:type` | Get configurable parameters for a capability type |
+| `get_build_options` | POST | `/api/build/options` | Get configuration options for a capability type: parameter groups, each parameter's definition, and a base price hint. It includes no assurance tiers |
 | `build_contract` | POST | `/api/build/contract` | Build a contract with selected parameters and pricing |
-| `validate_contract` | POST | `/api/build/validate` | Validate contract parameters before submission |
-| `get_profiles` | GET | `/api/build/profiles` | Get machine profiles with constraints |
 
 ## Job Execution Skills
 
@@ -39,11 +36,8 @@ Every PCCP capability is exposed as a REST API endpoint that any AI agent can ca
 
 | Skill | Method | Endpoint | What It Does |
 |-------|--------|----------|-------------|
-| `list_escrows` | GET | `/api/escrows` | List all escrow contracts |
-| `get_escrow` | GET | `/api/escrows/:id` | Get escrow details with milestones |
-| `fund_milestone` | POST | `/api/escrows/:id/fund` | Fund an escrow milestone |
-| `release_milestone` | POST | `/api/escrows/:id/milestones/:stepId/release` | Release funds after verification |
-| `file_dispute` | POST | `/api/escrows/:id/dispute` | File a dispute on a milestone |
+| `list_escrows` | GET | `/api/escrow` | List escrow contracts with their milestone counts. Optionally filter by escrow status |
+| `get_escrow` | GET | `/api/escrow/:escrowId` | Get one escrow. By its PCC id: the database record, with milestones and disputes. By its contract address: read from the chain |
 
 ## Evidence Skills
 
@@ -83,44 +77,6 @@ Every PCCP capability is exposed as a REST API endpoint that any AI agent can ca
 | `prove_tier` | POST | `/api/zk/prove/tier` | Generate tier compliance proof |
 | `verify_proof` | POST | `/api/zk/verify` | Verify a ZK proof |
 
-## DePIN & Rewards Skills
-
-| Skill | Method | Endpoint | What It Does |
-|-------|--------|----------|-------------|
-| `list_epochs` | GET | `/api/rewards/epochs` | List DePIN reward epochs |
-| `get_epoch` | GET | `/api/rewards/epochs/:id` | Get epoch details with kernel scores |
-| `list_certificates` | GET | `/api/rewards/certificates` | List soulbound capability certificates |
-| `list_claims` | GET | `/api/rewards/claims` | List reward claims |
-| `get_treasury` | GET | `/api/rewards/treasury` | Get DePIN treasury status |
-
-## Protocol Skills
-
-| Skill | Method | Endpoint | What It Does |
-|-------|--------|----------|-------------|
-| `list_protocols` | GET | `/api/protocols` | Browse protocol templates |
-| `get_protocol` | GET | `/api/protocols/:id` | Get protocol DAG and parameters |
-| `create_protocol` | POST | `/api/protocols` | Create a new protocol template |
-| `fork_protocol` | POST | `/api/protocols/:id/fork` | Fork an existing protocol |
-| `run_protocol` | POST | `/api/protocols/:id/run` | Start a protocol run |
-
-## Orchestrator Skills
-
-| Skill | Method | Endpoint | What It Does |
-|-------|--------|----------|-------------|
-| `get_transfer_graph` | GET | `/api/orchestrator/graph/:kernelId` | Get instrument transfer graph |
-| `list_samples` | GET | `/api/orchestrator/samples` | Track sample movements |
-| `list_workflows` | GET | `/api/orchestrator/workflows` | List instrument workflows |
-
-## Logistics Skills
-
-| Skill | Method | Endpoint | What It Does |
-|-------|--------|----------|-------------|
-| `list_shipments` | GET | `/api/logistics/shipments` | List active shipments |
-| `get_shipment` | GET | `/api/logistics/shipments/:id` | Get shipment tracking details |
-| `list_bookings` | GET | `/api/logistics/bookings` | List space bookings |
-| `list_installations` | GET | `/api/logistics/installations` | List installation orders |
-| `list_providers` | GET | `/api/logistics/providers` | List logistics providers |
-
 ## Authentication Skills
 
 | Skill | Method | Endpoint | What It Does |
@@ -159,5 +115,3 @@ Beyond REST, PCCP agents communicate via typed intents on the MessageBus:
 | `payment_released` | Settlement → User | Funds released to operator |
 | `request_funding` | Kernel → Broker | Request DePIN funding |
 | `claim_rewards` | Kernel → Broker | Claim DePIN epoch rewards |
-
-**Total: 65+ skills across 20 API route files + 13 A2A intents + 5 SSE streams.**

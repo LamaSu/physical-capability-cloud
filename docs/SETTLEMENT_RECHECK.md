@@ -118,7 +118,7 @@ The kit follows the contract's refund causes, inline settlement and emergency ca
 
 ## Pruned nodes and log caps
 
-The replay behavior below arrives with Run 2. A pruned pin reports PIN_STATE_UNAVAILABLE, never a mismatch. With `--later-block-for-terminal`, terminal and frozen facts (/unitState, /phase, /finalState, /isTerminal, /isAllocated and the /economics fields) may be checked at the user's node's own finalized hash only when finalState is non-null. States 8 and 9 have no exit and economics freeze at funding. The report marks the later block; all other unavailable rows remain UNVERIFIED.
+The replay CLI behaves as follows. A pruned pin reports PIN_STATE_UNAVAILABLE, never a mismatch. With `--later-block-for-terminal`, terminal and frozen facts (/unitState, /phase, /finalState, /isTerminal, /isAllocated and the /economics fields) may be checked at the user's node's own finalized hash only when finalState is non-null. States 8 and 9 have no exit and economics freeze at funding. The report marks the later block; all other unavailable rows remain UNVERIFIED.
 
 The replay requires `--rpc` with no default. Transport uses a `pcc-settlement-recheck/<kitVersion>` User-Agent, a 20-second timeout and one retry on a transport error, never on a JSON-RPC error. Hosted nodes may cap or refuse logs: the observed Base Sepolia public limit was 200 blocks, while the Base mainnet endpoint refused eth_getLogs. A scan starts at 2,000 blocks and halves on range-limit errors to a 50-block floor. The default budget is 1,000 requests, starting at the deployment's recordBlockNumber unless `--from-block` is supplied. Refusal, an unsatisfied cap or budget exhaustion makes log rows UNVERIFIED, never MISMATCH. `--no-logs` skips them.
 
@@ -130,7 +130,7 @@ Each deployment names its readSurface; each read surface owns its map. The recor
 
 ## Running the check
 
-The replay CLI arrives with Run 2. Until the operator's publication go, it runs from a clone: run these commands from the clone:
+Until the operator's publication go, the replay CLI runs from a clone. Run these commands in the clone:
 
 ```sh
 pnpm install
@@ -138,4 +138,4 @@ pnpm --filter @pcc/spec build
 node packages/spec/dist/recheck/cli.js --rpc <url> --reply <file>
 ```
 
-The last command becomes available with Run 2; Run 1 exports only the data kit. viem resolves from SPEC's devDependency in the clone. Neither run publishes the package.
+The last command runs the replay CLI. viem resolves from SPEC's devDependency in the clone. Neither run publishes the package.

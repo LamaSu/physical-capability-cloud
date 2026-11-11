@@ -230,6 +230,11 @@ function deriveSlug(refId: string): string {
   return refId.replace(/^cap_/, "").replace(/^skill_/, "");
 }
 
+/** A seeded kernel id is "k_<slug>"; any other kernel id is its own slug. */
+function kernelSlug(kernelId: string): string {
+  return kernelId.replace(/^k_/, "");
+}
+
 function pushJobToAssignee(jobId: string, slug: string): void {
   const list = jobsByAssignee.get(slug) ?? [];
   list.push(jobId);
@@ -243,7 +248,7 @@ function dispatchMakePizza(order: DemoOrder): DemoJob {
     jobId,
     orderId: order.orderId,
     type: "make-pizza",
-    assigneeSlug: deriveSlug(order.composition.shop.capabilityId),
+    assigneeSlug: kernelSlug(order.composition.shop.kernelId),
     status: "queued",
     details: {
       description: order.description,
@@ -272,7 +277,7 @@ function dispatchDelivery(order: DemoOrder): DemoJob {
     jobId,
     orderId: order.orderId,
     type: "deliver-pizza",
-    assigneeSlug: deriveSlug(order.composition.driver.capabilityId),
+    assigneeSlug: kernelSlug(order.composition.driver.kernelId),
     status: "queued",
     details: {
       description: `Deliver ${order.description}`,
@@ -669,7 +674,6 @@ export async function pizzaDemoRoutes(app: FastifyInstance): Promise<void> {
 
         const shopPayoutUSD = order.composition!.shop.priceUSD;
         const driverPayoutUSD = order.composition!.driver.priceUSD;
-        const pccFeeUSD = +(order.composition!.totalPriceUSD * 0.0235).toFixed(2);
 
         emit(`order:${order.orderId}`, {
           type: "delivered",
@@ -678,7 +682,6 @@ export async function pizzaDemoRoutes(app: FastifyInstance): Promise<void> {
             // Mocked settlement event; real impl wires to EAS V2 (#83/#94)
             shopPayoutUSD,
             driverPayoutUSD,
-            pccFeeUSD,
           },
           reputation: {
             // Mocked deltas; real wire is via PR #91 + #96 executeComposition
@@ -710,19 +713,12 @@ export async function pizzaDemoRoutes(app: FastifyInstance): Promise<void> {
           to: order.composition!.driver.name,
           data: { leg: "driver-payout" },
         });
-        emitChainEvent(order, "usdc_transfer", "USDC", {
-          amountUSDC: usdc(pccFeeUSD),
-          from: "MilestoneEscrowV2",
-          to: "pcc-treasury",
-          data: { leg: "pcc-protocol-fee", feeBps: 235 },
-        });
         recordStep(order, "settlement_released", "Settlement released", "chain", {
           txHash: release.txHash,
           blockNumber: release.blockNumber,
           explorerUrl: release.explorerUrl,
           shopPayoutUSD,
           driverPayoutUSD,
-          pccFeeUSD,
           contract: "MilestoneEscrowV2",
         });
 
@@ -829,7 +825,6 @@ export async function pizzaDemoRoutes(app: FastifyInstance): Promise<void> {
     ]);
 
     let totalVolumeUSD = 0;
-    let pccFeeUSDToday = 0;
     let completedToday = 0;
     const deliverTimes: number[] = [];
 
@@ -838,7 +833,6 @@ export async function pizzaDemoRoutes(app: FastifyInstance): Promise<void> {
       const vol = o.composition?.totalPriceUSD ?? 0;
       if (o.updatedAt.slice(0, 10) === today) {
         totalVolumeUSD += vol;
-        pccFeeUSDToday += +(vol * 0.0235).toFixed(2);
         completedToday++;
       }
       const placedAt = o.timeline.find((t) => t.step === "order_placed")?.at ?? o.createdAt;
@@ -878,7 +872,6 @@ export async function pizzaDemoRoutes(app: FastifyInstance): Promise<void> {
         activeOrders,
         completedToday,
         totalVolumeUSD: +totalVolumeUSD.toFixed(2),
-        pccFeeUSDToday: +pccFeeUSDToday.toFixed(2),
         avgTimeToDeliverSec,
         totalOrders: orders.size,
       },

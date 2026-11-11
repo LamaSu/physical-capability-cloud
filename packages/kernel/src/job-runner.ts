@@ -9,7 +9,7 @@
 import { createHash } from "node:crypto";
 import { computeTierLadderDigest, TierLadderError, type AssuranceTier, type EvidenceEvent, type SHA256, type TierLadderV1 } from "@pcc/spec";
 import type { MachineAdapter, SensorAdapter, CameraAdapter } from "./adapters/types.js";
-import { EvidenceEmitter } from "./evidence-emitter.js";
+import { EvidenceEmitter, KERNEL_SIGNER_REQUIRED_MESSAGE, refusesTestSigner } from "./evidence-emitter.js";
 import { openEvidenceSession } from "./evidence-session.js";
 import { isStepLeased, leaseStep } from "./step-lease.js";
 import * as Sentry from "@sentry/node";
@@ -104,6 +104,8 @@ export class JobRunner {
     const startTime = Date.now();
     const { jobId, stepId, inputHash, gcodeHash: legacyGcodeHash, inputData, gcodeData, tierLadder, assuranceTier, onPhase } = config;
     const refuse = (error: string): JobResult => ({ success: false, error, durationMs: Date.now() - startTime });
+    // Refuse the test-only signer before any session, step, device command or phase callback.
+    if (refusesTestSigner(this.evidenceEmitter)) return refuse(KERNEL_SIGNER_REQUIRED_MESSAGE);
 
     // Synchronous preflight: no session, step registration, command or phase callback.
     if ((inputHash !== undefined) === (legacyGcodeHash !== undefined)) {

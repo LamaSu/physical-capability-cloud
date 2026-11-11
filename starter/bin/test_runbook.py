@@ -391,7 +391,7 @@ class TestRound2(unittest.TestCase):
 
     def test_the_kernel_sends_a_physical_address_field(self):
         # The gateway reads only lat and lng from a location object; a text address is physicalAddress.
-        kernel = between(phase_text("05-register.md"), "/api/kernels\"", "**Check:**")
+        kernel = between(phase_text("05-register.md"), "kernel-fields.json <<'JSON'", "\nJSON\n")
         self.assertIn("physicalAddress", kernel)
         self.assertNotRegex(kernel, r'"location":\s*\{[^}]*"address"')
 
@@ -399,7 +399,7 @@ class TestRound2(unittest.TestCase):
         # F7: a mistyped kernel id would sign, and create, another kernel.
         signing = between(phase_text("05-register.md"), "## 2.", "## 3.")
         self.assertRegex(signing, r"GET[^\n]*/api/kernels/")
-        self.assertLess(signing.index("/api/kernels/"), signing.index("register_signing_key("))
+        self.assertLess(signing.index("/api/kernels/"), signing.index("register_kernel_signed("))
 
     def test_the_gateway_must_check_operator_ownership(self):
         # F1: master's operator routes do not check who owns the kernel or job.
@@ -409,6 +409,74 @@ class TestRound2(unittest.TestCase):
         # 0.1.1's daemon takes no jobs and its heartbeat says so, which would hide the listing.
         self.assertRegex(phase_text("07-operate.md"), r"acceptingJobs")
 
+
+
+class TestOneCallRegistration(unittest.TestCase):
+    """Phase 5 creates the kernel and registers its signing key in one call."""
+
+    def test_the_kernel_and_its_key_are_registered_in_one_call(self):
+        text = phase_text("05-register.md")
+        self.assertNotIn("register_signing_key", text)
+        self.assertEqual(len(re.findall(r"\bregister_kernel_signed\s*\(", text)), 1)
+        signing = between(text, "## 2.", "## 3.")
+        examples = [
+            code for code in re.findall(r"(?ms)^python3 - <<'EOF'[^\n]*\n(.*?)^EOF$", signing)
+            if "register_kernel_signed(" in code
+        ]
+        self.assertEqual(len(examples), 1)
+        tree = ast.parse(examples[0])
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == "register_kernel_signed"
+        ]
+        self.assertEqual(len(calls), 1)
+        call = calls[0]
+        self.assertEqual(len(call.args), 5)
+        self.assertFalse(call.keywords)
+        self.assertIsInstance(call.args[2], ast.Name)
+        bindings = [
+            node.value for node in tree.body
+            if isinstance(node, ast.Assign) and node.lineno < call.lineno
+            and any(isinstance(target, ast.Name) and target.id == call.args[2].id
+                    for target in node.targets)
+        ]
+        self.assertTrue(bindings)
+        self.assertIn("kernel-fields.json", ast.unparse(bindings[-1]))
+        self.assertIn("kernel-id", ast.unparse(bindings[-1]))
+
+    def test_step_1_sends_nothing_and_picks_the_id(self):
+        text = phase_text("05-register.md")
+        self.assertNotRegex(text, r'-X POST "\$BASE/api/kernels"')
+        kernel = between(text, "## 1.", "## 2.")
+        self.assertIn("secrets.token_hex", kernel)
+        self.assertNotIn("curl", kernel)
+
+    def test_the_id_is_checked_by_its_status_code_first(self):
+        signing = between(phase_text("05-register.md"), "## 2.", "## 3.")
+        before = signing[:signing.index("register_kernel_signed(")]
+        self.assertIn("404", before)
+        self.assertIn("%{http_code}", before)
+        self.assertNotIn("ready for its key", signing)
+
+    def test_the_starter_names_no_pcc_node_version(self):
+        for path, text in text_files():
+            self.assertNotRegex(text, r"\b0\.1\.\d+\b", path.name)
+
+    def test_the_signing_refusal_names_the_one_call(self):
+        index = json.loads((RUNBOOK / "index.json").read_text(encoding="utf-8"))
+        trigger = index["events"]["register.signing-refused"]["trigger"]
+        self.assertIn("register_kernel_signed", trigger)
+        self.assertIn("signing_key_unusable", trigger)
+        self.assertNotRegex(trigger, r"register_signing_key|LogSigningRefused")
+        self.assertIn('If it refuses with "pynacl" or `signing_key_unusable`:', phase_text("05-register.md"))
+
+    def test_the_install_check_finds_the_one_call(self):
+        install = between(phase_text("00-prerequisites.md"), "## 2.", "## 3.")
+        self.assertIn('python3 -c "from pcc_node.register import register_kernel_signed" && echo "pcc-node OK"', install)
+        self.assertNotIn("pcc-node --version", install)
+        book = json.loads((RUNBOOK / "runbook.json").read_text(encoding="utf-8"))
+        prerequisites = next(phase for phase in book["phases"] if phase["id"] == "prerequisites")
+        self.assertTrue(any("register_kernel_signed" in entry for entry in prerequisites["doneWhen"]))
 
 
 class TestRound3(unittest.TestCase):

@@ -139,10 +139,10 @@ describe("resume-settlement recovers a trapped completion (finding #2 / A-2)", (
   }
 
   function complete(jobId: string) {
-    return app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} });
+    return app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: asAdmin, payload: {} });
   }
   function resume(jobId: string) {
-    return app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, payload: {} });
+    return app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, headers: asAdmin, payload: {} });
   }
 
   it("plain /complete on a trapped evidence_submitted job still 409s (confirms the trap)", async () => {

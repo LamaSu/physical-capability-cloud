@@ -9,8 +9,10 @@ import { closeStore, initStore } from "../db.js";
 
 describe("POST /api/kernels authentication and ownership", () => {
   let app: FastifyInstance;
+  const previousLegacyProof = process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF;
 
   beforeEach(async () => {
+    process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF = "allow";
     process.env.PCC_DB_PATH = ":memory:";
     initStore({ seed: false });
     app = Fastify({ logger: false });
@@ -22,6 +24,8 @@ describe("POST /api/kernels authentication and ownership", () => {
   afterEach(async () => {
     await app.close();
     closeStore();
+    if (previousLegacyProof === undefined) delete process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF;
+    else process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF = previousLegacyProof;
   });
 
   it("keeps GET public but rejects an unauthenticated signing-key bind", async () => {

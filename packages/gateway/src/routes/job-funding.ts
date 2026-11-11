@@ -2,15 +2,10 @@ import type { FastifyInstance } from "fastify";
 import { gateJobRead, refuseJobRead } from "../readmodels/job-read-gate.js";
 import { jobFundingOf } from "../readmodels/job-funding.js";
 
-const READ_FAILED = {
-  error: "read_model_unavailable",
-  message: "The job record could not be read. Try again shortly.",
-};
-
 const schema = {
   tags: ["jobs"],
   summary: "Read a job's paid-scope funding status",
-  description: "The recorded buyer's, kernel operator's or admin's funding view of a job. Reads stored records without a chain call. Responses are not cached.",
+  description: "The recorded buyer's, kernel operator's or admin's funding view of a job. Reads stored records without a chain call, so funded_verified means the funding was verified at block verification.blockNumber, never that it is held now. Funding whose deployment.chainClass is not mainnet is never money. Responses are not cached.",
   params: {
     type: "object",
     required: ["jobId"],
@@ -42,7 +37,7 @@ export async function jobFundingRoutes(app: FastifyInstance) {
     const gate = gateJobRead(req, req.params.jobId);
     if (!gate.ok) return refuseJobRead(reply, gate, { error: "job_not_found" });
     const funding = jobFundingOf(gate.job.id, gate.job.kernelId, new Date().toISOString());
-    if (funding.read === "failed") return reply.code(503).send(READ_FAILED);
+    if (funding.read === "failed") return refuseJobRead(reply, { ok: false, kind: "unavailable" });
     return { jobId: gate.job.id, scopes: funding.scopes };
   });
 }

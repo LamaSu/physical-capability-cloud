@@ -79,6 +79,20 @@ describe("the agent pack tells agents only true things", () => {
     }
   });
 
+  it("describes the gateway's live verification oracles and agent bridge without Bittensor claims", () => {
+    const testPack = JSON.parse(readFileSync(join(REPO, "agent-package-test.json"), "utf8")) as {
+      tools: Array<{ name: string; description: string }>;
+    };
+    for (const [file, tools] of [
+      ["agent-package.json", pkg.tools],
+      ["agent-package-test.json", testPack.tools],
+    ] as const) {
+      for (const tool of tools) {
+        expect(tool.description, `${file}: ${tool.name}`).not.toMatch(/Bittensor/i);
+      }
+    }
+  });
+
   it("does not sell kernel_announce_capabilities as registration (N75)", () => {
     const announce = pkg.tools.find((t) => t.name === "kernel_announce_capabilities");
     expect(announce).toBeDefined();
@@ -166,6 +180,25 @@ describe("rehearsal R0: the pack matches the gateway it describes", () => {
       expect(d).not.toMatch(/critical path|required for all escrow settlements/i);
       expect(d).toContain("404");
     }
+  });
+
+  // P9: pcc_job_complete's route lets only the job's parties or the admin complete the job, and a
+  // party must send an explicit credential (paid-job-flow.ts, the PUT /api/jobs/:jobId/complete handler).
+  it("P9: pcc_job_complete names who may call it, as the route decides", () => {
+    expect(tool("pcc_job_complete").description).toContain(
+      "Only the job's buyer, its kernel's operator or the gateway admin may call it: a buyer or operator must send an API key or session key in the Authorization header (a sign-in cookie alone gets 403), and any other proven wallet gets 404 (\"Job not found\").",
+    );
+    const flow = readFileSync(join(REPO, "packages/gateway/src/routes/paid-job-flow.ts"), "utf8");
+    const route = '"/api/jobs/:jobId/complete"';
+    expect(flow.split(route)).toHaveLength(2);
+    const start = flow.indexOf(route);
+    const handler = flow.slice(start, flow.indexOf("const body", start));
+    for (const part of [
+      "gateJobRead(req, jobId)",
+      'refuseJobRead(reply, gate, { error: "Job not found" })',
+      'gate.as !== "admin" && provenByCookieOnly(authorityOf(req))',
+      "reply.status(403).send(EXPLICIT_CREDENTIAL_REQUIRED)",
+    ]) expect(handler, part).toContain(part);
   });
 
   it("G8: register-device requires exactly what POST /api/setup/register-device requires", () => {

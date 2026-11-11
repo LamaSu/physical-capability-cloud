@@ -260,35 +260,6 @@ function CardSkeleton() {
 // Row 1: Protocol Economics
 // ---------------------------------------------------------------------------
 
-function ProtocolFeeCard({ data }: { data: SystemPayload }) {
-  const feePct = (data.protocol.feeBps / 100).toFixed(2);
-  return (
-    <GlassPanel padding="lg">
-      <div className="space-y-4">
-        <div className="flex items-start justify-between gap-2">
-          <div>
-            <h3 className="text-sm font-bold text-white/85 tracking-wide">Protocol Fee</h3>
-            <p className="text-[11px] text-white/35 mt-0.5">On-chain settlement economics</p>
-          </div>
-          <Badge color="green">Live</Badge>
-        </div>
-        <div className="flex gap-4">
-          <BigNumber value={`${feePct}%`} label="Fee Rate" />
-          <BigNumber value={`$${data.protocol.totalFeesCollected}`} label="Collected" />
-        </div>
-        <div className="space-y-2 pt-1 border-t border-white/[0.06]">
-          <MetricRow
-            label="Fee Recipient"
-            value={truncateAddr(data.protocol.feeRecipient)}
-            mono
-          />
-          <MetricRow label="Rate (bps)" value={`${data.protocol.feeBps} bps`} mono />
-        </div>
-      </div>
-    </GlassPanel>
-  );
-}
-
 function EscrowActivityCard({ data }: { data: SystemPayload }) {
   return (
     <GlassPanel padding="lg">
@@ -794,12 +765,11 @@ export function SystemDashboardPage() {
       <div>
         <SectionLabel>Protocol Economics</SectionLabel>
         {isLoading ? (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {[...Array(3)].map((_, i) => <CardSkeleton key={i} />)}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {[...Array(2)].map((_, i) => <CardSkeleton key={i} />)}
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <ProtocolFeeCard data={data} />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <EscrowActivityCard data={data} />
             <MarketplaceCard data={data} />
           </div>

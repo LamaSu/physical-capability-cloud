@@ -30,12 +30,13 @@ import { BUYER_FUNDED_ESCROW_VERSION } from "../services/buyer-funded-escrow.js"
 const ADDRESS: Address = "0x1234567890123456789012345678901234567890";
 const ABSENT: Address = "0x9876543210987654321098765432109876543210";
 const UID = `0x${"ab".repeat(32)}`;
+const ADMIN = "buyer-funded-refusals-admin";
 const networkSpies = () => [chain.getMilestoneV2, chain.getEscrowStateV2, chain.fundEscrowV2,
   chain.depositBondV2, chain.submitEvidenceV2, chain.submitAttestationV2, chain.releaseMilestoneV2,
   chain.submitAttestationV3, chain.releaseMilestoneV3, chain.waitForReceipt];
 let app: FastifyInstance;
 beforeEach(async () => {
-  vi.stubEnv("PCC_DB_PATH", ":memory:"); vi.stubEnv("PCC_USE_EAS_V2", "true");
+  vi.stubEnv("PCC_DB_PATH", ":memory:"); vi.stubEnv("PCC_USE_EAS_V2", "true"); vi.stubEnv("PCC_ADMIN_KEY", ADMIN);
   initStore({ seed: false });
   vi.clearAllMocks();
   vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
@@ -55,7 +56,7 @@ function seed(version: string | null = BUYER_FUNDED_ESCROW_VERSION) {
 }
 function noChain() { for (const spy of networkSpies()) expect(spy).not.toHaveBeenCalled(); }
 const post = (action: string, address = ADDRESS) => app.inject({ method: "POST", url: `/api/escrow/chain/${address}/${action}`,
-  ...(action.startsWith("attestation") ? { payload: { easUid: UID } } : {}) });
+  headers: { "x-admin-key": ADMIN }, ...(action.startsWith("attestation") ? { payload: { easUid: UID } } : {}) });
 
 describe("buyer funded escrow refusals", () => {
   it("X1: fund refuses the marker before the activity or any chain call", async () => {
@@ -107,7 +108,7 @@ async function dispatchCases(action: string, v2: Function, v3: Function) {
     expect((await post(action)).statusCode).toBe(200);
     expect(version === "v3" ? v3 : v2).toHaveBeenCalledOnce(); expect(version === "v3" ? v2 : v3).not.toHaveBeenCalled();
   }
-  vi.clearAllMocks(); expect((await post(action, ABSENT)).statusCode).toBe(200); expect(v2).toHaveBeenCalledOnce(); expect(v3).not.toHaveBeenCalled();
-  // Missing and throwing version lookups retain the pre-existing V2 fallback.
-  closeStore(); vi.clearAllMocks(); expect((await post(action)).statusCode).toBe(200); expect(v2).toHaveBeenCalledOnce(); expect(v3).not.toHaveBeenCalled();
+  vi.clearAllMocks(); const absent = await post(action, ABSENT); expect(absent.statusCode).toBe(404); expect(absent.json().error).toBe("escrow_not_found"); noChain();
+  // Missing rows are 404 and an unreadable registry fails closed: no V2 fallback.
+  closeStore(); vi.clearAllMocks(); const down = await post(action); expect(down.statusCode).toBe(503); expect(down.json().error).toBe("escrow_lookup_unavailable"); noChain();
 }

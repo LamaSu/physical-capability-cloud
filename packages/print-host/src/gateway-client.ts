@@ -2,7 +2,9 @@ import { inspect } from "node:util";
 import type { EvidenceBundle } from "@pcc/spec";
 import type { Hex } from "viem";
 import { isGatewayBaseUrl } from "./config.js";
-import { createGatewayRequest, isRequestFailure, object, own, validId, type ObjectBody, type RequestOptions } from "./gateway-request.js";
+import { createGatewayRequest, isRequestFailure, object, own, validId, type ObjectBody, type RequestOptions, type SessionKeySource } from "./gateway-request.js";
+
+export type { SessionKeySource } from "./gateway-request.js";
 
 export type GwCode =
   | "unauthenticated" | "not_kernel_operator" | "operator_proof_required"
@@ -55,7 +57,8 @@ export type EmergencyStopReader = (body: Readonly<Record<string, unknown>>) => E
 
 export interface GatewayClientConfig {
   baseUrl: string;
-  apiKey: string;
+  apiKey?: string;
+  sessionKeys?: SessionKeySource;
   kernelId: string;
   wallet?: string;
   fetchImpl?: typeof fetch;
@@ -68,9 +71,19 @@ export interface GatewayClientConfig {
 export type RelayEvidenceBundle = Pick<EvidenceBundle, "events" | "bundleHash">
   & Partial<Pick<EvidenceBundle, "kernelSignature" | "sessionKeyAuthorization">>;
 
+export type JobFunding = {
+  ok: true;
+  fundedAt: number;
+  operator: string;
+  escrowAddress: string;
+  chainId: number;
+  fundingBlockNumber: string;
+  fundingBlockHash: string;
+} | { ok: false; code: "funding_read_failed" | "funding_unverified" | "funding_ambiguous" };
+
 export interface PollJobsValue {
   stop: EStopDecision;
-  jobs: { jobId: string; status: string }[];
+  jobs: { jobId: string; status: string; funding?: JobFunding }[];
   foreignJobsDropped: number;
   truncated: boolean;
 }
@@ -183,6 +196,51 @@ function readStop(reader: EmergencyStopReader, body: ObjectBody): EStopDecision 
   return { proceed: false, why: "malformed" };
 }
 
+function plainObject(value: unknown): value is ObjectBody {
+  return object(value) && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+}
+
+/** Funding is isolated per job; untrusted facts never fail the enclosing poll. */
+function readJobFunding(value: unknown): JobFunding {
+  const failed: JobFunding = { ok: false, code: "funding_read_failed" };
+  try {
+    if (!plainObject(value) || own(value, "read") !== "ok") return failed;
+    const scopes = own(value, "scopes");
+    if (!Array.isArray(scopes)) return failed;
+    const verified: unknown[] = [];
+    for (const scope of scopes) {
+      if (!plainObject(scope)) return failed;
+      const state = own(scope, "state");
+      if (typeof state !== "string") return failed;
+      if (state === "funded_verified") {
+        const verification = own(scope, "verification");
+        if (verification !== null && verification !== undefined) verified.push(verification);
+      }
+    }
+    if (verified.length === 0) return { ok: false, code: "funding_unverified" };
+    if (verified.length > 1) return { ok: false, code: "funding_ambiguous" };
+    const verification = verified[0];
+    if (!plainObject(verification)) return failed;
+    const fundedAt = own(verification, "fundedAt");
+    const operator = own(verification, "operator");
+    const escrowAddress = own(verification, "escrowAddress");
+    const chainId = own(verification, "chainId");
+    const fundingBlockNumber = own(verification, "fundingBlockNumber");
+    const fundingBlockHash = own(verification, "fundingBlockHash");
+    if (typeof fundedAt !== "number" || !Number.isSafeInteger(fundedAt)
+      || typeof operator !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(operator)
+      || typeof escrowAddress !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(escrowAddress)
+      || typeof chainId !== "number" || !Number.isSafeInteger(chainId) || chainId <= 0
+      || typeof fundingBlockNumber !== "string" || !/^(0|[1-9][0-9]{0,19})$/.test(fundingBlockNumber)
+      || BigInt(fundingBlockNumber) > 2n ** 64n - 1n
+      || typeof fundingBlockHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(fundingBlockHash)) return failed;
+    return {
+      ok: true, fundedAt, operator: operator.toLowerCase(), escrowAddress: escrowAddress.toLowerCase(),
+      chainId, fundingBlockNumber, fundingBlockHash: fundingBlockHash.toLowerCase(),
+    };
+  } catch { return failed; }
+}
+
 const evidenceConflict = ["kernel_mismatch", "job_mismatch"] as const;
 const evidenceInvalid = [
   "malformed_envelope", "ambiguous_envelope", "events_malformed", "event_hash_mismatch",
@@ -267,14 +325,20 @@ export function createGatewayClient(cfg: GatewayClientConfig): Readonly<GatewayC
   try {
     if (!object(cfg)) throw undefined;
     input = {
-      baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, kernelId: cfg.kernelId, wallet: cfg.wallet,
+      baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, sessionKeys: cfg.sessionKeys, kernelId: cfg.kernelId, wallet: cfg.wallet,
       fetchImpl: cfg.fetchImpl, timeoutMs: cfg.timeoutMs,
       maxResponseBytes: cfg.maxResponseBytes, emergencyStopReader: cfg.emergencyStopReader,
     };
   } catch { throw new GatewayClientError("bad_config"); }
-  const { baseUrl, apiKey, kernelId } = input;
+  const { baseUrl, apiKey, sessionKeys, kernelId } = input;
   if (typeof baseUrl !== "string" || !isGatewayBaseUrl(baseUrl)) throw new GatewayClientError("bad_base_url");
+  if (sessionKeys === undefined) {
   if (typeof apiKey !== "string" || !/^pcc_(live|test)_[A-Za-z0-9_-]{16,256}$/.test(apiKey)) throw new GatewayClientError("bad_api_key");
+  } else {
+    try {
+      if (apiKey !== undefined || !object(sessionKeys) || typeof sessionKeys.key !== "function" || typeof sessionKeys.invalidate !== "function") throw undefined;
+    } catch { throw new GatewayClientError("bad_config"); }
+  }
   if (!validId(kernelId)) throw new GatewayClientError("bad_kernel_id");
   if (input.wallet !== undefined && (typeof input.wallet !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(input.wallet))) {
     throw new GatewayClientError("bad_wallet");
@@ -290,10 +354,13 @@ export function createGatewayClient(cfg: GatewayClientConfig): Readonly<GatewayC
   if (typeof emergencyStopReader !== "function") throw new GatewayClientError("bad_reader");
   const endpoint = (name: string) => `${baseUrl.replace(/\/+$/, "")}/api/operator/${encodeURIComponent(name)}`;
 
-  const transport = createGatewayRequest({ apiKey, fetchImpl, timeoutMs, maxResponseBytes, wallet });
+  const transport = createGatewayRequest({ apiKey, sessionKeys, fetchImpl, timeoutMs, maxResponseBytes, wallet });
   async function request(kind: CallKind, url: string, body?: string, options?: RequestOptions): Promise<Reply | Failure> {
     const reply = await transport(url, body, options);
-    if (isRequestFailure(reply)) return kind === "evidence" ? failure("indeterminate", reply.status) : failure(reply.code, reply.status);
+    if (isRequestFailure(reply)) {
+      if (reply.code === "no_key") return failure("unauthenticated", null);
+      return kind === "evidence" ? failure("indeterminate", reply.status) : failure(reply.code, reply.status);
+    }
     try {
       // Non-200 JSON is decoded solely to classify allowlisted discriminators.
       if (reply.status !== 200) return classify(reply.status, reply.body ?? {}, reply.headers, kind);
@@ -320,7 +387,7 @@ export function createGatewayClient(cfg: GatewayClientConfig): Readonly<GatewayC
         const status = own(job, "status");
         if (!validId(id) || typeof jobKernel !== "string" || typeof status !== "string") return failure("malformed_response", 200);
         if (jobKernel !== kernelId) { foreignJobsDropped++; continue; }
-        jobs.push({ jobId: id, status });
+        jobs.push({ jobId: id, status, ...(Object.hasOwn(job, "funding") ? { funding: readJobFunding(own(job, "funding")) } : {}) });
       }
       return { ok: true, value: { stop: readStop(emergencyStopReader, reply.body), jobs, foreignJobsDropped, truncated: incoming.length >= 50 } };
     },

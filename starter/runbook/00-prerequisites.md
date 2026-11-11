@@ -28,26 +28,22 @@ Operator identity proof for operate is completed by WP-A (DECISIONS items 136 an
 pcc-node runs next to the device. It registers the kernel, signs its evidence and runs jobs. The `crypto` extra (pynacl) is **not optional**: without it the node cannot register a signing key or sign evidence, so its work can never verify.
 
 ```bash
-python3 -m pip install 'pcc-node[crypto]>=0.1.1'
+python3 -m pip install 'pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node'
 ```
-Until 0.1.1 is on PyPI (0.1.0 was withdrawn for security fixes), install the release commit instead:
-```bash
-python3 -m pip install 'pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node'
-```
+Install this pinned commit, not a release from PyPI: phase 5 calls `register_kernel_signed`, which no PyPI release has yet.
 **Check:**
 ```bash
-pcc-node --version                                   # pcc-node, version 0.1.1 (or later)
+python3 -c "from pcc_node.register import register_kernel_signed" && echo "pcc-node OK"
 python3 -c "import nacl.signing" && echo "signing OK"
 ```
+If the check fails after an earlier pcc-node install, pip kept that copy, because both report the same version: run the install line again with `--force-reinstall --no-deps` after `install`, then the check.
 
 ## 3. The node's signing key, made here and never sent
 The node signs its evidence with an Ed25519 key. Make it now, on this machine, and give PCC only its public half so its signatures can be verified. Without `publicKey`, the API key has no signing key on file; the gateway never generates or returns a private signing key.
 
 Key persistence is supported on **Linux only**, where pcc-node can check the filesystem and its aliases. Use the default `~/.pcc-node/keys.json`, or set `PCC_NODE_KEY_PATH` (or the fallback `PCC_NODE_KEYS_FILE`) to an absolute path outside this folder and every source checkout. Use the same location in this phase and phase 5; keep the override set for both if you need one. Your home and the key directory must be outside every source checkout. pcc-node checks the location, creates an owner-only directory and a `0600` key file, and refuses unsafe ownership, permissions or ancestry. Do not work around a refusal with `.gitignore` or by changing the key's permissions.
 
-The pcc-node 0.1.1 that step 2 installs does not run these checks or read `PCC_NODE_KEY_PATH`; the checks arrive with the first release that contains #374.
-
-Passing the path explicitly works across versions and skips #374's legacy-file check; this flow never creates `./pcc-keys.json`. A refused location can leave an empty `0700` directory.
+Passing the path explicitly keeps phases 0 and 5 on the same key file; this flow never creates `./pcc-keys.json`. A refused location can leave an empty `0700` directory.
 ```bash
 umask 077
 python3 - <<'EOF' > .pcc/node-public-key
@@ -57,8 +53,8 @@ from pcc_node.crypto import load_or_create_keys
 key_path = os.environ.get("PCC_NODE_KEY_PATH") or os.environ.get("PCC_NODE_KEYS_FILE") or os.path.expanduser("~/.pcc-node/keys.json")
 if not os.path.isabs(key_path) or os.path.realpath(key_path).startswith(os.path.realpath(".") + os.sep):
     raise SystemExit("The node key location must be an absolute path outside this folder and every source checkout")
-os.makedirs(os.path.dirname(key_path), mode=0o700, exist_ok=True)  # 0.1.1 r2 does not create it
-public_hex, _ = load_or_create_keys(key_path)        # explicit: 0.1.1 r2 would otherwise write ./pcc-keys.json
+os.makedirs(os.path.dirname(key_path), mode=0o700, exist_ok=True)  # owner-only key directory
+public_hex, _ = load_or_create_keys(key_path)        # explicit: the same key file in phases 0 and 5
 print(public_hex, end="")
 EOF
 ```
@@ -104,7 +100,7 @@ curl -s "$(cat .pcc/base)/api/auth/validate" -H @.pcc/auth.header
 Every phase ends with one report, whether it worked or not. The first call creates `.pcc/attempt.json`, holding this attempt's `sessionId`.
 ```bash
 export PCC_HARNESS=claude-code      # or codex, pcc-hosted, other
-bin/pcc-report prerequisites ok "gateway healthy, pcc-node 0.1.1 with crypto, key valid"
+bin/pcc-report prerequisites ok "gateway healthy, pcc-node with crypto, key valid"
 ```
 If something failed, report it with `failed` or `blocked` and what you saw. Then stop or continue as the phase says. Reports never block the onboarding.
 

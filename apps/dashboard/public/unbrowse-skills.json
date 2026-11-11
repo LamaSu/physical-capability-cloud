@@ -129,9 +129,9 @@
       "id": "get-depin-stats",
       "method": "GET",
       "path": "/api/rewards",
-      "description": "DePIN reward statistics — treasury balance, soulbound certificates, epoch rewards, claim status",
+      "description": "DePIN reward statistics — soulbound certificates, epoch rewards, claim status",
       "params": {},
-      "tags": ["depin", "rewards", "treasury"]
+      "tags": ["depin", "rewards"]
     },
     {
       "id": "get-subnet-status",

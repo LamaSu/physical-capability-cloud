@@ -32,10 +32,9 @@ from .register import (
     provision_api_key,
     register_kernel,
     register_devices,
-    register_signing_key,
+    PERMANENT_REFUSAL_EXIT,
     RegistrationError,
 )
-from .log_capture import LogSigningRefused
 
 
 def _setup_logging(verbose):
@@ -353,7 +352,12 @@ def main(ctx, verbose):
     help="Register with the public PCC network without asking",
 )
 def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
-    """Detect hardware, register on PCC, and start the node daemon."""
+    """Detect hardware, register on PCC, and start the node daemon.
+
+    Exit status 78 means the gateway refused the registration in a way a restart cannot fix
+    (HTTP 403, or 409 for a kernel bound to another key). A supervisor should not restart
+    the node on it; under systemd, set RestartPreventExitStatus=78.
+    """
     # The existing config, read once through the checked loader: it names the
     # gateway, so an unusable one stops the node before anything else.
     config_data = _existing_config_data(config_file)
@@ -466,14 +470,16 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
     # not go on to register devices, save config, or print "Node running" (item 133, board N119).
     click.echo("Registering on PCC network...")
     try:
-        register_kernel(config.pcc_base, config.pcc_api_key, config)
+        register_kernel(config.pcc_base, config.pcc_api_key, config, signer=(public_key, secret_key))
     except RegistrationError as exc:
         click.echo(
             f"Registration failed (HTTP {exc.status}) at {config.pcc_base}: {exc.data}. "
             "The node is NOT registered; check the API key and gateway. Not starting.",
             err=True,
         )
-        sys.exit(1)
+        if exc.hint:
+            click.echo("  " + exc.hint, err=True)
+        sys.exit(PERMANENT_REFUSAL_EXIT if exc.permanent else 1)
 
     # Devices reference the kernel, so register them only after the authenticated
     # kernel registration succeeds.
@@ -483,22 +489,6 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
         config.kernel_id,
         devices,
     )
-
-    # Prove possession of the node's Ed25519 signing key (Option C, #52 producer
-    # lane). Fail-soft: a genuine ed25519 node registers its signer so the oracle
-    # can verify its machine logs; an HMAC dev-fallback node cannot prove one, so
-    # we skip WITH a clear message rather than crash the daemon (its settlement /
-    # signing path simply stays unavailable). No HMAC value is ever sent as ed25519.
-    try:
-        register_signing_key(
-            config.pcc_base,
-            config.pcc_api_key,
-            config.kernel_id,
-            public_key,
-            secret_key,
-        )
-    except LogSigningRefused as exc:
-        click.echo(f"  Skipping signing-key registration (dev key): {exc}")
 
     # No capability announcement: this node takes no jobs (verdict 68d, finding 3).
 
@@ -510,7 +500,8 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
     click.echo(f"  Config saved to {saved_path}")
 
     # Start daemon. It registers the kernel again; "Node running" is printed only once that
-    # registration succeeded and the daemon is up, and a refusal there ends `start` with exit 1
+    # registration succeeded and the daemon is up, and a refusal there ends `start` with exit 1,
+    # or 78 when a restart cannot fix it
     # (ChatGPT r3 finding 1): a launcher must not read a node that never ran as started.
     def _say_running():
         click.echo("")
@@ -528,7 +519,9 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
             "did not start and the node is not running; check the API key and gateway, then run pcc-node start again.",
             err=True,
         )
-        sys.exit(1)
+        if exc.hint:
+            click.echo("  " + exc.hint, err=True)
+        sys.exit(PERMANENT_REFUSAL_EXIT if exc.permanent else 1)
     except FirstHeartbeatError:
         click.echo(
             f"The kernel registered at {config.pcc_base}, but its first heartbeat was not confirmed, "

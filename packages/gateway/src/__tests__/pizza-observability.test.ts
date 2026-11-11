@@ -23,9 +23,11 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { get, type IncomingMessage } from "node:http";
 
 import { pizzaDemoRoutes, _clearPizzaDemoForTests } from "../routes/pizza-demo.js";
 import { initStore, closeStore } from "../db.js";
+import { _clearGraphSearchForTests, _seedGraphSearchForTests } from "../routes/graph-search.js";
 
 // ── Asset locations ──────────────────────────────────────────────────────────
 const REPO_ROOT = resolve(__dirname, "../../../..");
@@ -130,10 +132,10 @@ describe("pizza-observability — GET /api/demo/orders/observability shape", () 
       activeOrders: 0,
       completedToday: 0,
       totalVolumeUSD: 0,
-      pccFeeUSDToday: 0,
       avgTimeToDeliverSec: 0,
       totalOrders: 0,
     });
+    expect(body.stats).not.toHaveProperty("pccFeeUSDToday");
     expect(typeof body.serverTime).toBe("string");
     expect(body.serverTime).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
@@ -173,5 +175,92 @@ describe("pizza-observability — GET /api/demo/orders/observability shape", () 
     expect(stepIds).toContain("composition_planned");
 
     expect(body.stats.totalOrders).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("pizza-observability — a delivered order", () => {
+  it("a delivered order sends no fee or treasury data, and its payout legs add up to the release", async () => {
+    const FEE_WORDING =
+      /\bplatform (?:fees?|tax(?:es)?)\b|\bprotocol fees?\b|\bpcc(?:['\u2019]s)? (?:cut|fees?)\b|\bfee (?:rate|collection|recipient|flows?)\b|\b2\.35 ?%/i;
+    const NEW_FEE = /\bfees?\b|pccfee|treasury|feebps|protocol-fee|\btax(?:es)?\b/i;
+    const app = await buildApp();
+    let response: IncomingMessage | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let request: ReturnType<typeof get> | undefined;
+    try {
+      _clearPizzaDemoForTests();
+      _clearGraphSearchForTests();
+      _seedGraphSearchForTests({
+        nodes: [
+          { capabilityId: "cap_shop-test", capabilityType: "make-pizza", kernelId: "k_shop-test", estimatedPriceUSD: 12, estimatedDurationMs: 900000, assuranceTier: 1, reputation: 600, available: true, inputTypes: [], outputTypes: ["pizza"], location: { lat: 37.77, lng: -122.42 } },
+          { capabilityId: "cap_driver-test", capabilityType: "delivered-pizza", kernelId: "k_driver-test", estimatedPriceUSD: 4, estimatedDurationMs: 1800000, assuranceTier: 1, reputation: 600, available: true, inputTypes: ["pizza"], outputTypes: ["delivered-pizza"], location: { lat: 37.77, lng: -122.42 } },
+        ],
+        edges: [{ fromCapabilityId: "cap_shop-test", toCapabilityId: "cap_driver-test", capabilityTypeFlow: "pizza", estimatedHandoffPriceUSD: 0 }],
+      });
+      const address = await app.listen({ port: 0, host: "127.0.0.1" });
+      let receive!: (value: { event: { settlement: Record<string, number> } }) => void;
+      const delivered = new Promise<{ event: { settlement: Record<string, number> } }>((resolve) => { receive = resolve; });
+      await new Promise<void>((resolve, reject) => {
+        request = get(address + "/sse/demo/firehose", (res) => {
+          response = res;
+          expect(res.statusCode).toBe(200);
+          let pending = "";
+          res.setEncoding("utf8");
+          res.on("data", (chunk: string) => {
+            pending += chunk;
+            let end: number;
+            while ((end = pending.indexOf("\n\n")) !== -1) {
+              const frame = pending.slice(0, end);
+              pending = pending.slice(end + 2);
+              if (!frame.startsWith("data: ")) continue;
+              const payload = JSON.parse(frame.slice(6));
+              if (payload.type === "connected") resolve();
+              if (payload.event?.type === "delivered") receive(payload);
+            }
+          });
+          res.on("error", reject);
+        });
+        request.on("error", reject);
+      });
+      const place = await app.inject({ method: "POST", url: "/api/demo/pizza-order", payload: { userId: "observability-test-user", description: "1 margherita", deliveryAddress: "123 Test St, SF CA" } });
+      expect(place.statusCode).toBe(201);
+      const id = place.json().order.orderId;
+      expect((await app.inject({ method: "POST", url: `/api/demo/orders/${id}/confirm` })).statusCode).toBe(200);
+      const shop = (await app.inject({ method: "GET", url: `/api/demo/orders/${id}` })).json().jobs.makePizza.jobId;
+      for (const action of ["accept", "complete"]) {
+        expect((await app.inject({ method: "POST", url: `/api/demo/jobs/${shop}/${action}`, payload: {} })).statusCode).toBe(200);
+      }
+      const driver = (await app.inject({ method: "GET", url: `/api/demo/orders/${id}` })).json().jobs.delivery.jobId;
+      for (const action of ["accept", "pickup", "complete"]) {
+        expect((await app.inject({ method: "POST", url: `/api/demo/jobs/${driver}/${action}`, payload: {} })).statusCode).toBe(200);
+      }
+      const observability = (await app.inject({ method: "GET", url: "/api/demo/orders/observability" })).json();
+      const detail = (await app.inject({ method: "GET", url: `/api/demo/orders/${id}` })).json();
+      const event = await Promise.race([
+        delivered,
+        new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error()), 5000); }),
+      ]);
+      for (const value of [observability, detail, event]) {
+        expect.soft(JSON.stringify(value)).not.toMatch(FEE_WORDING);
+        expect.soft(JSON.stringify(value)).not.toMatch(NEW_FEE);
+      }
+      const chain = detail.order.chainEvents as Array<{ type: string; amountUSDC?: string }>;
+      expect.soft(chain.filter((entry) => entry.type === "escrow_locked").map((entry) => entry.amountUSDC)).toEqual(["16.00"]);
+      expect.soft(chain.filter((entry) => entry.type === "escrow_released").map((entry) => entry.amountUSDC)).toEqual(["16.00"]);
+      expect.soft(chain.filter((entry) => entry.type === "usdc_transfer").map((entry) => entry.amountUSDC)).toEqual(["12.00", "4.00"]);
+      expect.soft(event.event.settlement).toEqual({ shopPayoutUSD: 12, driverPayoutUSD: 4 });
+      const settlement = detail.order.timeline.find((entry: { step: string }) => entry.step === "settlement_released").detail;
+      expect.soft(Object.fromEntries(Object.entries(settlement).filter(([key]) => key.endsWith("USD")))).toEqual({ shopPayoutUSD: 12, driverPayoutUSD: 4 });
+      expect.soft(observability.stats.totalVolumeUSD).toBe(16);
+      expect.soft(observability.stats).not.toHaveProperty("pccFeeUSDToday");
+    } finally {
+      clearTimeout(timer);
+      response?.destroy();
+      request?.destroy();
+      await app.close();
+      _clearPizzaDemoForTests();
+      _clearGraphSearchForTests();
+      closeStore();
+    }
   });
 });

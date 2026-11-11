@@ -323,6 +323,19 @@ For a `vnext-buyer` row, `POST /api/escrow/chain/:address/fund` answers HTTP 409
 The EAS release and attestation routes also answer HTTP 409 `escrow_buyer_funded` for these rows.
 An unrecognized escrow version answers HTTP 409 `escrow_version_unknown` on those EAS routes.
 
+## Temporary compatibility flags
+
+### `PCC_KERNEL_LEGACY_SIGNING_PROOF` (kernel registration's static proof)
+
+- **Default: off.** `POST /api/kernels` binds a signing key only with a fresh registration challenge (`POST /api/kernels/registration-challenges`, then `registrationProof: {challengeId, signature}`). A static `signingProof` answers 403 `legacy_signing_proof_disabled`. The boot log states the flag's value.
+- **`PCC_KERNEL_LEGACY_SIGNING_PROOF=allow`** (that exact value) accepts the static `signingProof` again, the signature over `pcc-kernel-signing-key:<kernelId>`. Use it only while a static-proof sender is still in service:
+  - the kernel SDK's `registerKernel(..., { signingKey })`;
+  - `scripts/register-print-kernel.mjs`;
+  - `scripts/rehearse-loop.mjs`.
+- **While it is `allow`, the static proof is a credential.** Ed25519 and RFC 6979 ECDSA signatures are deterministic, so that proof never changes. Anyone who has seen it can present it again, and it authorizes profile writes on its kernel (name, location, assurance tier, a location opt-out) from any API key. Treat it as a secret while the flag is on.
+- **It does not help two-step senders.** A sender that creates a kernel without a proof and binds its key in a second request (pcc-node before its registrationProof release, and the starter runbook's old order) is refused whatever the flag says. Those senders move to `registrationProof` before this registration change deploys.
+- **Sunset:** the flag and its code path are removed in the first gateway release at least 30 days after the registration challenge reaches production, and only once the senders above send `registrationProof`. Never set it in production after that release ships.
+
 ## What this does NOT yet include
 
 - **Canary / weighted rollout** — would require Cloudflare Workers or a Railway replica layer to split traffic. Skipped until capability.network has enough traffic to warrant it.

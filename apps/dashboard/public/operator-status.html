@@ -102,6 +102,7 @@ footer a{color:var(--accent);text-decoration:none}
 
 <script>
 const out = document.getElementById('out');
+const esc=v=>String(v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const slugIn = document.getElementById('slug');
 
 // Allow ?slug= prefill
@@ -119,7 +120,7 @@ document.getElementById('form').addEventListener('submit', async (e) => {
   try {
     const r = await fetch('/api/operators/'+encodeURIComponent(slug)+'/status');
     if (!r.ok) {
-      out.innerHTML = '<div class="error">HTTP '+r.status+': '+await r.text()+'</div>';
+      out.innerHTML = '<div class="error">HTTP '+r.status+': '+esc(await r.text())+'</div>';
       return;
     }
     const d = await r.json();
@@ -200,12 +201,12 @@ function render(d) {
   if (d.agentCardUrls.length) {
     html.push('<h2>A2A Agent Cards</h2>');
     html.push('<div style="margin:8px 0 16px">');
-    for (const u of d.agentCardUrls) html.push('<a href="'+escape(u)+'" class="acard-link" target="_blank">'+escape(u)+'</a>');
+    for (const u of d.agentCardUrls) html.push('<a href="'+esc(u)+'" class="acard-link" target="_blank">'+esc(u)+'</a>');
     html.push('</div>');
   }
 
   if (d.status === 'unconfigured') {
-    html.push('<div class="empty"><h3>No record for this slug</h3><p>No kernel is registered with operatorAddress = <code>'+escape(d.operatorSlug)+'</code>. Onboard via the <code>pcc-author-integration</code> A2A skill, or the wizard at <a href="/pizza-onboard-shop.html" style="color:var(--accent)">/pizza-onboard-shop.html</a>.</p></div>');
+    html.push('<div class="empty"><h3>No record for this slug</h3><p>No kernel is registered with operatorAddress = <code>'+escape(d.operatorSlug)+'</code>. Onboard via the <code>pcc-author-integration</code> A2A skill.</p></div>');
   }
 
   out.innerHTML = html.join('');

@@ -97,7 +97,6 @@ def _assert_command_refusal(command, message, tmp_path, load_side_effect=None):
                            side_effect=load_side_effect) as load, \
          mock.patch.object(cli, "provision_api_key") as provision, \
          mock.patch.object(cli, "register_kernel") as register, \
-         mock.patch.object(cli, "register_signing_key") as register_key, \
          mock.patch.object(cli, "save_config") as save, \
          mock.patch.object(cli, "run_daemon") as daemon:
         result = _runner_with_separate_stderr().invoke(cli.main, args)
@@ -111,6 +110,5 @@ def _assert_command_refusal(command, message, tmp_path, load_side_effect=None):
     load.assert_called_once_with()
     provision.assert_not_called()
     register.assert_not_called()
-    register_key.assert_not_called()
     save.assert_not_called()
     daemon.assert_not_called()

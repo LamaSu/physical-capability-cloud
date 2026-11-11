@@ -1,17 +1,24 @@
 {
   "schema": "pcc-agent-package-pizza/1.0",
   "name": "PCC Pizza Demo — Agent Package",
-  "description": "The minimal PCC tool set a Claude/ChatGPT/Gemini session needs to order a pizza for its user: discover the capability spec, plan a shop x driver composition, confirm, watch it run over SSE. A filtered subset of https://capability.network/agent-package.json. The pizza demo endpoints are keyless — no API key required.",
+  "description": "The minimal PCC tool set a Claude/ChatGPT/Gemini session needs to order a pizza for its user: discover the capability spec, plan a shop x driver composition, confirm, watch it run over SSE. A filtered subset of https://capability.network/agent-package.json. Every /api call here needs an API key except GET /api/capabilities/types and POST /api/auth/provision. Get one with POST /api/auth/provision (send an email or a wallet address), then send it as Authorization: Bearer pcc_live_.... The /sse/demo streams need no key.",
   "version": "1.0.0",
-  "toolCount": 11,
+  "toolCount": 12,
   "lastUpdated": "2026-06-14",
-  "homepage": "https://capability.network/pizza-llm-bootstrap.html",
-  "api_base": "https://capability.network",
-  "system_prompt": "You are a pizza-ordering agent on PCC (Physical Capability Cloud). Full instructions: https://capability.network/pizza-llm-agent-prompt.md. The flow: (0) GET /api/csd/suggest?q=make-pizza to discover the spec, or use the inline fallback in the prompt if no suggestions are returned; (1) clarify pizza + dietary + delivery + budget with the user, and ask whether they want cheapest/fastest/best-rated (-> optimizeFor); (2) POST /api/demo/pizza-order to plan (no spend); (3) show the plan + total and get an explicit yes; (4) POST /api/demo/orders/:id/confirm to place it; (5) watch GET /sse/demo/order/:id (or poll GET /api/demo/orders/:id) and narrate each event in plain English; (6) on the `delivered` event, report settlement (shop/driver payouts + 2.35% PCC fee). ABSOLUTE RULES: never spend without explicit confirmation; never accept a higher price or a worse deal on the user's behalf; always explain that you're asking because PCC's capability spec needs that detail.",
+  "homepage": "{BASE}/pizza-llm-bootstrap.html",
+  "api_base": "{BASE}",
+  "api_base_rule": "BASE is the address (scheme and host) of the site you fetched this file from. If you don't know it, ask the user.",
+  "system_prompt": "You are a pizza-ordering agent on PCC (Physical Capability Cloud). Full instructions: {BASE}/pizza-llm-agent-prompt.md. Before any other call, check that the demo is on: GET {BASE}/sse/demo/firehose. It needs no key. A 404 means the pizza demo is off on that deployment: make no other call, and tell the user: \"The pizza demo is off on this deployment.\" A 200 means it's on: close the stream and continue. Any other answer, or none, means you couldn't confirm it: make no other call, and tell the user: \"I couldn't confirm that the pizza demo is on.\" The flow: (0) GET /api/csd/suggest?q=make-pizza to discover the spec, or use the inline fallback in the prompt if no suggestions are returned; (1) clarify pizza + dietary + delivery + budget with the user, and ask whether they want cheapest/fastest/best-rated (-> optimizeFor); (2) POST /api/demo/pizza-order to plan (no spend); (3) show the plan + total and get an explicit yes; (4) POST /api/demo/orders/:id/confirm to place it; (5) watch GET /sse/demo/order/:id (or poll GET /api/demo/orders/:id) and narrate each event in plain English; (6) on the `delivered` event, report settlement (shop and driver payouts). ABSOLUTE RULES: never spend without explicit confirmation; never accept a higher price or a worse deal on the user's behalf; always explain that you're asking because PCC's capability spec needs that detail.",
   "tools": [
     {
+      "name": "check_demo_available",
+      "description": "START HERE. Checks that the demo is on at api_base: GET {BASE}/sse/demo/firehose. It needs no key. A 404 means the pizza demo is off on that deployment: make no other call, and tell the user: \"The pizza demo is off on this deployment.\" A 200 means it's on: close the stream and continue. Any other answer, or none, means you couldn't confirm it: make no other call, and tell the user: \"I couldn't confirm that the pizza demo is on.\"",
+      "input_schema": { "type": "object", "properties": {} },
+      "endpoint": { "method": "GET", "path": "/sse/demo/firehose" }
+    },
+    {
       "name": "discover_csd_suggestions",
-      "description": "START HERE. Search the CSD registry for capability specs matching a query string. Returns ranked CSD candidates with their parameter list. Call with q='make-pizza' to learn what to ask about the pizza, and q='delivered-pizza' for the delivery. Read each parameter: required + no defaultValue means you MUST ask; a defaultValue means you may take it (but mention it). If `suggestions` is empty (CSD not yet seeded on this gateway), fall back to the inline parameter list in pizza-llm-agent-prompt.md Section 3 / Step 1. PUBLIC / keyless.",
+      "description": "Search the CSD registry for capability specs matching a query string. Returns ranked CSD candidates with their parameter list. Call with q='make-pizza' to learn what to ask about the pizza, and q='delivered-pizza' for the delivery. Read each parameter: required + no defaultValue means you MUST ask; a defaultValue means you may take it (but mention it). If `suggestions` is empty (CSD not yet seeded on this gateway), fall back to the inline parameter list in pizza-llm-agent-prompt.md Section 3 / Step 1.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -88,7 +95,7 @@
     },
     {
       "name": "place_pizza_order",
-      "description": "Plan a 2-step pizza composition (a shop to make it, a driver to deliver it). The compose engine searches the capability graph and returns the best shop x driver pair under the chosen optimizeFor, within budget. This is a PROPOSAL — it does NOT spend or dispatch anything. Pack the user's clarified choices into 'description' as natural language (the make-pizza capability takes free text so any shop can fulfil it). Returns 201 with the proposed order; show the plan + total to the user before confirming. PUBLIC / keyless.",
+      "description": "Plan a 2-step pizza composition (a shop to make it, a driver to deliver it). The compose engine searches the capability graph and returns the best shop x driver pair under the chosen optimizeFor, within budget. This is a PROPOSAL — it does NOT spend or dispatch anything. Pack the user's clarified choices into 'description' as natural language (the make-pizza capability takes free text so any shop can fulfil it). Returns 201 with the proposed order; show the plan + total to the user before confirming.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -149,7 +156,7 @@
     },
     {
       "name": "confirm_order",
-      "description": "Commit a proposed order. THIS IS THE SPEND — only call it after the user has seen the full plan + total and said yes. Dispatches the make-pizza job to the chosen shop and moves the order to 'awaiting_shop'. Returns the order + the make-pizza job. After this, watch the order. PUBLIC / keyless.",
+      "description": "Commit a proposed order. THIS IS THE SPEND — only call it after the user has seen the full plan + total and said yes. Dispatches the make-pizza job to the chosen shop and moves the order to 'awaiting_shop'. Returns the order + the make-pizza job. After this, watch the order.",
       "input_schema": {
         "type": "object",
         "properties": { "id": { "type": "string", "description": "orderId from place_pizza_order." } },
@@ -171,7 +178,7 @@
     },
     {
       "name": "get_order",
-      "description": "Read the current state of an order plus its make-pizza and delivery jobs. Use this to poll status when you cannot keep an SSE stream open. Read order.status to know where things stand. PUBLIC / keyless.",
+      "description": "Read the current state of an order plus its make-pizza and delivery jobs. Use this to poll status when you cannot keep an SSE stream open. Read order.status to know where things stand.",
       "input_schema": {
         "type": "object",
         "properties": { "id": { "type": "string", "description": "orderId." } },
@@ -208,7 +215,7 @@
             "properties": {
               "type": { "type": "string", "enum": ["status", "job_accepted", "job_pickup", "delivered"] },
               "order": { "type": "object", "description": "Present on status/delivered — read .status." },
-              "settlement": { "type": "object", "description": "Present on delivered — shopPayoutUSD, driverPayoutUSD, pccFeeUSD." },
+              "settlement": { "type": "object", "description": "Present on delivered — shopPayoutUSD, driverPayoutUSD." },
               "reputation": { "type": "object", "description": "Present on delivered — shopDelta, driverDelta." }
             }
           }
@@ -221,13 +228,13 @@
           "data: {\"type\":\"connected\",\"topics\":[\"order:order_1a2b3c4d\"]}",
           "data: {\"topic\":\"order:order_1a2b3c4d\",\"event\":{\"type\":\"status\",\"order\":{\"status\":\"making\"}},\"ts\":\"2026-06-12T23:30:00Z\"}",
           "data: {\"topic\":\"order:order_1a2b3c4d\",\"event\":{\"type\":\"status\",\"order\":{\"status\":\"in_transit\"}},\"ts\":\"2026-06-12T23:45:00Z\"}",
-          "data: {\"topic\":\"order:order_1a2b3c4d\",\"event\":{\"type\":\"delivered\",\"settlement\":{\"shopPayoutUSD\":12,\"driverPayoutUSD\":4,\"pccFeeUSD\":0.38},\"reputation\":{\"shopDelta\":15,\"driverDelta\":15}}}"
+          "data: {\"topic\":\"order:order_1a2b3c4d\",\"event\":{\"type\":\"delivered\",\"settlement\":{\"shopPayoutUSD\":12,\"driverPayoutUSD\":4},\"reputation\":{\"shopDelta\":15,\"driverDelta\":15}}}"
         ]
       }
     },
     {
       "name": "cancel_order",
-      "description": "Cancel an order — only allowed before a shop accepts it (status 'proposed' or 'awaiting_shop'). Moves the order to 'rejected'. After a shop accepts, the order is in flight and cannot be cleanly cancelled. PUBLIC / keyless.",
+      "description": "Cancel an order — only allowed before a shop accepts it (status 'proposed' or 'awaiting_shop'). Moves the order to 'rejected'. After a shop accepts, the order is in flight and cannot be cleanly cancelled.",
       "input_schema": {
         "type": "object",
         "properties": { "id": { "type": "string", "description": "orderId." } },
@@ -266,7 +273,7 @@
     },
     {
       "name": "compose",
-      "description": "The raw composition engine that place_pizza_order wraps. Given an outcome chain + budget + tier, it returns a sequenced plan of capability instances. You normally don't call this for the pizza demo (use place_pizza_order, which also creates the watchable order + job lifecycle). Included for reference. PUBLIC for the demo gateway.",
+      "description": "The raw composition engine that place_pizza_order wraps. Given an outcome chain + budget + tier, it returns a sequenced plan of capability instances. You normally don't call this for the pizza demo (use place_pizza_order, which also creates the watchable order + job lifecycle). Included for reference.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -324,7 +331,7 @@
     },
     {
       "name": "provision_api_key",
-      "description": "Provision a PCC API key. NOT required for the pizza demo (the /api/demo/* endpoints are keyless). Only needed if you want to use the wider PCC API beyond ordering pizza. Accepts email OR walletAddress. The key is shown once — save it. PUBLIC.",
+      "description": "Provision a PCC API key. Accepts email OR walletAddress. The key is shown once — save it. PUBLIC.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -352,15 +359,15 @@
     }
   ],
   "quickstart": {
-    "keyless": "The pizza demo needs no API key. Just call the endpoints under api_base. Order of operations: discover_csd_suggestions -> (clarify with user) -> place_pizza_order -> (show plan, get yes) -> confirm_order -> watch_order/get_order -> report settlement on `delivered` event.",
-    "curl_relay": "If your session has no HTTP tool, write the curl command for the user to run and ask them to paste back the JSON. For status, have them re-run `curl -s https://capability.network/api/demo/orders/<id>` every ~15s instead of streaming."
+    "availability": "Before any other call, check that the demo is on: GET {BASE}/sse/demo/firehose. It needs no key. A 404 means the pizza demo is off on that deployment: make no other call, and tell the user: \"The pizza demo is off on this deployment.\" A 200 means it's on: close the stream and continue. Any other answer, or none, means you couldn't confirm it: make no other call, and tell the user: \"I couldn't confirm that the pizza demo is on.\" Order of operations: check_demo_available -> discover_csd_suggestions -> (clarify with user) -> place_pizza_order -> (show plan, get yes) -> confirm_order -> watch_order/get_order -> report settlement on `delivered` event.",
+    "curl_relay": "If your session has no HTTP tool, write the curl command for the user to run and ask them to paste back the JSON. For status, have them re-run `curl -s -H 'authorization: Bearer pcc_live_...' {BASE}/api/demo/orders/<id>` every ~15s instead of streaming."
   },
   "metadata": {
-    "tool_count": 11,
+    "tool_count": 12,
     "updated": "2026-06-14",
     "demo": "vibecodenights pizza demo",
     "full_package": "https://capability.network/agent-package.json",
-    "human_prompt": "https://capability.network/pizza-llm-agent-prompt.md",
-    "notes": "All /api/demo/* and /sse/demo/* endpoints are public (keyless). The /api/csd/suggest endpoint is also public. The other tools are reference/operator-side."
+    "human_prompt": "{BASE}/pizza-llm-agent-prompt.md",
+    "notes": "Every /api call here needs an API key except GET /api/capabilities/types and POST /api/auth/provision. Get one with POST /api/auth/provision (send an email or a wallet address), then send it as Authorization: Bearer pcc_live_.... The /sse/demo streams need no key. The other tools are reference/operator-side."
   }
 }

@@ -203,7 +203,7 @@ describe("read-only /mcp/apps surface (non-prod: surface active)", () => {
 
     // Full surface is unchanged — every tool in the served pack, plus render and the typed tools.
     const packNames = loadAgentPackage().tools.map((t) => t.name);
-    expect(packNames.length).toBeGreaterThan(200);
+    expect(packNames.length).toBeGreaterThan(170);
     expect(names).toEqual(expect.arrayContaining(packNames));
     expect(tools.length).toBeGreaterThan(packNames.length);
     expect(names).toContain("render_pcc_dashboard");

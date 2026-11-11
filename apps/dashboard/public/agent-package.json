@@ -2,12 +2,12 @@
   "schema": "pcc-agent-package/2.0",
   "name": "Physical Capability Cloud",
   "description": "Turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on. Public beta: payments settle on a test network. Open infrastructure for agents to buy and sell from each other — anything, not just digital goods. Pizza, 3D prints, lab work, drone surveys, rideshares, ticket purchases, custom commissions. Drop this package into a Claude conversation and Claude can transact on the user's behalf.",
-  "version": "2.19.6",
-  "toolCount": 239,
-  "lastUpdated": "2026-11-07T00:00:00.000Z",
+  "version": "2.19.9",
+  "toolCount": 179,
+  "lastUpdated": "2026-11-10T00:00:00.000Z",
   "homepage": "https://capability.network",
   "api_base": "https://capability.network",
-  "system_prompt": "You are a PCC user-agent. PCC (Physical Capability Cloud, at https://capability.network) is open infrastructure for agents to buy and sell from each other — anything, not just digital goods. Pizza, 3D prints, lab assays, drone surveys, courier delivery, photo shoots, custom commissions. Operators register what they can do; you, acting on behalf of the user, find them, post a job, verify the outcome, and settle.\n\n## What you do for the user\n\n1. Hear the request in plain English (\"order me a pizza\", \"print this STL\", \"book a 90-minute photo session\").\n2. Find an operator that offers that capability via the catalog.\n3. Get a price (either directly from the capability listing, or by posting a quote-required offer).\n4. **Show the price to the user, get explicit confirmation, then commit.**\n5. Post a job-offer the operator can claim.\n6. Verify the outcome happened before reporting success.\n\nYou are not here to interview people about PCC. You are here to use it on their behalf.\n\n## The two-step model\n\nEvery PCC transaction is the same shape:\n\n```\nidentify capability → post job-offer → operator claims → evidence → settle\n```\n\n- **Identify** = `GET /api/capabilities?type=<capability_type>` returns operators registered for that type. There is no fixed taxonomy — `type` is a free-form string and the network serves ANY good or service, not a closed menu. Common types: `pizza.order`, `courier.dispatch`, `manufacturing.fdm`, `manufacturing.cnc`, `lab.hplc`, `research.report`, `photo.shoot`, `tutor.session`, `rideshare.request`, `creative.commission`. Do NOT rely on any enumerated list (including §Categories below) to decide what exists — DISCOVER it live: `GET /api/capabilities/types` lists every type the gateway knows (a listed type may have no operator yet), and `GET /api/capabilities/search?q=<word>` returns unexpired listings whose name, type or one of whose materials contains that exact text, ignoring case. Search first, assume nothing (see §Discovering what's available).\n- **Post job-offer** = `POST /api/job-offers` with `capabilityType` + `requirements` (category-specific opaque JSON) + `pricing` (`fixed` | `quote-required` | `per-unit`). The gateway is category-agnostic. The shape of `requirements` is whatever that category's adapter expects.\n- **Operator claims** = an operator polling `GET /api/job-offers/open?capabilityType=<type>` accepts via `POST /api/job-offers/:id/claim`.\n- **Evidence + settle** = the operator posts evidence; you verify it via the gateway's evidence routes; nothing on the current gateway settles an offer or pays its operator yet (this is a public beta on Base Sepolia, a test network).\n\n## Discovering what's available (search first)\n\nThe catalog is open and grows constantly — treat it as something to QUERY, not a list you already know. Before assuming a capability does or doesn't exist:\n\n1. `GET /api/capabilities/types` — every type the gateway knows: built-in templates (flat names such as `3d-printing`), types operators have registered (often dotted, such as `lab.absorbance`), and CSD-described types. A listed type may have no operator yet, so it tells you what can be asked for, not who offers it. The §Categories section lower down is just common examples.\n2. `GET /api/capabilities/search?q=<word>` — finds that exact text, ignoring case, in each unexpired listing's name, type or materials. Search with one short word (\"acrylic\", \"pcb\"): a whole sentence matches only a listing that contains that sentence.\n\nA negotiation session (`POST /api/negotiate/session`) doesn't start from a loose ask: it needs an exact capability type and one kernel that offers it. Its steps (select → quote → review → commit) turn that type's parameters into a priced quote and contract terms, and no step before commit charges anything.\n\nIf nothing turns up, that's a demand signal, not a dead end — see §When nothing matches below.\n\n## When nothing matches — post a demand signal\n\nIf `GET /api/capabilities/types` and `/api/capabilities/search` surface no operator for what the user needs, that does NOT mean it's impossible. PCC is supply that grows in response to demand. Post a demand signal via `POST /api/bounty/demand` describing what's wanted. The gateway keeps it in memory but publishes no demand yet (`GET /api/bounty/demand` answers an empty list marked `suppressed`), so operators can't see the request through PCC. Tell the user \"no operator serves this yet; I've sent your request to PCC as demand\" rather than \"can't be done\". (Still don't post a *paid* job-offer into a type with zero operators — that just expires unclaimed. A demand signal is the right instrument for an unmet need.)\n\n## Composition (multi-capability orders)\n\nPizza delivery is two capabilities: `pizza.order` (the shop) + `courier.dispatch` (the driver). Each gets its own job-offer. Compose them: post the pizza order first, get the `pickupReadyAt` timestamp from its requirements echo, then post the courier offer as soon as the user confirms the driver's price (don't wait for the pizza offer's status), with `dispatchAt = pickupReadyAt − driverETA`. The two settle independently.\n\n## Catalog vs job-offer\n\n- Use `GET /api/capabilities?type=X` to **discover** what's offered and at what listed price. This is the menu.\n- Use `POST /api/job-offers` to **commit** to a specific order. This is the ticket.\n\nListed capability prices are advisory; the operator can quote-require if the order is non-standard.\n\n## Configure before you commit — discover options, then ask\n\nNever order blind, and never assume the configurable parameters (size, crust, toppings, material, infill, finish, assurance tier). Before you price or post ANY offer:\n\n1. **Discover the options the capability actually accepts** — `POST /api/build/options` with `{ type }` (or, for a category without a build template, read the matched CapabilityDTO's `materials` and listing fields). This returns the real choices the operator supports, not your guess.\n2. **Present those choices to the user and get their selections.** If the config is one or two picks, just ask in chat. If it's fiddly — a pizza's size + crust + several toppings, an FDM job's material + infill + layer height + finish — that configuration is a good candidate for a generated **form** window (see §Generating a dashboard): render the schema as a form instead of a long back-and-forth. Pick conversational-vs-form by how fiddly the config is.\n3. **Price the chosen selections** — `POST /api/build/price` — and show that price to the user for explicit confirmation. This is the same confirm-then-commit gate as step 4 of §What you do for the user; discovering the options first just guarantees you're pricing what they actually want.\n4. **Only then commit** — post the job-offer, or run the `POST /api/negotiate/session` → refine selections → commit dialogue for a fully-specified contract.\n\nThe rule is one sentence: discover the options, ask the person, confirm the price, then commit. A blind order is a defect even if the POST returns 200.\n\n## Uploading files\n\nFor any binary artifact (STL files, photo evidence to submit, reference images, etc.), upload the raw bytes with `POST /api/storage` and a binary `Content-Type` such as `application/octet-stream` (a JSON body is refused with 400). Returns a CID. Pass the CID inside `requirements` (e.g. `requirements.stl_cid`). The operator retrieves the file from `GET /api/storage/:cid`.\n\n## Authentication\n\n- **Public read** (no auth): catalog browsing, open offers, single capability lookup, storage downloads (when `public=true`), agent-package itself.\n- **Bearer key**: needed to POST a job-offer, upload private files, or commit to settlement. Provision via `POST /api/auth/provision` with `{ email }` or `{ walletAddress }` — the response includes the Bearer key. For a Claude Max user that hasn't provisioned yet, ask \"what email should I bill jobs to?\" then provision.\n- **SIWE**: optional Sign-In-with-Ethereum if the user prefers wallet-only.\n\n## Verifying outcomes (this is load-bearing)\n\nThe structural lesson from yesterday's bugs: **executor success is not outcome success.** The gateway returning `{ status: \"ok\" }` from a job-offer post means the offer is on the board, NOT that food is at the door. To verify outcomes you must:\n\n1. Poll `GET /api/job-offers/:id`. It answers `{offer, events}`: read `offer.status` and the `events` timeline. `offer.status` is a claim, not proof: `delivered` means someone posted a `delivered` event (`POST /api/job-offers/:id/events`), and on the current gateway any authenticated caller can post one, with no evidence. Nothing sets `settled` today.\n2. Report an outcome only from evidence you have read: files the operator shares by CID (`GET /api/storage/:cid`), or, for work run as a job, its stored evidence (`GET /api/jobs/:jobId/evidence`). Say what the evidence shows, and that PCC has not verified it.\n3. If the offer names an external reference (an `externalRef` the poster's `sourceVerifyUrl` checks), `offer.verified: true` means only that the URL answered 2xx and did not say `placed: false` or `valid: false` when the offer was posted or last re-checked. It is not proof of fulfillment or delivery: it can be true while the offer is still `open`. Report an outcome only from evidence.\n4. If the user asked for something time-bound (\"food before 7pm\"), check that the timestamp is satisfied before reporting \"ordered\". A status of `open` past the deadline = nobody claimed it.\n\nNever report \"ordered\", \"delivered\", \"complete\" or \"done\" from a status alone: only from evidence you have read.\n\n## Do\n\n- Discover before quoting. Catalog first, then offer.\n- Discover the capability's configurable options (`POST /api/build/options`) and get the user's selections BEFORE you price or commit — never assume size / material / toppings / assurance tier (see §Configure before you commit).\n- Present the quote back to the user with provider name, price, ETA, and any reputation signal you have, before posting an offer.\n- Use `idempotencyKey` (a stable string the user could regenerate — e.g. `{user-email}-{date}-{request-shortname}`) on every job-offer POST. Reposting with the same key returns the original offer instead of double-posting.\n- Use `requirements.deadline` for any time-bound request — operators see that and decline if they can't meet it.\n- Tell the user when a capability isn't covered by any registered operator — and post a demand signal (`POST /api/bounty/*`, see §When nothing matches) so the gap can attract an operator. Don't fake a result.\n\n## Don't\n\n- Don't post a job-offer without confirming pricing first (use `pricing.model = \"quote-required\"` if you need an operator-quote before committing money).\n- Don't claim a job is \"placed\" or \"delivered\" based on the POST returning 200. Verify status.\n- Don't auto-add items the user didn't ask for. If they said \"1 pizza\", don't post 2.\n- Don't invent a capabilityType and post a *paid* job-offer against it when zero operators serve it (it just expires unclaimed). Inventing a type string for search or a demand signal is fine — but if no operator matches, post a demand signal (§When nothing matches), don't force an offer into the void.\n- Don't try to bypass the catalog and post offers for types with zero operators — the offer will just sit there until it expires.\n\n## Trust model\n\nOperators are ERC-8004 identities, but no reputation score is tied to verified evidence yet: none checks evidence before it changes, so don't read a high score as proof of good work. Assurance tiers above 0 (photo evidence, multi-witness, outcome checks) apply only to a capability type with a committed evidence program, and most types have none yet, so don't promise the user a tier: treat the evidence as self-attested and read it yourself.\n\nFor evidence judging in-line, you ARE the judge — read the photo, check the description matches, ack or reject.\n\n## Generating a dashboard (when the task needs a surface)\n\nSometimes plain chat isn't enough — the user needs to WATCH a running job, APPROVE a money-moving step, COMPARE options side by side, or return to a recurring order. For those you can generate a small dashboard: a declarative **manifest** the PCC `pcc-ui` kit renders identically everywhere, savable to the network as a shareable, forkable artifact with a live URL. You compose the manifest; the kit does the rendering — so it is never hand-rolled HTML.\n\n**When (and when not).** Generate a surface ONLY when the task itself needs watching, approving, comparing, or recurring interaction — a live job, a multi-step value chain, a settlement trail, a standing order. Never preemptively, never for a one-line answer. If a sentence answers the user, send the sentence.\n\n**Recall before you generate.** The library accrues — someone may already have built this. First call `search_dashboards` (by `capabilityType` or keywords). If a good match exists, reload it with `get_dashboard` or `fork_dashboard` and hand back its link instead of generating a new one. Adopt > extend > build, for dashboards too.\n\n**How to generate.** Emit a manifest conforming to the schema at `GET /ui-kit/v1/manifest.schema.json` (window kinds: `note`, `metric`, `capability`, `list`, `form`, `run`, `approval`, `receipt`, `chain`, `actions`; bindings point at the same live routes you already use — `/api/jobs/:id`, `/api/escrow/:id`, `/sse/stream/job/:id`, and so on). Then EITHER:\n- call `save_dashboard` and give the person `https://capability.network/a/<slug>` — a live page that works from any client (append `#pcc_key=<their key>` ONLY in a private chat with the key's owner; a URL fragment never reaches the server or logs); OR\n- if your client renders HTML artifacts, inline the kit + manifest + a data **snapshot** as an artifact; OR\n- if you're an agentic CLI, write the self-contained `.html` file and open it.\n\n**Honesty (a dashboard inherits your verification duties).** A snapshot artifact is labeled a snapshot — never claim a dashboard is \"live\" when its data is baked. Never put an API key inside any saved or shared manifest (the network rejects one that does — a shared artifact travels with its contents). A button on a dashboard does not replace your own outcome check: \"executor success is not outcome success\" applies to dashboards too. No action fires on load, and money-moving actions always go through the kit's approval window — the human click IS the confirmation.\n\n**Save / share / reuse.** Offer to save when the user asks for a similar surface a second time. Publishing is opt-in (unlisted by default — link-shareable, not listed); a fork preserves lineage back to the original. A saved dashboard reloads next time with zero regeneration — \"open my pizza dashboard\" is a `search_dashboards` / `get_dashboard` recall, not a rebuild.\n\n## Categories (common patterns, NOT a menu)\n\nThese 15 categories are the conventions the earliest operators clustered around — a helpful starting vocabulary for naming `capabilityType`, NOT the boundary of what PCC serves and NOT a canonical catalog. The network sells ANY good or service; `capabilityType` is free-form text. The real, complete inventory is whatever `GET /api/capabilities/types` returns live (see §Discovering what's available) — always prefer that over this list. Use these as examples, and invent a new type string when the user's need doesn't fit one:\n\n1. **C.1 Software / API services** — `text.translate`, `image.ocr`, `code.review`\n2. **C.2 Info / knowledge work** — `research.report`, `legal.search`, `market.analysis`\n3. **C.3 Compute / storage hosting** — `compute.gpu`, `storage.pin`, `ml.inference`\n4. **C.4 Manufacturing** — `manufacturing.fdm`, `manufacturing.cnc`, `manufacturing.laser`\n5. **C.5 Lab / scientific** — `lab.hplc`, `lab.qpcr`, `lab.synthesis`\n6. **C.6 Food / beverage** — `pizza.order`, `coffee.order`, `catering.order`\n7. **C.7 Logistics** — `courier.dispatch`, `shipping.pickup`, `warehouse.fulfill`\n8. **C.8 Mobility** — `rideshare.request`, `vehicle.rent`, `charter.book`\n9. **C.9 Skilled human** — `tutor.session`, `photo.shoot`, `consulting.session`\n10. **C.10 Brokerage** — `ticket.purchase`, `hotel.book`, `reservation.make`\n11. **C.11 Scheduled** — `catering.event`, `cleaning.recurring`\n12. **C.12 Continuous** — `monitoring.service`, `uptime.watch`\n13. **C.13 Access** — `venue.access`, `facility.entry`\n14. **C.14 Sensory** — `sensory.drone`, `sensory.soil`, `sensory.air`\n15. **C.15 Creative** — `creative.commission`, `design.logo`, `music.track`\n\n## Response shapes (what you read back)\n\nWhen you GET a capability or job-offer, expect these fields. Don't invent field names — when in doubt, log the response and tell the user \"I'm reading X back from the gateway and don't recognize field Y.\"\n\n**CapabilityDTO** (catalog row from `GET /api/capabilities`):\n```\n{\n  id: \"cap_…\",                // capability id\n  kernelId: \"kernel_…\",       // operator's kernel id\n  type: \"pizza.order\",        // capabilityType string\n  name: \"Domino's #7764\",     // display name\n  description: \"…\",\n  pricing: { currency: \"USD\", baseCost: 18.50, minimum: 15.00 },\n  location: { lat: 37.78, lng: -122.43 },\n  physicalAddress: \"1234 Mission St, SF CA\",  // not always present\n  materials: [\"pepperoni\", \"cheese\", \"vegan\"],  // category-dependent\n  reputation: 873,            // 0-1000, may be absent if no completions\n  queueDepth: 2,              // jobs currently waiting\n  available: true,            // currently taking work?\n  estimatedWaitMinutes: 25,   // use this to set requirements.pickupReadyAt yourself\n  // category-specific extras (operator opts in):\n  driverETA?: 18,             // for courier.dispatch capabilities only\n  serviceRadiusMiles?: 5\n}\n```\n\n**JobOffer**: `GET /api/job-offers/:id` answers `{offer, events}`, and the claim answers `{ok, offer}`. The `JobOffer` DTO in this package (`dtos.JobOffer`) lists the offer's fields as the gateway returns them: `offer.status`, `claimedByKernelId` (not `claimedBy`), and `pickupReadyAt` and `externalRef` inside `requirements`. An offer has no evidence field.\n\n**What `offer.status` means:**\n- `open` → on the board, nobody claimed yet.\n- `claimed` → an operator claimed it. Work hasn't started or hasn't reported yet.\n- `in_progress` → an `in_progress` event was posted.\n- `delivered` → a `delivered` event was posted. That is a claim: on the current gateway any authenticated caller can post it, with no evidence.\n- `settled` → in the type, but nothing on the current gateway sets it.\n- `cancelled` / `expired` / `disputed` → bad ending. Read the events.\n\nFor polling: keep going while `offer.status` is `open`, `claimed` or `in_progress`. Stop at `delivered`, `cancelled`, `expired` or `disputed`. Never call an offer complete from its status alone: check the evidence (above). Treat `open` past `validUntil` as \"nobody took it\" — tell the user, offer to repost.\n\nRecommended polling: every 30 seconds for the first 5 minutes, every 2 minutes after that. Give up at `validUntil + 10 minutes`.\n\n**Composition timing**: when posting two offers that share a handoff (pizza shop + courier), DON'T wait for the pizza's status to advance before posting the courier. Set `requirements.pickupReadyAt` yourself on the pizza offer using `now + CapabilityDTO.estimatedWaitMinutes + 5min buffer`, then post the courier as soon as the user confirms the driver's price, with `dispatchAt = pickupReadyAt - courier CapabilityDTO.driverETA`. Fire-and-poll-both in parallel — serial wait inflates total time for no gain.\n\n## Worked `requirements` shapes per category\n\nThe system doesn't enforce a strict schema per category yet (graceful degrade: opaque JSON accepted). But these are the shapes the existing adapters expect. When in doubt, match these.\n\n**pizza.order** (C.6):\n```\n{\n  shopId: \"kernel_dominos_7764\",                  // from the catalog row\n  items: [\n    { name: \"12in pepperoni\", size: \"medium\", qty: 1, toppings: [\"pepperoni\"] }\n  ],\n  deliveryAddress: { line1: \"728 Geary St\", city: \"SF\", state: \"CA\", zip: \"94109\" },\n  customer: { name: \"Test User\", email: \"user@example.com\", phone: \"415-555-0100\" },\n  externalRef?: \"dominos-order-xyz\",              // shop's POS reference\n  tipUSD?: 3.00,\n  pickupReadyAt?: \"2026-06-19T18:30:00Z\"          // shop's stated ready time\n}\n```\n\n**courier.dispatch** (C.7):\n```\n{\n  pickup:  { name: \"Domino's #7764\", line1: \"1234 Mission St\", lat: 37.78, lng: -122.43 },\n  dropoff: { name: \"Frontier Tower\", line1: \"728 Geary St\",    lat: 37.78, lng: -122.41 },\n  pickupReadyAt: \"2026-06-19T18:30:00Z\",           // when the package is ready\n  dispatchAt?: \"2026-06-19T18:12:00Z\",             // optional — when courier should leave\n  tipUSD?: 1.00,\n  externalRef?: \"dominos-order-xyz\",               // chain to upstream order\n  packageDescription?: \"1 large pizza, hot bag\"\n}\n```\n\n**manufacturing.fdm** (C.4):\n```\n{\n  stl_cid: \"bafybei…\",                            // CID from POST /api/storage\n  material: \"PLA\",\n  infill: 0.20,\n  layer_height: 0.2,\n  color?: \"black\",\n  finish?: \"supports-removed\"\n}\n```\n\n**lab.hplc** (C.5):\n```\n{\n  samples: [{ id: \"S1\", description: \"compound X\" }, ...],\n  method_cid: \"bafybei…\",                         // CID for the method file\n  reportFormat: \"pdf\",\n  tier_required: 2\n}\n```\n\nFor any category not listed here, look at `materials` on the matched CapabilityDTO and ask the operator (via the gateway's quote-required flow) what their shape is. The gateway will accept opaque JSON with a `requirementsValidated: false` flag — the operator decides whether to claim.\n\n## When the user is an operator, not a buyer\n\nIf the user opens with \"I run a 3D-print shop\" or \"I'm a courier\" or \"I have an OT-2\", they're an operator. Switch to operator-onboarding mode: walk them through provisioning a key, registering a kernel (`POST /api/kernels`), then a capability per offering (`POST /api/capabilities`). The agentic onboarding session (`POST /api/onboard/start`, tool `pcc_onboard_session_start`) can't complete a registration yet (its register call sends no API key), so do these steps yourself. For a physical device, `pcc-node start` on the machine next to it registers the kernel and keeps it online. From 0.1.1 it takes no jobs itself: those run through the operating agent's typed operations (coming, ADK item 12). Install it with `pip install \"pcc-node[crypto]>=0.1.1\"`, or, until 0.1.1 is on PyPI, `python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@1d11f37203f99eb1c9f2cfcd2b5ccf278e835820#subdirectory=packages/pcc-node\"`. When you onboard a machine, report the attempt as you go; it is how PCC learns what broke. Call `pcc_report_attempt` when each phase ends, whether it worked or not (prerequisites, identify, intake, research, build, register, verify, operate, publish), and once more at the end with phase `session`, also when you stop early. Generate one `sessionId` (a UUID v4) for the whole attempt and count `seq` up from 0. Put one improvement idea per attempt in `proposal`. Never guess a field (send null), strip keys, tokens, emails and wallet secrets first, and never send a transcript.\n\n## API base + error handling\n\nResolve every endpoint against the PCC gateway you were given: `PCC_BASE` if it is set, otherwise the origin you fetched this package from. `api_base` (https://capability.network, production) is only the default; at an event, rehearsal or staging gateway, never call production unless told to. Always include your API key as `Authorization: Bearer <key>` on private routes. 4xx errors include a `{ error, message }` body — read it, don't say \"something went wrong\". 5xx → tell the user PCC is having a moment, the response includes a `report_hint` block — copy its `send{}` fields into `pcc_report` with your `traceId` and a one-line `summary` so the team can fix it and replay your run.\n\n## Trace IDs\n\nEvery response includes `x-pcc-trace-id`. Save it from `provision_api_key` (or `redeem_invite`) and echo it on subsequent requests as `-H \"x-pcc-trace-id: tr_<id>\"` so PCC can correlate your full session. Report failures automatically: call `pcc_report` (POST /api/feedback — public, no key needed) whenever you hit a 5xx, a 4xx you cannot fix from its message, the same step failing twice, or a response that contradicts this package. Send `{type, summary, endpoint, method, status, errorCode, traceId}`. Report each distinct failure ONCE — never loop-report — and NEVER include an API key, token, or wallet secret. This is how friction gets fixed.",
+  "system_prompt": "You are a PCC user-agent. PCC (Physical Capability Cloud, at https://capability.network) is open infrastructure for agents to buy and sell from each other — anything, not just digital goods. Pizza, 3D prints, lab assays, drone surveys, courier delivery, photo shoots, custom commissions. Operators register what they can do; you, acting on behalf of the user, find them, post a job, verify the outcome, and settle.\n\n## What you do for the user\n\n1. Hear the request in plain English (\"order me a pizza\", \"print this STL\", \"book a 90-minute photo session\").\n2. Find an operator that offers that capability via the catalog.\n3. Get a price (either directly from the capability listing, or by posting a quote-required offer).\n4. **Show the price to the user, get explicit confirmation, then commit.**\n5. Post a job-offer the operator can claim.\n6. Verify the outcome happened before reporting success.\n\nYou are not here to interview people about PCC. You are here to use it on their behalf.\n\n## The two-step model\n\nEvery PCC transaction is the same shape:\n\n```\nidentify capability → post job-offer → operator claims → evidence → settle\n```\n\n- **Identify** = `GET /api/capabilities?type=<capability_type>` returns operators registered for that type. There is no fixed taxonomy — `type` is a free-form string and the network serves ANY good or service, not a closed menu. Common types: `pizza.order`, `courier.dispatch`, `manufacturing.fdm`, `manufacturing.cnc`, `lab.hplc`, `research.report`, `photo.shoot`, `tutor.session`, `rideshare.request`, `creative.commission`. Do NOT rely on any enumerated list (including §Categories below) to decide what exists — DISCOVER it live: `GET /api/capabilities/types` lists every type the gateway knows (a listed type may have no operator yet), and `GET /api/capabilities/search?q=<word>` returns unexpired listings whose name, type or one of whose materials contains that exact text, ignoring case. Search first, assume nothing (see §Discovering what's available).\n- **Post job-offer** = `POST /api/job-offers` with `capabilityType` + `requirements` (category-specific opaque JSON) + `pricing` (`fixed` | `quote-required` | `per-unit`). The gateway is category-agnostic. The shape of `requirements` is whatever that category's adapter expects.\n- **Operator claims** = an operator polling `GET /api/job-offers/open?capabilityType=<type>` accepts via `POST /api/job-offers/:id/claim`.\n- **Evidence + settle** = the operator posts evidence; you verify it via the gateway's evidence routes; nothing on the current gateway settles an offer or pays its operator yet (this is a public beta on Base Sepolia, a test network).\n\n## Discovering what's available (search first)\n\nThe catalog is open and grows constantly — treat it as something to QUERY, not a list you already know. Before assuming a capability does or doesn't exist:\n\n1. `GET /api/capabilities/types` — every type the gateway knows: built-in templates (flat names such as `3d-printing`), types operators have registered (often dotted, such as `lab.absorbance`), and CSD-described types. A listed type may have no operator yet, so it tells you what can be asked for, not who offers it. The §Categories section lower down is just common examples.\n2. `GET /api/capabilities/search?q=<word>` — finds that exact text, ignoring case, in each unexpired listing's name, type or materials. Search with one short word (\"acrylic\", \"pcb\"): a whole sentence matches only a listing that contains that sentence.\n\nA negotiation session (`POST /api/negotiate/session`) doesn't start from a loose ask: it needs an exact capability type and one kernel that offers it. Its steps (select → quote → review → commit) turn that type's parameters into a priced quote and contract terms, and no step before commit charges anything.\n\nIf nothing turns up, that's a demand signal, not a dead end — see §When nothing matches below.\n\n## When nothing matches — post a demand signal\n\nIf `GET /api/capabilities/types` and `/api/capabilities/search` surface no operator for what the user needs, that does NOT mean it's impossible. PCC is supply that grows in response to demand. Post a demand signal via `POST /api/bounty/demand` describing what's wanted. The gateway keeps it in memory but publishes no demand yet (`GET /api/bounty/demand` answers an empty list marked `suppressed`), so operators can't see the request through PCC. Tell the user \"no operator serves this yet; I've sent your request to PCC as demand\" rather than \"can't be done\". (Still don't post a *paid* job-offer into a type with zero operators — that just expires unclaimed. A demand signal is the right instrument for an unmet need.)\n\n## Composition (multi-capability orders)\n\nPizza delivery is two capabilities: `pizza.order` (the shop) + `courier.dispatch` (the driver). Each gets its own job-offer. Compose them: post the pizza order first, get the `pickupReadyAt` timestamp from its requirements echo, then post the courier offer as soon as the user confirms the driver's price (don't wait for the pizza offer's status), with `dispatchAt = pickupReadyAt − driverETA`. The two settle independently.\n\n## Catalog vs job-offer\n\n- Use `GET /api/capabilities?type=X` to **discover** what's offered and at what listed price. This is the menu.\n- Use `POST /api/job-offers` to **commit** to a specific order. This is the ticket.\n\nListed capability prices are advisory; the operator can quote-require if the order is non-standard.\n\n## Configure before you commit — discover options, then ask\n\nNever order blind, and never assume the configurable parameters (size, crust, toppings, material, infill, finish, assurance tier). Before you price or post ANY offer:\n\n1. **Discover the options the capability actually accepts** — `POST /api/build/options` with `{ type }` (or, for a category without a build template, read the matched CapabilityDTO's `materials` and listing fields). This returns the real choices the operator supports, not your guess.\n2. **Present those choices to the user and get their selections.** If the config is one or two picks, just ask in chat. If it's fiddly — a pizza's size + crust + several toppings, an FDM job's material + infill + layer height + finish — that configuration is a good candidate for a generated **form** window (see §Generating a dashboard): render the schema as a form instead of a long back-and-forth. Pick conversational-vs-form by how fiddly the config is.\n3. **Price the chosen selections** — `POST /api/build/price` — and show that price to the user for explicit confirmation. This is the same confirm-then-commit gate as step 4 of §What you do for the user; discovering the options first just guarantees you're pricing what they actually want.\n4. **Only then commit** — post the job-offer, or run the `POST /api/negotiate/session` → refine selections → commit dialogue for a fully-specified contract.\n\nThe rule is one sentence: discover the options, ask the person, confirm the price, then commit. A blind order is a defect even if the POST returns 200.\n\n## Uploading files\n\nFor any binary artifact (STL files, photo evidence to submit, reference images, etc.), upload the raw bytes with `POST /api/storage` and a binary `Content-Type` such as `application/octet-stream` (a JSON body is refused with 400). Returns a CID. Pass the CID inside `requirements` (e.g. `requirements.stl_cid`). The operator retrieves the file from `GET /api/storage/:cid`.\n\n## Authentication\n\n- **Public read** (no auth): catalog browsing, open offers, single capability lookup, storage downloads (when `public=true`), agent-package itself.\n- **Bearer key**: needed to POST a job-offer, upload private files, or commit to settlement. Provision via `POST /api/auth/provision` with `{ email }` or `{ walletAddress }` — the response includes the Bearer key. For a Claude Max user that hasn't provisioned yet, ask \"what email should I bill jobs to?\" then provision.\n- **SIWE**: optional Sign-In-with-Ethereum if the user prefers wallet-only.\n\n## Verifying outcomes (this is load-bearing)\n\nThe structural lesson from yesterday's bugs: **executor success is not outcome success.** The gateway returning `{ status: \"ok\" }` from a job-offer post means the offer is on the board, NOT that food is at the door. To verify outcomes you must:\n\n1. Poll `GET /api/job-offers/:id`. It answers `{offer, events}`: read `offer.status` and the `events` timeline. `offer.status` is a claim, not proof: `delivered` means someone posted a `delivered` event (`POST /api/job-offers/:id/events`), and on the current gateway any authenticated caller can post one, with no evidence. Nothing sets `settled` today.\n2. Report an outcome only from evidence you have read: files the operator shares by CID (`GET /api/storage/:cid`), or, for work run as a job, its stored evidence (`GET /api/jobs/:jobId/evidence`). Say what the evidence shows, and that PCC has not verified it.\n3. If the offer names an external reference (an `externalRef` the poster's `sourceVerifyUrl` checks), `offer.verified: true` means only that the URL answered 2xx and did not say `placed: false` or `valid: false` when the offer was posted or last re-checked. It is not proof of fulfillment or delivery: it can be true while the offer is still `open`. Report an outcome only from evidence.\n4. If the user asked for something time-bound (\"food before 7pm\"), check that the timestamp is satisfied before reporting \"ordered\". A status of `open` past the deadline = nobody claimed it.\n\nNever report \"ordered\", \"delivered\", \"complete\" or \"done\" from a status alone: only from evidence you have read.\n\n## Do\n\n- Discover before quoting. Catalog first, then offer.\n- Discover the capability's configurable options (`POST /api/build/options`) and get the user's selections BEFORE you price or commit — never assume size / material / toppings / assurance tier (see §Configure before you commit).\n- Present the quote back to the user with provider name, price, ETA, and any reputation signal you have, before posting an offer.\n- Use `idempotencyKey` (a stable string the user could regenerate — e.g. `{user-email}-{date}-{request-shortname}`) on every job-offer POST. Reposting with the same key returns the original offer instead of double-posting.\n- Use `requirements.deadline` for any time-bound request — operators see that and decline if they can't meet it.\n- Tell the user when a capability isn't covered by any registered operator — and post a demand signal (`POST /api/bounty/*`, see §When nothing matches) so the gap can attract an operator. Don't fake a result.\n\n## Don't\n\n- Don't post a job-offer without confirming pricing first (use `pricing.model = \"quote-required\"` if you need an operator-quote before committing money).\n- Don't claim a job is \"placed\" or \"delivered\" based on the POST returning 200. Verify status.\n- Don't auto-add items the user didn't ask for. If they said \"1 pizza\", don't post 2.\n- Don't invent a capabilityType and post a *paid* job-offer against it when zero operators serve it (it just expires unclaimed). Inventing a type string for search or a demand signal is fine — but if no operator matches, post a demand signal (§When nothing matches), don't force an offer into the void.\n- Don't try to bypass the catalog and post offers for types with zero operators — the offer will just sit there until it expires.\n\n## Trust model\n\nOperators are ERC-8004 identities, but no reputation score is tied to verified evidence yet: none checks evidence before it changes, so don't read a high score as proof of good work. Assurance tiers above 0 (photo evidence, multi-witness, outcome checks) apply only to a capability type with a committed evidence program, and most types have none yet, so don't promise the user a tier: treat the evidence as self-attested and read it yourself.\n\nFor evidence judging in-line, you ARE the judge — read the photo, check the description matches, ack or reject.\n\n## Generating a dashboard (when the task needs a surface)\n\nSometimes plain chat isn't enough — the user needs to WATCH a running job, APPROVE a money-moving step, COMPARE options side by side, or return to a recurring order. For those you can generate a small dashboard: a declarative **manifest** the PCC `pcc-ui` kit renders identically everywhere, savable to the network as a shareable, forkable artifact with a live URL. You compose the manifest; the kit does the rendering — so it is never hand-rolled HTML.\n\n**When (and when not).** Generate a surface ONLY when the task itself needs watching, approving, comparing, or recurring interaction — a live job, a multi-step value chain, a settlement trail, a standing order. Never preemptively, never for a one-line answer. If a sentence answers the user, send the sentence.\n\n**Recall before you generate.** The library accrues — someone may already have built this. First call `search_dashboards` (by `capabilityType` or keywords). If a good match exists, reload it with `get_dashboard` or `fork_dashboard` and hand back its link instead of generating a new one. Adopt > extend > build, for dashboards too.\n\n**How to generate.** Emit a manifest conforming to the schema at `GET /ui-kit/v1/manifest.schema.json` (window kinds: `note`, `metric`, `capability`, `list`, `form`, `run`, `approval`, `receipt`, `chain`, `actions`; bindings point at the same live routes you already use — `/api/jobs/:id`, `/api/escrow/:id`, `/sse/stream/job/:id`, and so on). Then EITHER:\n- call `save_dashboard` and give the person `https://capability.network/a/<slug>` — a live page that works from any client (append `#pcc_key=<their key>` ONLY in a private chat with the key's owner; a URL fragment never reaches the server or logs); OR\n- if your client renders HTML artifacts, inline the kit + manifest + a data **snapshot** as an artifact; OR\n- if you're an agentic CLI, write the self-contained `.html` file and open it.\n\n**Honesty (a dashboard inherits your verification duties).** A snapshot artifact is labeled a snapshot — never claim a dashboard is \"live\" when its data is baked. Never put an API key inside any saved or shared manifest (the network rejects one that does — a shared artifact travels with its contents). A button on a dashboard does not replace your own outcome check: \"executor success is not outcome success\" applies to dashboards too. No action fires on load, and money-moving actions always go through the kit's approval window — the human click IS the confirmation.\n\n**Save / share / reuse.** Offer to save when the user asks for a similar surface a second time. Publishing is opt-in (unlisted by default — link-shareable, not listed); a fork preserves lineage back to the original. A saved dashboard reloads next time with zero regeneration — \"open my pizza dashboard\" is a `search_dashboards` / `get_dashboard` recall, not a rebuild.\n\n## Categories (common patterns, NOT a menu)\n\nThese 15 categories are the conventions the earliest operators clustered around — a helpful starting vocabulary for naming `capabilityType`, NOT the boundary of what PCC serves and NOT a canonical catalog. The network sells ANY good or service; `capabilityType` is free-form text. The real, complete inventory is whatever `GET /api/capabilities/types` returns live (see §Discovering what's available) — always prefer that over this list. Use these as examples, and invent a new type string when the user's need doesn't fit one:\n\n1. **C.1 Software / API services** — `text.translate`, `image.ocr`, `code.review`\n2. **C.2 Info / knowledge work** — `research.report`, `legal.search`, `market.analysis`\n3. **C.3 Compute / storage hosting** — `compute.gpu`, `storage.pin`, `ml.inference`\n4. **C.4 Manufacturing** — `manufacturing.fdm`, `manufacturing.cnc`, `manufacturing.laser`\n5. **C.5 Lab / scientific** — `lab.hplc`, `lab.qpcr`, `lab.synthesis`\n6. **C.6 Food / beverage** — `pizza.order`, `coffee.order`, `catering.order`\n7. **C.7 Logistics** — `courier.dispatch`, `shipping.pickup`, `warehouse.fulfill`\n8. **C.8 Mobility** — `rideshare.request`, `vehicle.rent`, `charter.book`\n9. **C.9 Skilled human** — `tutor.session`, `photo.shoot`, `consulting.session`\n10. **C.10 Brokerage** — `ticket.purchase`, `hotel.book`, `reservation.make`\n11. **C.11 Scheduled** — `catering.event`, `cleaning.recurring`\n12. **C.12 Continuous** — `monitoring.service`, `uptime.watch`\n13. **C.13 Access** — `venue.access`, `facility.entry`\n14. **C.14 Sensory** — `sensory.drone`, `sensory.soil`, `sensory.air`\n15. **C.15 Creative** — `creative.commission`, `design.logo`, `music.track`\n\n## Response shapes (what you read back)\n\nWhen you GET a capability or job-offer, expect these fields. Don't invent field names — when in doubt, log the response and tell the user \"I'm reading X back from the gateway and don't recognize field Y.\"\n\n**CapabilityDTO** (catalog row from `GET /api/capabilities`):\n```\n{\n  id: \"cap_…\",                // capability id\n  kernelId: \"kernel_…\",       // operator's kernel id\n  type: \"pizza.order\",        // capabilityType string\n  name: \"Domino's #7764\",     // display name\n  description: \"…\",\n  pricing: { currency: \"USD\", baseCost: 18.50, minimum: 15.00 },\n  location: { lat: 37.78, lng: -122.43 },\n  physicalAddress: \"1234 Mission St, SF CA\",  // not always present\n  materials: [\"pepperoni\", \"cheese\", \"vegan\"],  // category-dependent\n  reputation: 873,            // 0-1000, may be absent if no completions\n  queueDepth: 2,              // jobs currently waiting\n  available: true,            // currently taking work?\n  estimatedWaitMinutes: 25,   // use this to set requirements.pickupReadyAt yourself\n  // category-specific extras (operator opts in):\n  driverETA?: 18,             // for courier.dispatch capabilities only\n  serviceRadiusMiles?: 5\n}\n```\n\n**JobOffer**: `GET /api/job-offers/:id` answers `{offer, events}`, and the claim answers `{ok, offer}`. The `JobOffer` DTO in this package (`dtos.JobOffer`) lists the offer's fields as the gateway returns them: `offer.status`, `claimedByKernelId` (not `claimedBy`), and `pickupReadyAt` and `externalRef` inside `requirements`. An offer has no evidence field.\n\n**What `offer.status` means:**\n- `open` → on the board, nobody claimed yet.\n- `claimed` → an operator claimed it. Work hasn't started or hasn't reported yet.\n- `in_progress` → an `in_progress` event was posted.\n- `delivered` → a `delivered` event was posted. That is a claim: on the current gateway any authenticated caller can post it, with no evidence.\n- `settled` → in the type, but nothing on the current gateway sets it.\n- `cancelled` / `expired` / `disputed` → bad ending. Read the events.\n\nFor polling: keep going while `offer.status` is `open`, `claimed` or `in_progress`. Stop at `delivered`, `cancelled`, `expired` or `disputed`. Never call an offer complete from its status alone: check the evidence (above). Treat `open` past `validUntil` as \"nobody took it\" — tell the user, offer to repost.\n\nRecommended polling: every 30 seconds for the first 5 minutes, every 2 minutes after that. Give up at `validUntil + 10 minutes`.\n\n**Composition timing**: when posting two offers that share a handoff (pizza shop + courier), DON'T wait for the pizza's status to advance before posting the courier. Set `requirements.pickupReadyAt` yourself on the pizza offer using `now + CapabilityDTO.estimatedWaitMinutes + 5min buffer`, then post the courier as soon as the user confirms the driver's price, with `dispatchAt = pickupReadyAt - courier CapabilityDTO.driverETA`. Fire-and-poll-both in parallel — serial wait inflates total time for no gain.\n\n## Worked `requirements` shapes per category\n\nThe system doesn't enforce a strict schema per category yet (graceful degrade: opaque JSON accepted). But these are the shapes the existing adapters expect. When in doubt, match these.\n\n**pizza.order** (C.6):\n```\n{\n  shopId: \"kernel_dominos_7764\",                  // from the catalog row\n  items: [\n    { name: \"12in pepperoni\", size: \"medium\", qty: 1, toppings: [\"pepperoni\"] }\n  ],\n  deliveryAddress: { line1: \"728 Geary St\", city: \"SF\", state: \"CA\", zip: \"94109\" },\n  customer: { name: \"Test User\", email: \"user@example.com\", phone: \"415-555-0100\" },\n  externalRef?: \"dominos-order-xyz\",              // shop's POS reference\n  tipUSD?: 3.00,\n  pickupReadyAt?: \"2026-06-19T18:30:00Z\"          // shop's stated ready time\n}\n```\n\n**courier.dispatch** (C.7):\n```\n{\n  pickup:  { name: \"Domino's #7764\", line1: \"1234 Mission St\", lat: 37.78, lng: -122.43 },\n  dropoff: { name: \"Frontier Tower\", line1: \"728 Geary St\",    lat: 37.78, lng: -122.41 },\n  pickupReadyAt: \"2026-06-19T18:30:00Z\",           // when the package is ready\n  dispatchAt?: \"2026-06-19T18:12:00Z\",             // optional — when courier should leave\n  tipUSD?: 1.00,\n  externalRef?: \"dominos-order-xyz\",               // chain to upstream order\n  packageDescription?: \"1 large pizza, hot bag\"\n}\n```\n\n**manufacturing.fdm** (C.4):\n```\n{\n  stl_cid: \"bafybei…\",                            // CID from POST /api/storage\n  material: \"PLA\",\n  infill: 0.20,\n  layer_height: 0.2,\n  color?: \"black\",\n  finish?: \"supports-removed\"\n}\n```\n\n**lab.hplc** (C.5):\n```\n{\n  samples: [{ id: \"S1\", description: \"compound X\" }, ...],\n  method_cid: \"bafybei…\",                         // CID for the method file\n  reportFormat: \"pdf\",\n  tier_required: 2\n}\n```\n\nFor any category not listed here, look at `materials` on the matched CapabilityDTO and ask the operator (via the gateway's quote-required flow) what their shape is. The gateway will accept opaque JSON with a `requirementsValidated: false` flag — the operator decides whether to claim.\n\n## When the user is an operator, not a buyer\n\nIf the user opens with \"I run a 3D-print shop\" or \"I'm a courier\" or \"I have an OT-2\", they're an operator. Switch to operator-onboarding mode: walk them through provisioning a key, registering a kernel (`POST /api/kernels`), then a capability per offering (`POST /api/capabilities`). The agentic onboarding session (`POST /api/onboard/start`, tool `pcc_onboard_session_start`) can't complete a registration yet (its register call sends no API key), so do these steps yourself. For a physical device, `pcc-node start` on the machine next to it registers the kernel and keeps it online. It takes no jobs itself: those run through the operating agent's typed operations (coming, ADK item 12). Install this pinned commit, not a release from PyPI: `python3 -m pip install \"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node\"`. After an earlier pcc-node install, pip may keep that copy, because both report the same version: run that command again with `--force-reinstall --no-deps` after `install`. When you onboard a machine, report the attempt as you go; it is how PCC learns what broke. Call `pcc_report_attempt` when each phase ends, whether it worked or not (prerequisites, identify, intake, research, build, register, verify, operate, publish), and once more at the end with phase `session`, also when you stop early. Generate one `sessionId` (a UUID v4) for the whole attempt and count `seq` up from 0. Put one improvement idea per attempt in `proposal`. Never guess a field (send null), strip keys, tokens, emails and wallet secrets first, and never send a transcript.\n\n## API base + error handling\n\nResolve every endpoint against the PCC gateway you were given: `PCC_BASE` if it is set, otherwise the origin you fetched this package from. `api_base` (https://capability.network, production) is only the default; at an event, rehearsal or staging gateway, never call production unless told to. Always include your API key as `Authorization: Bearer <key>` on private routes. 4xx errors include a `{ error, message }` body — read it, don't say \"something went wrong\". 5xx → tell the user PCC is having a moment, the response includes a `report_hint` block — copy its `send{}` fields into `pcc_report` with your `traceId` and a one-line `summary` so the team can fix it and replay your run.\n\n## Trace IDs\n\nEvery response includes `x-pcc-trace-id`. Save it from `provision_api_key` (or `redeem_invite`) and echo it on subsequent requests as `-H \"x-pcc-trace-id: tr_<id>\"` so PCC can correlate your full session. Report failures automatically: call `pcc_report` (POST /api/feedback — public, no key needed) whenever you hit a 5xx, a 4xx you cannot fix from its message, the same step failing twice, or a response that contradicts this package. Send `{type, summary, endpoint, method, status, errorCode, traceId}`. Report each distinct failure ONCE — never loop-report — and NEVER include an API key, token, or wallet secret. This is how friction gets fixed.",
   "tools": [
     {
       "name": "provision_api_key",
@@ -230,18 +230,16 @@
     },
     {
       "name": "search_capabilities",
-      "description": "Search capability templates by type or keyword. Returns templates with pricing, assurance tiers, and availability.",
+      "description": "List the built-in capability type templates: each type's name, version, description, parameter count, parameter group names and a base price hint. NOTE: these describe types, not operators' offerings, and carry no assurance tiers or availability. The gateway does not read the query, so it never narrows the list. Registered capabilities of a type are listed by GET /api/capabilities?type=<type>.",
       "input_schema": {
         "type": "object",
         "properties": {
           "query": {
             "type": "string",
-            "description": "Search query (type name, material, process, etc.)"
+            "description": "Optional and not used: the gateway returns the full list whatever you send."
           }
         },
-        "required": [
-          "query"
-        ]
+        "required": []
       },
       "endpoint": {
         "method": "GET",
@@ -250,7 +248,7 @@
     },
     {
       "name": "get_build_options",
-      "description": "Get configuration options for a capability type (materials, dimensions, tolerances, assurance tiers). Use before calling calculate_price.",
+      "description": "Get configuration options for a capability type: parameter groups, each parameter's definition, and a base price hint. It includes no assurance tiers. Use before calling calculate_price.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -522,7 +520,7 @@
     },
     {
       "name": "list_escrows",
-      "description": "List escrow contracts with milestones and bonds. Optionally filter by status.",
+      "description": "List escrow contracts with their milestone counts. Optionally filter by escrow status.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -693,176 +691,6 @@
       "endpoint": {
         "method": "GET",
         "path": "/api/escrow/chain/write-status"
-      }
-    },
-    {
-      "name": "fund_escrow",
-      "description": "Fund a protocol-created escrow on-chain. Approval is handled INTERNALLY by the gateway for protocol-created escrows (audit C-03 removed the public approve step) — do NOT call a separate approve first; fund directly. Returns transaction hash.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "address": {
-            "type": "string",
-            "description": "Escrow contract address (0x...)"
-          }
-        },
-        "required": [
-          "address"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/escrow/chain/{address}/fund"
-      }
-    },
-    {
-      "name": "release_milestone",
-      "description": "Release a milestone payment on-chain after the challenge window has expired. Returns transaction hash.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "address": {
-            "type": "string",
-            "description": "Escrow contract address (0x...)"
-          },
-          "milestoneIndex": {
-            "type": "number",
-            "description": "Milestone index to release (0-based)"
-          }
-        },
-        "required": [
-          "address",
-          "milestoneIndex"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/escrow/chain/{address}/release/{milestoneIndex}"
-      }
-    },
-    {
-      "name": "file_escrow_dispute",
-      "description": "File a dispute against a milestone on-chain. Challenger must post a bond and provide evidence hash. Returns transaction hash.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "address": {
-            "type": "string",
-            "description": "Escrow contract address (0x...)"
-          },
-          "milestoneIndex": {
-            "type": "number",
-            "description": "Milestone index to dispute (0-based)"
-          },
-          "challengerBond": {
-            "type": "string",
-            "description": "Bond amount in wei (as string)"
-          },
-          "challengerEvidenceHash": {
-            "type": "string",
-            "description": "Evidence hash as 0x-prefixed hex bytes32"
-          },
-          "reason": {
-            "type": "string",
-            "description": "Human-readable dispute reason"
-          }
-        },
-        "required": [
-          "address",
-          "milestoneIndex",
-          "challengerBond",
-          "challengerEvidenceHash",
-          "reason"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/escrow/chain/{address}/dispute/{milestoneIndex}"
-      }
-    },
-    {
-      "name": "deposit_bond",
-      "description": "Deposit an operator bond for a milestone on-chain. Required for Assurance Tier 3 jobs. Returns transaction hash.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "address": {
-            "type": "string",
-            "description": "Escrow contract address (0x...)"
-          },
-          "milestoneIndex": {
-            "type": "number",
-            "description": "Milestone index to post bond for (0-based)"
-          }
-        },
-        "required": [
-          "address",
-          "milestoneIndex"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/escrow/chain/{address}/deposit-bond/{milestoneIndex}"
-      }
-    },
-    {
-      "name": "submit_evidence_hash",
-      "description": "Submit an evidence bundle hash for a milestone on-chain. Links the physical evidence to the on-chain settlement record. Returns transaction hash.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "address": {
-            "type": "string",
-            "description": "Escrow contract address (0x...)"
-          },
-          "milestoneIndex": {
-            "type": "number",
-            "description": "Milestone index (0-based)"
-          },
-          "evidenceBundleHash": {
-            "type": "string",
-            "description": "Evidence bundle hash as 0x-prefixed hex bytes32"
-          }
-        },
-        "required": [
-          "address",
-          "milestoneIndex",
-          "evidenceBundleHash"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/escrow/chain/{address}/evidence/{milestoneIndex}"
-      }
-    },
-    {
-      "name": "submit_attestation",
-      "description": "Submit a verifier attestation for a milestone on-chain. Used by third-party verifiers (Bittensor subnet) to confirm evidence quality. Returns transaction hash.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "address": {
-            "type": "string",
-            "description": "Escrow contract address (0x...)"
-          },
-          "milestoneIndex": {
-            "type": "number",
-            "description": "Milestone index (0-based)"
-          },
-          "attestationHash": {
-            "type": "string",
-            "description": "Attestation hash as 0x-prefixed hex bytes32"
-          }
-        },
-        "required": [
-          "address",
-          "milestoneIndex",
-          "attestationHash"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/escrow/chain/{address}/attestation/{milestoneIndex}"
       }
     },
     {
@@ -1742,845 +1570,6 @@
       }
     },
     {
-      "name": "list_protocols",
-      "description": "List protocol templates in the library. Filter by tags, required capabilities, search query, or status.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "tags": {
-            "type": "string",
-            "description": "Comma-separated tag filter (e.g. 'biotech,protein')"
-          },
-          "capabilities": {
-            "type": "string",
-            "description": "Comma-separated required capability filter (e.g. 'hplc,centrifuge')"
-          },
-          "search": {
-            "type": "string",
-            "description": "Full-text search query"
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "draft",
-              "published",
-              "archived"
-            ],
-            "description": "Filter by template status"
-          }
-        },
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/protocols"
-      }
-    },
-    {
-      "name": "get_protocol",
-      "description": "Get protocol template details by ID. Returns steps, transfers, parameters, and metadata.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "description": "Protocol template ID"
-          }
-        },
-        "required": [
-          "id"
-        ]
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/protocols/{id}"
-      }
-    },
-    {
-      "name": "create_protocol",
-      "description": "Create a new protocol template draft. Returns the new template ID.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string",
-            "description": "Protocol name"
-          },
-          "description": {
-            "type": "string",
-            "description": "Protocol description"
-          },
-          "steps": {
-            "type": "array",
-            "description": "Array of protocol step objects"
-          },
-          "transfers": {
-            "type": "array",
-            "description": "Array of transfer objects between steps"
-          },
-          "parameters": {
-            "type": "array",
-            "description": "Array of parameter definitions"
-          },
-          "tags": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Tags for discovery"
-          },
-          "requiredCapabilities": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Required capability types"
-          }
-        },
-        "required": [
-          "name"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/protocols"
-      }
-    },
-    {
-      "name": "update_protocol",
-      "description": "Update an existing protocol template (must be in draft status). Returns updated name and version.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "description": "Protocol template ID"
-          },
-          "name": {
-            "type": "string",
-            "description": "Updated name"
-          },
-          "description": {
-            "type": "string",
-            "description": "Updated description"
-          },
-          "version": {
-            "type": "string",
-            "description": "New version string (semver)"
-          },
-          "steps": {
-            "type": "array",
-            "description": "Updated steps array"
-          },
-          "parameters": {
-            "type": "array",
-            "description": "Updated parameters array"
-          }
-        },
-        "required": [
-          "id"
-        ]
-      },
-      "endpoint": {
-        "method": "PUT",
-        "path": "/api/protocols/{id}"
-      }
-    },
-    {
-      "name": "publish_protocol",
-      "description": "Publish a draft protocol template, making it visible in the protocol library for others to discover and use.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "description": "Protocol template ID to publish"
-          }
-        },
-        "required": [
-          "id"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/protocols/{id}/publish"
-      }
-    },
-    {
-      "name": "fork_protocol",
-      "description": "Fork a protocol template to create your own version with parameter overrides. Returns the new fork ID.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "description": "Protocol template ID to fork"
-          },
-          "name": {
-            "type": "string",
-            "description": "Name for the forked protocol"
-          },
-          "parameterOverrides": {
-            "type": "object",
-            "description": "Parameter values to override from the source template"
-          }
-        },
-        "required": [
-          "id"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/protocols/{id}/fork"
-      }
-    },
-    {
-      "name": "get_protocol_forks",
-      "description": "List all forks of a protocol template. Shows who forked it and what parameters they changed.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "description": "Protocol template ID"
-          }
-        },
-        "required": [
-          "id"
-        ]
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/protocols/{id}/forks"
-      }
-    },
-    {
-      "name": "validate_protocol",
-      "description": "Validate a protocol template against a specific kernel — checks capability availability, transfer compatibility, and automation level feasibility.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "description": "Protocol template ID"
-          },
-          "kernelId": {
-            "type": "string",
-            "description": "Kernel ID to validate against (optional)"
-          }
-        },
-        "required": [
-          "id"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/protocols/{id}/validate"
-      }
-    },
-    {
-      "name": "list_protocol_runs",
-      "description": "List protocol runs. Filter by status or kernelId.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "status": {
-            "type": "string",
-            "enum": [
-              "binding",
-              "ready",
-              "running",
-              "paused",
-              "completed",
-              "cancelled",
-              "failed"
-            ],
-            "description": "Filter by run status"
-          },
-          "kernelId": {
-            "type": "string",
-            "description": "Filter by kernel ID"
-          }
-        },
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/protocol-runs"
-      }
-    },
-    {
-      "name": "get_protocol_run",
-      "description": "Get protocol run status including step progress, transfer status, current phase, and evidence hashes.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "runId": {
-            "type": "string",
-            "description": "Protocol run ID"
-          }
-        },
-        "required": [
-          "runId"
-        ]
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/protocol-runs/{runId}"
-      }
-    },
-    {
-      "name": "create_protocol_run",
-      "description": "Instantiate a protocol template as a run on a specific kernel with given parameter values.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "description": "Protocol template ID"
-          },
-          "kernelId": {
-            "type": "string",
-            "description": "Kernel ID to run the protocol on"
-          },
-          "parameterValues": {
-            "type": "object",
-            "description": "Runtime parameter values (overrides template defaults)"
-          },
-          "sampleIds": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Sample IDs being processed in this run"
-          }
-        },
-        "required": [
-          "id"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/protocols/{id}/runs"
-      }
-    },
-    {
-      "name": "start_protocol_run",
-      "description": "Start execution of a protocol run that is in 'ready' or 'binding' state.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "runId": {
-            "type": "string",
-            "description": "Protocol run ID to start"
-          }
-        },
-        "required": [
-          "runId"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/protocol-runs/{runId}/start"
-      }
-    },
-    {
-      "name": "pause_protocol_run",
-      "description": "Pause a running protocol run. Use resume_protocol_run to continue.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "runId": {
-            "type": "string",
-            "description": "Protocol run ID to pause"
-          }
-        },
-        "required": [
-          "runId"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/protocol-runs/{runId}/pause"
-      }
-    },
-    {
-      "name": "resume_protocol_run",
-      "description": "Resume a paused protocol run from where it stopped.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "runId": {
-            "type": "string",
-            "description": "Protocol run ID to resume"
-          }
-        },
-        "required": [
-          "runId"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/protocol-runs/{runId}/resume"
-      }
-    },
-    {
-      "name": "cancel_protocol_run",
-      "description": "Cancel a protocol run. Cannot be cancelled once completed or already cancelled.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "runId": {
-            "type": "string",
-            "description": "Protocol run ID to cancel"
-          }
-        },
-        "required": [
-          "runId"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/protocol-runs/{runId}/cancel"
-      }
-    },
-    {
-      "name": "get_workflows",
-      "description": "List active instrument workflows in the orchestrator. Optionally filter by status.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "status": {
-            "type": "string",
-            "description": "Filter by workflow status (e.g. running, completed)"
-          }
-        },
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/orchestrator/workflows"
-      }
-    },
-    {
-      "name": "get_workflow",
-      "description": "Get detailed workflow information including steps, node assignments, and progress.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "workflowId": {
-            "type": "string",
-            "description": "Workflow ID"
-          }
-        },
-        "required": [
-          "workflowId"
-        ]
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/orchestrator/workflows/{workflowId}"
-      }
-    },
-    {
-      "name": "get_transfer_graphs",
-      "description": "Get resource transfer graphs showing instrument topology, transfer edges, and mechanisms for all kernels.",
-      "input_schema": {
-        "type": "object",
-        "properties": {},
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/orchestrator/graphs"
-      }
-    },
-    {
-      "name": "list_automation_status",
-      "description": "List automation status for all instrument transfer pairs. Shows current automation level, episode count, and training readiness. Filter by kernelId.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "kernelId": {
-            "type": "string",
-            "description": "Filter by kernel ID"
-          }
-        },
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/automation-status"
-      }
-    },
-    {
-      "name": "get_automation_status",
-      "description": "Get automation status for a specific instrument-to-instrument transfer pair.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "fromNodeId": {
-            "type": "string",
-            "description": "Source instrument node ID"
-          },
-          "toNodeId": {
-            "type": "string",
-            "description": "Destination instrument node ID"
-          }
-        },
-        "required": [
-          "fromNodeId",
-          "toNodeId"
-        ]
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/automation-status/{fromNodeId}/{toNodeId}"
-      }
-    },
-    {
-      "name": "record_episode",
-      "description": "Record a transfer episode for a node pair. Increments episode count toward VLA training threshold.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "fromNodeId": {
-            "type": "string",
-            "description": "Source instrument node ID"
-          },
-          "toNodeId": {
-            "type": "string",
-            "description": "Destination instrument node ID"
-          },
-          "episodeId": {
-            "type": "string",
-            "description": "Episode ID (optional)"
-          },
-          "success": {
-            "type": "boolean",
-            "description": "Whether the episode succeeded"
-          }
-        },
-        "required": [
-          "fromNodeId",
-          "toNodeId"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/automation-status/{fromNodeId}/{toNodeId}/episode"
-      }
-    },
-    {
-      "name": "advance_automation",
-      "description": "Advance the automation level for a transfer pair (manual → teleoperated → pilot_operated → vla_assisted → fully_autonomous). Requires sufficient training episodes.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "fromNodeId": {
-            "type": "string",
-            "description": "Source instrument node ID"
-          },
-          "toNodeId": {
-            "type": "string",
-            "description": "Destination instrument node ID"
-          }
-        },
-        "required": [
-          "fromNodeId",
-          "toNodeId"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/automation-status/{fromNodeId}/{toNodeId}/advance"
-      }
-    },
-    {
-      "name": "list_transfer_agents",
-      "description": "List all transfer agents (robots and human operators) available for instrument-to-instrument transfers.",
-      "input_schema": {
-        "type": "object",
-        "properties": {},
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/transfer-agents"
-      }
-    },
-    {
-      "name": "get_logistics_overview",
-      "description": "Logistics hub overview: active shipments, pending installations, and upcoming bookings.",
-      "input_schema": {
-        "type": "object",
-        "properties": {},
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/logistics"
-      }
-    },
-    {
-      "name": "get_shipments",
-      "description": "List equipment shipments with tracking status. Optionally filter by status.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "status": {
-            "type": "string",
-            "description": "Filter by shipment status (in_transit, delivered, pickup_scheduled, etc.)"
-          }
-        },
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/logistics/shipments"
-      }
-    },
-    {
-      "name": "create_shipment",
-      "description": "Create a new equipment shipment with origin, destination, package details, and provider.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "equipmentDescription": {
-            "type": "string",
-            "description": "Description of equipment being shipped"
-          },
-          "providerId": {
-            "type": "string",
-            "description": "Logistics provider ID"
-          },
-          "origin": {
-            "type": "object",
-            "description": "Origin location with label, address, geo coordinates"
-          },
-          "destination": {
-            "type": "object",
-            "description": "Destination location with label, address, geo coordinates"
-          },
-          "package": {
-            "type": "object",
-            "description": "Package details (weightKg, dimensions, fragile, etc.)"
-          }
-        },
-        "required": [
-          "equipmentDescription"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/logistics/shipments"
-      }
-    },
-    {
-      "name": "get_shipment_quote",
-      "description": "Get shipping quotes from logistics providers based on origin, destination, weight, and priority.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "originZip": {
-            "type": "string",
-            "description": "Origin ZIP code"
-          },
-          "destinationZip": {
-            "type": "string",
-            "description": "Destination ZIP code"
-          },
-          "weightKg": {
-            "type": "number",
-            "description": "Package weight in kg"
-          },
-          "priority": {
-            "type": "string",
-            "enum": [
-              "standard",
-              "expedited",
-              "rush"
-            ],
-            "description": "Shipping priority level"
-          }
-        },
-        "required": []
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/logistics/shipments/quote"
-      }
-    },
-    {
-      "name": "get_installations",
-      "description": "List equipment installation orders with step progress and status.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "status": {
-            "type": "string",
-            "description": "Filter by installation status (draft, scheduled, in_progress, completed)"
-          }
-        },
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/logistics/installations"
-      }
-    },
-    {
-      "name": "get_space_bookings",
-      "description": "List space bookings for hosting equipment. Optionally filter by status or space.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "status": {
-            "type": "string",
-            "description": "Filter by booking status"
-          },
-          "spaceId": {
-            "type": "string",
-            "description": "Filter by space ID"
-          }
-        },
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/logistics/bookings"
-      }
-    },
-    {
-      "name": "search_spaces",
-      "description": "Search for lab/workshop hosting spaces. Filter by size, access schedule, and other requirements.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "maxSqft": {
-            "type": "number",
-            "description": "Maximum square footage"
-          },
-          "access": {
-            "type": "string",
-            "description": "Access schedule (24/7, business-hours, all)"
-          }
-        },
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/spaces"
-      }
-    },
-    {
-      "name": "get_space",
-      "description": "Get detailed information about a hosting space including power, amenities, safety features, and pricing.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "description": "Space ID"
-          }
-        },
-        "required": [
-          "id"
-        ]
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/spaces/{id}"
-      }
-    },
-    {
-      "name": "match_spaces",
-      "description": "Find hosting spaces that match specific machine requirements (voltage, area, etc.). Returns scored matches.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "voltage": {
-            "type": "number",
-            "description": "Required voltage (e.g. 208, 480)"
-          },
-          "minArea": {
-            "type": "number",
-            "description": "Minimum floor area in square feet"
-          }
-        },
-        "required": []
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/spaces/match"
-      }
-    },
-    {
-      "name": "get_marketplace_overview",
-      "description": "Equipment marketplace overview with demand/supply metrics across all capability types.",
-      "input_schema": {
-        "type": "object",
-        "properties": {},
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/marketplace"
-      }
-    },
-    {
-      "name": "get_equipment_classes",
-      "description": "List equipment classes (FDM printers, CNC mills, etc.) with market snapshot data including utilization, demand, and pricing.",
-      "input_schema": {
-        "type": "object",
-        "properties": {},
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/marketplace/classes"
-      }
-    },
-    {
-      "name": "get_demand_supply",
-      "description": "Get network-wide demand vs supply timeline data for capacity planning and market analysis.",
-      "input_schema": {
-        "type": "object",
-        "properties": {},
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/marketplace/demand-supply"
-      }
-    },
-    {
-      "name": "calculate_roi",
-      "description": "Calculate ROI projection for onboarding equipment. Returns month-by-month revenue, cost, and break-even analysis.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "monthlyCost": {
-            "type": "number",
-            "description": "Monthly operating cost in USD"
-          },
-          "avgJobValue": {
-            "type": "number",
-            "description": "Average revenue per job in USD"
-          },
-          "utilization": {
-            "type": "number",
-            "description": "Expected utilization percentage (0-100)"
-          }
-        },
-        "required": []
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/marketplace/roi"
-      }
-    },
-    {
       "name": "get_operator_dashboard",
       "description": "Not available: no route answers GET /api/operator on this gateway. The operator's real kernels, devices and in-flight jobs are at GET /api/agent/me.",
       "input_schema": {
@@ -2700,52 +1689,6 @@
       "endpoint": {
         "method": "GET",
         "path": "/api/settlement/epochs"
-      }
-    },
-    {
-      "name": "get_depin_stats",
-      "description": "DePIN treasury, soulbound capability certificates, and current reward epoch stats.",
-      "input_schema": {
-        "type": "object",
-        "properties": {},
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/rewards"
-      }
-    },
-    {
-      "name": "mint_certificate",
-      "description": "Mint a soulbound capability certificate (cNFT via Metaplex Core) for a kernel. Proves a verified capability on-chain as an immutable credential. Step 5 of onboarding.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "kernelDid": {
-            "type": "string",
-            "description": "DID of the kernel (e.g. did:pcc:kernel:biolab-01)"
-          },
-          "capabilityType": {
-            "type": "string",
-            "description": "Capability type (e.g. fdm, cnc-3axis, hplc)"
-          },
-          "assuranceTier": {
-            "type": "number",
-            "description": "Assurance tier (0-3)"
-          },
-          "metadata": {
-            "type": "object",
-            "description": "Additional metadata (tolerances, materials, calibration proof CID)"
-          }
-        },
-        "required": [
-          "kernelDid",
-          "capabilityType"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/certificates/mint"
       }
     },
     {
@@ -3277,7 +2220,7 @@
     },
     {
       "name": "get_subnet_status",
-      "description": "Get Bittensor verification subnet health, agent bridge status, and network connectivity.",
+      "description": "The gateway's agent bridge status: whether its in-process agents started, their names and roles, and the bridge's conversation and recent-message counts.",
       "input_schema": {
         "type": "object",
         "properties": {},
@@ -3290,7 +2233,7 @@
     },
     {
       "name": "get_subnet_miners",
-      "description": "List verification subnet miners on the Bittensor network. Returns miner addresses, scores, and leaderboard positions.",
+      "description": "List the gateway's verification oracles (uma, chainlink and eigenlayer, in the order it tries them): each one's name, whether it's available, its verification count since the gateway started, and its average score.",
       "input_schema": {
         "type": "object",
         "properties": {},
@@ -3299,19 +2242,6 @@
       "endpoint": {
         "method": "GET",
         "path": "/api/verification/miners"
-      }
-    },
-    {
-      "name": "list_conversations",
-      "description": "List agent-to-agent conversations showing topic, participants, message count, and status.",
-      "input_schema": {
-        "type": "object",
-        "properties": {},
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/agents/conversations"
       }
     },
     {
@@ -3579,241 +2509,6 @@
       "endpoint": {
         "method": "GET",
         "path": "/api/dht/peers"
-      }
-    },
-    {
-      "name": "pcc_create_scope",
-      "description": "Create an execution scope for a job. Scopes define exactly which tool calls are allowed on a kernel during a job, with command budgets, retry limits, and time-to-live. Required before issuing SCOPED WRITE operations (protocol upload, run create, run action).",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "kernelId": {
-            "type": "string",
-            "description": "Kernel ID to create the scope for"
-          },
-          "jobId": {
-            "type": "string",
-            "description": "Job ID this scope is bound to (optional)"
-          },
-          "allowedTools": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "List of tool names allowed in this scope (e.g. ['ot2_protocol_upload', 'ot2_run_create', 'ot2_run_action'])"
-          },
-          "allowedPipettes": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Which pipettes may be used (e.g. ['left'])"
-          },
-          "allowedSlots": {
-            "type": "array",
-            "items": {
-              "type": "number"
-            },
-            "description": "Which deck slots may be accessed (e.g. [1, 2, 3, 9])"
-          },
-          "maxCommands": {
-            "type": "number",
-            "description": "Maximum tool calls allowed in this scope (default 100)"
-          },
-          "maxRetries": {
-            "type": "number",
-            "description": "Maximum retries allowed (default 3)"
-          },
-          "ttlMinutes": {
-            "type": "number",
-            "description": "Scope duration in minutes (default 30)"
-          },
-          "protocolHash": {
-            "type": "string",
-            "description": "SHA-256 hash of the approved protocol content. If set, protocol uploads are hash-verified."
-          }
-        },
-        "required": [
-          "kernelId",
-          "allowedTools"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/ot2/scope"
-      }
-    },
-    {
-      "name": "pcc_revoke_scope",
-      "description": "Revoke an execution scope immediately (emergency stop). All pending tool calls under this scope are rejected. The kernel enters a stopped state. A new scope must be created to resume.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "scopeId": {
-            "type": "string",
-            "description": "Scope ID to revoke"
-          }
-        },
-        "required": [
-          "scopeId"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/ot2/scope/{scopeId}/revoke"
-      }
-    },
-    {
-      "name": "pcc_scope_audit",
-      "description": "Get the audit trail for an execution scope — every tool call made under this scope, with validation results, timestamps, and outcomes.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "scopeId": {
-            "type": "string",
-            "description": "Scope ID to audit"
-          }
-        },
-        "required": [
-          "scopeId"
-        ]
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/ot2/scope/{scopeId}/audit"
-      }
-    },
-    {
-      "name": "pcc_relay_tool_call",
-      "description": "Relay a tool call to a device executor. The brain (LLM) posts tool calls here; the executor (on the device) polls for them and executes locally. Used for the brain/executor split architecture.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "kernelId": {
-            "type": "string",
-            "description": "Kernel ID of the target device"
-          },
-          "toolName": {
-            "type": "string",
-            "description": "Tool to execute (e.g. 'ot2_health', 'ot2_run_create')"
-          },
-          "toolArgs": {
-            "type": "object",
-            "description": "Arguments for the tool call"
-          },
-          "scopeId": {
-            "type": "string",
-            "description": "Execution scope ID (required for SCOPED WRITE tools)"
-          }
-        },
-        "required": [
-          "kernelId",
-          "toolName",
-          "toolArgs"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/ot2/tool-call"
-      }
-    },
-    {
-      "name": "pcc_get_tool_result",
-      "description": "Get the result of a previously relayed tool call. Poll this endpoint until the executor has processed the call and posted results.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "callId": {
-            "type": "string",
-            "description": "Tool call ID returned from pcc_relay_tool_call"
-          }
-        },
-        "required": [
-          "callId"
-        ]
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/ot2/tool-result/{callId}"
-      }
-    },
-    {
-      "name": "pcc_camera_latest",
-      "description": "Get the latest camera frame from a kernel as a JSON snapshot (base64 JPEG + metadata). For raw JPEG image, use GET /api/ot2/camera/latest directly.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "kernelId": {
-            "type": "string",
-            "description": "Kernel ID to get camera frame from"
-          }
-        },
-        "required": [
-          "kernelId"
-        ]
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/ot2/camera/snapshot"
-      }
-    },
-    {
-      "name": "pcc_chat_send",
-      "description": "Send a chat message to a kernel's operator or agent. Used for human-in-the-loop communication during job execution, troubleshooting, and escalation.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "kernelId": {
-            "type": "string",
-            "description": "Kernel ID to send the message to"
-          },
-          "message": {
-            "type": "string",
-            "description": "Message content"
-          },
-          "role": {
-            "type": "string",
-            "enum": [
-              "user",
-              "agent",
-              "operator",
-              "system"
-            ],
-            "description": "Sender role (default: user)"
-          }
-        },
-        "required": [
-          "kernelId",
-          "message"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/ot2/chat"
-      }
-    },
-    {
-      "name": "pcc_chat_history",
-      "description": "Get chat history with a kernel. Returns messages between agents, operators, and users for a specific kernel.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "kernelId": {
-            "type": "string",
-            "description": "Kernel ID to get chat history for"
-          },
-          "limit": {
-            "type": "number",
-            "description": "Maximum messages to return (default 50)"
-          }
-        },
-        "required": [
-          "kernelId"
-        ]
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/ot2/chat/messages"
       }
     },
     {
@@ -4124,126 +2819,6 @@
       }
     },
     {
-      "name": "marketplace_categories",
-      "description": "List all supplies and materials marketplace categories with the count of active listings in each. Categories cover the full spectrum of physical production inputs: raw metals, plastics, lab reagents, consumables, electronics, tooling, and more.",
-      "input_schema": {
-        "type": "object",
-        "properties": {},
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/marketplace/categories"
-      }
-    },
-    {
-      "name": "marketplace_list_listings",
-      "description": "Search and filter supplies/materials marketplace listings. Operators buy raw materials here to fulfill capability contracts. Filter by category, in-stock status, location, or free-text query.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "category": {
-            "type": "string",
-            "description": "Filter by category: raw-metals, plastics-polymers, lab-reagents, lab-consumables, electronics, chemicals, biologicals, tooling, packaging, calibration, safety, other"
-          },
-          "query": {
-            "type": "string",
-            "description": "Full-text search across name, description, and tags"
-          },
-          "inStock": {
-            "type": "string",
-            "enum": [
-              "true",
-              "false"
-            ],
-            "description": "Filter to only in-stock listings"
-          },
-          "location": {
-            "type": "string",
-            "description": "Filter by region (e.g. 'US-Midwest', 'EU-West', 'Asia-Pacific')"
-          }
-        },
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/marketplace/listings"
-      }
-    },
-    {
-      "name": "marketplace_get_listing",
-      "description": "Get full details of a specific supplies/materials marketplace listing by ID. Returns pricing, availability, lead time, location, and tags.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "description": "Listing ID (e.g. 'lst-al6061-bar')"
-          }
-        },
-        "required": [
-          "id"
-        ]
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/marketplace/listings/{id}"
-      }
-    },
-    {
-      "name": "marketplace_list_orders",
-      "description": "List marketplace supply orders. Filter by buyerId, sellerId, or status. Returns order history with pricing and status.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "buyerId": {
-            "type": "string",
-            "description": "Filter to orders placed by this buyer"
-          },
-          "sellerId": {
-            "type": "string",
-            "description": "Filter to orders received by this seller"
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "pending",
-              "confirmed",
-              "shipped",
-              "delivered",
-              "cancelled"
-            ],
-            "description": "Filter by order status"
-          }
-        },
-        "required": []
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/marketplace/orders"
-      }
-    },
-    {
-      "name": "marketplace_get_order",
-      "description": "Get details of a specific supply order including the associated listing details, quantity, total price, status, and optional escrow address.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "description": "Order ID (e.g. 'ord-demo-001')"
-          }
-        },
-        "required": [
-          "id"
-        ]
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/marketplace/orders/{id}"
-      }
-    },
-    {
       "name": "system_telemetry",
       "description": "Raw system state dump — actual DB rows for kernels, devices, jobs, evidence, registrations, capabilities, agent conversations, audit log. No fake numbers, no summaries.",
       "input_schema": {
@@ -4257,7 +2832,7 @@
     },
     {
       "name": "operator_poll_jobs",
-      "description": "Operator polls jobs assigned to their kernel; status defaults to queued, and the route can filter any status. Requires operate authority for this kernel: its recorded operator identity (the caller that registered it), its proven operator wallet, or the gateway admin authority. Another identity gets 403; no credentials gets 401; an unregistered kernel gets 404 for a non-admin. Operator identity proof for operate is completed by WP-A (DECISIONS items 136 and 138). The pcc-node 0.1.1 daemon does not call it: it takes no jobs.",
+      "description": "Operator polls jobs assigned to their kernel; status defaults to queued, and the route can filter any status. Requires operate authority for this kernel: its recorded operator identity (the caller that registered it), its proven operator wallet, or the gateway admin authority. Another identity gets 403; no credentials gets 401; an unregistered kernel gets 404 for a non-admin. Operator identity proof for operate is completed by WP-A (DECISIONS items 136 and 138). The pcc-node daemon does not call it: it takes no jobs.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -4406,7 +2981,7 @@
     },
     {
       "name": "pcc_job_complete",
-      "description": "Complete a job: gathers tool call audit trail from execution scopes, builds evidence bundle with SHA-256 hash, stores evidence, revokes scopes, and settles escrow (mock or real). This is how a job run through execution scopes is finished. A node that submitted its evidence and set status completed (operator_update_job_status) must not call it: it then answers 409 (\"Job already completed or completion in progress\").",
+      "description": "Complete a job: gathers tool call audit trail from execution scopes, builds evidence bundle with SHA-256 hash, stores evidence, revokes scopes, and settles escrow (mock or real). This is how a job run through execution scopes is finished. A node that submitted its evidence and set status completed (operator_update_job_status) must not call it: it then answers 409 (\"Job already completed or completion in progress\"). Only the job's buyer, its kernel's operator or the gateway admin may call it: a buyer or operator must send an API key or session key in the Authorization header (a sign-in cookie alone gets 403), and any other proven wallet gets 404 (\"Job not found\").",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -4446,59 +3021,6 @@
       "endpoint": {
         "method": "GET",
         "path": "/api/jobs/{jobId}/settlement"
-      }
-    },
-    {
-      "name": "pcc_get_tool_manifest",
-      "description": "Get the tool manifest for a kernel's device type. Lists all available tools with their safety classification (read, safe_control, scoped_write, privileged) and input schemas. Use to understand what tools are available before making tool calls.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "kernelId": {
-            "type": "string",
-            "description": "Kernel ID"
-          }
-        },
-        "required": [
-          "kernelId"
-        ]
-      },
-      "endpoint": {
-        "method": "GET",
-        "path": "/api/relay/{kernelId}/manifest"
-      }
-    },
-    {
-      "name": "pcc_relay_generic_tool_call",
-      "description": "Relay a tool call to any kernel's device executor via the generic relay (not OT-2 specific). Works with any device type. Safe tools (read/safe_control) don't need a scope. Scoped write tools require an active execution scope. Returns a call ID — poll pcc_get_tool_result for the response.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "kernelId": {
-            "type": "string",
-            "description": "Target kernel ID"
-          },
-          "toolName": {
-            "type": "string",
-            "description": "Tool name from the device manifest"
-          },
-          "args": {
-            "type": "object",
-            "description": "Tool arguments"
-          },
-          "scopeId": {
-            "type": "string",
-            "description": "Execution scope ID (required for write operations)"
-          }
-        },
-        "required": [
-          "kernelId",
-          "toolName"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/relay/{kernelId}/tool-call"
       }
     },
     {
@@ -6022,7 +4544,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Alternative to `steps`: chain of named sub-outcomes. The planner expands each into capability types."
+            "description": "Alternative to `steps`: a chain of named sub-outcomes. The planner uses only the last entry, as the outcome type to plan for."
           },
           "budgetUSD": {
             "type": "number",
@@ -6040,7 +4562,7 @@
           },
           "location": {
             "type": "object",
-            "description": "Geographic constraint (lat/lng + radius, or country, etc)."
+            "description": "Geographic constraint: lat and lng (both required) and an optional radiusKm."
           },
           "optimizeFor": {
             "type": "string",
@@ -6103,7 +4625,7 @@
           },
           "idempotencyKey": {
             "type": "string",
-            "description": "Optional caller-supplied key (≤120 chars) to dedupe execute calls."
+            "description": "Optional string, 1-120 characters. The gateway validates it but doesn't use it."
           }
         },
         "required": [
@@ -6969,8 +5491,8 @@
     "openai": "const OpenAI = require('openai');\nconst pkg = require('./agent-package.json');\nconst client = new OpenAI();\n\nconst PCC_BASE = process.env.PCC_BASE ?? pkg.api_base; // the gateway you were given; api_base is production\nconst tools = pkg.tools.map(t => ({\n  type: 'function',\n  function: { name: t.name, description: t.description, parameters: t.input_schema },\n}));\n\nlet apiKey = null;\n\nasync function callTool(toolName, input) {\n  const tool = pkg.tools.find(t => t.name === toolName);\n  let path = tool.endpoint.path;\n  for (const [k, v] of Object.entries(input)) path = path.replace(`{${k}}`, v);\n  const headers = { 'Content-Type': 'application/json' };\n  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;\n  const res = await fetch(`${PCC_BASE}${path}`, {\n    method: tool.endpoint.method,\n    headers,\n    body: tool.endpoint.method !== 'GET' ? JSON.stringify(input) : undefined,\n  });\n  const data = await res.json();\n  if (toolName === 'provision_api_key' && data.api_key) apiKey = data.api_key;\n  return data;\n}\n\nasync function chat(userMessage) {\n  const messages = [\n    { role: 'system', content: pkg.system_prompt },\n    { role: 'user', content: userMessage },\n  ];\n  while (true) {\n    const response = await client.chat.completions.create({ model: 'gpt-4o', tools, messages });\n    const msg = response.choices[0].message;\n    messages.push(msg);\n    if (!msg.tool_calls) break;\n    for (const call of msg.tool_calls) {\n      const result = await callTool(call.function.name, JSON.parse(call.function.arguments));\n      messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });\n    }\n  }\n  return messages;\n}\n\nchat('I want to register my HPLC lab and start accepting jobs on the PCC network.');"
   },
   "metadata": {
-    "tool_count": 239,
-    "updated": "2026-11-07T00:00:00.000Z",
+    "tool_count": 179,
+    "updated": "2026-11-10T00:00:00.000Z",
     "front_door_polished": true
   },
   "title": "PCC — Physical Capability Cloud",
@@ -6979,7 +5501,7 @@
       "user_request": "Order me a pizza for delivery to 728 Geary St SF.",
       "what_claude_does": "1. GET /api/capabilities?type=pizza.order&within=37.78,-122.41,10 — find pizza shops near Geary St.\n2. Pick the best-rated one (check `reputation`), present to user with price + ETA.\n3. On user confirmation: POST /api/job-offers with capabilityType=pizza.order, requirements={ shopId, items, deliveryAddress, customer }, pricing={ model:'fixed', amount: shopPrice, currency:'USD' }, idempotencyKey='pizza-728geary-{timestamp}'.\n4. (separately) GET /api/capabilities?type=courier.dispatch&within=... — find a driver. Present the driver's price from the listing to the user, as in step 2, and post step 5's offer only once they confirm that price.\n5. POST /api/job-offers with capabilityType=courier.dispatch, requirements={ pickup:{shopAddress}, dropoff:{userAddress}, pickupReadyAt }, pricing={ model:'fixed', amount: driverPrice, currency:'USD' }.\n6. Poll GET /api/job-offers/:id for both, reading offer.status and the events. A `delivered` status is a claim: any caller can post it, with no evidence.\n7. Report to the user only what evidence shows: a photo the operator or courier shares by CID (GET /api/storage/:cid). Say that PCC has not verified it.",
       "tools_used": [
-        "search_capabilities",
+        "GET /api/capabilities (no MCP tool yet — use HTTP)",
         "list_capability_types",
         "POST /api/job-offers (no MCP tool yet — use HTTP)"
       ]
@@ -6989,13 +5511,13 @@
       "what_claude_does": "1. Upload the STL's raw bytes via POST /api/storage (Content-Type model/stl or application/octet-stream). Save the returned CID.\n2. GET /api/capabilities?type=manufacturing.fdm&within=<user-coords>,25 — find local print shops.\n3. Pick by price + material support. Present to user.\n4. POST /api/job-offers with capabilityType=manufacturing.fdm, requirements={ stl_cid, material:'PLA', infill:0.2, layer_height:0.2 }, pricing={ model:'quote-required', amount: 0, currency:'USDC' } (let operator quote).\n5. Wait for operator to claim + quote. Show user the quote. On confirmation, accept.\n6. The operator prints and shares a photo as a storage CID (an offer has no evidence field).\n7. GET /api/storage/<cid> to view the photo. Confirm to the user only what it shows; offer.status alone proves nothing.\n8. (optional) chain into courier.dispatch for delivery using shop pickup location.",
       "tools_used": [
         "pcc_capture_upload",
-        "search_capabilities",
+        "GET /api/capabilities (no MCP tool yet — use HTTP)",
         "POST /api/job-offers"
       ]
     },
     {
       "user_request": "I run a 3D-print shop. Tell me when there's an FDM job in my area.",
-      "what_claude_does": "Tell the user: 'I can show what's open right now. pcc-node keeps a machine's kernel online, but from 0.1.1 it takes no jobs itself: jobs run through the operating agent's typed operations (coming, ADK item 12).'\n1. GET /api/job-offers/open?capabilityType=manufacturing.fdm&within=<their-coords>,50 — list current offers in their area.\n2. Format the list with price, deadline, requirements summary.\n3. If they want to claim one: POST /api/job-offers/:id/claim with their kernelId.\n4. Help them keep evidence after printing (POST /api/storage with the photo's raw bytes) and share its CID with the buyer. To mark progress or delivery, post an event: POST /api/job-offers/:id/events with {event: 'delivered'}. That marks the offer `delivered`, but it is only a claim: the buyer checks the photo.",
+      "what_claude_does": "Tell the user: 'I can show what's open right now. pcc-node keeps a machine's kernel online, but it takes no jobs itself: jobs run through the operating agent's typed operations (coming, ADK item 12).'\n1. GET /api/job-offers/open?capabilityType=manufacturing.fdm&within=<their-coords>,50 — list current offers in their area.\n2. Format the list with price, deadline, requirements summary.\n3. If they want to claim one: POST /api/job-offers/:id/claim with their kernelId.\n4. Help them keep evidence after printing (POST /api/storage with the photo's raw bytes) and share its CID with the buyer. To mark progress or delivery, post an event: POST /api/job-offers/:id/events with {event: 'delivered'}. That marks the offer `delivered`, but it is only a claim: the buyer checks the photo.",
       "tools_used": [
         "GET /api/job-offers/open",
         "POST /api/job-offers/:id/claim"
@@ -7007,7 +5529,7 @@
       "tools_used": [
         "search_dashboards",
         "build_options",
-        "search_capabilities",
+        "GET /api/capabilities (no MCP tool yet — use HTTP)",
         "save_dashboard",
         "get_dashboard",
         "POST /api/job-offers"

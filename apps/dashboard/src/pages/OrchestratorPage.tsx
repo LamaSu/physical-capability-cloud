@@ -4,9 +4,8 @@ import { useQuery } from "@tanstack/react-query";
 import { GlassPanel, GlowBadge, DataCell } from "@pcc/ui";
 import type { TransferGraph, TransferNode, Sample, InstrumentWorkflow, ResourceClaim } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
-import { useOrchestratorStore } from "../stores/orchestrator-store.js";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
-import { readOrchestratorResponse, workflowStepSegments } from "./orchestrator-logic.js";
+import { listFromRead, readOrchestratorResponse, workflowStepSegments } from "./orchestrator-logic.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -50,10 +49,6 @@ const WF_STATUS_COLOR: Record<InstrumentWorkflow["status"], "green" | "gold" | "
 export function OrchestratorPage() {
   const navigate = useNavigate();
   const setPageMeta = useUIStore((s) => s.setPageMeta);
-  const {
-    graphs, samples, workflows, claims,
-    setGraphs, setSamples, setWorkflows, setClaims,
-  } = useOrchestratorStore();
 
   React.useEffect(() => {
     setPageMeta("Orchestrator", "Intra-kernel instrument choreography");
@@ -89,21 +84,10 @@ export function OrchestratorPage() {
     ),
   });
 
-  React.useEffect(() => {
-    if (graphRead?.kind === "ok" && graphRead.data?.graphs) setGraphs(graphRead.data.graphs);
-  }, [graphRead, setGraphs]);
-
-  React.useEffect(() => {
-    if (sampleRead?.kind === "ok" && sampleRead.data?.samples) setSamples(sampleRead.data.samples);
-  }, [sampleRead, setSamples]);
-
-  React.useEffect(() => {
-    if (workflowRead?.kind === "ok" && workflowRead.data?.workflows) setWorkflows(workflowRead.data.workflows);
-  }, [workflowRead, setWorkflows]);
-
-  React.useEffect(() => {
-    if (claimRead?.kind === "ok" && claimRead.data?.claims) setClaims(claimRead.data.claims);
-  }, [claimRead, setClaims]);
+  const graphs = listFromRead(graphRead, "graphs");
+  const samples = listFromRead(sampleRead, "samples");
+  const workflows = listFromRead(workflowRead, "workflows");
+  const claims = listFromRead(claimRead, "claims");
 
   const reads = [
     { label: "Transfer Graphs", read: graphRead },
@@ -114,12 +98,12 @@ export function OrchestratorPage() {
   const unavailable = reads.flatMap(({ read }) => read?.kind === "not_available" ? [read] : []);
   const routes = [...new Set(unavailable.flatMap((read) => read.see))];
   const failures = reads.flatMap(({ label, read }) => read?.kind === "error" ? [{ label, ...read }] : []);
-  const claimsKnown = claimRead?.kind === "ok";
+  const claimsKnown = claims !== undefined;
 
   // Build claim lookup: nodeId -> claim
   const claimByNode = React.useMemo(() => {
     const map: Record<string, ResourceClaim> = {};
-    for (const c of claims) {
+    for (const c of claims ?? []) {
       if (!c.released) map[c.nodeId] = c;
     }
     return map;
@@ -127,7 +111,7 @@ export function OrchestratorPage() {
 
   // All nodes across all graphs
   const allNodes = React.useMemo(
-    () => graphs.flatMap((g) => g.nodes),
+    () => (graphs ?? []).flatMap((g) => g.nodes),
     [graphs],
   );
 
@@ -153,27 +137,27 @@ export function OrchestratorPage() {
       {/* Summary KPIs */}
       <div className="grid grid-cols-4 gap-4">
         <GlassPanel padding="md">
-          <DataCell label="Transfer Graphs" value={graphRead?.kind === "ok" ? String(graphs.length) : "—"} />
+          <DataCell label="Transfer Graphs" value={graphs ? String(graphs.length) : "—"} />
         </GlassPanel>
         <GlassPanel padding="md">
-          <DataCell label="Active Samples" value={sampleRead?.kind === "ok" ? String(samples.length) : "—"} />
+          <DataCell label="Active Samples" value={samples ? String(samples.length) : "—"} />
         </GlassPanel>
         <GlassPanel padding="md">
           <DataCell
             label="Running Workflows"
-            value={workflowRead?.kind === "ok" ? String(workflows.filter((w) => w.status === "running").length) : "—"}
+            value={workflows ? String(workflows.filter((w) => w.status === "running").length) : "—"}
           />
         </GlassPanel>
         <GlassPanel padding="md">
           <DataCell
             label="Active Claims"
-            value={claimsKnown ? String(claims.filter((c) => !c.released).length) : "—"}
+            value={claims ? String(claims.filter((c) => !c.released).length) : "—"}
           />
         </GlassPanel>
       </div>
 
       {/* Transfer Graphs */}
-      {graphRead?.kind === "ok" && graphs.map((graph) => (
+      {graphs?.map((graph) => (
         <GlassPanel key={graph.id} padding="md">
           <div className="flex items-center justify-between mb-4">
             <div>
@@ -192,7 +176,7 @@ export function OrchestratorPage() {
           <div className="grid grid-cols-5 gap-3 mb-4">
             {graph.nodes.map((node) => {
               const claim = claimByNode[node.id];
-              const sampleHere = samples.find((s) => s.currentNodeId === node.id);
+              const sampleHere = samples?.find((s) => s.currentNodeId === node.id);
               return (
                 <div
                   key={node.id}
@@ -256,7 +240,7 @@ export function OrchestratorPage() {
         <GlassPanel padding="md">
           <h3 className="text-sm font-medium text-white/60 mb-3">Active Samples</h3>
           <div className="space-y-2">
-            {sampleRead?.kind === "ok" && samples.map((sample) => {
+            {samples?.map((sample) => {
               const nodeLabel = allNodes.find((n) => n.id === sample.currentNodeId)?.label ?? sample.currentNodeId;
               return (
                 <div
@@ -284,7 +268,7 @@ export function OrchestratorPage() {
                 </div>
               );
             })}
-            {sampleRead?.kind === "ok" && samples.length === 0 && (
+            {samples?.length === 0 && (
               <div className="text-center py-8 text-white/30 text-xs">No active samples</div>
             )}
           </div>
@@ -294,7 +278,7 @@ export function OrchestratorPage() {
         <GlassPanel padding="md">
           <h3 className="text-sm font-medium text-white/60 mb-3">Instrument Workflows</h3>
           <div className="space-y-2">
-            {workflowRead?.kind === "ok" && workflows.map((wf) => {
+            {workflows?.map((wf) => {
               const segments = workflowStepSegments(wf.status, wf.steps.length);
               return (
                 <div
@@ -337,7 +321,7 @@ export function OrchestratorPage() {
                 </div>
               );
             })}
-            {workflowRead?.kind === "ok" && workflows.length === 0 && (
+            {workflows?.length === 0 && (
               <div className="text-center py-8 text-white/30 text-xs">No workflows found</div>
             )}
           </div>
@@ -345,7 +329,7 @@ export function OrchestratorPage() {
       </div>
 
       {/* Instrument Status */}
-      {graphRead?.kind === "ok" && <GlassPanel padding="md">
+      {graphs && <GlassPanel padding="md">
         <h3 className="text-sm font-medium text-white/60 mb-3">Instrument Status</h3>
         <div className="grid grid-cols-5 gap-3">
           {allNodes.map((node) => {

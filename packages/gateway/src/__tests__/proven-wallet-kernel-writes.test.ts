@@ -17,6 +17,7 @@ const PATH = "/api/wallets/link-requests";
 const KERNEL_A = "kernel-w1b-writes-a";
 const ADMIN = "w1b-kernel-writes-admin";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+const PREVIOUS_LEGACY_PROOF = process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF;
 type Headers = NonNullable<InjectOptions["headers"]>;
 type Account = ReturnType<typeof privateKeyToAccount>;
 let app: FastifyInstance;
@@ -62,6 +63,8 @@ afterEach(async () => {
   closeStore();
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  if (PREVIOUS_LEGACY_PROOF === undefined) delete process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF;
+  else process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF = PREVIOUS_LEGACY_PROOF;
 });
 
 function seedKernel(id: string, operatorAddress: string) {
@@ -142,7 +145,7 @@ describe("self-linked wallets cannot transfer existing kernel ownership", () => 
       payload: { id: KERNEL_A, operatorAddress: walletB.address } });
     expect(getRepos().kernels.findById(KERNEL_A)).toEqual(before);
     expect(registered.statusCode).toBe(403);
-    expect(registered.json()).toMatchObject({ error: "FORBIDDEN", message: `Authenticated actor does not own kernel '${KERNEL_A}'` });
+    expect(registered.json()).toMatchObject({ error: "FORBIDDEN", message: `Kernel '${KERNEL_A}' requires owner authority or its bound signing key` });
     for (const request of [
       { url: `/api/kernels/${KERNEL_A}/heartbeat`, payload: { status: "online", operatorAddress: walletB.address } },
       { url: "/api/operator/heartbeat", payload: { kernelId: KERNEL_A, status: "online", operatorAddress: walletB.address } },
@@ -155,13 +158,16 @@ describe("self-linked wallets cannot transfer existing kernel ownership", () => 
     await decideRefused(KERNEL_A, headers);
   });
 
-  it("characterization (gateway #8098): the current claimed-identity owner check lets a key claiming A and self-linked to B update A's profile; neither header can DECIDE", async () => {
+  it("refuses a key claiming A and self-linked to B from updating A's profile; neither header can DECIDE (gateway #8098)", async () => {
     const key = await provision(walletA.address);
     await selfLink(key);
+    const before = getRepos().kernels.findById(KERNEL_A)!;
     const registered = await app.inject({ method: "POST", url: "/api/kernels", headers: selected(key),
       payload: { id: KERNEL_A, operatorAddress: walletB.address, name: "Owner's profile update" } });
-    expect(registered.statusCode).toBe(200);
-    expect(getRepos().kernels.findById(KERNEL_A)).toMatchObject({ operatorAddress: walletA.address, name: "Owner's profile update" });
+    expect(registered.statusCode).toBe(403);
+    expect(registered.json()).toMatchObject({ error: "FORBIDDEN", message: `Kernel '${KERNEL_A}' requires owner authority or its bound signing key` });
+    expect(getRepos().kernels.findById(KERNEL_A)).toMatchObject({ operatorAddress: walletA.address, name: "Original kernel profile" });
+    expect(getRepos().kernels.findById(KERNEL_A)).toEqual(before);
     await decideRefused(KERNEL_A, selected(key, walletB.address));
     await decideRefused(KERNEL_A, selected(key, walletA.address));
     expect(getRepos().kernels.findById(KERNEL_A)!.operatorAddress).toBe(walletA.address);
@@ -171,6 +177,7 @@ describe("self-linked wallets cannot transfer existing kernel ownership", () => 
     ["blank owner", "kernel-w1b-writes-u1", ""],
     ["zero-address owner", "kernel-w1b-writes-u2", ZERO_ADDRESS],
   ])("(c) refuses the legacy claim for %s before any profile, location or signer write", async (_name, kernelId, operatorAddress) => {
+    process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF = "allow";
     const before = seedKernel(kernelId, operatorAddress);
     seedJob(kernelId);
     const key = await provision(walletB.address);
@@ -209,6 +216,7 @@ describe("self-linked wallets cannot transfer existing kernel ownership", () => 
   });
 
   it.each(["", ZERO_ADDRESS])("preserves the admin's existing update path for an unowned kernel (%s)", async operatorAddress => {
+    process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF = "allow";
     const kernelId = "kernel-w1b-writes-admin";
     seedKernel(kernelId, operatorAddress);
     const key = await provision(walletB.address);
@@ -223,6 +231,7 @@ describe("self-linked wallets cannot transfer existing kernel ownership", () => 
   });
 
   it.each(["", ZERO_ADDRESS])("preserves actorless updates without claiming an unowned kernel (%s)", async operatorAddress => {
+    process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF = "allow";
     const kernelId = "kernel-w1b-writes-actorless";
     seedKernel(kernelId, operatorAddress);
     const signingProof = await walletB.signMessage({ message: kernelSigningProofMessage(kernelId) });
