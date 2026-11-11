@@ -530,8 +530,8 @@ export class SetupAgent {
       {
         name: "register_and_test",
         description:
-          "Registers the device via /api/setup/register-device and then requests a test job for " +
-          "one device; the gateway runs it only on its in-process kernel. Returns whether registration succeeded and the test result.",
+          "Registers the device via /api/setup/register-device and, if registration succeeds, requests a test job for " +
+          "one device; the gateway runs it only on its in-process kernel. Returns whether registration succeeded and, if it did, a test completion summary.",
         parameters: {
           kernelId: { type: "string", description: "Kernel ID to register the device under" },
           deviceId: { type: "string", description: "Unique device identifier" },

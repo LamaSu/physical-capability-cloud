@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { SetupAgent } from "../../../agent-support/src/setup-agent.js";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifySwagger from "@fastify/swagger";
 import fastifySwaggerUi from "@fastify/swagger-ui";
@@ -159,17 +160,19 @@ describe("copy contract: build, settlement, IP routes and test job", () => {
     );
     expect(a2a).not.toContain("to prove + auto-activate");
 
-    const setupAgent = readRepoFile("packages/agent-support/src/setup-agent.ts");
-    expect(setupAgent).toContain(
-      'description: "Submit a test job for one device on a kernel (Step 4 of onboarding). The gateway runs it only for a kernel it operates in-process; for any other kernel it refuses and runs nothing. Every reply from the test-job handler says whether the job ran and passed.",',
+    const descriptions = new Map(
+      new SetupAgent({} as never).getTools().map((tool) => [tool.name, tool.description]),
     );
-    expect(setupAgent).not.toContain("verify the full pipeline end-to-end");
-    expect(setupAgent).toContain(
-      '"one device; the gateway runs it only on its in-process kernel. Returns whether registration succeeded and the test result.",',
+    expect(descriptions.get("run_test_job")).toBe(
+      "Submit a test job for one device on a kernel (Step 4 of onboarding). The gateway runs it only for a kernel it operates in-process; for any other kernel it refuses and runs nothing. Every reply from the test-job handler says whether the job ran and passed.",
     );
-    expect(setupAgent).not.toContain("runs a test job to verify");
+    expect(descriptions.get("register_and_test")).toBe(
+      "Registers the device via /api/setup/register-device and, if registration succeeds, requests a test job for one device; the gateway runs it only on its in-process kernel. Returns whether registration succeeded and, if it did, a test completion summary.",
+    );
     const llms = readRepoFile("apps/dashboard/public/llms.txt");
-    expect(llms).toContain("`POST /api/setup/test-job` (in-process kernel only; activates nothing).");
+    expect(llms.split("\n").find((line) => line.startsWith("Flow: "))).toBe(
+      "Flow: `POST /api/auth/provision` → `POST /api/onboard/analyze` (AI capability analysis) → `POST /api/kernels` (register your site/operator) → `POST /api/setup/register-device` → `POST /api/capabilities` (publish) → `POST /api/setup/test-job` (in-process kernel only; activates nothing).",
+    );
     expect(llms).not.toContain("auto-activate");
 
     const mcpReadme = readRepoFile("packages/mcp-server/README.md");
