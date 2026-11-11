@@ -1127,7 +1127,7 @@ describe("C4 (R1) MOCK_SETTLEMENT does not switch refusals off", () => {
     app = await buildApp();
     const ipId = "0x6666666666666666666666666666666666666666";
 
-    const checks: Array<[string, string, Record<string, unknown>, unknown]> = [
+    const checks: Array<["POST", string, Record<string, unknown>, unknown]> = [
       ["POST", "/api/ip/distribute-royalties", { ipId, splits: [{ address: "0xAAAA", role: "operator", percentage: 100, label: "Operator" }] }, DISTRIBUTE_501],
       ["POST", "/api/ip/settle-royalties", { jobId: "job-001", childIpId: ipId, jobRevenue: "1000", payerAddress: "0xPAYER" }, SETTLE_501],
       ["POST", `/api/ip/${encodeURIComponent(ipId)}/pay`, { amount: "500", payerAddress: "0xPAYER" }, PAY_501],
@@ -1489,5 +1489,89 @@ describe("C9 (R3) LicensingEngine routes carry basis prediction", () => {
     const res = await app.inject({ method: "GET", url: `/api/ip/${encodeURIComponent(ipId)}/royalty-distribution?amount=1000000` });
     expect(res.statusCode).toBe(200);
     expect(res.json<{ basis: unknown }>().basis).toBe("prediction");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C10 (R2) — real mode refuses GET capability even when a registration row exists
+// ---------------------------------------------------------------------------
+
+describe("C10 (R2) real-mode capability refusal ignores a recorded registration", () => {
+  let app: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    if (app) await app.close();
+    app = undefined;
+    closeStore();
+    process.env.STORY_MOCK = "true";
+    resetStoryIPService();
+    vi.restoreAllMocks();
+  });
+
+  it("GET capability in real mode returns 501 getIPRegistration with a registration row recorded", async () => {
+    process.env.STORY_MOCK = "false";
+    resetStoryIPService();
+    app = await buildApp();
+    const ipId = "0xcafef00d00000000000000000000000000000002";
+    getRepos().story.insertIpRegistration({
+      ipId,
+      nftTokenId: "10",
+      licenseTermsId: "10",
+      txHash: "0xtx_db_real_mode",
+      capabilityId: "cap-nyc-fdm",
+      csdUrl: "pcc://capabilities/cap-nyc-fdm",
+      chain: "story-aeneid",
+      registeredAt: new Date().toISOString(),
+    });
+
+    const res = await app.inject({ method: "GET", url: "/api/ip/capability/cap-nyc-fdm" });
+    expect(res.statusCode).toBe(501);
+    const body = res.json<{ error: string; operation: string; registration?: unknown }>();
+    expect(body.error).toBe("not_executed");
+    expect(body.operation).toBe("getIPRegistration");
+    expect(body.registration).toBeUndefined();
+    expect(res.body).not.toContain(ipId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C11 (R3) — GET revenue sets its own simulated flag
+// ---------------------------------------------------------------------------
+
+describe("C11 (R3) revenue sets its own simulated flag", () => {
+  let app: FastifyInstance;
+  let ipId: string;
+
+  beforeEach(async () => {
+    process.env.STORY_MOCK = "true";
+    resetStoryIPService();
+    app = await buildApp();
+    const regRes = await app.inject({ method: "POST", url: "/api/ip/register-capability", payload: CAPABILITY_BODY });
+    ipId = regRes.json<{ registration: { ipId: string } }>().registration.ipId;
+  });
+
+  afterEach(async () => {
+    await app.close();
+    closeStore();
+    process.env.STORY_MOCK = "true";
+    resetStoryIPService();
+    vi.restoreAllMocks();
+  });
+
+  it("revenue 200 body has simulated true when the service snapshot carries no simulated key", async () => {
+    vi.spyOn(StoryIPService.prototype, "getRevenueSnapshot").mockResolvedValueOnce({
+      ipId,
+      vaultAddress: "0x00000000000000000000000000000000000000ab",
+      totalRevenue: "0",
+      unclaimedRevenue: "0",
+      tokenHolders: [],
+      lastPaymentAt: "2026-01-01T00:00:00.000Z",
+    } as Awaited<ReturnType<StoryIPService["getRevenueSnapshot"]>>);
+
+    const res = await app.inject({ method: "GET", url: `/api/ip/${encodeURIComponent(ipId)}/revenue` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{ ipId: string; simulated: unknown }>();
+    expect(body.ipId).toBe(ipId);
+    expect(body.simulated).toBe(true);
   });
 });
