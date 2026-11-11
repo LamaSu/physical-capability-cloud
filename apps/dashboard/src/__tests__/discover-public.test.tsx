@@ -51,7 +51,7 @@ let originalAuth: ReturnType<typeof useAuthStore.getState>;
 let originalUI: ReturnType<typeof useUIStore.getState>;
 let originalStorage: [string, string][];
 
-// App.tsx loads these pages with React.lazy, so the first test to render one
+// App.tsx loads DiscoverPage with React.lazy, so the first test to render it
 // pays its module load inside a 1 s vi.waitFor, which under full-suite load
 // sometimes ran past 1 s. Preloading here keeps that cost out of assertions.
 beforeAll(async () => {

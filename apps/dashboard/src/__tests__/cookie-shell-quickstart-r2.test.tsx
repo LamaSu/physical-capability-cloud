@@ -87,6 +87,7 @@ beforeAll(async () => {
   await Promise.all([
     import("../pages/OperatorDashboardPage.js"),
     import("../pages/EarnFromYourWorkPage.js"),
+    import("../pages/LandingPage.js"),
   ]);
 }, 60_000);
 
