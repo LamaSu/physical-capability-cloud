@@ -106,7 +106,11 @@ describe("the whitepaper's beta signup form", () => {
     await setValue(nameInput(), "  Ann Example ");
     await setValue(emailInput(), " ann@example.com ");
     await chooseRadio("builder");
-    await submitForm();
+    const form = container.querySelector("form") as HTMLFormElement;
+    await act(async () => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
     await submitForm();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
@@ -218,6 +222,9 @@ describe("the whitepaper's beta signup form", () => {
       expect(section.classList.contains("sentry-block")).toBe(true);
       await fillValid();
       await submitForm();
+      const successSection = container.querySelector("section") as HTMLElement;
+      expect(successSection.classList.contains("ph-no-capture")).toBe(true);
+      expect(successSection.classList.contains("sentry-block")).toBe(true);
       for (const spy of spies) expect(spy).not.toHaveBeenCalled();
     } finally {
       for (const spy of spies) spy.mockRestore();

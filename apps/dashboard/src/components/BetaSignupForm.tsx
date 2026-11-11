@@ -20,12 +20,13 @@ export function BetaSignupForm() {
   const [role, setRole] = React.useState("");
   const [hp, setHp] = React.useState("");
   const [sending, setSending] = React.useState(false);
+  const inFlight = React.useRef(false);
   const [done, setDone] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (sending) return;
+    if (inFlight.current) return;
     const trimmedName = name.trim();
     const trimmedEmail = email.trim();
     if (trimmedName.length < 1 || trimmedName.length > 100 || hasControlChar(trimmedName)) {
@@ -41,6 +42,7 @@ export function BetaSignupForm() {
       return;
     }
     setError(null);
+    inFlight.current = true;
     setSending(true);
     try {
       const res = await fetch(gatewayUrl("/api/beta-apply"), {
@@ -72,6 +74,7 @@ export function BetaSignupForm() {
     } catch {
       setError("We couldn't confirm your signup. Try again.");
     } finally {
+      inFlight.current = false;
       setSending(false);
     }
   }
