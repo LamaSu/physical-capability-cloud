@@ -75,7 +75,7 @@ describe("copy contract: build, settlement, IP routes and test job", () => {
       "6. `POST /api/setup/test-job` -- run a test job (only on a kernel the gateway operates in-process; it activates nothing)",
     );
     expect(lines).toContain(
-      "7. `pcc-node` keeps the kernel online and takes no jobs: devices run only through the operating agent's typed operations",
+      "7. The `pcc-node` daemon keeps the kernel online and takes no jobs: devices run only through the operating agent's typed operations",
     );
     expect(res.body).not.toContain("verify the full pipeline");
     expect(res.body).not.toContain("Jobs arrive automatically");
@@ -161,9 +161,12 @@ describe("copy contract: build, settlement, IP routes and test job", () => {
 
     const setupAgent = readRepoFile("packages/agent-support/src/setup-agent.ts");
     expect(setupAgent).toContain(
-      'description: "Submit a test job for one device on a kernel (Step 4 of onboarding). The gateway runs it only for a kernel it operates in-process; for any other kernel it refuses and runs nothing. Every reply says whether the job ran and passed.",',
+      'description: "Submit a test job for one device on a kernel (Step 4 of onboarding). The gateway runs it only for a kernel it operates in-process; for any other kernel it refuses and runs nothing. Every reply from the test-job handler says whether the job ran and passed.",',
     );
     expect(setupAgent).not.toContain("verify the full pipeline end-to-end");
+    const llms = readRepoFile("apps/dashboard/public/llms.txt");
+    expect(llms).toContain("`POST /api/setup/test-job` (in-process kernel only; activates nothing).");
+    expect(llms).not.toContain("auto-activate");
 
     const mcpReadme = readRepoFile("packages/mcp-server/README.md");
     expect(mcpReadme).toContain("| `pcc_build_contract` | Full unsigned contract object. Building it funds nothing. |");

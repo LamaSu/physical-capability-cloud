@@ -57,7 +57,7 @@ There are three "lanes" — three economic-agent shapes:
 - Human skill — a person offering a skill. Gets pinged, accepts within a window, finishes by a deadline.
 - Asset — a thing that posts outbound demand on its own behalf, bidding for capabilities within an owner-set budget.
 
-Flow: `POST /api/auth/provision` → `POST /api/onboard/analyze` (AI capability analysis) → `POST /api/kernels` (register your site/operator) → `POST /api/setup/register-device` → `POST /api/capabilities` (publish) → `POST /api/setup/test-job` (prove → auto-activate).
+Flow: `POST /api/auth/provision` → `POST /api/onboard/analyze` (AI capability analysis) → `POST /api/kernels` (register your site/operator) → `POST /api/setup/register-device` → `POST /api/capabilities` (publish) → `POST /api/setup/test-job` (in-process kernel only; activates nothing).
 
 CLI alternative: `pip install pcc-node && pcc-node start` auto-detects hardware, generates keys, provisions, registers, and starts the job daemon.
 

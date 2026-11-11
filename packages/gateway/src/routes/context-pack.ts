@@ -371,7 +371,7 @@ AssuranceTier -- evidence depth + liability
 4. \`POST /api/setup/validate\` -- validate connectivity and adapter compatibility
 5. \`POST /api/setup/register-device\` -- register your device on the network
 6. \`POST /api/setup/test-job\` -- run a test job (only on a kernel the gateway operates in-process; it activates nothing)
-7. \`pcc-node\` keeps the kernel online and takes no jobs: devices run only through the operating agent's typed operations
+7. The \`pcc-node\` daemon keeps the kernel online and takes no jobs: devices run only through the operating agent's typed operations
 
 ### For Verifiers: "I want to earn by verifying work"
 1. \`GET /api/verification/assignments\` -- see available verification tasks
