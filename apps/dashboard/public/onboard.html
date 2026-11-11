@@ -545,7 +545,7 @@ function renderStep(){
       <p class="sub">The gateway runs a test job only for a kernel it operates in-process. For a kernel your <code style="font-family:var(--mono);color:var(--cyan)">pcc-node</code> keeps online it refuses and runs nothing, and a test job activates nothing.</p>
       <div class="prove-card"><div class="ico" style="font-family:var(--mono);color:var(--cyan)">▣ TEST JOB</div>
         <div class="big">${esc(S.model||S.name||'Your machine')}</div>
-        <div class="evi"><button type="button" class="pill ${S.proof.test?'got':''}" data-ev="test">${S.proof.test?'✓ in your plan (not run yet)':'▸ queue test job'}</button></div>
+        <div class="evi"><button type="button" class="pill ${S.proof.test?'got':''}" data-ev="test">${S.proof.test?'✓ in your plan':'▸ queue test job'}</button></div>
         <div class="meta">POST /api/setup/test-job · runs only on a kernel the gateway operates in-process</div></div>`;
     } else if(S.lane==='human'){
       h=`<div class="kick">Step 05 · prove</div><div class="q" tabindex="-1">Prove a job.</div>
@@ -560,7 +560,7 @@ function renderStep(){
       <p class="sub">Your first outbound demand exercises the loop end-to-end: the compose engine plans (single- or multi-step via graph-search), the asset is now bidding for capabilities.</p>
       <div class="prove-card"><div class="ico" style="font-family:var(--mono);color:var(--violet)">◈ SAMPLE DEMAND</div>
         <div class="big">${esc(S.name||'Your asset')}</div>
-        <div class="evi"><button type="button" class="pill ${S.proof.demand?'got':''}" data-ev="demand">${S.proof.demand?'✓ in your plan (not posted yet)':'▸ post sample demand'}</button></div>
+        <div class="evi"><button type="button" class="pill ${S.proof.demand?'got':''}" data-ev="demand">${S.proof.demand?'✓ in your plan':'▸ post sample demand'}</button></div>
         <div class="meta">POST /api/assets/&lt;id&gt;/outbound-demand · composer plans path · status: <b>proposed</b></div></div>`;
     } else {
       h=`<div class="kick">Step 05 · prove</div><div class="q" tabindex="-1">Pick a lane first.</div>`;

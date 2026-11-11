@@ -171,7 +171,7 @@ auto-expire after 30 minutes; committed sessions are immutable. Requires
 | `pcc_setup_validate_config` | Validate a kernel config (or the currently loaded one). |
 | `pcc_setup_register_device` | Register a physical device under a kernel. |
 | `pcc_setup_health_check` | Health checks across devices (or a single device). |
-| `pcc_setup_test_job` | Submit a test job for one device on a kernel. The gateway runs it only for a kernel it operates in-process; for any other kernel it refuses and runs nothing. Every reply says whether the job ran and passed. |
+| `pcc_setup_test_job` | Submit a test job for one device on a kernel. The gateway runs it only for a kernel it operates in-process; for any other kernel it refuses and runs nothing. The test-job handler includes ran and passed in its replies; authentication and other earlier refusals may omit them. |
 | `pcc_setup_generate_env` | Generate a `.env` file (dev/testnet/mainnet profiles). Local, no gateway call. |
 | `pcc_setup_status` | Status across all categories — gateway, DB, adapters, chain, storage, identity. |
 
@@ -192,7 +192,7 @@ Story Protocol (now The DATA Foundation). These tools make no on-chain call: not
 | `pcc_ip_register_capability` | Record a CSD as an IP asset. Any id or transaction hash it returns is a placeholder, and no royalty is paid. |
 | `pcc_ip_revenue_snapshot` | The revenue PCC has recorded for an IP asset. No revenue has been paid: any figure it returns is a placeholder. |
 | `pcc_ip_claim` | Claim an IP asset's recorded revenue. Nothing is paid out: any amount or transaction hash it returns is a placeholder. |
-| `pcc_ip_lineage` | The IP lineage PCC has recorded for an IP asset: ancestors (parent CSDs) and descendants (job evidence records and derivative CSDs). |
+| `pcc_ip_lineage` | The IP links PCC has recorded in this process for an IP asset: direct parents and up to two descendant levels from job-evidence records. |
 | `pcc_ip_set_splits` | Configure revenue splits for an IP asset. Splits must sum to 100. No revenue is paid from them today. |
 
 ### Sovereign Wealth Fund (3)

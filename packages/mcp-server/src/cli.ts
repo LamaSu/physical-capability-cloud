@@ -324,7 +324,7 @@ pcc ip claim <ipId> [--tokenIds='["id1"]']
   Claim an IP asset's recorded revenue. Nothing is paid out: any amount or transaction hash it returns is a placeholder.
 
 pcc ip lineage <ipId>
-  Get the IP lineage PCC has recorded for an IP asset: ancestors (parent CSDs) and descendants (job evidence records and derivative CSDs).
+  Get the IP links PCC has recorded in this process for an IP asset: direct parents and up to two descendant levels from job-evidence records.
 
 pcc ip splits <ipId> --splits='[{"address":"0x...","role":"operator","percentage":93,"label":"Machine Operator"},{"address":"0x...","role":"verifier","percentage":3,"label":"Evidence Verifier"},{"address":"0x...","role":"protocol-author","percentage":2,"label":"CSD Author"},{"address":"0x...","role":"integrator","percentage":2,"label":"Adapter Integrator"}]'
   Configure revenue splits for an IP Asset. Splits must sum to 100. No revenue is paid from them today.
