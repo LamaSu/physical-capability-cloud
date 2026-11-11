@@ -540,7 +540,7 @@ export async function reputationRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         tags: ["reputation"],
         summary: "One reputation read for a kernel or composition agent",
-        description: "Reports, field by field, what PCC records about a kernel or composition agent: its composition score, declared assurance tier, evidence bundles by tier, liveness, offer response time and evidence completeness. Each field names its basis and rule, or says why it is unavailable; there is no blended score. Fields drawn from job, offer and evidence records cover the last 30 days, need at least 5 records, and are withheld while tenant isolation is on. Quality rating is not read here, and uptime is not measured yet. This read writes nothing and reads no chain.",
+        description: "Reports, field by field, what PCC records about a kernel or composition agent: its composition score, declared assurance tier, evidence bundles by tier, liveness, offer response time and evidence completeness. Each field names its basis and rule, or says why it is unavailable; there is no blended score. The record fields use evidence created, offers posted, or jobs completed in the last 30 days; completeness can use evidence stored at any time. Each needs at least 5 eligible records and is withheld while tenant isolation is on. Quality rating is not read here, and uptime is not measured yet. This profile handler changes no domain records and reads no chain.",
         params: { type: "object", required: ["subjectId"], properties: { subjectId: { type: "string", minLength: 1 } } },
         response: {
           200: {
@@ -565,6 +565,10 @@ export async function reputationRoutes(app: FastifyInstance): Promise<void> {
             properties: { error: { type: "string" }, message: { type: "string" } },
           },
         },
+      },
+      onSend: async (_req, reply, payload) => {
+        reply.header("cache-control", "no-store");
+        return payload;
       },
     },
     async (req, reply) => {

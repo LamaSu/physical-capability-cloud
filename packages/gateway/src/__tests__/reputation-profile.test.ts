@@ -15,6 +15,7 @@ import {
   getJobOffersStore,
   initJobOffersStore,
   _resetJobOffersStoreForTests,
+  type SqliteDatabaseLike,
 } from "../services/job-offers-store.js";
 import { createOperationIdTransform } from "../openapi/operation-id.js";
 import {
@@ -25,11 +26,11 @@ import {
 const RULE_COMPOSITION = "The composition reputation record: a 0-1000 score that starts at 500 and moves with finalized composition step outcomes and dispute rulings. GET /api/reputation/:agentId/deltas lists its recorded changes. This read never creates a record.";
 const RULE_ASSURANCE = "The maximum assurance tier stored on the kernel's record. This read reports that record and does not check it.";
 const RULE_EVIDENCE_TIERS = "This kernel's evidence bundles created in the window, counted by tier. These are stored records; this count does not check whether any was verified.";
-const RULE_LIVENESS = "Current liveness, not uptime: the kernel's status and last heartbeat. An online kernel is stale after 5 minutes without a heartbeat, or after 24 hours if it lists at least one capability.";
+const RULE_LIVENESS = "Current liveness, not uptime: the kernel's status and last heartbeat. Only status online can be stale: its heartbeat age must exceed 5 minutes, or 24 hours if it lists at least one capability. A missing or invalid heartbeat is stale.";
 const RULE_RESPONSE = "Seconds from an offer's posting to this kernel's claim, over offers posted in the window that this kernel claimed. Offers it did not claim count for nothing, so this is not a response rate. Offers this kernel posted are left out; self-posted offers the gateway cannot tie to the kernel, such as a DID poster's, are still counted.";
 const RULE_COMPLETENESS = "Of this kernel's jobs with status completed and a completion time in the window, how many have an evidence bundle stored for this kernel at or above the job's assurance tier (a job with no tier counts as tier 0). A completion is a recorded status, and this count does not check whether any bundle was verified. Jobs that finish through settlement (evidence_submitted, evidence_stored, settled) are not counted yet.";
 const SUMMARY = "One reputation read for a kernel or composition agent";
-const DESCRIPTION = "Reports, field by field, what PCC records about a kernel or composition agent: its composition score, declared assurance tier, evidence bundles by tier, liveness, offer response time and evidence completeness. Each field names its basis and rule, or says why it is unavailable; there is no blended score. Fields drawn from job, offer and evidence records cover the last 30 days, need at least 5 records, and are withheld while tenant isolation is on. Quality rating is not read here, and uptime is not measured yet. This read writes nothing and reads no chain.";
+const DESCRIPTION = "Reports, field by field, what PCC records about a kernel or composition agent: its composition score, declared assurance tier, evidence bundles by tier, liveness, offer response time and evidence completeness. Each field names its basis and rule, or says why it is unavailable; there is no blended score. The record fields use evidence created, offers posted, or jobs completed in the last 30 days; completeness can use evidence stored at any time. Each needs at least 5 eligible records and is withheld while tenant isolation is on. Quality rating is not read here, and uptime is not measured yet. This profile handler changes no domain records and reads no chain.";
 const NOT_FOUND = "No kernel or composition reputation record has this id.";
 const QUALITY_SEE = "GET /api/registry/reputation/:entityId";
 
@@ -132,11 +133,12 @@ async function createOffer(postMs: number, posterKernelId?: string): Promise<str
   return created.offer.id;
 }
 
-async function createAndClaim(postMs: number, delaySec: number, kernelId: string, posterKernelId?: string): Promise<void> {
+async function createAndClaim(postMs: number, delaySec: number, kernelId: string, posterKernelId?: string): Promise<string> {
   const offerId = await createOffer(postMs, posterKernelId);
   clock = postMs + delaySec * 1000;
   const claimed = await getJobOffersStore().claim(offerId, { kernelId });
   expect(claimed.ok).toBe(true);
+  return offerId;
 }
 
 async function getProfile(id: string) {
@@ -160,6 +162,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await app.close();
   vi.unstubAllEnvs();
+  vi.useRealTimers();
   closeStore();
   _resetJobOffersStoreForTests();
 });
@@ -215,7 +218,11 @@ describe("reputation profile", () => {
   });
 
   it("RP2 enforces the sample floor across the record fields", async () => {
-    seedKernel("K3", { status: "online", lastHeartbeat: isoMs(Date.now() - 60_000), maxAssuranceTier: 1 });
+    const NOW = Date.parse("2025-06-15T12:00:00.000Z");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+    const heartbeat = isoMs(NOW - 60_000);
+    seedKernel("K3", { status: "online", lastHeartbeat: heartbeat, maxAssuranceTier: 1 });
     seedCapability("C3", "K3");
     const inw = inWindowIso();
     for (let i = 1; i <= 4; i++) {
@@ -226,21 +233,37 @@ describe("reputation profile", () => {
     let res = await getProfile("K3");
     expect(res.statusCode).toBe(200);
     let body = res.json();
-    expect(body.evidenceTiers).toEqual({ state: "unavailable", reason: "insufficient_sample" });
-    expect(body.evidenceCompleteness).toEqual({ state: "unavailable", reason: "insufficient_sample" });
-    expect(body.responseTime).toEqual({ state: "unavailable", reason: "insufficient_sample" });
-    const serialized = JSON.stringify(body);
-    for (const key of [`"byTier":`, `"total":`, `"completed":`, `"withEvidence":`, `"ratio":`, `"medianSeconds":`, `"p90Seconds":`, `"sampleSize":`]) {
-      expect(serialized).not.toContain(key);
-    }
+    const asOf = new Date(NOW).toISOString();
+    const from = new Date(NOW - 30 * DAY).toISOString();
+    expect(body).toEqual({
+      subject: { id: "K3", kind: "kernel" },
+      asOf,
+      window: { days: 30, from, to: asOf },
+      compositionScore: { state: "unavailable", reason: "no_record" },
+      assuranceTier: { state: "declared", tier: 1, basis: "kernel_record", rule: RULE_ASSURANCE },
+      evidenceTiers: { state: "unavailable", reason: "insufficient_sample" },
+      qualityRating: { state: "unavailable", reason: "not_read", see: QUALITY_SEE },
+      uptime: { state: "unavailable", reason: "no_heartbeat_history", liveness: { status: "online", lastHeartbeat: heartbeat, isStale: false, rule: RULE_LIVENESS } },
+      responseTime: { state: "unavailable", reason: "insufficient_sample" },
+      evidenceCompleteness: { state: "unavailable", reason: "insufficient_sample" },
+    });
     seedJob("KJ5", "K3", "C3", { status: "completed", assuranceTier: 0, completedAt: inw });
     seedBundle("KB5", "KJ5", "K3", 0, inw);
     await createAndClaim(Date.now() - 2 * DAY, 30, "K3");
     res = await getProfile("K3");
     body = res.json();
-    expect(body.evidenceTiers).toEqual({ state: "measured", byTier: { "0": 5 }, total: 5, basis: "stored_records", rule: RULE_EVIDENCE_TIERS });
-    expect(body.evidenceCompleteness).toEqual({ state: "measured", completed: 5, withEvidence: 5, ratio: 1, basis: "stored_records", rule: RULE_COMPLETENESS });
-    expect(body.responseTime).toEqual({ state: "measured", medianSeconds: 30, p90Seconds: 30, sampleSize: 5, basis: "job_offer_claims", rule: RULE_RESPONSE });
+    expect(body).toEqual({
+      subject: { id: "K3", kind: "kernel" },
+      asOf,
+      window: { days: 30, from, to: asOf },
+      compositionScore: { state: "unavailable", reason: "no_record" },
+      assuranceTier: { state: "declared", tier: 1, basis: "kernel_record", rule: RULE_ASSURANCE },
+      evidenceTiers: { state: "measured", byTier: { "0": 5 }, total: 5, basis: "stored_records", rule: RULE_EVIDENCE_TIERS },
+      qualityRating: { state: "unavailable", reason: "not_read", see: QUALITY_SEE },
+      uptime: { state: "unavailable", reason: "no_heartbeat_history", liveness: { status: "online", lastHeartbeat: heartbeat, isStale: false, rule: RULE_LIVENESS } },
+      responseTime: { state: "measured", medianSeconds: 30, p90Seconds: 30, sampleSize: 5, basis: "job_offer_claims", rule: RULE_RESPONSE },
+      evidenceCompleteness: { state: "measured", completed: 5, withEvidence: 5, ratio: 1, basis: "stored_records", rule: RULE_COMPLETENESS },
+    });
   });
 
   it("RP3 computes response time medians and percentile", async () => {
@@ -297,10 +320,12 @@ describe("reputation profile", () => {
     const here = dirname(fileURLToPath(import.meta.url));
     const source = readFileSync(join(here, "../readmodels/reputation-profile.ts"), "utf8");
     const specifiers: string[] = [];
-    const re = /(?:from\s+|import\s+|require\(\s*)["']([^"']+)["']/g;
+    const re = /(?:from\s+|import\s+|import\s*\(\s*|require\(\s*)["'`]([^"'`]+)["'`]/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(source)) !== null) specifiers.push(m[1]);
     expect(specifiers).toEqual(["../facades/populators/staleness.js"]);
+    expect(source).not.toMatch(/import\s*\(/);
+    expect(source).not.toMatch(/require\s*\(/);
     for (const s of specifiers) {
       expect(s).not.toMatch(/ethers|viem|web3|registry|erc8004|chain|rpc|contracts|wallet/i);
     }
@@ -335,32 +360,57 @@ describe("reputation profile", () => {
     expect(body.compositionScore).toEqual({ state: "measured", score: 700, positiveContributions: 2, negativeContributions: 0, disputesUpheld: 1, disputesRejected: 0, lastUpdatedAt: kUpdated, basis: "composition_deltas", rule: RULE_COMPOSITION });
   });
 
-  it("RP7 writes nothing on a read", async () => {
+  it("RP7 changes no domain records on a read", async () => {
     _seedReputationForTests({ agentId: "agent-only", kind: "composer", score: 500, positiveContributions: 0, negativeContributions: 0, disputesUpheld: 0, disputesRejected: 0, lastUpdatedAt: new Date().toISOString() });
     seedKernel("K7", { status: "online", lastHeartbeat: isoMs(Date.now() - 60_000), maxAssuranceTier: 1 });
     seedCapability("C7", "K7");
     const inw = inWindowIso();
+    const offerIds: string[] = [];
     for (let i = 1; i <= 5; i++) {
       seedJob(`WJ${i}`, "K7", "C7", { status: "completed", assuranceTier: 0, completedAt: inw });
       seedBundle(`WB${i}`, `WJ${i}`, "K7", 0, inw);
-      await createAndClaim(Date.now() - 2 * DAY, 30, "K7");
+      offerIds.push(await createAndClaim(Date.now() - 2 * DAY, 30, "K7"));
     }
-    const countReps = () => getStore().db.select().from(schema.agentReputations).all().length;
-    const countDeltas = () => getStore().db.select().from(schema.reputationDeltas).all().length;
-    const beforeReps = countReps();
-    const beforeDeltas = countDeltas();
+    const raw = (getStore().db as unknown as { $client?: SqliteDatabaseLike }).$client;
+    if (!raw) throw new Error("test rig: no raw SQLite handle on the store");
+    const catalogBefore = raw.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master").all();
+    const tableNames = (catalogBefore as Array<{ type: string; name: string }>).filter((r) => r.type === "table").map((r) => r.name).filter((n) => n !== "api_keys");
+    const snapshotTables = (): Record<string, unknown[]> => {
+      const out: Record<string, unknown[]> = {};
+      for (const name of tableNames) {
+        const rows = raw.prepare(`SELECT * FROM "${name.replace(/"/g, '""')}"`).all() as unknown[];
+        out[name] = [...rows].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+      }
+      return out;
+    };
+    const tablesBefore = snapshotTables();
+    const totalBefore = (raw.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
+    const offersBefore = new Map(offerIds.map((id) => [id, { offer: structuredClone(getJobOffersStore().get(id)), events: structuredClone(getJobOffersStore().getEvents(id)) }]));
     for (const id of ["unknown-7", "agent-only", "K7"]) {
       await getProfile(id);
       await getProfile(id);
     }
-    expect(countReps()).toBe(beforeReps);
-    expect(countDeltas()).toBe(beforeDeltas);
     const res = await getProfile("unknown-7");
     expect(res.statusCode).toBe(404);
+    const catalogAfter = raw.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master").all();
+    expect(catalogAfter).toEqual(catalogBefore);
+    expect(snapshotTables()).toEqual(tablesBefore);
+    const totalAfter = (raw.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
+    expect(totalAfter - totalBefore).toBe(0);
+    for (const id of offerIds) {
+      expect(getJobOffersStore().get(id)).toEqual(offersBefore.get(id)?.offer);
+      expect(getJobOffersStore().getEvents(id)).toEqual(offersBefore.get(id)?.events);
+    }
   });
 
   it("RP8 withholds record fields under tenant isolation", async () => {
-    seedKernel("K8", { status: "online", lastHeartbeat: isoMs(Date.now() - 60_000), maxAssuranceTier: 2 });
+    const NOW = Date.parse("2025-06-15T12:00:00.000Z");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+    const heartbeat = isoMs(NOW - 60_000);
+    const compUpdated = new Date(NOW).toISOString();
+    _seedReputationForTests({ agentId: "K8", kind: "composer", score: 640, positiveContributions: 3, negativeContributions: 1, disputesUpheld: 0, disputesRejected: 1, lastUpdatedAt: compUpdated });
+    seedKernel("K8", { status: "online", lastHeartbeat: heartbeat, maxAssuranceTier: 2 });
     seedCapability("C8", "K8");
     const inw = inWindowIso();
     for (let i = 1; i <= 5; i++) {
@@ -368,25 +418,57 @@ describe("reputation profile", () => {
       seedBundle(`TB${i}`, `TJ${i}`, "K8", 0, inw);
       await createAndClaim(Date.now() - 2 * DAY, 30, "K8");
     }
-    let res = await getProfile("K8");
-    let body = res.json();
-    expect(body.evidenceTiers.state).toBe("measured");
-    expect(body.evidenceCompleteness.state).toBe("measured");
-    expect(body.responseTime.state).toBe("measured");
-    const assuranceBefore = body.assuranceTier;
-    const uptimeBefore = body.uptime;
-    vi.stubEnv("TENANT_ENFORCE", "true");
-    res = await getProfile("K8");
-    body = res.json();
-    expect(body.evidenceTiers).toEqual({ state: "unavailable", reason: "tenant_scoped" });
-    expect(body.evidenceCompleteness).toEqual({ state: "unavailable", reason: "tenant_scoped" });
-    expect(body.responseTime).toEqual({ state: "unavailable", reason: "tenant_scoped" });
-    const serialized = JSON.stringify(body);
-    for (const key of [`"byTier":`, `"total":`, `"completed":`, `"withEvidence":`, `"ratio":`, `"medianSeconds":`, `"p90Seconds":`, `"sampleSize":`]) {
-      expect(serialized).not.toContain(key);
+    const jobsSpy = vi.spyOn(getRepos().jobs, "findByKernel");
+    const bundlesSpy = vi.spyOn(getRepos().evidence, "findByKernel");
+    const offersSpy = vi.spyOn(getJobOffersStore(), "listClaimedBy");
+    try {
+      let res = await getProfile("K8");
+      expect(res.statusCode).toBe(200);
+      expect(jobsSpy).toHaveBeenCalled();
+      expect(bundlesSpy).toHaveBeenCalled();
+      expect(offersSpy).toHaveBeenCalled();
+      const asOf = new Date(NOW).toISOString();
+      const from = new Date(NOW - 30 * DAY).toISOString();
+      const bodyOff = res.json();
+      expect(bodyOff).toEqual({
+        subject: { id: "K8", kind: "kernel" },
+        asOf,
+        window: { days: 30, from, to: asOf },
+        compositionScore: { state: "measured", score: 640, positiveContributions: 3, negativeContributions: 1, disputesUpheld: 0, disputesRejected: 1, lastUpdatedAt: compUpdated, basis: "composition_deltas", rule: RULE_COMPOSITION },
+        assuranceTier: { state: "declared", tier: 2, basis: "kernel_record", rule: RULE_ASSURANCE },
+        evidenceTiers: { state: "measured", byTier: { "0": 5 }, total: 5, basis: "stored_records", rule: RULE_EVIDENCE_TIERS },
+        qualityRating: { state: "unavailable", reason: "not_read", see: QUALITY_SEE },
+        uptime: { state: "unavailable", reason: "no_heartbeat_history", liveness: { status: "online", lastHeartbeat: heartbeat, isStale: false, rule: RULE_LIVENESS } },
+        responseTime: { state: "measured", medianSeconds: 30, p90Seconds: 30, sampleSize: 5, basis: "job_offer_claims", rule: RULE_RESPONSE },
+        evidenceCompleteness: { state: "measured", completed: 5, withEvidence: 5, ratio: 1, basis: "stored_records", rule: RULE_COMPLETENESS },
+      });
+      jobsSpy.mockClear();
+      bundlesSpy.mockClear();
+      offersSpy.mockClear();
+      vi.stubEnv("TENANT_ENFORCE", "true");
+      res = await getProfile("K8");
+      expect(res.statusCode).toBe(200);
+      expect(jobsSpy).not.toHaveBeenCalled();
+      expect(bundlesSpy).not.toHaveBeenCalled();
+      expect(offersSpy).not.toHaveBeenCalled();
+      const bodyOn = res.json();
+      expect(bodyOn).toEqual({
+        subject: { id: "K8", kind: "kernel" },
+        asOf,
+        window: { days: 30, from, to: asOf },
+        compositionScore: { state: "measured", score: 640, positiveContributions: 3, negativeContributions: 1, disputesUpheld: 0, disputesRejected: 1, lastUpdatedAt: compUpdated, basis: "composition_deltas", rule: RULE_COMPOSITION },
+        assuranceTier: { state: "declared", tier: 2, basis: "kernel_record", rule: RULE_ASSURANCE },
+        evidenceTiers: { state: "unavailable", reason: "tenant_scoped" },
+        qualityRating: { state: "unavailable", reason: "not_read", see: QUALITY_SEE },
+        uptime: { state: "unavailable", reason: "no_heartbeat_history", liveness: { status: "online", lastHeartbeat: heartbeat, isStale: false, rule: RULE_LIVENESS } },
+        responseTime: { state: "unavailable", reason: "tenant_scoped" },
+        evidenceCompleteness: { state: "unavailable", reason: "tenant_scoped" },
+      });
+    } finally {
+      jobsSpy.mockRestore();
+      bundlesSpy.mockRestore();
+      offersSpy.mockRestore();
     }
-    expect(body.assuranceTier).toEqual(assuranceBefore);
-    expect(body.uptime).toEqual(uptimeBefore);
   });
 
   it("RP9 exposes the profile in the OpenAPI spec", async () => {
@@ -494,4 +576,136 @@ describe("reputation profile", () => {
     expect(src.bundles).toHaveBeenCalledTimes(0);
     expect(src.claimedOffers).toHaveBeenCalledTimes(0);
   });
+  it("RP12 the window edges are inclusive", async () => {
+    const NOW = Date.parse("2025-06-15T12:00:00.000Z");
+    const FROM = NOW - 30 * DAY;
+    const times = [FROM, FROM, NOW, NOW, NOW - DAY];
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const bundles = [
+      ...times.map((ms, i) => ({ jobId: `JW${i}`, kernelId: "KW", assuranceTier: 0, createdAt: iso(ms) })),
+      { jobId: "JW-out1", kernelId: "KW", assuranceTier: 0, createdAt: iso(FROM - 1) },
+      { jobId: "JW-out2", kernelId: "KW", assuranceTier: 0, createdAt: iso(NOW + 1) },
+      { jobId: "JW-out3", kernelId: "KW", assuranceTier: 0, createdAt: "not-a-time" },
+      { jobId: "JW-out4", kernelId: "KW", assuranceTier: 0, createdAt: "" },
+    ];
+    const jobs = [
+      ...times.map((ms, i) => ({ id: `JW${i}`, kernelId: "KW", status: "completed", completedAt: iso(ms), assuranceTier: 0 })),
+      { id: "JW-out1", kernelId: "KW", status: "completed", completedAt: iso(FROM - 1), assuranceTier: 0 },
+      { id: "JW-out2", kernelId: "KW", status: "completed", completedAt: iso(NOW + 1), assuranceTier: 0 },
+      { id: "JW-out3", kernelId: "KW", status: "completed", completedAt: "not-a-time", assuranceTier: 0 },
+      { id: "JW-out4", kernelId: "KW", status: "completed", completedAt: null, assuranceTier: 0 },
+    ];
+    const claimedOffers = [
+      ...times.map((ms) => ({ postedAt: iso(ms), claimedAt: iso(ms + 30_000), claimedByKernelId: "KW", posterKernelId: null })),
+      { postedAt: iso(FROM - 1), claimedAt: iso(FROM - 1 + 30_000), claimedByKernelId: "KW", posterKernelId: null },
+      { postedAt: iso(NOW + 1), claimedAt: iso(NOW + 1 + 30_000), claimedByKernelId: "KW", posterKernelId: null },
+      { postedAt: "not-a-time", claimedAt: iso(NOW), claimedByKernelId: "KW", posterKernelId: null },
+      { postedAt: "", claimedAt: iso(NOW), claimedByKernelId: "KW", posterKernelId: null },
+    ];
+    const dto = buildReputationProfile("KW", {
+      kernel: () => ({ id: "KW", status: "online", lastHeartbeat: iso(NOW - 60_000), maxAssuranceTier: 1 }),
+      reputation: () => undefined,
+      capabilityCount: () => 0,
+      jobs: () => jobs,
+      bundles: () => bundles,
+      claimedOffers: () => claimedOffers,
+      tenantEnforced: false,
+    }, new Date(NOW));
+    expect(dto?.evidenceTiers).toEqual({ state: "measured", byTier: { "0": 5 }, total: 5, basis: "stored_records", rule: RULE_EVIDENCE_TIERS });
+    expect(dto?.evidenceCompleteness).toEqual({ state: "measured", completed: 5, withEvidence: 5, ratio: 1, basis: "stored_records", rule: RULE_COMPLETENESS });
+    expect(dto?.responseTime).toEqual({ state: "measured", medianSeconds: 30, p90Seconds: 30, sampleSize: 5, basis: "job_offer_claims", rule: RULE_RESPONSE });
+  });
+
+  it("RP13 the kernel checks and evidence of any age", async () => {
+    seedKernel("KA", { status: "online", lastHeartbeat: isoMs(Date.now() - 60_000), maxAssuranceTier: 1 });
+    seedCapability("CA", "KA");
+    const inw = inWindowIso();
+    for (let i = 1; i <= 5; i++) {
+      seedJob(`AJ${i}`, "KA", "CA", { status: "completed", assuranceTier: 0, completedAt: inw });
+      seedBundle(`AB${i}`, `AJ${i}`, "KA", 0, oldIso());
+    }
+    const res = await getProfile("KA");
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.evidenceCompleteness).toEqual({ state: "measured", completed: 5, withEvidence: 5, ratio: 1, basis: "stored_records", rule: RULE_COMPLETENESS });
+    expect(body.evidenceTiers).toEqual({ state: "unavailable", reason: "insufficient_sample" });
+
+    const NOW = Date.parse("2025-06-15T12:00:00.000Z");
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const inWin = iso(NOW - DAY);
+    const jobs = [
+      ...[1, 2, 3, 4, 5].map((i) => ({ id: `J${i}`, kernelId: "KX", status: "completed", completedAt: inWin, assuranceTier: 0 })),
+      ...[1, 2, 3, 4, 5].map((i) => ({ id: `F${i}`, kernelId: "KY", status: "completed", completedAt: inWin, assuranceTier: 0 })),
+    ];
+    const bundles = [
+      ...[1, 2, 3].map((i) => ({ jobId: `J${i}`, kernelId: "KX", assuranceTier: 0, createdAt: inWin })),
+      ...[4, 5].map((i) => ({ jobId: `J${i}`, kernelId: "KY", assuranceTier: 0, createdAt: inWin })),
+      ...[1, 2, 3, 4, 5].map((i) => ({ jobId: `F${i}`, kernelId: "KY", assuranceTier: 0, createdAt: inWin })),
+    ];
+    const claimedOffers = [
+      ...[1, 2, 3, 4, 5].map(() => ({ postedAt: inWin, claimedAt: iso(NOW - DAY + 30_000), claimedByKernelId: "KX", posterKernelId: null })),
+      ...[1, 2, 3, 4, 5].map(() => ({ postedAt: inWin, claimedAt: iso(NOW - DAY + 90_000), claimedByKernelId: "KY", posterKernelId: null })),
+    ];
+    const dto = buildReputationProfile("KX", {
+      kernel: () => ({ id: "KX", status: "online", lastHeartbeat: iso(NOW - 60_000), maxAssuranceTier: 1 }),
+      reputation: () => undefined,
+      capabilityCount: () => 0,
+      jobs: () => jobs,
+      bundles: () => bundles,
+      claimedOffers: () => claimedOffers,
+      tenantEnforced: false,
+    }, new Date(NOW));
+    expect(dto?.evidenceTiers).toEqual({ state: "unavailable", reason: "insufficient_sample" });
+    expect(dto?.evidenceCompleteness).toEqual({ state: "measured", completed: 5, withEvidence: 3, ratio: 0.6, basis: "stored_records", rule: RULE_COMPLETENESS });
+    expect(dto?.responseTime).toEqual({ state: "measured", medianSeconds: 30, p90Seconds: 30, sampleSize: 5, basis: "job_offer_claims", rule: RULE_RESPONSE });
+  });
+
+  it("RP14 the liveness rule edges", async () => {
+    const NOW = Date.parse("2025-06-15T12:00:00.000Z");
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const cases: Array<{ status: string; lastHeartbeat: string | null; hasCap: boolean; isStale: boolean }> = [
+      { status: "online", lastHeartbeat: iso(NOW - 5 * 60_000), hasCap: false, isStale: false },
+      { status: "online", lastHeartbeat: iso(NOW - 5 * 60_000 - 1), hasCap: false, isStale: true },
+      { status: "online", lastHeartbeat: iso(NOW - 24 * 60 * 60_000), hasCap: true, isStale: false },
+      { status: "online", lastHeartbeat: iso(NOW - 24 * 60 * 60_000 - 1), hasCap: true, isStale: true },
+      { status: "online", lastHeartbeat: iso(NOW + 60_000), hasCap: false, isStale: false },
+      { status: "online", lastHeartbeat: null, hasCap: false, isStale: true },
+      { status: "online", lastHeartbeat: "not-a-time", hasCap: false, isStale: true },
+      { status: "offline", lastHeartbeat: null, hasCap: false, isStale: false },
+      { status: "ONLINE", lastHeartbeat: null, hasCap: false, isStale: false },
+      { status: "maintenance", lastHeartbeat: iso(NOW - 2 * DAY), hasCap: false, isStale: false },
+    ];
+    for (const c of cases) {
+      const dto = buildReputationProfile("KL", {
+        kernel: () => ({ id: "KL", status: c.status, lastHeartbeat: c.lastHeartbeat, maxAssuranceTier: 1 }),
+        reputation: () => undefined,
+        capabilityCount: () => (c.hasCap ? 1 : 0),
+        jobs: () => [],
+        bundles: () => [],
+        claimedOffers: () => [],
+        tenantEnforced: false,
+      }, new Date(NOW));
+      expect(dto?.uptime).toEqual({ state: "unavailable", reason: "no_heartbeat_history", liveness: { status: c.status, lastHeartbeat: c.lastHeartbeat, isStale: c.isStale, rule: RULE_LIVENESS } });
+    }
+  });
+
+  it("RP15 no-store on a 500 before the handler", async () => {
+    const app2 = Fastify({ logger: false });
+    app2.addHook("onRequest", async () => {
+      throw new Error("key lookup failed");
+    });
+    await app2.register(reputationRoutes);
+    await app2.ready();
+    try {
+      const resProfile = await app2.inject({ method: "GET", url: "/api/reputation/KZ/profile" });
+      expect(resProfile.statusCode).toBe(500);
+      expect(resProfile.headers["cache-control"]).toBe("no-store");
+      const resBoard = await app2.inject({ method: "GET", url: "/api/reputation/leaderboard" });
+      expect(resBoard.statusCode).toBe(500);
+      expect(resBoard.headers["cache-control"]).toBeUndefined();
+    } finally {
+      await app2.close();
+    }
+  });
+
 });
