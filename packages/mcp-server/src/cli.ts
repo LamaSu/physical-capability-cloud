@@ -315,23 +315,24 @@ pcc discover onboard [--uri=<deviceUri>] [--protocol=<proto>] [--timeout=3000]
 
   ip: `
 pcc ip register --capId=<id> --name=<name> --type=<type> --kernelId=<id> --designer=0x... --designerName=<name> [--revShare=5] [--ipfsCid=<cid>] [--description=<text>]
-  Register a capability as a Story Protocol IP Asset.
+  Record a capability as an IP asset. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain. Any id it returns is a placeholder, and no royalty is paid.
 
 pcc ip revenue <ipId>
-  Get revenue snapshot for an IP Asset.
+  Get the revenue PCC has recorded for an IP asset. No revenue has been paid: any figure it returns is a placeholder.
 
 pcc ip claim <ipId> [--tokenIds='["id1"]']
-  Claim accumulated revenue from an IP Royalty Vault.
+  Claim an IP asset's recorded revenue. Nothing is paid out: any amount or transaction hash it returns is a placeholder.
 
 pcc ip lineage <ipId>
-  Get IP lineage chain (ancestors + descendants).
+  Get the IP links PCC has recorded in this process for an IP asset: direct parents and up to two descendant levels from job-evidence records.
 
-pcc ip splits <ipId> --splits='[{"address":"0x...","role":"protocol-author","percentage":2,"label":"CSD Author"},{"address":"0x...","role":"integrator","percentage":2,"label":"Adapter Integrator"},{"address":"0x...","role":"operator","percentage":92,"label":"Machine Operator"},{"address":"0x...","role":"verifier","percentage":3,"label":"Evidence Verifier"},{"address":"0x...","role":"network-treasury","percentage":1,"label":"Network Treasury"}]'
-  Configure revenue splits for an IP Asset. Splits must sum to 100.
+pcc ip splits <ipId> --splits='[{"address":"0x...","role":"operator","percentage":93,"label":"Machine Operator"},{"address":"0x...","role":"verifier","percentage":3,"label":"Evidence Verifier"},{"address":"0x...","role":"protocol-author","percentage":2,"label":"CSD Author"},{"address":"0x...","role":"integrator","percentage":2,"label":"Adapter Integrator"}]'
+  Configure revenue splits for an IP Asset. Splits must sum to 100. No revenue is paid from them today.
   Roles (ADR-12): operator, verifier, insurer, integrator, protocol-author,
-  model-author, dataset-contributor, curator, assembler, network-treasury.
-  Legacy aliases 'designer' and 'network' still decode for backward compat —
-  prefer the canonical names above.
+  model-author, dataset-contributor, curator, assembler.
+  Legacy aliases kept for backward decoding only — prefer the canonical names above:
+  'designer' → use 'protocol-author', 'assembler' or 'integrator', depending on CSD kind;
+  'network' → no name above replaces it; leave it out of new splits.
 `.trim(),
 
   swf: `

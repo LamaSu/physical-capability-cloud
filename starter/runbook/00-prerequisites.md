@@ -25,7 +25,7 @@ curl -sf "$(cat .pcc/base)/api/health" && echo " gateway OK"
 Operator identity proof for operate is completed by WP-A (DECISIONS items 136 and 138).
 
 ## 2. pcc-node, with the crypto extra
-pcc-node runs next to the device. It registers the kernel, signs its evidence and runs jobs. The `crypto` extra (pynacl) is **not optional**: without it the node cannot register a signing key or sign evidence, so its work can never verify.
+pcc-node runs next to the device. It registers the kernel and signs its evidence; its daemon takes no jobs. The `crypto` extra (pynacl) is **not optional**: without it the node cannot register a signing key or sign evidence, so its work can never verify.
 
 ```bash
 python3 -m pip install 'pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node'

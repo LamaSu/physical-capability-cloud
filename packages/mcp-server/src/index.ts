@@ -656,7 +656,7 @@ server.tool(
 
 server.tool(
   "pcc_setup_test_job",
-  "Submit a test job for one device on a kernel (Step 4 of onboarding). The gateway runs it only for a kernel it operates in-process; for any other kernel it refuses and runs nothing. Every reply says whether the job ran and passed.",
+  "Submit a test job for one device on a kernel (Step 4 of onboarding). The gateway runs it only for a kernel it operates in-process; for any other kernel it refuses and runs nothing. The test-job handler includes ran and passed in its replies; authentication and other earlier refusals may omit them.",
   {
     kernelId: z.string().optional().describe("Target kernel (required: the gateway answers 400 without it)."),
     deviceId: z.string().optional().describe("Device on that kernel (required: the gateway answers 400 without it)."),
@@ -1041,7 +1041,7 @@ server.tool(
 
 server.tool(
   "pcc_ip_lineage",
-  "Get the IP lineage PCC has recorded for an IP asset: ancestors (parent CSDs) and descendants (job evidence records and derivative CSDs). Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain.",
+  "Get the IP links PCC has recorded in this process for an IP asset: direct parents and up to two descendant levels from job-evidence records. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain.",
   {
     ipId: z.string().describe("Story Protocol IP Asset address (0x...)"),
   },
