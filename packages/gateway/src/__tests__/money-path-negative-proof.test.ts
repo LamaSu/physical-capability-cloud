@@ -759,6 +759,28 @@ describe("N258 scanner follow-ups", () => {
   }, 15_000);
 });
 
+describe("N289 W4 bound controls at each reporting site", () => {
+  const N = 24;
+  const lines = (v: string, n: number, rhs: (i: number) => string) => Array.from({ length: n }, (_, i) => `${v} = ${rhs(i)};`).join(" ");
+
+  for (const [name, file, rule, source] of [
+    ["C-tmpl", "apps/sample/src/Page.tsx", "E3", `export function render(md) { let html = md; ${lines("html", N, i => "`${html}<p" + i + ">`")} const re = /x/g; return re.exec(html); }`],
+    ["C-tagged", "packages/sample/src/a.ts", "E3", `import { $ } from "zx"; export async function r(md) { let cmd = md; ${lines("cmd", N, i => `cmd + " -x${i}"`)} await $\`\${cmd}\`; }`],
+    ["C-wcargs", "packages/sample/src/a.ts", "E2", `function h(w, to) { let data = "0x"; ${lines("data", N, i => `data + part${i}`)} return w.writeContract({ address: to, abi: ABI, functionName: "relay", args: [data] }); }`],
+    ["C-identarg2", "packages/sample/src/a.ts", "E2", `function h(w, base) { let tx = base; ${lines("tx", N, i => `merge(tx, part${i})`)} return w.sendTransaction(tx); }`],
+    ["C-exprpayload", "packages/sample/src/a.ts", "E2", `function h(w, to) { let data = "0x"; ${lines("data", N, i => `data + part${i}`)} return w.sendTransaction({ to, data: data + "00" }); }`],
+    ["C-deep", "packages/sample/src/a.ts", "E2", `function h(req) { const data = ${"[".repeat(70)}"0x"${"]".repeat(70)}; w.sendTransaction({ to, data }); }`],
+  ] as const) it(`N289 W4 ${name}: an exceeded bound is a finding at this site, under 1 s`, async () => {
+    const t = tree({ [file]: source });
+    const result = await followupScan(t.root, file, rule, 10_000);
+    console.info(`N289 W4 ${name}: ${result.ms.toFixed(2)} ms; ${result.hits.length} findings`);
+    expect(result.ms).toBeLessThan(1000);
+    expect(result.hits).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rule: rule === "E2" ? "E2-R4" : "E3-R2", detail: expect.stringContaining("cannot be inspected") }),
+    ]));
+  }, 25_000);
+});
+
 function followupScan(root: string, file: string, rule: "E2" | "E3", limit: number): Promise<{ ms: number; hits: Finding[] }> {
   const worker = new Worker(`
     const { parentPort, workerData } = require("node:worker_threads");
