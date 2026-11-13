@@ -277,7 +277,7 @@ because the gateway refuses to provision a key without an email. Install
 this pinned commit, not a release from PyPI: `python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node"`.
 After an earlier pcc-node install, pip may keep that copy, because both report the same version: run that command again with `--force-reinstall --no-deps` after `install`.
 The node keeps the kernel online but takes no jobs itself: jobs run
-through the operating agent's typed operations.
+through the operating agent's typed operations (coming, ADK item 12).
 
 ## When NOT to use PCC
 
