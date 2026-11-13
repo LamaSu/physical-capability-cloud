@@ -100,7 +100,7 @@ transact end-to-end — are Discovery, Contract building, **Negotiation**, and
 |---|---|
 | `pcc_build_options` | Available configuration options for a capability type given partial selections. |
 | `pcc_calculate_price` | Price quote for a complete parameter selection. |
-| `pcc_build_contract` | Full contract object ready for escrow funding. |
+| `pcc_build_contract` | Full unsigned contract object. Building it funds nothing. |
 
 ### Negotiation (7)
 

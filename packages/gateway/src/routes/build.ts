@@ -235,7 +235,7 @@ export async function buildRoutes(app: FastifyInstance) {
         description:
           "Synchronously builds a contract for the given capability type with " +
           "the provided parameter selections and assurance tier (0-3). Returns " +
-          "an unsigned contract ready for escrow funding via /api/escrow/fund.",
+          "an unsigned contract. Building it creates no escrow and funds nothing.",
         body: {
           type: "object",
           additionalProperties: false,

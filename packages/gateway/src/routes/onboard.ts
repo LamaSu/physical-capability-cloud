@@ -546,7 +546,7 @@ export async function onboardRoutes(app: FastifyInstance) {
           assuranceTier,
           warning: tierWarning,
           warnings: warnings.length > 0 ? warnings : undefined,
-          message: "Evidence accepted — registration auto-approved and activated. Your device is now live on the network.",
+          message: "Evidence accepted — registration auto-approved and activated.",
         };
       },
     );
