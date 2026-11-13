@@ -25,6 +25,7 @@ import { Sentry } from "../sentry.js";
 import { traceCollector, TraceCollector } from "../trace-collector.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { auditService } from "./audit-service.js";
+import { ownerOf } from "../auth/kernel-authority.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -294,40 +295,63 @@ export class SettlementService {
             if (job?.capabilityId) {
               const ipReg = repos.story.findIpByCapabilityId(job.capabilityId);
               if (ipReg) {
-                const { getStoryIPService } = await import("@pcc/contracts");
-                const storyIPService = getStoryIPService();
-                const link = await storyIPService.registerJobAsDerivative(ipReg.ipId, {
-                  jobId,
-                  evidenceBundleHash: bundle.bundleHash,
-                  operatorAddress: "0x0000000000000000000000000000000000000000",
-                  operatorName: "operator",
-                  ipfsCid: result.cid,
-                });
-                // Persist derivative link to DB
-                try {
-                  repos.story.insertDerivativeLink({
-                    id: `dl_${jobId}_${Date.now()}`,
-                    parentIpId: link.parentIpId,
-                    childIpId: link.childIpId,
-                    licenseTokenId: link.licenseTokenId,
-                    jobId: link.jobId,
-                    evidenceBundleHash: link.evidenceBundleHash,
-                    txHash: link.txHash,
-                    linkedAt: link.linkedAt,
+                const kernel = job.kernelId ? repos.kernels.findById(job.kernelId) : undefined;
+                const operator = kernel ? ownerOf(kernel.operatorAddress) : null;
+                const hasOperator = operator !== null && /^0x[0-9a-fA-F]{40}$/.test(operator);
+                if (!hasOperator) {
+                  pipelineTelemetry.emit(jobId, "settlement_claim", "skipped", {
+                    metadata: { reason: "operator_unknown" },
                   });
-                } catch (dbErr) {
-                  console.warn("[settlement] Story derivative DB persist failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
+                } else {
+                  const { getStoryIPService } = await import("@pcc/contracts");
+                  const storyIPService = getStoryIPService();
+                  const link = await storyIPService.registerJobAsDerivative(ipReg.ipId, {
+                    jobId,
+                    evidenceBundleHash: bundle.bundleHash,
+                    operatorAddress: operator,
+                    operatorName: "operator",
+                    ipfsCid: result.cid,
+                  });
+                  // Persist derivative link to DB
+                  let insertSucceeded = false;
+                  try {
+                    repos.story.insertDerivativeLink({
+                      id: `dl_${jobId}_${Date.now()}`,
+                      parentIpId: link.parentIpId,
+                      childIpId: link.childIpId,
+                      licenseTokenId: link.licenseTokenId,
+                      jobId: link.jobId,
+                      evidenceBundleHash: link.evidenceBundleHash,
+                      txHash: link.txHash,
+                      linkedAt: link.linkedAt,
+                    });
+                    insertSucceeded = true;
+                  } catch (dbErr) {
+                    console.warn("[settlement] Story derivative DB persist failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
+                    pipelineTelemetry.emit(jobId, "settlement_claim", "failed", {
+                      metadata: { reason: "derivative_unrecorded", derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
+                    });
+                    auditService.log({
+                      eventType: "settlement.story_unrecorded",
+                      resourceType: "job",
+                      resourceId: jobId,
+                      action: "register_derivative",
+                      metadata: { reason: "derivative_unrecorded", derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
+                    });
+                  }
+                  if (insertSucceeded) {
+                    pipelineTelemetry.emit(jobId, "settlement_claim", "completed", {
+                      metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId, simulated: link.simulated === true },
+                    });
+                    auditService.log({
+                      eventType: "settlement.story_registered",
+                      resourceType: "job",
+                      resourceId: jobId,
+                      action: "register_derivative",
+                      metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId, simulated: link.simulated === true },
+                    });
+                  }
                 }
-                pipelineTelemetry.emit(jobId, "settlement_claim", "completed", {
-                  metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
-                });
-                auditService.log({
-                  eventType: "settlement.story_registered",
-                  resourceType: "job",
-                  resourceId: jobId,
-                  action: "register_derivative",
-                  metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
-                });
               }
             }
           } catch (storyErr) {
@@ -470,32 +494,6 @@ export class SettlementService {
         repos.jobs.updateStatus(jobId, "settled");
       } catch {
         // DB update non-fatal
-      }
-
-      // ── Best-effort: Story Protocol royalty payment ─────────────────
-      try {
-        const repos = getRepos();
-        // Find derivative links for this job to get the IP ID
-        const derivLinks = repos.story.findDerivativeLinksByJob(jobId);
-        if (derivLinks.length > 0) {
-          const childIpId = derivLinks[0].childIpId;
-          const royaltyPercent = Number(process.env.STORY_ROYALTY_PERCENT ?? "5");
-
-          // Estimate job value from milestone index (use a placeholder amount for mock)
-          // In production this would come from the escrow contract's milestone amount
-          const milestoneAmountStr = process.env.STORY_MILESTONE_AMOUNT ?? "1000000"; // 1 USDC in atomic units
-          const royaltyAmount = String(
-            Math.floor(Number(milestoneAmountStr) * royaltyPercent / 100),
-          );
-
-          const { getStoryIPService } = await import("@pcc/contracts");
-          const storyIPService = getStoryIPService();
-          await storyIPService.payJobRoyalty(childIpId, royaltyAmount, contractAddress as string);
-          console.log(`[settlement] Story royalty paid: ipId=${childIpId} amount=${royaltyAmount} (${royaltyPercent}% of milestone)`);
-        }
-      } catch (storyErr) {
-        // Royalty payment is best-effort — escrow release succeeds regardless
-        console.warn("[settlement] Story royalty payment failed (best-effort):", storyErr instanceof Error ? storyErr.message : storyErr);
       }
 
       return {

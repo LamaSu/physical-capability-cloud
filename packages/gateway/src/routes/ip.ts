@@ -5,14 +5,14 @@
  *
  *   POST /api/ip/register-capability         — Register a CSD as Story IP Asset
  *   POST /api/ip/register-job-evidence       — Register job evidence as derivative IP
- *   POST /api/ip/distribute-royalties        — Set revenue split for an IP Asset
+ *   POST /api/ip/distribute-royalties        — 501 not_executed (PCC does not execute Story royalty payments)
  *   POST /api/ip/set-licensing-terms         — Designer sets auto-license conditions
- *   POST /api/ip/settle-royalties            — Trigger royalty settlement for completed job
+ *   POST /api/ip/settle-royalties            — 501 not_executed (PCC does not execute Story royalty payments)
  *   GET  /api/ip/:ipId/licensing-terms       — Get licensing terms for an IP Asset
  *   GET  /api/ip/:ipId/derivative-tree       — Get full derivative tree with revenue shares
  *   GET  /api/ip/:ipId/royalty-distribution  — Calculate royalty distribution for a job amount
- *   POST /api/ip/:ipId/pay                   — Pay royalty to an IP vault
- *   POST /api/ip/:ipId/claim                 — Claim revenue from a vault
+ *   POST /api/ip/:ipId/pay                   — 501 not_executed (PCC does not execute Story royalty payments)
+ *   POST /api/ip/:ipId/claim                 — 501 not_executed (PCC does not execute Story royalty payments)
  *   GET  /api/ip/:ipId/revenue               — Revenue snapshot
  *   GET  /api/ip/:ipId/lineage               — Full IP lineage chain
  *   GET  /api/ip/capability/:capabilityId    — Get IP registration for a capability
@@ -25,8 +25,20 @@
 import type { FastifyInstance } from "fastify";
 import { v4 as uuidv4 } from "uuid";
 import { getRepos } from "../db.js";
-import { getStoryIPService, getLicensingEngine } from "@pcc/contracts";
-import type { ContributorRole, LicensingTerms } from "@pcc/spec";
+import { getStoryIPService, getLicensingEngine, StoryNotExecutedError } from "@pcc/contracts";
+import type { LicensingTerms } from "@pcc/spec";
+
+const STORY_ROYALTY_NOT_EXECUTED_MESSAGE =
+  "PCC does not execute Story royalty payments. This route moves no money and records nothing.";
+
+function isStoryNotExecuted(err: unknown): boolean {
+  if (err instanceof StoryNotExecutedError) return true;
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === "STORY_NOT_EXECUTED"
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Body / Params interfaces
@@ -53,42 +65,6 @@ interface RegisterJobEvidenceBody {
   operatorAddress: string;
   operatorName: string;
   ipfsCid?: string;
-}
-
-/**
- * Body shape for POST /api/ip/distribute-royalties.
- *
- * `splits[].role` reuses the canonical `ContributorRole` taxonomy from
- * @pcc/spec (ADR-12 §2.1). That union covers all 10 new role values
- * (operator, verifier, insurer, integrator, protocol-author, model-author,
- * dataset-contributor, curator, assembler, network-treasury) plus the
- * deprecated `designer` alias kept for backward compatibility so older
- * clients still validate.
- *
- * The route handler does not enforce the enum at runtime — it only checks
- * the splits array shape and that percentages sum to 100, then forwards
- * the payload to `svc.distributeRoyaltyTokens()`. Older clients sending
- * the pre-ADR-12 `"network"` string therefore still decode at the JSON
- * boundary, even though it is not part of `ContributorRole`. Such clients
- * should migrate to `network-treasury` per ADR-12 §2.2.
- */
-interface DistributeRoyaltiesBody {
-  ipId: string;
-  splits: Array<{
-    address: string;
-    role: ContributorRole;
-    percentage: number;
-    label: string;
-  }>;
-}
-
-interface PayRoyaltyBody {
-  amount: string;
-  payerAddress: string;
-}
-
-interface ClaimRevenueBody {
-  tokenIds?: string[];
 }
 
 interface RaiseDisputeBody {
@@ -122,13 +98,6 @@ interface SetLicensingTermsBody {
   defaultRevShare: number;
   allowSubDerivatives: boolean;
   derivativeDecayRate: number;
-}
-
-interface SettleRoyaltiesBody {
-  jobId: string;
-  childIpId: string;
-  jobRevenue: string;
-  payerAddress: string;
 }
 
 interface RoyaltyDistributionQuerystring {
@@ -200,8 +169,15 @@ export async function ipRoutes(app: FastifyInstance) {
           console.warn("[ip] DB persist of IP registration failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
         }
 
-        return { registration: reg };
+        return { registration: reg, simulated: true };
       } catch (err) {
+        if (isStoryNotExecuted(err)) {
+          return reply.code(501).send({
+            error: "not_executed",
+            operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
+            message: (err as { message?: string }).message,
+          });
+        }
         return reply.code(500).send({
           error: "registration_failed",
           message: err instanceof Error ? err.message : String(err),
@@ -257,8 +233,15 @@ export async function ipRoutes(app: FastifyInstance) {
           console.warn("[ip] DB persist of derivative link failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
         }
 
-        return { link };
+        return { link, simulated: true };
       } catch (err) {
+        if (isStoryNotExecuted(err)) {
+          return reply.code(501).send({
+            error: "not_executed",
+            operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
+            message: (err as { message?: string }).message,
+          });
+        }
         return reply.code(500).send({
           error: "derivative_registration_failed",
           message: err instanceof Error ? err.message : String(err),
@@ -269,52 +252,14 @@ export async function ipRoutes(app: FastifyInstance) {
 
   // ── POST /api/ip/distribute-royalties ────────────────────────────────────
 
-  app.post<{ Body: DistributeRoyaltiesBody }>(
+  app.post(
     "/api/ip/distribute-royalties",
-    async (req, reply) => {
-      const { ipId, splits } = req.body;
-
-      if (!ipId || !splits || !Array.isArray(splits) || splits.length === 0) {
-        return reply.code(400).send({ error: "ipId and splits (non-empty array) are required" });
-      }
-
-      const total = splits.reduce((s, item) => s + (item.percentage ?? 0), 0);
-      if (total !== 100) {
-        return reply.code(400).send({
-          error: "splits_must_sum_to_100",
-          message: `Splits sum to ${total}, expected 100`,
-        });
-      }
-
-      try {
-        const result = await svc.distributeRoyaltyTokens(ipId, splits);
-
-        // Persist splits to DB (best-effort)
-        try {
-          const repos = getRepos();
-          // Remove old splits first
-          repos.story.deleteRoyaltySplitsByIp(ipId);
-          for (const split of splits) {
-            repos.story.insertRoyaltySplit({
-              id: uuidv4(),
-              ipId,
-              address: split.address,
-              role: split.role,
-              percentage: split.percentage,
-              label: split.label,
-            });
-          }
-        } catch (dbErr) {
-          console.warn("[ip] DB persist of royalty splits failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
-        }
-
-        return result;
-      } catch (err) {
-        return reply.code(500).send({
-          error: "distribute_royalties_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
+    async (_req, reply) => {
+      return reply.code(501).send({
+        error: "not_executed",
+        operation: "distributeRoyaltyTokens",
+        message: STORY_ROYALTY_NOT_EXECUTED_MESSAGE,
+      });
     },
   );
 
@@ -343,51 +288,20 @@ export async function ipRoutes(app: FastifyInstance) {
       };
 
       engine.setTerms(body.ipId, terms);
-      return { terms };
+      return { terms, basis: "prediction", persisted: false };
     },
   );
 
   // ── POST /api/ip/settle-royalties ─────────────────────────────────────────
 
-  app.post<{ Body: SettleRoyaltiesBody }>(
+  app.post(
     "/api/ip/settle-royalties",
-    async (req, reply) => {
-      const { jobId, childIpId, jobRevenue, payerAddress } = req.body ?? {};
-
-      if (!jobId || !childIpId || !jobRevenue || !payerAddress) {
-        return reply.code(400).send({
-          error: "jobId, childIpId, jobRevenue, and payerAddress are required",
-        });
-      }
-
-      try {
-        const distributions = engine.getRoyaltyDistribution(childIpId, jobRevenue);
-        const settled: Array<{ recipientAddress: string; amount: string; ipId: string; txHash: string }> = [];
-        let totalDistributed = 0n;
-
-        for (const dist of distributions) {
-          if (dist.amount === "0") continue;
-          try {
-            const { txHash } = await svc.payJobRoyalty(dist.ipId, dist.amount, payerAddress);
-            settled.push({ recipientAddress: dist.recipientAddress, amount: dist.amount, ipId: dist.ipId, txHash });
-            totalDistributed += BigInt(dist.amount);
-          } catch (err) {
-            console.warn(`[ip] Royalty settlement failed for ${dist.ipId}:`, err instanceof Error ? err.message : err);
-          }
-        }
-
-        return {
-          jobId,
-          childIpId,
-          distributions: settled,
-          totalDistributed: String(totalDistributed),
-        };
-      } catch (err) {
-        return reply.code(500).send({
-          error: "settle_royalties_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
+    async (_req, reply) => {
+      return reply.code(501).send({
+        error: "not_executed",
+        operation: "settleRoyalties",
+        message: STORY_ROYALTY_NOT_EXECUTED_MESSAGE,
+      });
     },
   );
 
@@ -401,7 +315,7 @@ export async function ipRoutes(app: FastifyInstance) {
       if (!terms) {
         return reply.code(404).send({ error: "licensing_terms_not_found" });
       }
-      return { terms };
+      return { terms, basis: "prediction", persisted: false };
     },
   );
 
@@ -419,6 +333,7 @@ export async function ipRoutes(app: FastifyInstance) {
           ancestorChain: chain.chain,
           totalAncestorShare: chain.totalAncestorShare,
           directChildren: children,
+          basis: "prediction",
         };
       } catch (err) {
         return reply.code(500).send({
@@ -439,7 +354,7 @@ export async function ipRoutes(app: FastifyInstance) {
 
       try {
         const distributions = engine.getRoyaltyDistribution(ipId, amount);
-        return { ipId, amount, distributions };
+        return { ipId, amount, distributions, basis: "prediction" };
       } catch (err) {
         return reply.code(500).send({
           error: "royalty_distribution_failed",
@@ -451,61 +366,27 @@ export async function ipRoutes(app: FastifyInstance) {
 
   // ── POST /api/ip/:ipId/pay ────────────────────────────────────────────────
 
-  app.post<{ Params: IpIdParams; Body: PayRoyaltyBody }>(
+  app.post(
     "/api/ip/:ipId/pay",
-    async (req, reply) => {
-      const { ipId } = req.params;
-      const { amount, payerAddress } = req.body;
-
-      if (!amount || !payerAddress) {
-        return reply.code(400).send({ error: "amount and payerAddress are required" });
-      }
-
-      try {
-        const result = await svc.payJobRoyalty(ipId, amount, payerAddress);
-        return result;
-      } catch (err) {
-        return reply.code(500).send({
-          error: "pay_royalty_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
+    async (_req, reply) => {
+      return reply.code(501).send({
+        error: "not_executed",
+        operation: "payJobRoyalty",
+        message: STORY_ROYALTY_NOT_EXECUTED_MESSAGE,
+      });
     },
   );
 
   // ── POST /api/ip/:ipId/claim ──────────────────────────────────────────────
 
-  app.post<{ Params: IpIdParams; Body: ClaimRevenueBody }>(
+  app.post(
     "/api/ip/:ipId/claim",
-    async (req, reply) => {
-      const { ipId } = req.params;
-      const { tokenIds } = req.body ?? {};
-
-      try {
-        const result = await svc.claimRevenue(ipId, tokenIds);
-
-        // Persist claim to DB (best-effort)
-        try {
-          const repos = getRepos();
-          repos.story.insertRevenueClaim({
-            id: uuidv4(),
-            ipId,
-            claimerAddress: "0x0000000000000000000000000000000000000000",
-            amount: result.claimed,
-            txHash: result.txHash,
-            claimedAt: new Date().toISOString(),
-          });
-        } catch (dbErr) {
-          console.warn("[ip] DB persist of revenue claim failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
-        }
-
-        return result;
-      } catch (err) {
-        return reply.code(500).send({
-          error: "claim_revenue_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
+    async (_req, reply) => {
+      return reply.code(501).send({
+        error: "not_executed",
+        operation: "claimRevenue",
+        message: STORY_ROYALTY_NOT_EXECUTED_MESSAGE,
+      });
     },
   );
 
@@ -518,8 +399,15 @@ export async function ipRoutes(app: FastifyInstance) {
 
       try {
         const snapshot = await svc.getRevenueSnapshot(ipId);
-        return snapshot;
+        return { ...snapshot, simulated: true };
       } catch (err) {
+        if (isStoryNotExecuted(err)) {
+          return reply.code(501).send({
+            error: "not_executed",
+            operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
+            message: (err as { message?: string }).message,
+          });
+        }
         return reply.code(500).send({
           error: "revenue_snapshot_failed",
           message: err instanceof Error ? err.message : String(err),
@@ -537,8 +425,15 @@ export async function ipRoutes(app: FastifyInstance) {
 
       try {
         const lineage = await svc.getLineage(ipId);
-        return { ipId, ...lineage };
+        return { ipId, ...lineage, simulated: true };
       } catch (err) {
+        if (isStoryNotExecuted(err)) {
+          return reply.code(501).send({
+            error: "not_executed",
+            operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
+            message: (err as { message?: string }).message,
+          });
+        }
         return reply.code(500).send({
           error: "lineage_failed",
           message: err instanceof Error ? err.message : String(err),
@@ -566,7 +461,7 @@ export async function ipRoutes(app: FastifyInstance) {
             const repos = getRepos();
             const dbReg = repos.story.findIpByCapabilityId(capabilityId);
             if (dbReg) {
-              return { registration: dbReg };
+              return { registration: dbReg, simulated: true };
             }
           } catch {
             // DB not available
@@ -574,8 +469,15 @@ export async function ipRoutes(app: FastifyInstance) {
           return reply.code(404).send({ error: "ip_registration_not_found" });
         }
 
-        return { registration: reg };
+        return { registration: reg, simulated: true };
       } catch (err) {
+        if (isStoryNotExecuted(err)) {
+          return reply.code(501).send({
+            error: "not_executed",
+            operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
+            message: (err as { message?: string }).message,
+          });
+        }
         return reply.code(500).send({
           error: "get_ip_registration_failed",
           message: err instanceof Error ? err.message : String(err),
@@ -598,8 +500,15 @@ export async function ipRoutes(app: FastifyInstance) {
 
       try {
         const dispute = await svc.raiseDispute(ipId, { hash: evidenceHash, reason });
-        return { dispute };
+        return { dispute, simulated: true };
       } catch (err) {
+        if (isStoryNotExecuted(err)) {
+          return reply.code(501).send({
+            error: "not_executed",
+            operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
+            message: (err as { message?: string }).message,
+          });
+        }
         return reply.code(500).send({
           error: "raise_dispute_failed",
           message: err instanceof Error ? err.message : String(err),
