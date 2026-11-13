@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** PCC Onboard CLI: local validation and project scaffolding. */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync, statSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, realpathSync, openSync, readSync, closeSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { scaffold } from "./scaffolder.js";
@@ -83,23 +83,34 @@ export function runCli(argv: string[], io: { log(line: string): void; error(line
   }
 
   let raw: string;
+  let fd: number | undefined;
   try {
-    if (statSync(configPath).size > 1_048_576) {
+    fd = openSync(configPath, "r");
+    const buffer = Buffer.alloc(1_048_577);
+    let length = 0;
+    while (length < buffer.length) {
+      const read = readSync(fd, buffer, length, buffer.length - length, null);
+      if (read === 0) break;
+      length += read;
+    }
+    if (length > 1_048_576) {
       io.error(`Cannot read config ${configPath}: larger than 1 MiB`);
       return 2;
     }
-    raw = readFileSync(configPath, "utf-8");
+    raw = buffer.toString("utf-8", 0, length);
   } catch (error) {
     const code = (error as { code?: string } | null)?.code ?? "unreadable";
     io.error(`Cannot read config ${configPath}: ${code}`);
     return 2;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 
   let config: OnboardConfig;
   try {
     config = JSON.parse(raw) as OnboardConfig;
   } catch (error) {
-    const position = /position (\d+)/.exec((error as Error).message)?.[1];
+    const position = / JSON at position (\d+)(?: \(line \d+ column \d+\))?$/.exec((error as Error).message)?.[1];
     io.error(`Cannot read config ${configPath}: not valid JSON${position ? ` (position ${position})` : ""}`);
     return 2;
   }

@@ -93,7 +93,7 @@ export function validate(options: ValidationOptions): ValidationResult {
   if (typeof config.kernel.walletPrivateKeyEnvVar === "string" && config.kernel.walletPrivateKeyEnvVar !== "") {
     checks.push({
       name: "kernel.walletPrivateKeyEnvVar", passed: false, severity: "warning",
-      message: `the scaffolded agent never reads ${config.kernel.walletPrivateKeyEnvVar}; KernelAgent takes no wallet setting, so its wallet is a new random key each start`,
+      message: `the scaffolded agent never reads the variable named in walletPrivateKeyEnvVar; KernelAgent takes no wallet setting, so its wallet is a new random key each start`,
     });
   }
 
@@ -149,10 +149,16 @@ export function validate(options: ValidationOptions): ValidationResult {
       });
     }
 
-    if (!(EVIDENCE_DEVICE_TYPES as readonly string[]).includes(adapter.deviceType)) {
+    if (adapter.adapterType === "machine" && !(EVIDENCE_DEVICE_TYPES as readonly string[]).includes(adapter.deviceType)) {
       checks.push({
         name: `${prefix}.deviceType`, passed: false, severity: "warning",
         message: `${JSON.stringify(adapter.deviceType)} is not an evidence device type in @pcc/spec (for example controller, power_monitor, robot_arm); schema-checking verifiers refuse its events`,
+      });
+    }
+    if (adapter.adapterType === "sensor") {
+      checks.push({
+        name: `${prefix}.deviceType`, passed: false, severity: "warning",
+        message: `the generated sensor adapter writes deviceType "sensor" whatever this field says, and "sensor" is not an evidence device type in @pcc/spec; schema-checking verifiers refuse its events until you change it in the generated adapter (for example to power_monitor)`,
       });
     }
     if (adapter.adapterType === "machine" && adapter.protocol !== "http") {

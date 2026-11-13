@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { validate } from "../validate.js";
 import type { OnboardConfig } from "../types.js";
 import { getRegisteredTypes } from "@pcc/contract-builder";
@@ -189,7 +191,7 @@ describe("local config rules", () => {
   const amountError = (value: string, reason: "invalid-price" | "invalid-minimum") =>
     `${JSON.stringify(value)} is not an amount with at most two decimals; the gateway's discovery quote refuses it (capability_price_undeclared: ${reason})`;
   const slugWarning = (type: string) => `${JSON.stringify(type)} is not a slug (lowercase letters and digits joined by single "-" or "."); the gateway accepts any type`;
-  const walletMessage = "the scaffolded agent never reads KERNEL_PRIVATE_KEY; KernelAgent takes no wallet setting, so its wallet is a new random key each start";
+  const walletMessage = "the scaffolded agent never reads the variable named in walletPrivateKeyEnvVar; KernelAgent takes no wallet setting, so its wallet is a new random key each start";
   const walletError = 'is not an environment variable name (a letter or "_", then letters, digits or "_"); the scaffold writes it as a key of .env.example';
   const withType = (type: string) => {
     const config = makeValidConfig();
@@ -362,11 +364,28 @@ describe("local config rules", () => {
     expect(validate({ config: makeValidConfig() }).warnings).toContainEqual(warning("kernel.walletPrivateKeyEnvVar", walletMessage));
   });
 
-  it("CV13: sensor is not an evidence device type but controller is", () => {
+  it("CV13: deviceType warnings follow what each generated adapter writes", () => {
+    const sensorMessage = 'the generated sensor adapter writes deviceType "sensor" whatever this field says, and "sensor" is not an evidence device type in @pcc/spec; schema-checking verifiers refuse its events until you change it in the generated adapter (for example to power_monitor)';
     const result = validate({ config: makeValidConfig() });
-    expect(result.warnings).toContainEqual(warning("adapter[dev-sensor-01].deviceType",
-      '"sensor" is not an evidence device type in @pcc/spec (for example controller, power_monitor, robot_arm); schema-checking verifiers refuse its events'));
+    expect(result.warnings).toContainEqual(warning("adapter[dev-sensor-01].deviceType", sensorMessage));
     expect(result.warnings.some(w => w.name === "adapter[dev-machine-01].deviceType")).toBe(false);
+
+    const sensor = makeValidConfig();
+    sensor.adapters[1].deviceType = "power_monitor";
+    const sensorResult = validate({ config: sensor });
+    expect(sensorResult.warnings).toContainEqual(warning("adapter[dev-sensor-01].deviceType", sensorMessage));
+    expect(sensorResult.warnings.filter(w => w.name === "adapter[dev-sensor-01].deviceType")).toHaveLength(1);
+
+    const machine = makeValidConfig();
+    machine.adapters[0].deviceType = "robot";
+    expect(validate({ config: machine }).warnings).toContainEqual(warning("adapter[dev-machine-01].deviceType",
+      '"robot" is not an evidence device type in @pcc/spec (for example controller, power_monitor, robot_arm); schema-checking verifiers refuse its events'));
+
+    const camera: OnboardConfig = JSON.parse(readFileSync(fileURLToPath(new URL("../examples/cnc-shop-config.json", import.meta.url)), "utf8"));
+    camera.adapters.find(adapter => adapter.adapterId === "dev-qc-camera")!.deviceType = "robot";
+    const cameraResult = validate({ config: camera });
+    expect(cameraResult.checks.some(c => c.name === "adapter[dev-qc-camera].connectionString")).toBe(true);
+    expect(cameraResult.warnings.some(w => w.name === "adapter[dev-qc-camera].deviceType")).toBe(false);
   });
 
   it("CV14: only machine adapters warn about the generated HTTP transport", () => {
@@ -462,6 +481,22 @@ describe("local config rules", () => {
     }
   });
 
+  it("CV21: the wallet warning never prints the configured value", () => {
+    const hex = "ab".repeat(32);
+    for (const value of ["0x" + hex, hex]) {
+      const config = makeValidConfig();
+      config.kernel.walletPrivateKeyEnvVar = value;
+      const result = validate({ config });
+      expect(JSON.stringify(result)).not.toContain(hex);
+      expect(result.warnings).toContainEqual(warning("kernel.walletPrivateKeyEnvVar", walletMessage));
+      if (value === "0x" + hex) {
+        expect(result.errors).toContainEqual(error("kernel.walletPrivateKeyEnvVar", walletError));
+      } else {
+        expect(result.valid).toBe(true);
+      }
+    }
+  });
+
   it("KT1: known types equal the template and built-in CSD union in both directions", () => {
     const expected = new Set<string>(getRegisteredTypes());
     for (const csd of loadBuiltinCsds().list()) {
@@ -480,20 +515,20 @@ describe("local config rules", () => {
     expect(actual.has("fdm")).toBe(true);
   });
 
-  it("accepts the earlier draft's wood-fired-pizza type with a warning", () => {
+  it("accepts an unknown type such as wood-fired-pizza with a warning", () => {
     const result = validate({ config: withType("wood-fired-pizza") });
     expect(result.valid).toBe(true);
     expect(result.errors).toHaveLength(0);
     expect(result.warnings.some(w => w.name === "capability[wood-fired-pizza].type" && w.message.startsWith("wood-fired-pizza has no template or CSD in this kit"))).toBe(true);
   });
 
-  it("accepts the earlier draft's pizza.order slug", () => {
+  it("accepts a dotted slug such as pizza.order", () => {
     const result = validate({ config: withType("pizza.order") });
     expect(result.valid).toBe(true);
     expect(result.errors).toHaveLength(0);
   });
 
-  it("recognizes the earlier draft's fdm type without a type warning", () => {
+  it("recognizes the fdm type without a type warning", () => {
     const result = validate({ config: withType("fdm") });
     expect(result.valid).toBe(true);
     expect(result.errors).toHaveLength(0);

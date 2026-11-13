@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,7 @@ import { isMainModule, runCli } from "../cli.js";
 import { scaffold } from "../scaffolder.js";
 
 const example = fileURLToPath(new URL("../examples/cnc-shop-config.json", import.meta.url));
+const packageDir = fileURLToPath(new URL("../..", import.meta.url));
 const scratchDirs: string[] = [];
 function scratch(): string {
   const dir = mkdtempSync(join(tmpdir(), "pcc-cli-"));
@@ -180,5 +182,58 @@ describe("CLI frame", () => {
     expect(isMainModule(undefined, moduleUrl)).toBe(false);
     expect(isMainModule(join(dir, "missing"), moduleUrl)).toBe(false);
     expect(isMainModule(other, moduleUrl)).toBe(false);
+  });
+
+  it("CLI7: reads at most 1 MiB from a file or a pipe", () => {
+    const dir = scratch();
+    const path = join(dir, "exact.json");
+    const text = readFileSync(example, "utf8");
+    writeFileSync(path, text + " ".repeat(1_048_576 - Buffer.byteLength(text)));
+    const exact = run(["validate", "--config", path]);
+    expect(exact.code).toBe(0);
+    expect(exact.errors).toEqual([]);
+
+    const payload = join(dir, "payload");
+    writeFileSync(payload, "x".repeat(1_048_577));
+    const piped = spawnSync("bash", ["-c", 'cat "$1" | "$0" --import tsx src/cli.ts validate --config /dev/stdin', process.execPath, payload], {
+      cwd: packageDir, encoding: "utf8", timeout: 30000,
+    });
+    expect(piped.error).toBeUndefined();
+    expect(piped.status).toBe(2);
+    expect(piped.stdout).toBe("");
+    expect(piped.stderr).toBe("Cannot read config /dev/stdin: larger than 1 MiB\n");
+  });
+
+  it("CLI8: prints V8's position only, never digits from the input", () => {
+    for (const [text, suffix] of [
+      ["position 42 nope", ""],
+      ['{"a":1}}', " (position 7)"],
+      ["{\n  \"a\": 1,\n}", " (position 12)"],
+    ]) {
+      const path = join(scratch(), "invalid.json");
+      writeFileSync(path, text);
+      const result = run(["validate", "--config", path]);
+      expect(result.code).toBe(2);
+      expect(result.logs).toEqual([]);
+      expect(result.errors).toEqual([`Cannot read config ${path}: not valid JSON${suffix}`]);
+    }
+  });
+
+  it("CLI9: the wallet value appears in neither the text output nor --json", () => {
+    const hex = "ab".repeat(32);
+    const config = JSON.parse(readFileSync(example, "utf8"));
+    config.kernel.walletPrivateKeyEnvVar = "0x" + hex;
+    const path = configFile(config);
+    const text = run(["validate", "--config", path]);
+    const json = run(["validate", "--config", path, "--json"]);
+    for (const result of [text, json]) {
+      expect(result.code).toBe(1);
+      expect(result.errors).toEqual([]);
+      expect(result.logs.join("\n")).not.toContain(hex);
+    }
+    expect(JSON.parse(json.logs[0]).warnings).toContainEqual(expect.objectContaining({
+      name: "kernel.walletPrivateKeyEnvVar",
+      message: "the scaffolded agent never reads the variable named in walletPrivateKeyEnvVar; KernelAgent takes no wallet setting, so its wallet is a new random key each start",
+    }));
   });
 });
