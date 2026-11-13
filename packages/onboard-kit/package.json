@@ -28,9 +28,11 @@
     "@pcc/kernel": "workspace:*",
     "@pcc/contract-builder": "workspace:*",
     "@pcc/agent-user": "workspace:*",
-    "@pcc/agent-broker": "workspace:*"
+    "@pcc/agent-broker": "workspace:*",
+    "zod": "^3.23.0"
   },
   "devDependencies": {
+    "typescript": "^5.4.0",
     "vitest": "^1.6.0"
   }
 }
