@@ -27,6 +27,8 @@ import { v4 as uuidv4 } from "uuid";
 import { getRepos } from "../db.js";
 import { getStoryIPService, getLicensingEngine, StoryNotExecutedError } from "@pcc/contracts";
 import type { LicensingTerms } from "@pcc/spec";
+import { authorityOf, isAnonymous, provenByCookieOnly, mayWriteKernelAsOwner, AUTHENTICATION_REQUIRED, EXPLICIT_CREDENTIAL_REQUIRED } from "../auth/kernel-authority.js";
+import { walletOwner, recordedIpOwner, IP_REPLIES } from "./ip-ownership.js";
 
 const STORY_ROYALTY_NOT_EXECUTED_MESSAGE =
   "PCC does not execute Story royalty payments. This route moves no money and records nothing.";
@@ -119,6 +121,8 @@ interface CapabilityIdParams {
 export async function ipRoutes(app: FastifyInstance) {
   const svc = getStoryIPService();
   const engine = getLicensingEngine();
+  const registeringCapabilities = new Set<string>();
+  const registeringJobs = new Set<string>();
 
   // ── POST /api/ip/register-capability ─────────────────────────────────────
 
@@ -134,39 +138,63 @@ export async function ipRoutes(app: FastifyInstance) {
         return reply.code(400).send({ error: "designerAddress and designerName are required" });
       }
 
+      const a = authorityOf(req);
+      if (isAnonymous(a)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+      if (provenByCookieOnly(a)) return reply.code(403).send(EXPLICIT_CREDENTIAL_REQUIRED);
+
+      let repos: ReturnType<typeof getRepos>;
+      let cap: ReturnType<ReturnType<typeof getRepos>["capabilities"]["findById"]>;
+      try {
+        repos = getRepos();
+        cap = repos.capabilities.findById(capability.id);
+      } catch {
+        return reply.code(503).send(IP_REPLIES.read_failed);
+      }
+      if (!cap) return reply.code(404).send(IP_REPLIES.capability_not_found);
+      if (capability.kernelId !== cap.kernelId) return reply.code(409).send(IP_REPLIES.capability_kernel_mismatch);
+      let owner: string | null;
+      try {
+        owner = walletOwner(repos.kernels.findById(cap.kernelId)?.operatorAddress);
+      } catch {
+        return reply.code(503).send(IP_REPLIES.read_failed);
+      }
+      if (owner === null) return reply.code(403).send(IP_REPLIES.ip_owner_unknown);
+      if (!a.admin) {
+        if (a.provenWallet === null) return reply.code(403).send(IP_REPLIES.wallet_proof_required);
+        if (!mayWriteKernelAsOwner(a, owner)) return reply.code(403).send(IP_REPLIES.not_kernel_operator);
+      }
+      if (designerAddress.toLowerCase() !== owner) return reply.code(403).send(IP_REPLIES.designer_must_be_owner);
+      try {
+        if (repos.story.findIpByCapabilityId(cap.id) || registeringCapabilities.has(cap.id)) {
+          return reply.code(409).send(IP_REPLIES.already_registered);
+        }
+        registeringCapabilities.add(cap.id);
+      } catch {
+        return reply.code(503).send(IP_REPLIES.read_failed);
+      }
+
       try {
         const reg = await svc.registerCapabilityAsIP(capability, {
-          designerAddress,
+          designerAddress: owner,
           designerName,
           commercialRevShare,
           ipfsCid,
         });
 
-        // Persist to DB (best-effort)
         try {
-          const repos = getRepos();
-          // Only set capabilityId if the capability actually exists in the DB
-          // (the FK is nullable, and the capability may not be persisted in all envs)
-          let resolvedCapabilityId: string | undefined;
-          try {
-            const caps = repos.capabilities.findByKernel(capability.kernelId);
-            const cap = caps.find((c) => c.id === capability.id);
-            resolvedCapabilityId = cap?.id;
-          } catch {
-            // Capability lookup failed — insert without FK
-          }
-          repos.story.insertIpRegistration({
+          const recorded = repos.story.insertIpRegistration({
             ipId: reg.ipId,
             nftTokenId: reg.nftTokenId,
             licenseTermsId: reg.licenseTermsId,
             txHash: reg.txHash,
-            capabilityId: resolvedCapabilityId,
+            capabilityId: cap.id,
             csdUrl: reg.csdUrl,
             chain: reg.chain,
             registeredAt: reg.registeredAt,
           });
-        } catch (dbErr) {
-          console.warn("[ip] DB persist of IP registration failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
+          if (!recorded) return reply.code(500).send(IP_REPLIES.registration_not_recorded);
+        } catch {
+          return reply.code(500).send(IP_REPLIES.registration_not_recorded);
         }
 
         return { registration: reg, simulated: true };
@@ -175,13 +203,15 @@ export async function ipRoutes(app: FastifyInstance) {
           return reply.code(501).send({
             error: "not_executed",
             operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
-            message: (err as { message?: string }).message,
+            message: typeof (err as { message?: unknown }).message === "string" ? (err as { message: string }).message : undefined,
           });
         }
         return reply.code(500).send({
           error: "registration_failed",
           message: err instanceof Error ? err.message : String(err),
         });
+      } finally {
+        registeringCapabilities.delete(cap.id);
       }
     },
   );
@@ -199,38 +229,79 @@ export async function ipRoutes(app: FastifyInstance) {
         });
       }
 
+      const a = authorityOf(req);
+      if (isAnonymous(a)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+      if (provenByCookieOnly(a)) return reply.code(403).send(EXPLICIT_CREDENTIAL_REQUIRED);
+
+      let repos: ReturnType<typeof getRepos>;
+      let job: ReturnType<ReturnType<typeof getRepos>["jobs"]["findById"]>;
       try {
-        const link = await svc.registerJobAsDerivative(parentIpId, {
-          jobId,
+        repos = getRepos();
+        job = repos.jobs.findById(jobId);
+      } catch {
+        return reply.code(503).send(IP_REPLIES.read_failed);
+      }
+      if (!job) return reply.code(404).send(IP_REPLIES.job_not_found);
+      let owner: string | null;
+      try {
+        owner = walletOwner(repos.kernels.findById(job.kernelId)?.operatorAddress);
+      } catch {
+        return reply.code(503).send(IP_REPLIES.read_failed);
+      }
+      if (owner === null) return reply.code(403).send(IP_REPLIES.ip_owner_unknown);
+      if (!a.admin) {
+        if (a.provenWallet === null) return reply.code(403).send(IP_REPLIES.wallet_proof_required);
+        if (!mayWriteKernelAsOwner(a, owner)) return reply.code(403).send(IP_REPLIES.not_kernel_operator);
+      }
+      if (operatorAddress.toLowerCase() !== owner) return reply.code(403).send(IP_REPLIES.operator_must_be_owner);
+      let parent: ReturnType<ReturnType<typeof getRepos>["story"]["findIpByCapabilityId"]>;
+      try {
+        parent = repos.story.findIpByCapabilityId(job.capabilityId);
+      } catch {
+        return reply.code(503).send(IP_REPLIES.read_failed);
+      }
+      if (!parent || parent.ipId.toLowerCase() !== parentIpId.toLowerCase()) {
+        return reply.code(409).send(IP_REPLIES.parent_not_job_capability);
+      }
+      let parentOwner: string | null;
+      try {
+        parentOwner = recordedIpOwner(repos, parent.ipId);
+      } catch {
+        return reply.code(503).send(IP_REPLIES.read_failed);
+      }
+      if (parentOwner !== owner) return reply.code(403).send(IP_REPLIES.not_parent_owner);
+      try {
+        if (repos.story.findDerivativeLinksByJob(job.id).length > 0 || registeringJobs.has(job.id)) {
+          return reply.code(409).send(IP_REPLIES.already_registered);
+        }
+        registeringJobs.add(job.id);
+      } catch {
+        return reply.code(503).send(IP_REPLIES.read_failed);
+      }
+
+      try {
+        const link = await svc.registerJobAsDerivative(parent.ipId, {
+          jobId: job.id,
           evidenceBundleHash,
-          operatorAddress,
+          operatorAddress: owner,
           operatorName,
           ipfsCid,
         });
 
-        // Persist to DB (best-effort)
         try {
-          const repos = getRepos();
-          // Only set jobId if the job actually exists in the DB (FK constraint)
-          let resolvedJobId: string | undefined;
-          try {
-            const job = repos.jobs.findById(link.jobId);
-            resolvedJobId = job?.id;
-          } catch {
-            // Job lookup failed — insert without FK
-          }
-          repos.story.insertDerivativeLink({
+          const recorded = repos.story.insertDerivativeLink({
             id: uuidv4(),
             parentIpId: link.parentIpId,
             childIpId: link.childIpId,
             licenseTokenId: link.licenseTokenId,
-            jobId: resolvedJobId,
+            jobId: job.id,
             evidenceBundleHash: link.evidenceBundleHash,
             txHash: link.txHash,
             linkedAt: link.linkedAt,
           });
-        } catch (dbErr) {
-          console.warn("[ip] DB persist of derivative link failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
+          if (!recorded) return reply.code(500).send(IP_REPLIES.derivative_not_recorded);
+        } catch {
+          return reply.code(500).send(IP_REPLIES.derivative_not_recorded);
         }
 
         return { link, simulated: true };
@@ -239,13 +310,15 @@ export async function ipRoutes(app: FastifyInstance) {
           return reply.code(501).send({
             error: "not_executed",
             operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
-            message: (err as { message?: string }).message,
+            message: typeof (err as { message?: unknown }).message === "string" ? (err as { message: string }).message : undefined,
           });
         }
         return reply.code(500).send({
           error: "derivative_registration_failed",
           message: err instanceof Error ? err.message : String(err),
         });
+      } finally {
+        registeringJobs.delete(job.id);
       }
     },
   );
@@ -274,10 +347,27 @@ export async function ipRoutes(app: FastifyInstance) {
         return reply.code(400).send({ error: "ipId and designerAddress are required" });
       }
 
+      const a = authorityOf(req);
+      if (isAnonymous(a)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+      if (provenByCookieOnly(a)) return reply.code(403).send(EXPLICIT_CREDENTIAL_REQUIRED);
+
+      let owner: string | null;
+      try {
+        owner = recordedIpOwner(getRepos(), body.ipId);
+      } catch {
+        return reply.code(503).send(IP_REPLIES.read_failed);
+      }
+      if (owner === null) return reply.code(403).send(IP_REPLIES.ip_owner_unknown);
+      if (!a.admin) {
+        if (a.provenWallet === null) return reply.code(403).send(IP_REPLIES.wallet_proof_required);
+        if (!mayWriteKernelAsOwner(a, owner)) return reply.code(403).send(IP_REPLIES.not_ip_owner);
+      }
+      if (body.designerAddress.toLowerCase() !== owner) return reply.code(403).send(IP_REPLIES.designer_must_be_owner);
+
       const terms: LicensingTerms = {
         id: uuidv4(),
         ipId: body.ipId,
-        designerAddress: body.designerAddress,
+        designerAddress: owner,
         autoLicense: body.autoLicense,
         standingOffers: body.standingOffers ?? [],
         defaultRevShare: body.defaultRevShare ?? 5,
@@ -405,7 +495,7 @@ export async function ipRoutes(app: FastifyInstance) {
           return reply.code(501).send({
             error: "not_executed",
             operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
-            message: (err as { message?: string }).message,
+            message: typeof (err as { message?: unknown }).message === "string" ? (err as { message: string }).message : undefined,
           });
         }
         return reply.code(500).send({
@@ -431,7 +521,7 @@ export async function ipRoutes(app: FastifyInstance) {
           return reply.code(501).send({
             error: "not_executed",
             operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
-            message: (err as { message?: string }).message,
+            message: typeof (err as { message?: unknown }).message === "string" ? (err as { message: string }).message : undefined,
           });
         }
         return reply.code(500).send({
@@ -469,13 +559,22 @@ export async function ipRoutes(app: FastifyInstance) {
           return reply.code(404).send({ error: "ip_registration_not_found" });
         }
 
+        let recorded: ReturnType<ReturnType<typeof getRepos>["story"]["findIpById"]>;
+        try {
+          recorded = getRepos().story.findIpById(reg.ipId);
+        } catch {
+          return reply.code(503).send(IP_REPLIES.read_failed);
+        }
+        if (!recorded || recorded.capabilityId !== capabilityId) {
+          return reply.code(404).send({ error: "ip_registration_not_found" });
+        }
         return { registration: reg, simulated: true };
       } catch (err) {
         if (isStoryNotExecuted(err)) {
           return reply.code(501).send({
             error: "not_executed",
             operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
-            message: (err as { message?: string }).message,
+            message: typeof (err as { message?: unknown }).message === "string" ? (err as { message: string }).message : undefined,
           });
         }
         return reply.code(500).send({
@@ -498,15 +597,28 @@ export async function ipRoutes(app: FastifyInstance) {
         return reply.code(400).send({ error: "evidenceHash and reason are required" });
       }
 
+      const a = authorityOf(req);
+      if (isAnonymous(a)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+      if (provenByCookieOnly(a)) return reply.code(403).send(EXPLICIT_CREDENTIAL_REQUIRED);
+
+      let owner: string | null;
+      try {
+        owner = recordedIpOwner(getRepos(), ipId);
+      } catch {
+        return reply.code(503).send(IP_REPLIES.read_failed);
+      }
+      if (owner === null) return reply.code(403).send(IP_REPLIES.ip_owner_unknown);
+      if (a.provenWallet === null) return reply.code(403).send(IP_REPLIES.wallet_proof_required);
+
       try {
         const dispute = await svc.raiseDispute(ipId, { hash: evidenceHash, reason });
-        return { dispute, simulated: true };
+        return { dispute, raisedBy: a.provenWallet.toLowerCase(), simulated: true };
       } catch (err) {
         if (isStoryNotExecuted(err)) {
           return reply.code(501).send({
             error: "not_executed",
             operation: typeof (err as { operation?: unknown }).operation === "string" ? (err as { operation: string }).operation : null,
-            message: (err as { message?: string }).message,
+            message: typeof (err as { message?: unknown }).message === "string" ? (err as { message: string }).message : undefined,
           });
         }
         return reply.code(500).send({
