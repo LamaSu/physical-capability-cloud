@@ -287,6 +287,11 @@ describe("finalizedBlock — allocation or last job-class discharge, NEVER Final
       .toThrow(InconsistentAnchorsError);
   });
 
+  it("T11d inline allocation cannot have a zeroing discharge in the same block", () => {
+    expect(() => deriveFinalizedBlock({ allocation: { block: 120n, claimCount: 0n }, zeroingDischargeBlock: 120n }))
+      .toThrow(InconsistentAnchorsError);
+  });
+
   it.each([
     ["negative claim count", { allocation: { block: 120n, claimCount: -1n } }],
     ["number allocation block", { allocation: { block: 5, claimCount: 2n } }],
@@ -317,7 +322,7 @@ describe("appeal window emergency anchor", () => {
     [9200n, 9200n, "equal to due, strict comparison"],
     [9300n, 9200n, "after due"],
     [1500n, 1500n, "D-1 empty window (ESC:1224-1227)"],
-  ] as const)("T14 anchor %s gives %s (%s)", (emergencyAnchor, expected) => {
+  ] as const)("T14 anchor %s gives %s (%s)", (emergencyAnchor, expected, _description) => {
     expect(windowEndsAt({ state: UnitState.CHALLENGED, challengedAt: 2000n, emergencyAnchor }, WINDOWS))
       .toBe(expected);
   });

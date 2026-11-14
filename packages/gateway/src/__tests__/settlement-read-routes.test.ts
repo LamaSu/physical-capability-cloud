@@ -438,6 +438,31 @@ describe("settlement witnesses and emergency cap", () => {
     } finally { await app.close(); }
   });
 
+  it.each([
+    UnitState.FUNDED_ACTIVE,
+    UnitState.PRIMARY_ASSERTED,
+    UnitState.CHALLENGED,
+    UnitState.BACKUP_PENDING,
+    UnitState.BACKUP_ASSERTED,
+  ])("T19b state %i with zero remaining claims never reads finalization logs", async state => {
+    const readFinalizationWitness = vi.fn(async () => ({ allocation: { block: 120n, claimCount: 0n } }));
+    setSettlementUnitReader(makeReader({
+      // Before allocation the counter is zero, but the unit is not terminal.
+      readAnchors: async () => ({
+        state, remainingClaimCount: 0n, assertedAt: 1000n, challengedAt: 2000n,
+        emergencyAnchor: 5000n, assertionCutoff: 6000n,
+      }),
+      readFinalizationWitness,
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().finalizedBlock).toBeNull();
+      expect(readFinalizationWitness).not.toHaveBeenCalled();
+    } finally { await app.close(); }
+  });
+
   it("T20 state 9 deadline reclaim is witnessed by code 4", async () => {
     setSettlementUnitReader(makeReader({
       readAnchors: async () => ({ state: UnitState.SETTLED_REFUNDED, remainingClaimCount: 0n }),
@@ -476,6 +501,26 @@ describe("settlement witnesses and emergency cap", () => {
       if (state === UnitState.SETTLED_REFUNDED) expect(res.json().refundReason).toBe("UNKNOWN");
       else expect(res.json().refundReason).toBeNull();
       expect(res.json().finalizedBlock).toBe("UNKNOWN");
+    } finally { await app.close(); }
+  });
+
+  it.each([true, false])("T22b state 7 witnessed=%s refund reason on a complete index", async witnessed => {
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state: UnitState.REFUND_ALLOCATED, remainingClaimCount: 1n }),
+      readRefundWitness: async () => witnessed ? { finalized: { released: false, code: 2 } } : {},
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      const b = res.json();
+      expect(b.logCompleteness).toBe("complete");
+      expect(b.finalizedBlock).toBeNull();
+      if (witnessed) {
+        expect(b.refundReason).toMatchObject({ value: "BACKUP_NO_RELEASE", source: "log", completeness: "complete" });
+      } else {
+        expect(b.refundReason).toBe("UNKNOWN");
+      }
     } finally { await app.close(); }
   });
 
