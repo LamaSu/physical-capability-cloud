@@ -628,3 +628,35 @@ describe("A12 a self-link:device proof is not an owner proof", () => {
     expect(counts()).toEqual(before);
   });
 });
+
+describe("A13 letter case on register-job-evidence", () => {
+  it("checksummed operatorAddress reaches Story in lowercase", async () => {
+    const f = await owned();
+    const parent = getRepos().story.findIpById(f.ip)!;
+    const spy = vi.spyOn(StoryIPService.prototype, "registerJobAsDerivative");
+    const before = counts();
+    const res = await f.app.inject({ method: "POST", url: "/api/ip/register-job-evidence", headers: f.headers.OWNER_KEY,
+      payload: jobBody(parent.ipId, "n10a-fresh-j", EVM_A.address) });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(parent.ipId, expect.objectContaining({ operatorAddress: OWNER }));
+    expect(counts()).toEqual({ ...before, links: before.links + 1 });
+  });
+  it("uppercase parentIpId reaches Story and the link with its recorded spelling", async () => {
+    const f = await owned();
+    const parent = getRepos().story.findIpById(f.ip)!;
+    const parentIpId = `0x${parent.ipId.slice(2).toUpperCase()}`;
+    expect(parentIpId).not.toBe(parent.ipId);
+    const spy = vi.spyOn(StoryIPService.prototype, "registerJobAsDerivative");
+    const before = counts();
+    const res = await f.app.inject({ method: "POST", url: "/api/ip/register-job-evidence", headers: f.headers.OWNER_KEY,
+      payload: jobBody(parentIpId, "n10a-fresh-j") });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0]).toBe(parent.ipId);
+    const links = getRepos().story.findDerivativeLinksByJob("n10a-fresh-j");
+    expect(links).toHaveLength(1);
+    expect(links[0].parentIpId).toBe(parent.ipId);
+    expect(counts()).toEqual({ ...before, links: before.links + 1 });
+  });
+});
