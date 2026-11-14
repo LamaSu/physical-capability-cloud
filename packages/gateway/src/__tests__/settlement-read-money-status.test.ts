@@ -44,7 +44,7 @@ function reader(state: UnitState): SettlementUnitReader {
     pinSnapshot: async () => ({ asOfBlock: 100n, asOfBlockHash: SNAP_HASH, finality: "finalized" as const, logCompleteness: "complete" as const }),
     readAnchors: async () => ({ state, remainingClaimCount }),
     readRefundWitness: async () => ({}),
-    readZeroingDischargeBlock: async () => 999n,
+    readFinalizationWitness: async () => ({ allocation: { block: 99n, claimCount: 0n } }),
     readEconomics: async () => ({ amount: "1000000", feeAmount: "23500", recipient: "0xRecipient", token: "0xUSDC", assuranceTier: 1 }),
     readAssetIdentity: async () => ({ assetReality: "test" as const, registryId: "reg-1", revision: 3 }),
     readProvenance: async () => ({ availability: "AVAILABLE" as const, compositionRoot: "0xroot", revision: 1, leaves: [], nextCursor: null }),

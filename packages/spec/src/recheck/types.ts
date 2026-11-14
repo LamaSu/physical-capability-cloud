@@ -35,7 +35,7 @@ export interface RecheckField {
   readonly inputs?: readonly string[];
   readonly rule: string;
   readonly money: boolean;
-  readonly knownDrift?: "E2" | "E4.1" | "E4.2" | "E4.3";
+  readonly knownDrift?: "E2";
 }
 export interface RecheckDeployment extends SettlementDeploymentIdentity {
   readonly network: string;

@@ -27,6 +27,7 @@ import {
   deriveRefundReason,
   deriveFinalizedBlock,
   UnreachableUnitStateError,
+  type FinalizationWitness,
   type SettlementAnchors,
   type WindowConstants,
 } from "../settlement/unit-state-mapper.js";
@@ -149,7 +150,7 @@ describe("windows — #667 trap: 2 and 5 share ONE rule, backupLane discriminate
   });
 
   it("CHALLENGED uses challengedAt + APPEAL_WINDOW (a different anchor AND window)", () => {
-    expect(windowEndsAt({ state: UnitState.CHALLENGED, challengedAt: 2000n }, WINDOWS)).toBe(9200n);
+    expect(windowEndsAt({ state: UnitState.CHALLENGED, challengedAt: 2000n, emergencyAnchor: 0n }, WINDOWS)).toBe(9200n);
   });
 
   it("BACKUP_PENDING uses the assertion cutoff verbatim", () => {
@@ -200,19 +201,22 @@ describe("refundReason — five witnessed causes, all LOG-derived (rule 21)", ()
     );
   });
 
-  it("DEADLINE_RECLAIM is the ONLY cause a bare RefundAllocated may yield", () => {
-    // THEATRE NOTE (sol finding 6): this input is the RESULT of elimination
-    // supplied as a boolean, so it cannot prove the upstream scan ran. What it
-    // CAN pin is that the branch maps to exactly this cause and nothing else —
-    // so a future edit that widens it to another cause fails here.
-    expect(deriveRefundReason({ bareRefundAllocated: true })).toEqual({
-      value: "DEADLINE_RECLAIM",
-      source: "log",
-      completeness: "unknown",
+  it("T1 DEADLINE_RECLAIM is witnessed by Finalized(false, 4)", () => {
+    expect(deriveRefundReason({ finalized: { released: false, code: 4 } })).toEqual({
+      value: "DEADLINE_RECLAIM", source: "log", completeness: "unknown",
     });
-    // The caller (route) is what turns absence into UNKNOWN when the index is
-    // incomplete; that behaviour is asserted in settlement-read-routes.test.ts,
-    // NOT here, because this function cannot see index completeness.
+  });
+
+  it.each([0, 1, 5, 255])("T2 unknown refund code %i gives no cause", code => {
+    expect(deriveRefundReason({ finalized: { released: false, code } })).toBeNull();
+  });
+
+  it("T3 released code 4 gives no refund cause", () => {
+    expect(deriveRefundReason({ finalized: { released: true, code: 4 } })).toBeNull();
+  });
+
+  it("T4 a stale reader's elimination flag gives no cause", () => {
+    expect(deriveRefundReason({ bareRefundAllocated: true } as never)).toBeNull();
   });
 
   it("returns NULL when nothing witnesses a cause — and null is NOT a cause", () => {
@@ -231,60 +235,106 @@ describe("refundReason — five witnessed causes, all LOG-derived (rule 21)", ()
     expect(deriveRefundReason({ finalized: { released: true, code: 2 } })).toBeNull();
   });
 
-  it("every derived cause is marked source:'log' so it is never mistaken for staticcall", () => {
+  it("every derived cause is marked source:'log' so it is never mistaken for staticcall (T5)", () => {
     const all = [
       deriveRefundReason({ escalationResolved: { role: "APPEAL", upheld: false } }),
       deriveRefundReason({ escalationResolved: { role: "EMERGENCY", upheld: false } }),
       deriveRefundReason({ finalized: { released: false, code: 3 } }),
       deriveRefundReason({ finalized: { released: false, code: 2 } }),
-      deriveRefundReason({ bareRefundAllocated: true }),
+      deriveRefundReason({ finalized: { released: false, code: 4 } }),
     ];
     expect(all).toHaveLength(5);
     for (const r of all) expect(r?.source).toBe("log");
   });
 });
 
-describe("finalizedBlock — from the zeroing dischargeClaim, NEVER from Finalized (#666 F-2)", () => {
-  it("uses the block of the discharge that zeroed remainingClaimCount", () => {
-    expect(deriveFinalizedBlock(12345n)).toEqual({
-      value: 12345n,
-      source: "log",
-      completeness: "unknown",
+describe("finalizedBlock — allocation or last job-class discharge, NEVER Finalized", () => {
+  it("T6 inline settlement uses the allocation block", () => {
+    expect(deriveFinalizedBlock({ allocation: { block: 120n, claimCount: 0n } })).toEqual({
+      value: 120n, source: "log", completeness: "unknown",
     });
   });
 
-  it("is NULL while allocated (6/7) — no discharge has zeroed the count yet", () => {
-    expect(deriveFinalizedBlock(undefined)).toBeNull();
+  it("T7 deferred settlement uses the zeroing discharge", () => {
+    expect(deriveFinalizedBlock({ allocation: { block: 120n, claimCount: 2n }, zeroingDischargeBlock: 150n }))
+      .toEqual({ value: 150n, source: "log", completeness: "unknown" });
   });
 
-  it("finalizedBlock and finalState carry DIFFERENT confidence (rule 21)", () => {
-    // THEATRE FIX (sol finding 6): asserting only source==="log" would still
-    // pass if the value came from the FORBIDDEN `Finalized` event — that is a
-    // log too. What this pins instead is the ASYMMETRY the rule exists for:
-    // finalState is staticcall-authoritative and carries NO source envelope,
-    // while finalizedBlock is reorg-exposed and MUST carry one. If either side
-    // drifts toward the other's confidence level, this fails.
-    const fb = deriveFinalizedBlock(1n);
-    expect(fb).toEqual({ value: 1n, source: "log", completeness: "unknown" });
+  it("T8 outstanding claims have no settlement block", () => {
+    expect(deriveFinalizedBlock({ allocation: { block: 120n, claimCount: 2n } })).toBeNull();
+  });
 
+  it("T9 allocation and zeroing discharge in the same block are valid", () => {
+    expect(deriveFinalizedBlock({ allocation: { block: 120n, claimCount: 1n }, zeroingDischargeBlock: 120n }))
+      .toEqual({ value: 120n, source: "log", completeness: "unknown" });
+  });
+
+  it("T10 no witnesses gives no settlement block", () => {
+    expect(deriveFinalizedBlock({})).toBeNull();
+  });
+
+  it("T11a a zeroing discharge without allocation is inconsistent", () => {
+    expect(() => deriveFinalizedBlock({ zeroingDischargeBlock: 150n })).toThrow(InconsistentAnchorsError);
+  });
+
+  it("T11b inline allocation cannot have a zeroing discharge", () => {
+    expect(() => deriveFinalizedBlock({ allocation: { block: 120n, claimCount: 0n }, zeroingDischargeBlock: 150n }))
+      .toThrow(InconsistentAnchorsError);
+  });
+
+  it("T11c a zeroing discharge cannot precede allocation", () => {
+    expect(() => deriveFinalizedBlock({ allocation: { block: 120n, claimCount: 1n }, zeroingDischargeBlock: 119n }))
+      .toThrow(InconsistentAnchorsError);
+  });
+
+  it("T11d inline allocation cannot have a zeroing discharge in the same block", () => {
+    expect(() => deriveFinalizedBlock({ allocation: { block: 120n, claimCount: 0n }, zeroingDischargeBlock: 120n }))
+      .toThrow(InconsistentAnchorsError);
+  });
+
+  it.each([
+    ["negative claim count", { allocation: { block: 120n, claimCount: -1n } }],
+    ["number allocation block", { allocation: { block: 5, claimCount: 2n } }],
+    ["negative zeroing block", { allocation: { block: 120n, claimCount: 2n }, zeroingDischargeBlock: -1n }],
+    ["number zeroing block", { allocation: { block: 120n, claimCount: 2n }, zeroingDischargeBlock: 150 }],
+    ["negative allocation block", { allocation: { block: -1n, claimCount: 2n } }],
+    ["number claim count", { allocation: { block: 120n, claimCount: 2 } }],
+  ])("T12 rejects invalid witness boundary: %s", (_name, witness) => {
+    expect(() => deriveFinalizedBlock(witness as FinalizationWitness)).toThrow(InconsistentAnchorsError);
+  });
+
+  it("T13 the last job-class discharge is the reader's obligation", () => {
+    // The mapper cannot prove which discharge was the last job-class one;
+    // excluding bond and other auxiliary claims is the reader's obligation.
+    expect(deriveFinalizedBlock({ allocation: { block: 120n, claimCount: 3n }, zeroingDischargeBlock: 140n }))
+      .toEqual({ value: 140n, source: "log", completeness: "unknown" });
     const settled = view({ state: UnitState.SETTLED_RELEASED });
     expect(settled.finalState).toBe("SETTLED_RELEASED");
-    // finalState is a bare value, NOT a Sourced<T> — it is authoritative.
     expect(typeof settled.finalState).toBe("string");
     expect(settled.finalState).not.toHaveProperty("source");
   });
+});
 
-  it("CANNOT be satisfied by a Finalized-event block — the provenance is the caller's contract", () => {
-    // HONEST LIMIT, stated rather than papered over: deriveFinalizedBlock takes
-    // a bare block number and has NO way to verify the caller passed the block
-    // of the ZEROING dischargeClaim rather than an allocation-time `Finalized`
-    // block (sol finding 4). This test documents that the guarantee lives in
-    // the reader port, not here — so nobody reads the suite as proving it.
-    const allocationTimeBlock = 999n; // pretend this came from `Finalized`
-    const r = deriveFinalizedBlock(allocationTimeBlock);
-    expect(r?.value).toBe(999n); // it is accepted — that is the gap
-    expect(r?.source).toBe("log"); // and correctly marked reorg-exposed
-    // The port is what must only ever pass a zeroing-discharge block.
+describe("appeal window emergency anchor", () => {
+  it.each([
+    [0n, 9200n, "no emergency window"],
+    [5000n, 5000n, "capped"],
+    [9200n, 9200n, "equal to due, strict comparison"],
+    [9300n, 9200n, "after due"],
+    [1500n, 1500n, "D-1 empty window (ESC:1224-1227)"],
+  ] as const)("T14 anchor %s gives %s (%s)", (emergencyAnchor, expected, _description) => {
+    expect(windowEndsAt({ state: UnitState.CHALLENGED, challengedAt: 2000n, emergencyAnchor }, WINDOWS))
+      .toBe(expected);
+  });
+
+  it("T15 missing either appeal anchor fails closed", () => {
+    expect(windowEndsAt({ state: UnitState.CHALLENGED, challengedAt: 2000n }, WINDOWS)).toBeNull();
+    expect(windowEndsAt({ state: UnitState.CHALLENGED, emergencyAnchor: 5000n }, WINDOWS)).toBeNull();
+  });
+
+  it.each([UnitState.PRIMARY_ASSERTED, UnitState.BACKUP_ASSERTED])("T16 state %i challenge window is not capped", state => {
+    expect(windowEndsAt({ state, assertedAt: 1000n, emergencyAnchor: 1500n, backupLane: state === UnitState.BACKUP_ASSERTED }, WINDOWS))
+      .toBe(4600n);
   });
 });
 
