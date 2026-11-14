@@ -426,11 +426,10 @@ document.addEventListener('click', (e) => {
   }
 });
 
-// Feedback form: POST to /api/feedback (server-side: file save + Discord webhook)
-// AND parallel POST to formsubmit.co for direct email-to-team delivery.
-// formsubmit.co requires one-time recipient verification (a single click in
-// the first email it sends to the recipient); after that, every submission
-// goes through to the inbox.
+// Feedback form: submissions go to /api/feedback.
+// An email copy goes through formsubmit.co only when FEEDBACK_EMAIL is set.
+// Leave it empty until the capability.network role address forwards mail.
+// formsubmit.co then needs a one-time recipient verification click.
 const FEEDBACK_EMAIL = '';
 const fbForm = document.getElementById('feedback-form');
 const fbBtn = document.getElementById('fb-submit');
@@ -455,19 +454,22 @@ fbForm.addEventListener('submit', async (e) => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(apiPayload),
   });
-  const emailFD = new FormData();
-  emailFD.append('_subject', 'PCC feedback: ' + type + ' from ' + (email || 'anonymous'));
-  emailFD.append('_template', 'box');
-  emailFD.append('_captcha', 'false');
-  emailFD.append('email', email || 'anonymous');
-  emailFD.append('type', type);
-  emailFD.append('message', message);
-  emailFD.append('page', location.href);
-  emailFD.append('userAgent', navigator.userAgent);
-  const emailCall = fetch('https://formsubmit.co/ajax/' + FEEDBACK_EMAIL, {
-    method: 'POST',
-    body: emailFD,
-  }).catch(() => null);
+  let emailCall = null;
+  if (FEEDBACK_EMAIL.trim()) {
+    const emailFD = new FormData();
+    emailFD.append('_subject', 'PCC feedback: ' + type + ' from ' + (email || 'anonymous'));
+    emailFD.append('_template', 'box');
+    emailFD.append('_captcha', 'false');
+    emailFD.append('email', email || 'anonymous');
+    emailFD.append('type', type);
+    emailFD.append('message', message);
+    emailFD.append('page', location.href);
+    emailFD.append('userAgent', navigator.userAgent);
+    emailCall = fetch('https://formsubmit.co/ajax/' + FEEDBACK_EMAIL, {
+      method: 'POST',
+      body: emailFD,
+    }).catch(() => null);
+  }
 
   try {
     const apiRes = await apiCall;
