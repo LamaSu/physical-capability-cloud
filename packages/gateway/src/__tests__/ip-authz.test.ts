@@ -380,6 +380,16 @@ describe("A6 registrations require recorded rows", () => {
 });
 
 describe("A7 store reads fail closed", () => {
+  async function readFailedWithoutChanges(f: Fixture, action: Action) {
+    const termsUrl = `/api/ip/${f.ip}/licensing-terms`;
+    const prior = await f.app.inject({ url: termsUrl, headers: f.headers.OWNER_KEY });
+    expect(prior.statusCode, prior.body).toBe(200);
+    const res = await refuse(f, "OWNER_KEY", action, "read_failed", 503);
+    expect(res.body).not.toContain(READ_MARKER);
+    const after = await f.app.inject({ url: termsUrl, headers: f.headers.OWNER_KEY });
+    expect(after.statusCode, after.body).toBe(200);
+    expect(after.json()).toEqual(prior.json());
+  }
   it("capabilities.findById / register-capability", async () => {
     const f = await owned();
     vi.spyOn(getRepos().capabilities, "findById").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
@@ -401,6 +411,60 @@ describe("A7 store reads fail closed", () => {
     expect(res.json()).toEqual(bodies.read_failed);
     expect(res.body).not.toContain(READ_MARKER);
     expect(counts()).toEqual(before);
+  });
+  it("kernels.findById / register-capability", async () => {
+    const f = await owned();
+    const read = vi.spyOn(getRepos().kernels, "findById").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
+    await readFailedWithoutChanges(f, "register-capability");
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+  it("kernels.findById / register-job-evidence", async () => {
+    const f = await owned();
+    const read = vi.spyOn(getRepos().kernels, "findById").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
+    await readFailedWithoutChanges(f, "register-job-evidence");
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+  it("story.findIpByCapabilityId / register-capability", async () => {
+    const f = await owned();
+    const read = vi.spyOn(getRepos().story, "findIpByCapabilityId").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
+    await readFailedWithoutChanges(f, "register-capability");
+    expect(read).toHaveBeenCalledTimes(1);
+    read.mockRestore();
+    const retry = await f.app.inject({ method: "POST", ...request(f, "register-capability"), headers: f.headers.OWNER_KEY });
+    expect(retry.statusCode, retry.body).toBe(200);
+  });
+  it("jobs.findById / register-job-evidence", async () => {
+    const f = await owned();
+    const read = vi.spyOn(getRepos().jobs, "findById").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
+    await readFailedWithoutChanges(f, "register-job-evidence");
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+  it("story.findIpByCapabilityId / register-job-evidence", async () => {
+    const f = await owned();
+    const read = vi.spyOn(getRepos().story, "findIpByCapabilityId").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
+    await readFailedWithoutChanges(f, "register-job-evidence");
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+  it("story.findIpById / register-job-evidence parent owner", async () => {
+    const f = await owned();
+    const read = vi.spyOn(getRepos().story, "findIpById").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
+    await readFailedWithoutChanges(f, "register-job-evidence");
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+  it("story.findDerivativeLinksByJob / register-job-evidence", async () => {
+    const f = await owned();
+    const read = vi.spyOn(getRepos().story, "findDerivativeLinksByJob").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
+    await readFailedWithoutChanges(f, "register-job-evidence");
+    expect(read).toHaveBeenCalledTimes(1);
+    read.mockRestore();
+    const retry = await f.app.inject({ method: "POST", ...request(f, "register-job-evidence"), headers: f.headers.OWNER_KEY });
+    expect(retry.statusCode, retry.body).toBe(200);
+  });
+  it("story.findIpById / dispute", async () => {
+    const f = await owned();
+    const read = vi.spyOn(getRepos().story, "findIpById").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
+    await readFailedWithoutChanges(f, "dispute");
+    expect(read).toHaveBeenCalledTimes(1);
   });
 });
 
