@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
 import { randomUUID } from "node:crypto";
+import { Writable } from "node:stream";
 import { schema, sql } from "@pcc/store";
 import { getLicensingEngine, resetStoryIPService, StoryIPService } from "@pcc/contracts";
 import { provisionApiKey } from "../auth/api-key-auth.js";
@@ -53,6 +54,7 @@ type Caller = typeof callers[number];
 const actions = ["register-capability", "register-job-evidence", "set-licensing-terms", "dispute"] as const;
 type Action = typeof actions[number];
 let apps: FastifyInstance[];
+let logs: { level: number; msg: string; err?: { message?: string } }[];
 
 beforeEach(() => {
   vi.stubEnv("PCC_DB_PATH", ":memory:");
@@ -69,6 +71,7 @@ beforeEach(() => {
   initStore({ seed: false });
   __resetScopeCacheForTests();
   apps = [];
+  logs = [];
 });
 afterEach(async () => {
   for (const app of apps) await app.close();
@@ -80,7 +83,11 @@ afterEach(async () => {
 });
 
 async function buildApp(noGate = false) {
-  const app = Fastify({ logger: false });
+  const stream = new Writable({ write(chunk, _encoding, done) {
+    for (const line of chunk.toString().split("\n")) if (line) logs.push(JSON.parse(line));
+    done();
+  } });
+  const app = Fastify({ logger: { level: "warn", stream } });
   apps.push(app);
   if (!noGate) {
     app.decorateRequest("userId", null);
@@ -184,6 +191,11 @@ function spies() {
 function counts() {
   return { registrations: getRepos().story.listIpRegistrations().length,
     links: getStore().db.select().from(schema.storyDerivativeLinks).all().length };
+}
+function expectWarning(message: string, marker: string) {
+  const warnings = logs.filter(log => log.level === 40);
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0]).toMatchObject({ level: 40, msg: message, err: { message: marker } });
 }
 async function refuse(f: Fixture, caller: Caller, action: Action, error: Refusal | "api_key_required", status = 403, req = request(f, action)) {
   const calls = spies();
@@ -351,6 +363,7 @@ describe("A6 registrations require recorded rows", () => {
     expect(res.statusCode, res.body).toBe(500);
     expect(res.json()).toEqual(bodies[action === "register-capability" ? "registration_not_recorded" : "derivative_not_recorded"]);
     expect(res.body).not.toContain(marker);
+    expectWarning(action === "register-capability" ? "ip register-capability: registration row not recorded" : "ip register-job-evidence: derivative link not recorded", marker);
     expect(counts()).toEqual(before);
     if (action === "register-capability") {
       const get = await f.app.inject({ url: `/api/ip/capability/${f.freshCap.id}`, headers: f.headers.OWNER_KEY });
@@ -398,12 +411,14 @@ describe("A7 store reads fail closed", () => {
     vi.spyOn(getRepos().capabilities, "findById").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
     const res = await refuse(f, "OWNER_KEY", "register-capability", "read_failed", 503);
     expect(res.body).not.toContain(READ_MARKER);
+    expectWarning("ip register-capability: capability read failed", READ_MARKER);
   });
   it("story.findIpById / set-licensing-terms", async () => {
     const f = await owned();
     vi.spyOn(getRepos().story, "findIpById").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
     const res = await refuse(f, "OWNER_KEY", "set-licensing-terms", "read_failed", 503);
     expect(res.body).not.toContain(READ_MARKER);
+    expectWarning("ip set-licensing-terms: owner read failed", READ_MARKER);
   });
   it("confirm story.findIpById / GET capability", async () => {
     const f = await owned();
@@ -413,6 +428,7 @@ describe("A7 store reads fail closed", () => {
     expect(res.statusCode, res.body).toBe(503);
     expect(res.json()).toEqual(bodies.read_failed);
     expect(res.body).not.toContain(READ_MARKER);
+    expectWarning("ip GET capability: registration read failed", READ_MARKER);
     expect(counts()).toEqual(before);
   });
   it("kernels.findById / register-capability", async () => {
@@ -420,18 +436,21 @@ describe("A7 store reads fail closed", () => {
     const read = vi.spyOn(getRepos().kernels, "findById").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
     await readFailedWithoutChanges(f, "register-capability");
     expect(read).toHaveBeenCalledTimes(1);
+    expectWarning("ip register-capability: kernel read failed", READ_MARKER);
   });
   it("kernels.findById / register-job-evidence", async () => {
     const f = await owned();
     const read = vi.spyOn(getRepos().kernels, "findById").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
     await readFailedWithoutChanges(f, "register-job-evidence");
     expect(read).toHaveBeenCalledTimes(1);
+    expectWarning("ip register-job-evidence: kernel read failed", READ_MARKER);
   });
   it("story.findIpByCapabilityId / register-capability", async () => {
     const f = await owned();
     const read = vi.spyOn(getRepos().story, "findIpByCapabilityId").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
     await readFailedWithoutChanges(f, "register-capability");
     expect(read).toHaveBeenCalledTimes(1);
+    expectWarning("ip register-capability: registration read failed", READ_MARKER);
     read.mockRestore();
     const retry = await f.app.inject({ method: "POST", ...request(f, "register-capability"), headers: f.headers.OWNER_KEY });
     expect(retry.statusCode, retry.body).toBe(200);
@@ -441,24 +460,28 @@ describe("A7 store reads fail closed", () => {
     const read = vi.spyOn(getRepos().jobs, "findById").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
     await readFailedWithoutChanges(f, "register-job-evidence");
     expect(read).toHaveBeenCalledTimes(1);
+    expectWarning("ip register-job-evidence: job read failed", READ_MARKER);
   });
   it("story.findIpByCapabilityId / register-job-evidence", async () => {
     const f = await owned();
     const read = vi.spyOn(getRepos().story, "findIpByCapabilityId").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
     await readFailedWithoutChanges(f, "register-job-evidence");
     expect(read).toHaveBeenCalledTimes(1);
+    expectWarning("ip register-job-evidence: parent IP read failed", READ_MARKER);
   });
   it("story.findIpById / register-job-evidence parent owner", async () => {
     const f = await owned();
     const read = vi.spyOn(getRepos().story, "findIpById").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
     await readFailedWithoutChanges(f, "register-job-evidence");
     expect(read).toHaveBeenCalledTimes(1);
+    expectWarning("ip register-job-evidence: parent owner read failed", READ_MARKER);
   });
   it("story.findDerivativeLinksByJob / register-job-evidence", async () => {
     const f = await owned();
     const read = vi.spyOn(getRepos().story, "findDerivativeLinksByJob").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
     await readFailedWithoutChanges(f, "register-job-evidence");
     expect(read).toHaveBeenCalledTimes(1);
+    expectWarning("ip register-job-evidence: derivative link read failed", READ_MARKER);
     read.mockRestore();
     const retry = await f.app.inject({ method: "POST", ...request(f, "register-job-evidence"), headers: f.headers.OWNER_KEY });
     expect(retry.statusCode, retry.body).toBe(200);
@@ -468,6 +491,7 @@ describe("A7 store reads fail closed", () => {
     const read = vi.spyOn(getRepos().story, "findIpById").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
     await readFailedWithoutChanges(f, "dispute");
     expect(read).toHaveBeenCalledTimes(1);
+    expectWarning("ip dispute: owner read failed", READ_MARKER);
   });
 });
 

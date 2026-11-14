@@ -147,7 +147,8 @@ export async function ipRoutes(app: FastifyInstance) {
       try {
         repos = getRepos();
         cap = repos.capabilities.findById(capability.id);
-      } catch {
+      } catch (err) {
+        req.log.warn({ err }, "ip register-capability: capability read failed");
         return reply.code(503).send(IP_REPLIES.read_failed);
       }
       if (!cap) return reply.code(404).send(IP_REPLIES.capability_not_found);
@@ -155,7 +156,8 @@ export async function ipRoutes(app: FastifyInstance) {
       let owner: string | null;
       try {
         owner = walletOwner(repos.kernels.findById(cap.kernelId)?.operatorAddress);
-      } catch {
+      } catch (err) {
+        req.log.warn({ err }, "ip register-capability: kernel read failed");
         return reply.code(503).send(IP_REPLIES.read_failed);
       }
       if (owner === null) return reply.code(403).send(IP_REPLIES.ip_owner_unknown);
@@ -169,7 +171,8 @@ export async function ipRoutes(app: FastifyInstance) {
           return reply.code(409).send(IP_REPLIES.already_registered);
         }
         registeringCapabilities.add(cap.id);
-      } catch {
+      } catch (err) {
+        req.log.warn({ err }, "ip register-capability: registration read failed");
         return reply.code(503).send(IP_REPLIES.read_failed);
       }
 
@@ -193,7 +196,8 @@ export async function ipRoutes(app: FastifyInstance) {
             registeredAt: reg.registeredAt,
           });
           if (!recorded) return reply.code(500).send(IP_REPLIES.registration_not_recorded);
-        } catch {
+        } catch (err) {
+          req.log.warn({ err }, "ip register-capability: registration row not recorded");
           return reply.code(500).send(IP_REPLIES.registration_not_recorded);
         }
 
@@ -238,14 +242,16 @@ export async function ipRoutes(app: FastifyInstance) {
       try {
         repos = getRepos();
         job = repos.jobs.findById(jobId);
-      } catch {
+      } catch (err) {
+        req.log.warn({ err }, "ip register-job-evidence: job read failed");
         return reply.code(503).send(IP_REPLIES.read_failed);
       }
       if (!job) return reply.code(404).send(IP_REPLIES.job_not_found);
       let owner: string | null;
       try {
         owner = walletOwner(repos.kernels.findById(job.kernelId)?.operatorAddress);
-      } catch {
+      } catch (err) {
+        req.log.warn({ err }, "ip register-job-evidence: kernel read failed");
         return reply.code(503).send(IP_REPLIES.read_failed);
       }
       if (owner === null) return reply.code(403).send(IP_REPLIES.ip_owner_unknown);
@@ -257,7 +263,8 @@ export async function ipRoutes(app: FastifyInstance) {
       let parent: ReturnType<ReturnType<typeof getRepos>["story"]["findIpByCapabilityId"]>;
       try {
         parent = repos.story.findIpByCapabilityId(job.capabilityId);
-      } catch {
+      } catch (err) {
+        req.log.warn({ err }, "ip register-job-evidence: parent IP read failed");
         return reply.code(503).send(IP_REPLIES.read_failed);
       }
       if (!parent || parent.ipId.toLowerCase() !== parentIpId.toLowerCase()) {
@@ -266,7 +273,8 @@ export async function ipRoutes(app: FastifyInstance) {
       let parentOwner: string | null;
       try {
         parentOwner = recordedIpOwner(repos, parent.ipId);
-      } catch {
+      } catch (err) {
+        req.log.warn({ err }, "ip register-job-evidence: parent owner read failed");
         return reply.code(503).send(IP_REPLIES.read_failed);
       }
       if (parentOwner !== owner) return reply.code(403).send(IP_REPLIES.not_parent_owner);
@@ -275,7 +283,8 @@ export async function ipRoutes(app: FastifyInstance) {
           return reply.code(409).send(IP_REPLIES.already_registered);
         }
         registeringJobs.add(job.id);
-      } catch {
+      } catch (err) {
+        req.log.warn({ err }, "ip register-job-evidence: derivative link read failed");
         return reply.code(503).send(IP_REPLIES.read_failed);
       }
 
@@ -300,7 +309,8 @@ export async function ipRoutes(app: FastifyInstance) {
             linkedAt: link.linkedAt,
           });
           if (!recorded) return reply.code(500).send(IP_REPLIES.derivative_not_recorded);
-        } catch {
+        } catch (err) {
+          req.log.warn({ err }, "ip register-job-evidence: derivative link not recorded");
           return reply.code(500).send(IP_REPLIES.derivative_not_recorded);
         }
 
@@ -354,7 +364,8 @@ export async function ipRoutes(app: FastifyInstance) {
       let owner: string | null;
       try {
         owner = recordedIpOwner(getRepos(), body.ipId);
-      } catch {
+      } catch (err) {
+        req.log.warn({ err }, "ip set-licensing-terms: owner read failed");
         return reply.code(503).send(IP_REPLIES.read_failed);
       }
       if (owner === null) return reply.code(403).send(IP_REPLIES.ip_owner_unknown);
@@ -562,7 +573,8 @@ export async function ipRoutes(app: FastifyInstance) {
         let recorded: ReturnType<ReturnType<typeof getRepos>["story"]["findIpById"]>;
         try {
           recorded = getRepos().story.findIpById(reg.ipId);
-        } catch {
+        } catch (err) {
+          req.log.warn({ err }, "ip GET capability: registration read failed");
           return reply.code(503).send(IP_REPLIES.read_failed);
         }
         if (!recorded || recorded.capabilityId !== capabilityId) {
@@ -604,7 +616,8 @@ export async function ipRoutes(app: FastifyInstance) {
       let owner: string | null;
       try {
         owner = recordedIpOwner(getRepos(), ipId);
-      } catch {
+      } catch (err) {
+        req.log.warn({ err }, "ip dispute: owner read failed");
         return reply.code(503).send(IP_REPLIES.read_failed);
       }
       if (owner === null) return reply.code(403).send(IP_REPLIES.ip_owner_unknown);
