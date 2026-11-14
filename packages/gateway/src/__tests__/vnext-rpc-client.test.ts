@@ -29,3 +29,19 @@ describe("V-next read-only RPC", () => {
     } finally { await tearDownFixture(f); }
   });
 });
+
+
+describe("createVNextChainReads.latestBlock", () => {
+  it("RLB1: latestBlock reads the latest header and closes transport errors", async () => {
+    const calls: unknown[] = [];
+    __setVNextTransportForTest(custom({ request: async request => {
+      calls.push(request);
+      return { number: "0x64", hash: B.hash, timestamp: "0x6b49d200", transactions: [] };
+    } }, { retryCount: 0 }));
+    const reads = createVNextChainReads("https://rpc.invalid");
+    expect(await reads.latestBlock()).toEqual({ number: 100n, hash: B.hash, timestamp: 1800000000n });
+    expect(calls).toEqual([{ method: "eth_getBlockByNumber", params: ["latest", false] }]);
+    __setVNextTransportForTest(custom({ request: async () => { throw new Error("transport"); } }, { retryCount: 0 }));
+    await expect(createVNextChainReads("https://rpc.invalid").latestBlock()).rejects.toThrow(/^chain_read_failed$/);
+  });
+});

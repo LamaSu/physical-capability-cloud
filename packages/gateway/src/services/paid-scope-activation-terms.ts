@@ -49,6 +49,7 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } fr
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { isTestProcess } from "./settlement-mode.js";
+import { servedPrepareTtlMs } from "./funding-prepare-ttl.js";
 
 /** reconcilePaidScope's two required inputs besides the record; null where no source supplies one. */
 export interface PaidScopeActivationTerms {
@@ -280,12 +281,9 @@ export function configuredVNextDeploymentRecord(packageRoot?: string | null): VN
   return root === null ? null : vnextDeploymentRecord(root, network);
 }
 
-/**
- * The post-activation TTL S1.1's prepared funding terms give the scope's job, or null. S1.1 (the
- * prepare step) does not exist yet, so there are no prepared terms to read: null.
- */
-export function preparedActivationTtlMs(_scope: ActivationScope): number | null {
-  return null;
+/** The post-activation TTL of the scope's served prepare (funding-prepare-ttl.ts), or null without one. */
+export function preparedActivationTtlMs(scope: ActivationScope): number | null {
+  return servedPrepareTtlMs(scope.id);
 }
 
 let testSource: PaidScopeActivationTermsSource | null = null;

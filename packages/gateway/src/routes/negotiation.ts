@@ -1,3 +1,4 @@
+import { BuyerFundingSelectionError } from "../services/buyer-funding-prepare.js";
 /**
  * Negotiation Session API — the structured pre-lock-in protocol
  * between a user agent and an operator's kernel.
@@ -687,6 +688,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
         // ── Wire: COMMITTED -> create escrow + job + scope ────────────
         let paidJobResult: Awaited<ReturnType<typeof createJobFromSession>> | null = null;
         let settlementError: string | null = null;
+        let selectionRefusal: string | null = null;
 
         try {
           const committedRow = db.select().from(negotiationSessions)
@@ -698,6 +700,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
         } catch (err) {
           settlementError = err instanceof Error ? err.message : String(err);
           console.warn("[negotiation] Paid job flow wiring failed:", settlementError);
+          selectionRefusal = err instanceof BuyerFundingSelectionError ? err.code : null;
         }
 
         // ── Money-path guard: never return a false 200 in REAL settlement ──
@@ -718,7 +721,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
         // guarded POST /retry-settlement (never double-mints) and DELETE (cancel) provide
         // the recovery path this state was missing. On the money path, blocking a double
         // escrow still outranks un-sticking the session.
-        if (!isMockSettlement() && (settlementError || !paidJobResult?.escrowAddress)) {
+        if (selectionRefusal !== null || (!isMockSettlement() && (settlementError || (!paidJobResult?.escrowAddress && paidJobResult?.fundingMode !== "vnext_buyer")))) {
           // Stamp the failure class so the retry can distinguish a provably-no-escrow
           // pre-flight failure (safe to re-mint) from an ambiguous one (fail closed).
           const failTransitions = [
@@ -728,7 +731,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
               to: "settlement_failed" as SessionStatus,
               timestamp: new Date().toISOString(),
               actor: "system",
-              reason: settlementFailureClass(settlementError),
+              reason: selectionRefusal !== null ? SETTLEMENT_FAILED_PREFLIGHT : settlementFailureClass(settlementError),
             },
           ];
           db.update(negotiationSessions)
@@ -756,9 +759,12 @@ export async function negotiationRoutes(app: FastifyInstance) {
           escrowId: paidJobResult?.escrowId ?? null,
           escrowAddress: paidJobResult?.escrowAddress ?? null,
           escrowStatus: paidJobResult?.escrowStatus ?? null,
-          message: paidJobResult
+          message: paidJobResult?.fundingMode === "vnext_buyer"
+            ? "Session committed. Job and execution scope created. The buyer funds the escrow after the kernel's operator accepts (POST /api/buyer-funding/scopes/:scopeId/prepare)."
+            : paidJobResult
             ? "Session committed. Job, escrow, and execution scope created."
             : "Session committed. Job created and ready for operator processing.",
+          ...(paidJobResult?.fundingMode === "vnext_buyer" ? { fundingMode: "vnext_buyer" } : {}),
         };
       } catch {
         return reply.status(500).send({ error: "Failed to commit session" });
@@ -859,6 +865,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
 
         let paidJobResult: Awaited<ReturnType<typeof createJobFromSession>> | null = null;
         let settlementError: string | null = null;
+        let selectionRefusal: string | null = null;
         try {
           const committedRow = db.select().from(negotiationSessions)
             .where(eq(negotiationSessions.id, req.params.id))
@@ -867,16 +874,17 @@ export async function negotiationRoutes(app: FastifyInstance) {
         } catch (err) {
           settlementError = err instanceof Error ? err.message : String(err);
           console.warn("[negotiation] retry-settlement wiring failed:", settlementError);
+          selectionRefusal = err instanceof BuyerFundingSelectionError ? err.code : null;
         }
 
         // Same money-path guard as /commit: no false success in REAL mode.
-        if (!isMockSettlement() && (settlementError || !paidJobResult?.escrowAddress)) {
+        if (selectionRefusal !== null || (!isMockSettlement() && (settlementError || (!paidJobResult?.escrowAddress && paidJobResult?.fundingMode !== "vnext_buyer")))) {
           const failTransitions = [...retryTransitions, {
             from: "committed" as SessionStatus,
             to: "settlement_failed" as SessionStatus,
             timestamp: new Date().toISOString(),
             actor: "system",
-            reason: settlementFailureClass(settlementError),
+            reason: selectionRefusal !== null ? SETTLEMENT_FAILED_PREFLIGHT : settlementFailureClass(settlementError),
           }];
           db.update(negotiationSessions)
             .set({ status: "settlement_failed", transitions: failTransitions as any })
@@ -903,6 +911,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
           escrowAddress: paidJobResult?.escrowAddress ?? null,
           escrowStatus: paidJobResult?.escrowStatus ?? null,
           message: "Settlement retried. Job, escrow, and execution scope created.",
+          ...(paidJobResult?.fundingMode === "vnext_buyer" ? { fundingMode: "vnext_buyer" } : {}),
         };
       } catch {
         return reply.status(500).send({ error: "Failed to retry settlement" });
