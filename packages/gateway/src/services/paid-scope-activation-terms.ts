@@ -11,21 +11,25 @@
  *                        Any PCC_VNEXT_RECORD_LABEL config is refused, including an empty value.
  *                        Never paid-job-flow's resolveChainId, @pcc/contracts getDeployment or
  *                        IDENTITY_REGISTRY_CHAIN_ID (ruling 4). The verifier (S1.2) reads the same record.
- *   postActivationTtlMs  How long a scope stays live once activated: S1.1's prepared funding terms
- *                        for the scope's job, bounded so the work ends before the escrow's primary
- *                        verdict is due (reclaimAt − 9 days; ruling 5 (B)).
+ *   postActivationTtlMs  How long a scope stays live once activated: the TTL of the scope's served
+ *                        funding prepare (S1.1, funding-prepare-ttl.ts), reconcileUntil less the
+ *                        scope's expiry, where reconcileUntil = reclaimAt − max(challenge + appeal +
+ *                        backup windows, finality); so the work ends before the escrow's primary
+ *                        verdict is due (ruling 5 (B); prepareBuyerFunding, buyer-funding-prepare.ts).
  *
  * The configured expectedChainId is non-null only when PCC_VNEXT_RECORD_NETWORK names a valid
  * CANONICAL.json under deployments/vnext/ (base-sepolia is the only committed record since #653,
  * chain 84532); there is no default. A testnet-only record (scheduleTestnetOnly, as base-sepolia's
  * is) resolves only with PCC_VNEXT_ALLOW_TESTNET_RECORD=1 (R-c), and its terms carry testnetOnly,
- * so reconcile admits only a buyer on the PCC_VNEXT_TESTNET_BUYERS list. postActivationTtlMs stays
- * null until S1.1 exists. reconcilePaidScope refuses funding_record_store_unavailable before
- * expected_chain_unavailable or activation_ttl_unavailable. On the accept path, both inputs are
- * read only with a funding-record store (test processes only, until S1.2), so production answers
- * exactly as before and never reads either. A test process with a store,
- * PCC_VNEXT_RECORD_NETWORK=base-sepolia, PCC_VNEXT_ALLOW_TESTNET_RECORD=1 and no installed test
- * source resolves the chain but is refused activation_ttl_unavailable.
+ * so reconcile admits only a buyer on the PCC_VNEXT_TESTNET_BUYERS list. postActivationTtlMs is
+ * null until the scope has a served prepare. reconcilePaidScope refuses
+ * funding_record_store_unavailable before expected_chain_unavailable or activation_ttl_unavailable.
+ * Both inputs are read only for a scope with a verification record: on the accept path, in the
+ * verifier and the sweep, and in the job-funding read model. Since NS-2 (Q9) the funding-record
+ * store is live outside a test process too, so production reads both inputs whenever a scope has
+ * a record. A test process with a store, PCC_VNEXT_RECORD_NETWORK=base-sepolia,
+ * PCC_VNEXT_ALLOW_TESTNET_RECORD=1 and no installed test source resolves the chain, and is refused
+ * activation_ttl_unavailable unless the scope has a served prepare.
  *
  * The whole validated record is exported too, for S1.1 and S1.2: configuredVNextDeploymentRecord
  * (the configured directory) and vnextDeploymentRecord (a given one). It carries chainId; factory,
