@@ -20,6 +20,7 @@ vi.mock("../middleware/security-hardening.js", () => ({ canProvision: () => true
 const OWNER = EVM_A.address.toLowerCase();
 const OTHER = EVM_B.address.toLowerCase();
 const ADMIN_SECRET = "n10a-admin-secret";
+const READ_MARKER = "N10A-READ-FAILURE-MARKER";
 const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
 // Literal expectations keep these cells independent of the new ownership module, including red-before.
 const bodies = {
@@ -337,7 +338,7 @@ describe("A5 body addresses and parent ownership", () => {
 describe("A6 registrations require recorded rows", () => {
   it.each(["register-capability", "register-job-evidence"] as const)("%s / failed insert hides result and retry succeeds", async action => {
     const f = await owned();
-    const marker = "N10A-INSERT-PRIVATE-MARKER";
+    const marker = "N10A-INSERT-FAILURE-MARKER";
     const before = counts();
     const persist = action === "register-capability" ? vi.spyOn(getRepos().story, "insertIpRegistration") : vi.spyOn(getRepos().story, "insertDerivativeLink");
     persist.mockImplementationOnce(() => { throw new Error(marker); });
@@ -379,24 +380,24 @@ describe("A6 registrations require recorded rows", () => {
 describe("A7 store reads fail closed", () => {
   it("capabilities.findById / register-capability", async () => {
     const f = await owned();
-    vi.spyOn(getRepos().capabilities, "findById").mockImplementationOnce(() => { throw new Error("N10A-READ-PRIVATE-MARKER"); });
+    vi.spyOn(getRepos().capabilities, "findById").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
     const res = await refuse(f, "OWNER_KEY", "register-capability", "read_failed", 503);
-    expect(res.body).not.toContain("N10A-READ-PRIVATE-MARKER");
+    expect(res.body).not.toContain(READ_MARKER);
   });
   it("story.findIpById / set-licensing-terms", async () => {
     const f = await owned();
-    vi.spyOn(getRepos().story, "findIpById").mockImplementationOnce(() => { throw new Error("N10A-READ-PRIVATE-MARKER"); });
+    vi.spyOn(getRepos().story, "findIpById").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
     const res = await refuse(f, "OWNER_KEY", "set-licensing-terms", "read_failed", 503);
-    expect(res.body).not.toContain("N10A-READ-PRIVATE-MARKER");
+    expect(res.body).not.toContain(READ_MARKER);
   });
   it("confirm story.findIpById / GET capability", async () => {
     const f = await owned();
     const before = counts();
-    vi.spyOn(getRepos().story, "findIpById").mockImplementationOnce(() => { throw new Error("N10A-READ-PRIVATE-MARKER"); });
+    vi.spyOn(getRepos().story, "findIpById").mockImplementationOnce(() => { throw new Error(READ_MARKER); });
     const res = await f.app.inject({ url: `/api/ip/capability/${f.cap.id}`, headers: f.headers.OWNER_KEY });
     expect(res.statusCode, res.body).toBe(503);
     expect(res.json()).toEqual(bodies.read_failed);
-    expect(res.body).not.toContain("N10A-READ-PRIVATE-MARKER");
+    expect(res.body).not.toContain(READ_MARKER);
     expect(counts()).toEqual(before);
   });
 });
