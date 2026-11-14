@@ -43,6 +43,9 @@ const bodies = {
   registration_not_recorded: { error: "registration_not_recorded", message: "The gateway couldn't record this IP registration, so it doesn't count as registered. Try again." },
   derivative_not_recorded: { error: "derivative_not_recorded", message: "The gateway couldn't record this job's derivative link, so it doesn't count as registered. Try again." },
   read_failed: { error: "read_failed", message: "The gateway couldn't read the records that say who owns this IP. Try again shortly." },
+  capability_fields_required: { error: "designerAddress and designerName are required" },
+  job_fields_required: { error: "parentIpId, jobId, evidenceBundleHash, operatorAddress, and operatorName are required" },
+  terms_fields_required: { error: "ipId and designerAddress are required" },
 };
 type Refusal = keyof typeof bodies;
 const callers = ["ADMIN", "OWNER_KEY", "OWNER_BEARER", "OWNER_COOKIE", "CLAIMED", "STRANGER", "ANON"] as const;
@@ -658,5 +661,19 @@ describe("A13 letter case on register-job-evidence", () => {
     expect(links).toHaveLength(1);
     expect(links[0].parentIpId).toBe(parent.ipId);
     expect(counts()).toEqual({ ...before, links: before.links + 1 });
+  });
+});
+
+describe("A14 non-string addresses answer 400", () => {
+  it.each([
+    { action: "register-capability", field: "designerAddress", error: "capability_fields_required" },
+    { action: "register-job-evidence", field: "operatorAddress", error: "job_fields_required" },
+    { action: "register-job-evidence", field: "parentIpId", error: "job_fields_required" },
+    { action: "set-licensing-terms", field: "designerAddress", error: "terms_fields_required" },
+  ] as const)("$field / $action", async ({ action, field, error }) => {
+    const f = await owned();
+    const req = request(f, action);
+    req.payload[field] = 42;
+    await refuse(f, "OWNER_KEY", action, error, 400, req);
   });
 });

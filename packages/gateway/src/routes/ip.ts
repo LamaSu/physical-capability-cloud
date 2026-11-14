@@ -134,7 +134,7 @@ export async function ipRoutes(app: FastifyInstance) {
       if (!capability?.id || !capability?.name || !capability?.type || !capability?.kernelId) {
         return reply.code(400).send({ error: "capability.id, capability.name, capability.type, and capability.kernelId are required" });
       }
-      if (!designerAddress || !designerName) {
+      if (!designerAddress || !designerName || typeof designerAddress !== "string") {
         return reply.code(400).send({ error: "designerAddress and designerName are required" });
       }
 
@@ -223,7 +223,7 @@ export async function ipRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const { parentIpId, jobId, evidenceBundleHash, operatorAddress, operatorName, ipfsCid } = req.body;
 
-      if (!parentIpId || !jobId || !evidenceBundleHash || !operatorAddress || !operatorName) {
+      if (!parentIpId || !jobId || !evidenceBundleHash || !operatorAddress || !operatorName || typeof parentIpId !== "string" || typeof operatorAddress !== "string") {
         return reply.code(400).send({
           error: "parentIpId, jobId, evidenceBundleHash, operatorAddress, and operatorName are required",
         });
@@ -343,7 +343,7 @@ export async function ipRoutes(app: FastifyInstance) {
     "/api/ip/set-licensing-terms",
     async (req, reply) => {
       const body = req.body;
-      if (!body?.ipId || !body?.designerAddress) {
+      if (!body?.ipId || !body?.designerAddress || typeof body.designerAddress !== "string") {
         return reply.code(400).send({ error: "ipId and designerAddress are required" });
       }
 
