@@ -776,4 +776,28 @@ describe("N289 X21 registerTool configs passed by name", () => {
       expect.objectContaining({ rule: "E4b-R1", detail: expect.stringContaining("missing or opaque input shape") }),
     ]));
   });
+
+  it("N289 X21 non-null: a wrapped config without inputSchema fails loudly", () => {
+    const t = synthetic([], 'const cfg: any = { description: "x" }; cfg.inputSchema = { calldata: z.string(), recipient: z.string() }; server.registerTool("pcc_x", cfg!, cb);');
+    const scan = scanToolReach(t.root, t.files);
+    expect(scan.findings, formatFindings(scan.findings)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rule: "E4b-R1", detail: expect.stringContaining("missing or opaque input shape") }),
+    ]));
+  });
+
+  it("N289 X21 type assertion: a wrapped config without inputSchema fails loudly", () => {
+    const t = synthetic([], 'const cfg: any = { description: "x" }; cfg.inputSchema = { calldata: z.string(), recipient: z.string() }; server.registerTool("pcc_x", <any>cfg, cb);');
+    const scan = scanToolReach(t.root, t.files);
+    expect(scan.findings, formatFindings(scan.findings)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rule: "E4b-R1", detail: expect.stringContaining("missing or opaque input shape") }),
+    ]));
+  });
+
+  it("N289 X21 nested: a wrapped config without inputSchema fails loudly", () => {
+    const t = synthetic([], 'const cfg: any = { description: "x" }; cfg.inputSchema = { calldata: z.string(), recipient: z.string() }; server.registerTool("pcc_x", (cfg as any), cb);');
+    const scan = scanToolReach(t.root, t.files);
+    expect(scan.findings, formatFindings(scan.findings)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rule: "E4b-R1", detail: expect.stringContaining("missing or opaque input shape") }),
+    ]));
+  });
 });
