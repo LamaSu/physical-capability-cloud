@@ -1,4 +1,3 @@
-import { BuyerFundingSelectionError } from "../services/buyer-funding-prepare.js";
 /**
  * Negotiation Session API — the structured pre-lock-in protocol
  * between a user agent and an operator's kernel.
@@ -51,6 +50,7 @@ import {
 // Liveness gate lives in one shared module so the A2A commit path (a2a-tasks.ts)
 // enforces the identical rule — see session-liveness.ts (N1).
 import { assertSessionLive as assertLive } from "./session-liveness.js";
+import { BuyerFundingSelectionError } from "../services/buyer-funding-prepare.js";
 
 /**
  * Serialize a WorkflowChallenge for the wire — converts the BigInt
@@ -910,7 +910,9 @@ export async function negotiationRoutes(app: FastifyInstance) {
           escrowId: paidJobResult?.escrowId ?? null,
           escrowAddress: paidJobResult?.escrowAddress ?? null,
           escrowStatus: paidJobResult?.escrowStatus ?? null,
-          message: "Settlement retried. Job, escrow, and execution scope created.",
+          message: paidJobResult?.fundingMode === "vnext_buyer"
+            ? "Settlement retried. Job and execution scope created. The buyer funds the escrow after the kernel's operator accepts (POST /api/buyer-funding/scopes/:scopeId/prepare)."
+            : "Settlement retried. Job, escrow, and execution scope created.",
           ...(paidJobResult?.fundingMode === "vnext_buyer" ? { fundingMode: "vnext_buyer" } : {}),
         };
       } catch {

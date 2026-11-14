@@ -175,7 +175,7 @@ export function commitBuyerFundingSelection(kernelId: string, buyer: string): st
 }
 
 export type FundingPrepareRow = typeof schema.fundingPrepares.$inferSelect;
-type PrepareResult = { kind: "answer"; row: FundingPrepareRow } | { kind: "refused"; code: BuyerFundingPrepareRefusal };
+type PrepareResult = { kind: "answer"; row: FundingPrepareRow; atMs?: number } | { kind: "refused"; code: BuyerFundingPrepareRefusal };
 const refused = (code: BuyerFundingPrepareRefusal): PrepareResult => ({ kind: "refused", code });
 export const fundingPrepareRow = (scopeId: string) => getStore().db.select().from(schema.fundingPrepares)
   .where(eq(schema.fundingPrepares.scopeId, scopeId)).get();
@@ -304,6 +304,8 @@ export async function prepareBuyerFunding(scopeId: string, deps: {
     const current = tx.select().from(schema.executionScopes).where(eq(schema.executionScopes.id, scopeId)).get();
     if (!current || current.status !== SCOPE_AWAITING_FUNDING) return refused("scope_not_awaiting_funding");
     if (scopeExpiryMs(current.expiresAt) <= Date.now()) return refused("scope_expired");
+    const atMs = (deps.now ?? (() => new Date()))().getTime();
+    if (atMs + Number(SERVE_MARGIN_SECONDS) * 1000 > row.expiry * 1000) return refused("window_too_short");
     const stopNow = emergencyStopState(current.kernelId);
     if (stopNow !== "clear") return refused(stopNow === "stopped" ? "kernel_emergency_stopped" : "policy_unavailable");
     try { if (buyerFundingSelection(current.kernelId, "prepare") !== selected) return refused("buyer_funding_not_selected"); }
@@ -319,7 +321,7 @@ export async function prepareBuyerFunding(scopeId: string, deps: {
     tx.insert(schema.escrowMilestones).values({
       id: `ms-${randomUUID().slice(0, 12)}`, escrowId, stepId: job.stepId, amount: "1.00", status: "pending", bondAmount: "0.00",
     }).run();
-    return { kind: "answer", row };
+    return { kind: "answer", row, atMs };
   }, { behavior: "immediate" });
 }
 

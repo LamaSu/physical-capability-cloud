@@ -24,7 +24,7 @@ import { escrowForJob } from "../services/scope-acceptance.js";
 import { BUYER_FUNDING_SWEEP_INTERVAL_SEC } from "../services/buyer-funding-sweep.js";
 import { __setVNextTransportForTest } from "../services/vnext-rpc-client.js";
 import { prepareBuyerFunding, operatorPrepareView, servePrepareSignature, prepareRowAnswer, fundingPrepareRow, prepareSigningInput,
-  buyerFundingSelection, buyerFundingUnitEntry, __setBuyerFundingTestUnitForTest, BuyerFundingSelectionError,
+  buyerFundingSelection, commitBuyerFundingSelection, prepareRefusalAnswer, buyerFundingUnitEntry, __setBuyerFundingTestUnitForTest, BuyerFundingSelectionError,
   DRY_RUN_UNIT_ID, PREPARE_MARGIN_SECONDS, SERVE_MARGIN_SECONDS, CHAIN_CLOCK_LEAD_MAX_SECONDS } from "../services/buyer-funding-prepare.js";
 
 let f: Fixture;
@@ -148,6 +148,25 @@ describe("buyerFundingSelection", () => {
   for (const key of ["PCC_VNEXT_RECORD_NETWORK", "PCC_VNEXT_RPC_URL"]) it(`SEL4: selected commit requires ${key}`, async () => {
     selectUnit(); vi.stubEnv(key, undefined); await selectionFailure("buyer_funding_unavailable");
   });
+  for (const [field, value] of [["chainId", 8453], ["scheduleId", "vnext-mainnet-v1"], ["scheduleTestnetOnly", false], ["usdc", BUYER]] as const) {
+    it(`SEL10: commitBuyerFundingSelection checks the record's ${field}`, async () => {
+      __setBuyerFundingTestUnitForTest({ ...buyerFundingUnitEntry(DRY_RUN_UNIT_ID)!, id: "record-mismatch-unit", [field]: value });
+      selectUnit("record-mismatch-unit");
+      let error: unknown;
+      try { commitBuyerFundingSelection(KERNEL, BUYER); } catch (e) { error = e; }
+      expect(error).toBeInstanceOf(BuyerFundingSelectionError);
+      expect(error).toMatchObject({ code: "buyer_funding_unavailable" });
+      await selectionFailure("buyer_funding_unavailable");
+    });
+  }
+  for (const value of ["toString", "constructor", "__proto__"]) it(`SEL9: buyerFundingSelection requires an own unit key for ${value}`, () => {
+    selectUnit(value);
+    let error: unknown;
+    try { buyerFundingSelection(KERNEL, "commit"); } catch (e) { error = e; }
+    expect(error).toBeInstanceOf(BuyerFundingSelectionError);
+    expect(error).toMatchObject({ code: "buyer_funding_selection_invalid" });
+    expect(buyerFundingSelection(KERNEL, "prepare")).toBeNull();
+  });
   it("SEL5: selected commit requires a wallet buyer", async () => { selectUnit(); await selectionFailure("buyer_not_wallet", "agent-alice"); });
   it("SEL7: unreadable policy preserves commit and refuses prepare", async () => {
     const j = seedPrepare(); const q = await quoted();
@@ -161,10 +180,24 @@ describe("buyerFundingSelection", () => {
     selectUnit(); vi.stubEnv("PCC_VNEXT_RECORD_NETWORK", undefined); const q = await selectionFailure("buyer_funding_unavailable");
     configure(); const res = await negotiation.inject({ method: "POST", url: `/api/negotiate/session/${q.id}/retry-settlement`, headers: asKey(BUYER) });
     expect(res.statusCode, res.body).toBe(200); expect(res.json()).toMatchObject({ retried: true, fundingMode: "vnext_buyer" });
+    expect(res.json().message).toBe("Settlement retried. Job and execution scope created. The buyer funds the escrow after the kernel's operator accepts (POST /api/buyer-funding/scopes/:scopeId/prepare).");
     expect(scopeRow(res.json().scopeId).status).toBe("awaiting_acceptance");
     setPolicy(KERNEL, { ...basePolicy(), vnextBuyerFunding: undefined }); const legacy = await quoted(); updateSession(legacy.id, { status: "settlement_failed", transitions: [{ reason: "settlement_failed:preflight_no_escrow" }] });
     const retried = await negotiation.inject({ method: "POST", url: `/api/negotiate/session/${legacy.id}/retry-settlement`, headers: asKey(BUYER) });
     expect(retried.statusCode).toBe(200); expect(retried.json()).not.toHaveProperty("fundingMode");
+    expect(retried.json().message).toBe("Settlement retried. Job, escrow, and execution scope created.");
+  });
+  for (const mock of ["true", undefined]) it(`SEL11: retry-settlement preserves a selection refusal with MOCK_SETTLEMENT=${String(mock)}`, async () => {
+    vi.stubEnv("MOCK_SETTLEMENT", mock);
+    selectUnit(); vi.stubEnv("PCC_VNEXT_RECORD_NETWORK", undefined);
+    const q = await selectionFailure("buyer_funding_unavailable");
+    const before = allCounts();
+    const response = await negotiation.inject({ method: "POST", url: `/api/negotiate/session/${q.id}/retry-settlement`, headers: asKey(BUYER) });
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toEqual({ error: "settlement_failed", message: "buyer_funding_unavailable", sessionId: q.id, jobId: sessionRow(q.id).jobId });
+    expect(sessionRow(q.id).status).toBe("settlement_failed");
+    expect(sessionRow(q.id).transitions.at(-1)?.reason).toBe("settlement_failed:preflight_no_escrow");
+    expect(allCounts()).toEqual(before);
   });
   it("BuyerFundingSelectionError carries only its closed code", () => {
     const e = new BuyerFundingSelectionError("buyer_not_wallet"); expect(e.name).toBe("BuyerFundingSelectionError"); expect(e.message).toBe(e.code);
@@ -242,12 +275,17 @@ bldCases.push(["BLD5 buyer", "buyer_not_wallet", j => updateScope(j.scopeId, { c
   ["BLD5 stop", "kernel_emergency_stopped", () => setPolicy(KERNEL, { ...basePolicy(), emergencyStop: true })],
   ["BLD5 selection", "buyer_funding_not_selected", () => setPolicy(KERNEL, {})],
   ["BLD5 marker", "buyer_funding_not_selected", j => { markerInsert(j); }]);
+for (const value of ["toString", "constructor", "__proto__"]) bldCases.push([`SEL9 ${value}`, "buyer_funding_not_selected", () => selectUnit(value)]);
 for (const [label, code, change] of bldCases) it(`${label} TX6: prepareBuyerFunding refuses without writes`, async () => {
   vi.setSystemTime(Number(C) * 1000); const j = seedPrepare(); const r = prepareReads(); change(j, r);
   const before = counts(); const s = sessionRow(j.sessionId);
   expect(await prepareBuyerFunding(j.scopeId, r.deps)).toEqual({ kind: "refused", code });
   expect(counts()).toEqual(before); expect(sessionRow(j.sessionId)).toEqual(s);
   if (!label.startsWith("BLD4")) expect(r.calls).toEqual([]);
+});
+it("BLD6: prepareRefusalAnswer forbids a disallowed testnet buyer", () => {
+  expect(prepareRefusalAnswer("testnet_buyer_not_allowed")).toEqual({ status: 403,
+    body: { error: "testnet_buyer_not_allowed", message: "The buyer is not allowed on this testnet." } });
 });
 it("BLD1: explicitly operator-custodied API wallets remain usable", async () => {
   vi.setSystemTime(Number(C) * 1000); const j = seedPrepare(); const key = provisionApiKey({ operatorId: "own", scopes: ["*"] });
@@ -282,6 +320,23 @@ for (const [label, chainS, nowS, scopeExp, code, record] of winCases) it(`${labe
 });
 it("WIN7: PREPARE_MARGIN_SECONDS covers a sweep and SERVE_MARGIN_SECONDS includes buyer time", () => {
   expect(PREPARE_MARGIN_SECONDS).toBeGreaterThanOrEqual(BigInt(BUYER_FUNDING_SWEEP_INTERVAL_SEC.max + 120)); expect(SERVE_MARGIN_SECONDS).toBe(600n);
+});
+
+it("WIN8a: prepareBuyerFunding rechecks the serve margin at the transaction clock", async () => {
+  const j = seedPrepare({ scopeExp: C + 2800n }); const r = prepareReads(C);
+  const atMs = Number(C + 100n) * 1000; vi.setSystemTime(atMs);
+  const now = vi.fn(() => new Date(atMs + 1000)).mockImplementationOnce(() => new Date(atMs));
+  const before = counts(), session = sessionRow(j.sessionId);
+  expect(await prepareBuyerFunding(j.scopeId, { ...r.deps, now })).toEqual({ kind: "refused", code: "window_too_short" });
+  expect(counts()).toEqual(before); expect(sessionRow(j.sessionId)).toEqual(session);
+});
+it("WIN8b: prepareBuyerFunding returns the transaction clock at the serve margin edge", async () => {
+  const j = seedPrepare({ scopeExp: C + 2800n }); const r = prepareReads(C);
+  const atMs = Number(C + 100n) * 1000; vi.setSystemTime(atMs);
+  const answer = await prepareBuyerFunding(j.scopeId, { ...r.deps, now: () => new Date(atMs) });
+  expect(answer.kind).toBe("answer"); if (answer.kind !== "answer") throw new Error(answer.code);
+  expect(answer.atMs).toBe(atMs);
+  expect(prepareRowAnswer(answer.row, answer.atMs!)).toEqual({ status: 202, body: pendingBody });
 });
 
 function barrier(reads: ReturnType<typeof prepareReads>[], change?: () => void) {
@@ -386,6 +441,16 @@ describe("servePrepareSignature", () => {
     expect(row).toMatchObject({ state: "served", operatorSignature: payload.fund.acceptance.operatorSignature.toLowerCase(), signatureVerifiedAt: new Date().toISOString(), signedAt: new Date().toISOString(),
       servedPayloadSha256: createHash("sha256").update(row.servedPayload!).digest("hex") });
   });
+  it("SIG8: servePrepareSignature lowercases the first posted signature and served bytes", async () => {
+    const j = seedPrepare(); await prepare(j);
+    const sig = payload.fund.acceptance.operatorSignature;
+    const answer = await servePrepareSignature(j.scopeId, "0x" + sig.slice(2).toUpperCase());
+    const row = fundingPrepareRow(j.scopeId)!;
+    expect(answer.status).toBe(200); expect(answer.body).toEqual(row.servedPayload);
+    expect(answer.body).toEqual(Buffer.from(JSON.stringify(payload), "utf8"));
+    expect(row.operatorSignature).toBe(sig.toLowerCase());
+    expect(JSON.parse(row.servedPayload!.toString("utf8")).fund.acceptance.operatorSignature).toBe(sig.toLowerCase());
+  });
   it("SIG3: repeat signatures compare case-free and preserve the served row", async () => {
     const j = seedPrepare(); const row = await signed(j);
     const upper = `0x${payload.fund.acceptance.operatorSignature.slice(2).toUpperCase()}`;
@@ -409,18 +474,20 @@ describe("servePrepareSignature", () => {
     expect(await servePrepareSignature(j.scopeId, signature)).toEqual({ status: 400, body: { error: "signature_not_operator", message: "The signature is not from the operator." } });
     expect(fundingPrepareRow(j.scopeId)).toEqual(row);
   });
-  for (const kind of ["revoked", "stopped", "funded", "expired", "window"]) it(`SIG6: signing rechecks ${kind}`, async () => {
+  for (const kind of ["revoked", "stopped", "funded", "expired", "window", "version"]) it(`SIG6: signing rechecks ${kind}`, async () => {
     const j = seedPrepare(); const row = await prepare(j);
     if (kind === "revoked") updateScope(j.scopeId, { status: "revoked" });
     if (kind === "stopped") setPolicy(KERNEL, { ...basePolicy(), emergencyStop: true });
     if (kind === "funded") setEscrow(marker(j).id, { status: "funded" });
+    if (kind === "version") db().update(schema.escrows).set({ version: "v2" }).where(eq(schema.escrows.id, marker(j).id)).run();
     if (kind === "expired") vi.setSystemTime((row.expiry - 600) * 1000 + 1);
     if (kind === "window") updateScope(j.scopeId, { expiresAt: new Date().toISOString() });
     const answer = await servePrepareSignature(j.scopeId, good);
-    const code = kind === "revoked" ? "scope_not_awaiting_funding" : kind === "stopped" ? "kernel_emergency_stopped" : kind === "funded" ? "escrow_not_created" : kind === "window" ? "scope_expired" : "prepare_expired";
-    expect(answer).toEqual({ status: kind === "expired" ? 410 : 409, body: kind === "stopped" ? { error: code } : { error: code, message: kind === "revoked" ? "The scope is not awaiting funding." : kind === "funded" ? "The marker escrow is not created." : kind === "window" ? "The execution scope has expired." : "The funding prepare has expired." } });
+    const code = kind === "revoked" ? "scope_not_awaiting_funding" : kind === "stopped" ? "kernel_emergency_stopped" : (kind === "funded" || kind === "version") ? "escrow_not_created" : kind === "window" ? "scope_expired" : "prepare_expired";
+    expect(answer).toEqual({ status: kind === "expired" ? 410 : 409, body: kind === "stopped" ? { error: code } : { error: code, message: kind === "revoked" ? "The scope is not awaiting funding." : (kind === "funded" || kind === "version") ? "The marker escrow is not created." : kind === "window" ? "The execution scope has expired." : "The funding prepare has expired." } });
     expect(fundingPrepareRow(j.scopeId)!.state).toBe(kind === "expired" ? "expired" : "pending_signature");
     if (kind === "expired") expect(fundingPrepareRow(j.scopeId)!.endedAt).toBe(new Date().toISOString());
+    if (kind === "version") expect(fundingPrepareRow(j.scopeId)).toMatchObject({ operatorSignature: null, servedPayload: null, signatureVerifiedAt: null });
   });
   it("SIG7: prepareRowAnswer includes the exact serving margin edge", async () => {
     const j = seedPrepare(); const row = await prepare(j); const edge = (row.expiry - 600) * 1000;
@@ -470,10 +537,10 @@ it("MC7a: frozen prepare lifecycle keeps sweep identities and ISO sort order", a
   for (const r of rows) { expect(r.scopeId).toBeTruthy(); expect(r.jobId).toBeTruthy(); expect(r.createdAt).toBe(new Date(Date.parse(r.createdAt)).toISOString()); expect(["pending_signature", "served", "expired"]).toContain(r.state); }
   expect([...rows].sort((a, b) => a.createdAt.localeCompare(b.createdAt)).map(r => r.id)).toEqual([...rows].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)).map(r => r.id));
 });
-it("MC9a: prepare and escrow timestamps use deps.now once", async () => {
-  vi.setSystemTime(Number(C) * 1000 + 1000); const j = seedPrepare(); const r = prepareReads(); const now = vi.fn(() => new Date(Number(C) * 1000));
+it("MC9a: prepare and escrow timestamps use the first deps.now read", async () => {
+  vi.setSystemTime(Number(C) * 1000 + 1000); const j = seedPrepare(); const r = prepareReads(); const now = vi.fn(() => new Date(Number(C) * 1000 + 500)).mockImplementationOnce(() => new Date(Number(C) * 1000));
   const answer = await prepareBuyerFunding(j.scopeId, { ...r.deps, now }); expect(answer.kind).toBe("answer");
-  expect(now).toHaveBeenCalledTimes(1); expect(fundingPrepareRow(j.scopeId)!.createdAt).toBe(new Date(Number(C) * 1000).toISOString());
+  expect(now).toHaveBeenCalledTimes(2); expect(fundingPrepareRow(j.scopeId)!.createdAt).toBe(new Date(Number(C) * 1000).toISOString());
   expect(marker(j).createdAt).toBe(new Date(Number(C) * 1000).toISOString());
 });
 it("MC5c: fundingPrepares has one bounded production writer", () => {

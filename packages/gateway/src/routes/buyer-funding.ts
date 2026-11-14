@@ -22,7 +22,7 @@ export async function buyerFundingRoutes(app: FastifyInstance) {
     if (!binding.ok) return reply.code(binding.status).send(binding.body);
     const row = fundingPrepareRow(scope.id);
     const result = row ? { kind: "answer" as const, row } : await prepareBuyerFunding(scope.id);
-    const answer = result.kind === "answer" ? prepareRowAnswer(result.row, Date.now()) : prepareRefusalAnswer(result.code);
+    const answer = result.kind === "answer" ? prepareRowAnswer(result.row, result.atMs ?? Date.now()) : prepareRefusalAnswer(result.code);
     if (answer.contentType) reply.type(answer.contentType);
     return reply.code(answer.status).send(answer.body);
   });

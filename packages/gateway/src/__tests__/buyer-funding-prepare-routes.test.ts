@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import Fastify, { type FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { custom, decodeFunctionData, encodeFunctionResult, toHex, zeroAddress } from "viem";
+import { custom, decodeFunctionData, encodeFunctionResult, getAddress, toHex, zeroAddress } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { VNextSettlementEscrowABI, VNextSettlementEscrowFactoryABI, policySalt, predictEscrow } from "@pcc/contracts/vnext";
 import { buyerFundingRoutes } from "../routes/buyer-funding.js";
@@ -13,12 +13,12 @@ import { deviceRelayRoutes } from "../routes/device-relay.js";
 import { walletsRoutes } from "../routes/wallets.js";
 import { apiGate } from "../middleware/api-gate.js";
 import { BUYER_MISMATCH, BUYER_PROOF_REQUIRED } from "../auth/buyer-identity.js";
-import { AUTHENTICATION_REQUIRED } from "../auth/kernel-authority.js";
+import { AUTHENTICATION_REQUIRED, EXPLICIT_CREDENTIAL_REQUIRED } from "../auth/kernel-authority.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { CONSENT_SHA256 } from "../services/wallet-links/consent.js";
 import { configuredVNextDeploymentRecord } from "../services/paid-scope-activation-terms.js";
 import { __setVNextTransportForTest } from "../services/vnext-rpc-client.js";
-import { __setBuyerFundingTestUnitForTest, fundingPrepareRow } from "../services/buyer-funding-prepare.js";
+import { __setBuyerFundingTestUnitForTest, fundingPrepareRow, prepareRefusalAnswer, prepareSigningInput } from "../services/buyer-funding-prepare.js";
 import { getSignerAddress } from "../contracts/escrow-client.js";
 import { setUpFixture, tearDownFixture, asKey, OTHER, type Fixture } from "./helpers/paid-scope-fixture.js";
 import { actAsJobParty } from "./helpers/job-read-party.js";
@@ -47,7 +47,7 @@ const gateRequired = { error: "api_key_required", message: "This endpoint requir
   provision_url: "/api/auth/provision", docs: "https://capability.network/whitepaper.md" };
 const operatorRequired = { error: "forbidden", reason: "operator_proof_required",
   message: "This needs the gateway admin secret, or proof that you control the kernel's operator wallet (wallet sign-in proof, WP-A). An API key's claimed identity is not proof." };
-function installTransport(fail = false) {
+function installTransport(fail = false, onCall?: (functionName: string) => void) {
   const record = configuredVNextDeploymentRecord()!;
   const abi = [...VNextSettlementEscrowABI, ...VNextSettlementEscrowFactoryABI];
   __setVNextTransportForTest(custom({ request: async ({ method, params = [] }: any) => {
@@ -62,6 +62,7 @@ function installTransport(fail = false) {
     const result = decoded.functionName === "predictEscrow"
       ? predictEscrow({ factory: record.factory, implementation: record.implementation, salt: policySalt(decoded.args![0] as never) })
       : values[decoded.functionName];
+    onCall?.(decoded.functionName);
     return encodeFunctionResult({ abi, functionName: decoded.functionName, result: result as never });
   } }, { retryCount: 0 }));
 }
@@ -79,6 +80,9 @@ beforeEach(async () => {
     if (typeof key === "string") { req.operatorId = key; req.userId = key; }
   });
   actAsJobParty(app, inputs.operator);
+  app.addHook("onRequest", async req => {
+    if (req.headers["x-test-carrier"] === "cookie") req.provenWalletCarrier = "cookie";
+  });
   await app.register(walletsRoutes);
   await app.register(negotiationRoutes);
   await app.register(buyerFundingRoutes);
@@ -141,7 +145,13 @@ describe("buyerFundingRoutes and operatorRoutes", () => {
     const pending = await app.inject({ url: buyerPath(j.scopeId), headers });
     expect(pending.statusCode).toBe(202); expect(pending.json()).toEqual(pendingBody);
     const signing = await app.inject({ url: operatorPath(j.scopeId) });
-    expect(signing.statusCode).toBe(200); expect(signing.json().subjectBlock).toEqual(inputs.subject);
+    expect(signing.statusCode).toBe(200);
+    expect(signing.json()).toEqual(prepareSigningInput(fundingPrepareRow(j.scopeId)!));
+    expect(signing.json().subjectBlock).toEqual(inputs.subject);
+    expect(signing.json().units).toEqual(payload.fund.configs); expect(signing.json().bindings).toEqual([]);
+    expect(signing.json().policy.escrow).toBe(getAddress(payload.escrow));
+    expect(signing.json().policy.chainId).toBe(payload.chainId); expect(signing.json().policy.factory).toBe(payload.factory);
+    expect(signing.json().policy.expiry).toBe(payload.expiry);
     const signed = await app.inject({ method: "POST", url: `${operatorPath(j.scopeId)}/signature`, payload: { signature: payload.fund.acceptance.operatorSignature } });
     expect(signed.statusCode, signed.body).toBe(200); expect(signed.headers["content-type"]).toBe("application/json; charset=utf-8");
     expect(signed.json()).toEqual(payload); expect(signed.rawPayload).toEqual(Buffer.from(JSON.stringify(payload)));
@@ -172,6 +182,45 @@ describe("buyerFundingRoutes and operatorRoutes", () => {
     vi.mocked(getSignerAddress).mockReturnValue(inputs.operator);
     const response = await app.inject({ method: "POST", url: buyerPath(j.scopeId), headers: asKey(inputs.payer) });
     expect(response.statusCode).toBe(409); expect(response.json()).toEqual({ error: "operator_unusable", message: "The operator cannot sign this policy." });
+    expect(counts()).toEqual(before); expect(requests).toEqual([]);
+  });
+  for (const late of [true, false]) it(`RT7: prepareBuyerFunding ${late ? "refuses after" : "accepts at"} the serve margin edge over HTTP`, async () => {
+    const j = seedPrepare({ scopeExp: C + 2800n });
+    const atMs = Number(C + 100n) * 1000; vi.setSystemTime(atMs);
+    installTransport(false, name => { if (late && name === "policyNonceFloor") vi.setSystemTime(atMs + 1000); });
+    const before = counts();
+    const response = await app.inject({ method: "POST", url: buyerPath(j.scopeId), headers: asKey(inputs.payer) });
+    expect(response.statusCode).toBe(late ? 409 : 202);
+    expect(response.json()).toEqual(late ? prepareRefusalAnswer("window_too_short").body : pendingBody);
+    if (late) { expect(counts()).toEqual(before); expect(fundingPrepareRow(j.scopeId)).toBeUndefined(); }
+  });
+  it("RT8a: operatorRoutes requires explicit credentials to view the signing input", async () => {
+    const j = seedPrepare();
+    expect((await app.inject({ method: "POST", url: buyerPath(j.scopeId), headers: asKey(inputs.payer) })).statusCode).toBe(202);
+    const response = await app.inject({ url: operatorPath(j.scopeId), headers: { "x-test-carrier": "cookie" } });
+    expect(response.statusCode).toBe(403); expect(response.json()).toEqual(EXPLICIT_CREDENTIAL_REQUIRED);
+    expect(fundingPrepareRow(j.scopeId)!.signatureRequestedAt).toBeNull();
+    const control = await app.inject({ url: operatorPath(j.scopeId) });
+    expect(control.statusCode).toBe(200); expect(control.json()).toEqual(prepareSigningInput(fundingPrepareRow(j.scopeId)!));
+  });
+  it("RT8b: operatorRoutes requires explicit credentials to submit a signature", async () => {
+    const j = seedPrepare();
+    expect((await app.inject({ method: "POST", url: buyerPath(j.scopeId), headers: asKey(inputs.payer) })).statusCode).toBe(202);
+    const signature = { signature: payload.fund.acceptance.operatorSignature };
+    const response = await app.inject({ method: "POST", url: `${operatorPath(j.scopeId)}/signature`, headers: { "x-test-carrier": "cookie" }, payload: signature });
+    expect(response.statusCode).toBe(403); expect(response.json()).toEqual(EXPLICIT_CREDENTIAL_REQUIRED);
+    expect(fundingPrepareRow(j.scopeId)).toMatchObject({ state: "pending_signature", operatorSignature: null, servedPayload: null, signatureVerifiedAt: null });
+    const signing = await app.inject({ url: operatorPath(j.scopeId) });
+    expect(signing.statusCode).toBe(200); expect(signing.json()).toEqual(prepareSigningInput(fundingPrepareRow(j.scopeId)!));
+    const control = await app.inject({ method: "POST", url: `${operatorPath(j.scopeId)}/signature`, payload: signature });
+    expect(control.statusCode).toBe(200); expect(control.rawPayload).toEqual(Buffer.from(JSON.stringify(payload), "utf8"));
+  });
+  it("RT9: prepareBuyerFunding forbids a disallowed testnet buyer before chain reads", async () => {
+    const j = seedPrepare(); const before = counts();
+    vi.stubEnv("PCC_VNEXT_TESTNET_BUYERS", privateKeyToAccount(generatePrivateKey()).address);
+    const response = await app.inject({ method: "POST", url: buyerPath(j.scopeId), headers: asKey(inputs.payer) });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: "testnet_buyer_not_allowed", message: "The buyer is not allowed on this testnet." });
     expect(counts()).toEqual(before); expect(requests).toEqual([]);
   });
   it("AUTH1: bindBuyer loses agent proof when walletsRoutes revokes its link", async () => {

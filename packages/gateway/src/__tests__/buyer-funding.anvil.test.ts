@@ -11,7 +11,7 @@ import { createPublicClient, createTestClient, createWalletClient, http, keccak2
   type Address, type Chain, type Hex, type PrivateKeyAccount, type PublicClient, type TransactionReceipt } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { buildUnitConfig, compileVNextPolicy, jobIdHashOf, VNextSettlementEscrowFactoryABI, type CompiledVNextPolicy } from "@pcc/contracts/vnext";
-import { FUNDING_PREPARE_SCHEMA, prepareFunding, approveAndFund } from "@pcc/spec/funding";
+import { FUNDING_PREPARE_SCHEMA, prepareFunding, approveAndFund, ensureEscrow } from "@pcc/spec/funding";
 import { initStore, closeStore, getStore, getRepos } from "../db.js";
 import { BUYER_FUNDED_ESCROW_VERSION } from "../services/buyer-funded-escrow.js";
 import { __setFundingRecordStoreForTest } from "../services/funding-record-port.js";
@@ -251,6 +251,7 @@ describe.skipIf(!RUN)("buyer funding verifier against real anvil contracts", () 
         expect: { jobId, operator: operator.address, payees: [operator.address], maxFeeBps: 0, feeRecipients: [], tiers: [1],
           latestReclaimAt: c + 866100n, termsHash: result.row.termsHash as Hex, acceptedPolicyDigest: result.row.acceptedPolicyDigest as Hex,
           compositionRoots: [zeroHash] } });
+      await ensureEscrow({ prepared, wallet: wallet(buyer), publicClient: pub });
       expect((await approveAndFund({ prepared, wallet: wallet(buyer), publicClient: pub })).outcome).toBe("committed");
       await finalized();
       expect(await sweep()).toEqual({ passA: {}, passB: { recorded: 1 } });
