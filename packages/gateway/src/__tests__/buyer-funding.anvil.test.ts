@@ -11,7 +11,7 @@ import { createPublicClient, createTestClient, createWalletClient, http, keccak2
   type Address, type Chain, type Hex, type PrivateKeyAccount, type PublicClient, type TransactionReceipt } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { buildUnitConfig, compileVNextPolicy, jobIdHashOf, VNextSettlementEscrowFactoryABI, type CompiledVNextPolicy } from "@pcc/contracts/vnext";
-import { FUNDING_PREPARE_SCHEMA, prepareFunding, approveAndFund } from "@pcc/spec/funding";
+import { FUNDING_PREPARE_SCHEMA, prepareFunding, approveAndFund, ensureEscrow } from "@pcc/spec/funding";
 import { initStore, closeStore, getStore, getRepos } from "../db.js";
 import { BUYER_FUNDED_ESCROW_VERSION } from "../services/buyer-funded-escrow.js";
 import { __setFundingRecordStoreForTest } from "../services/funding-record-port.js";
@@ -19,6 +19,10 @@ import { SqliteFundingRecordStore } from "../services/sqlite-funding-record-stor
 import { __setPaidScopeActivationTermsForTest, VNEXT_SCHEDULE_TUPLES, type VNextDeploymentRecord } from "../services/paid-scope-activation-terms.js";
 import { createVNextChainReads, type VNextChainReads } from "../services/vnext-rpc-client.js";
 import { runBuyerFundingSweepOnce } from "../services/buyer-funding-sweep.js";
+import { __setBuyerFundingTestUnitForTest, buyerFundingUnitEntry, DRY_RUN_UNIT_ID, prepareBuyerFunding, servePrepareSignature, fundingPrepareRow } from "../services/buyer-funding-prepare.js";
+import { __setVNextTransportForTest } from "../services/vnext-rpc-client.js";
+import { servedPrepareTtlMs } from "../services/funding-prepare-ttl.js";
+import { scopeExpiryMs } from "../services/scope-expiry.js";
 
 const RUN = process.env.VNEXT_ANVIL_E2E === "1";
 const ROOT = fileURLToPath(new URL("../../../contracts/", import.meta.url));
@@ -214,5 +218,50 @@ describe.skipIf(!RUN)("buyer funding verifier against real anvil contracts", () 
   }, 120000);
   it("A9: another EOA's funded clone cannot pay for this buyer's scope", async () => {
     const job = await make("A9", deployed, other); await fund(job); await finalized(); await refused(rows(job, { buyer: buyer.address }), "prepare_not_scope");
+  }, 120000);
+
+  it("ANV1: prepareBuyerFunding serves an operator signature that the buyer funds and the sweep activates", async () => {
+    const c = (await pub.getBlock({ blockTag: "latest" })).timestamp;
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Number(c) * 1000);
+    try {
+      __setBuyerFundingTestUnitForTest({ ...buyerFundingUnitEntry(DRY_RUN_UNIT_ID)!, id: "anvil-test-unit-v1",
+        chainId: 31337, scheduleId: "vnext-mainnet-v1", scheduleTestnetOnly: false,
+        usdc: deployed.TOKEN.toLowerCase() as Address, reclaimDelaySeconds: 866100n });
+      vi.stubEnv("PCC_VNEXT_RPC_URL", rpc);
+      const scopeId = "scope:prepared-anvil", jobId = "job:prepared-anvil", cwmId = "cwm:prepared-anvil";
+      const createdAt = new Date(Number(c) * 1000).toISOString(), expiresAt = new Date(Number(c + 3600n) * 1000).toISOString();
+      db().update(schema.shopKernels).set({ operatorAddress: operator.address }).where(eq(schema.shopKernels.id, "kernel-nyc")).run();
+      db().update(schema.operatorPolicies).set({ policy: { version: 1, emergencyStop: false, vnextBuyerFunding: "anvil-test-unit-v1" } as never })
+        .where(eq(schema.operatorPolicies.kernelId, "kernel-nyc")).run();
+      db().insert(schema.negotiationSessions).values({ id: "session:prepared-anvil", kernelId: "kernel-nyc", userAgentId: buyer.address,
+        capabilityType: "liquid-handler", status: "committed", operatorConstraints: {}, selections: {}, transitions: [], jobId, cwmId,
+        quote: { totalPrice: "1.00", currency: "USDC" }, contractTerms: {}, createdAt, expiresAt }).run();
+      getRepos().jobs.insert({ ...getRepos().jobs.findAll()[0]!, id: jobId, kernelId: "kernel-nyc", cwmId, stepId: "prepared-anvil", assuranceTier: 1 });
+      db().insert(schema.executionScopes).values({ id: scopeId, kernelId: "kernel-nyc", jobId, createdBy: buyer.address,
+        status: "awaiting_funding", allowedTools: [], createdAt, expiresAt }).run();
+      const result = await prepareBuyerFunding(scopeId, { record: record(), reads: createVNextChainReads(rpc), now: () => new Date(Number(c) * 1000) });
+      expect(result.kind).toBe("answer"); if (result.kind !== "answer") throw new Error(result.code);
+      const signature = await operator.sign({ hash: result.row.typedDataDigest as Hex });
+      const served = await servePrepareSignature(scopeId, signature);
+      expect(served.status).toBe(200); expect(Buffer.isBuffer(served.body)).toBe(true);
+      const text = (served.body as Buffer).toString("utf8"), payload = JSON.parse(text);
+      await send(buyer, { address: deployed.TOKEN, abi: TOKEN_ABI, functionName: "mint", args: [buyer.address, BigInt(payload.totalGross)] });
+      const prepared = await prepareFunding({ payload, wallet: wallet(buyer), publicClient: pub,
+        quote: { maxTotalGross: BigInt(payload.totalGross) }, pins: { "31337": { factory: deployed.FACTORY, usdc: deployed.TOKEN } },
+        expect: { jobId, operator: operator.address, payees: [operator.address], maxFeeBps: 0, feeRecipients: [], tiers: [1],
+          latestReclaimAt: c + 866100n, termsHash: result.row.termsHash as Hex, acceptedPolicyDigest: result.row.acceptedPolicyDigest as Hex,
+          compositionRoots: [zeroHash] } });
+      await ensureEscrow({ prepared, wallet: wallet(buyer), publicClient: pub });
+      expect((await approveAndFund({ prepared, wallet: wallet(buyer), publicClient: pub })).outcome).toBe("committed");
+      await finalized();
+      expect(await sweep()).toEqual({ passA: {}, passB: { recorded: 1 } });
+      expect(getRepos().escrows.findByCwm(cwmId)!.status).toBe("funded");
+      expect(db().select().from(schema.executionScopes).where(eq(schema.executionScopes.id, scopeId)).get()!.status).toBe("active");
+      const row = fundingPrepareRow(scopeId)!;
+      expect(servedPrepareTtlMs(scopeId)).toBe(row.reconcileUntil * 1000 - scopeExpiryMs(row.scopeExpiresAt));
+    } finally {
+      __setBuyerFundingTestUnitForTest(null); __setVNextTransportForTest(null);
+      vi.restoreAllMocks(); vi.useRealTimers();
+    }
   }, 120000);
 });

@@ -9,7 +9,7 @@ const ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
 const MARKER = "vnext-buyer";
 const collapse = (text: string) => text.replace(/\s+/g, " ").trim();
 type Table = "escrows" | "escrow_milestones";
-type Ref = { table: Table | "schema"; alias: boolean };
+type Ref = { table: Table | "schema" | "store"; alias: boolean };
 type Binding = { name: string; declaration: ts.Node; scope: ts.Node; direct?: Ref; initializer?: ts.Expression; property?: string };
 interface Writer { file: string; call: string; table: Table; kind: string; alias: boolean; fn: string; statuses: string[]; versions: string[]; updatesVersion: boolean }
 interface Scan { writes: Writer[]; violations: string[] }
@@ -49,7 +49,9 @@ export function scanEscrowWriters(file: string, text: string): Scan {
         direct: { table: table ?? "schema", alias: node.name.text !== imported } });
     } else if (ts.isNamespaceImport(node)) {
       const declaration = node.parent.parent;
-      if (ts.isImportDeclaration(declaration) && ts.isStringLiteral(declaration.moduleSpecifier) && /schema/.test(declaration.moduleSpecifier.text))
+      if (ts.isImportDeclaration(declaration) && ts.isStringLiteral(declaration.moduleSpecifier) && declaration.moduleSpecifier.text === "@pcc/store")
+        bindings.push({ name: node.name.text, declaration: node, scope: source, direct: { table: "store", alias: false } });
+      else if (ts.isImportDeclaration(declaration) && ts.isStringLiteral(declaration.moduleSpecifier) && /schema/.test(declaration.moduleSpecifier.text))
         bindings.push({ name: node.name.text, declaration: node, scope: source, direct: { table: "schema", alias: node.name.text !== "schema" } });
     } else if (ts.isVariableDeclaration(node)) {
       if (ts.isIdentifier(node.name)) bindings.push({ name: node.name.text, declaration: node, scope: parentScope(node), initializer: node.initializer });
@@ -83,6 +85,7 @@ export function scanEscrowWriters(file: string, text: string): Scan {
       if (!base) return undefined;
       if (b.property) {
         const table = tableName(b.property);
+        if (base.table === "store" && b.property === "schema") return { table: "schema", alias: b.name !== "schema" };
         return base.table === "schema" && table ? { table, alias: base.alias || b.name !== b.property } : undefined;
       }
       return { ...base, alias: true };
@@ -90,13 +93,32 @@ export function scanEscrowWriters(file: string, text: string): Scan {
     if (ts.isPropertyAccessExpression(node)) {
       const base = ref(node.expression, at, seen);
       const table = tableName(node.name.text);
+      if (base?.table === "store" && node.name.text === "schema") return { table: "schema", alias: base.alias };
       return base?.table === "schema" && table ? { table, alias: base.alias } : undefined;
     }
     if (ts.isElementAccessExpression(node) && node.argumentExpression && ts.isStringLiteralLike(node.argumentExpression)) {
       const base = ref(node.expression, at, seen), table = tableName(node.argumentExpression.text);
       return base?.table === "schema" && table ? { table, alias: base.alias } : undefined;
     }
+    if (ts.isAwaitExpression(node) && ts.isCallExpression(node.expression)
+      && node.expression.expression.kind === ts.SyntaxKind.ImportKeyword
+      && node.expression.arguments[0] && ts.isStringLiteral(node.expression.arguments[0])
+      && node.expression.arguments[0].text === "@pcc/store") return { table: "store", alias: false };
     return undefined;
+  }
+  function repoReceiver(expression: ts.Expression, at: ts.Node, seen = new Set<ts.Node>()): boolean {
+    const node = unparen(expression);
+    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "EscrowRepository") return true;
+    if ((ts.isPropertyAccessExpression(node) && node.name.text === "escrows")
+      || (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression) && node.argumentExpression.text === "escrows")) return !ref(node, at);
+    if (ts.isIdentifier(node)) {
+      const b = binding(node.text, at);
+      if (!b?.initializer || seen.has(b.declaration)) return false;
+      seen.add(b.declaration);
+      if (b.property) return b.property === "escrows" && !ref(b.initializer, b.declaration);
+      return repoReceiver(b.initializer, b.declaration, seen);
+    }
+    return false;
   }
   function strings(expression: ts.Expression | undefined, at: ts.Node, seen = new Set<string>()): string[] {
     if (!expression) return [];
@@ -135,7 +157,7 @@ export function scanEscrowWriters(file: string, text: string): Scan {
     return { file, call: collapse(root.getText(source)), table, kind, alias, fn: fn?.name?.getText(source) ?? "", statuses: [...new Set(statuses)].sort(),
       versions: [...new Set(versions)].sort(), updatesVersion };
   }
-  const rawPattern = /\b(insert\s+(?:or\s+\w+\s+)?into|replace\s+into|update|delete\s+from)\s+["`\[]?(escrows|escrow_milestones)\b/gi;
+  const rawPattern = /\b(insert\s+(?:or\s+\w+\s+)?into|replace\s+into|update|delete\s+from)\s+(?:["`\[]?main["`\]]?\.)?["`\[]?(escrows|escrow_milestones)\b/gi;
   function rawSql(node: ts.Node, sql: string) {
     for (const match of sql.matchAll(rawPattern)) {
       const operation = match[1]!.split(/\s/)[0]!.toLowerCase();
@@ -149,7 +171,7 @@ export function scanEscrowWriters(file: string, text: string): Scan {
   function checkAliasUse(node: ts.Identifier) {
     if (!aliasNames.has(node.text)) return;
     const value = ref(node, node);
-    if (!value?.alias || value.table === "schema") return;
+    if (!value?.alias || value.table === "schema" || value.table === "store") return;
     const parent = node.parent;
     if (ts.isImportSpecifier(parent) || ts.isBindingElement(parent) && parent.name === node
       || ts.isVariableDeclaration(parent) && parent.name === node
@@ -164,22 +186,45 @@ export function scanEscrowWriters(file: string, text: string): Scan {
       && ["from", "innerJoin", "leftJoin", "insert", "update", "delete"].includes(owner.expression.name.text)) return;
     violations.push(`alias outside read: ${collapse(owner.getText(source))}`);
   }
+  function sqlText(expression: ts.Expression): string | undefined {
+    const e = unparen(expression);
+    if (ts.isStringLiteralLike(e)) return e.text;
+    if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+      const left = sqlText(e.left), right = sqlText(e.right);
+      return left !== undefined && right !== undefined ? left + right : undefined;
+    }
+    if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && e.expression.name.text === "concat") {
+      const parts = [sqlText(e.expression.expression), ...e.arguments.map(sqlText)];
+      return parts.every(p => p !== undefined) ? parts.join("") : undefined;
+    }
+    if (ts.isTemplateExpression(e)) {
+      return e.head.text + e.templateSpans.map(s => {
+        const table = ref(s.expression, s);
+        return (table?.table === "escrows" || table?.table === "escrow_milestones" ? table.table : " ") + s.literal.text;
+      }).join("");
+    }
+    if (ts.isTaggedTemplateExpression(e) && e.tag.getText(source) === "sql") return sqlText(e.template);
+    return undefined;
+  }
   function walk(node: ts.Node) {
     if (ts.isIdentifier(node)) checkAliasUse(node);
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
       const method = node.expression.name.text, receiver = node.expression.expression;
       const table = node.arguments[0] && ref(node.arguments[0], node);
-      if (["insert", "update", "delete"].includes(method) && table && table.table !== "schema") {
+      if (["insert", "update", "delete"].includes(method) && table && table.table !== "schema" && table.table !== "store") {
         writes.push(details(node, fullCall(node), `drizzle_${method}`, table.table, table.alias));
         if (table.alias) violations.push(`alias write: ${collapse(node.getText(source))}`);
       } else if (["insert", "updateStatus", "insertMilestone", "updateMilestoneStatus"].includes(method)
-        && ts.isPropertyAccessExpression(receiver) && receiver.name.text === "escrows" && !ref(receiver, node)) {
+        && repoReceiver(receiver, node)) {
         writes.push(details(node, node, `repo_${method}`, method.includes("Milestone") ? "escrow_milestones" : "escrows", false));
       }
     }
-    // Inspect string/template AST nodes once; comments and quoted text inside them are never executed.
-    if (ts.isStringLiteralLike(node) && !ts.isImportDeclaration(node.parent)) rawSql(node, node.text);
-    if (ts.isTemplateExpression(node)) rawSql(node, node.head.text + node.templateSpans.map(s => " " + s.literal.text).join(""));
+    if (ts.isExpressionNode(node)) {
+      const sql = sqlText(node);
+      const parent = node.parent;
+      const combined = ts.isExpressionNode(parent) && sqlText(parent) !== undefined;
+      if (sql !== undefined && !combined && !ts.isImportDeclaration(parent)) rawSql(node, sql);
+    }
     ts.forEachChild(node, walk);
   }
   walk(source); return { writes, violations };
@@ -213,6 +258,8 @@ function multiset(writes: Array<Pick<Writer, "file" | "call">>) {
 }
 // REVIEWED_WRITERS is a literal multiset of the call text, including the two markBuyerFunded CAS calls.
 const REVIEWED_WRITERS: Array<{ file: string; call: string; count: number }> = [
+  {"file": "packages/gateway/src/services/buyer-funding-prepare.ts", "call": "tx.insert(schema.escrows).values({ id: escrowId, cwmId: session.cwmId!, contractAddress: getAddress(compiled.escrow), payer: scope.createdBy, totalAmount: quote!.totalPrice as string, currency: \"USDC\", status: \"created\", createdAt: new Date(nowMs).toISOString(), deadline: (terms?.deadline as string) ?? new Date(nowMs + 24 * 60 * 60_000).toISOString(), version: BUYER_FUNDED_ESCROW_VERSION, }).run()", "count": 1},
+  {"file": "packages/gateway/src/services/buyer-funding-prepare.ts", "call": "tx.insert(schema.escrowMilestones).values({ id: `ms-${randomUUID().slice(0, 12)}`, escrowId, stepId: job.stepId, amount: \"1.00\", status: \"pending\", bondAmount: \"0.00\", }).run()", "count": 1},
   {
     "file": "packages/gateway/src/routes/paid-job-flow.ts",
     "call": "repos.escrows.insert({ id: escrowId, cwmId: session.cwmId ?? `cwm-${crypto.randomUUID().slice(0, 12)}`, contractAddress: escrowAddress, payer: session.userAgentId, totalAmount: totalPrice, currency, status: escrowStatus, createdAt: now, deadline, // V3 dispatch: settled-later routes/facades read this and pick the V3 // write helpers (submitAttestationV3 / releaseMilestoneV3) vs V2. version: useV3ModeA() ? \"v3\" : \"v2\", })",
@@ -337,5 +384,100 @@ describe("escrow writer set", () => {
     expect(scan.violations).toHaveLength(1); expect(scan.writes[8]!.alias).toBe(true);
     for (const sql of ["INSERT INTO escrows (id) VALUES ('x')", "REPLACE INTO escrows (id) VALUES ('x')", "UPDATE escrows SET version='v9'", "DELETE FROM escrow_milestones"])
       expect(scanEscrowWriters("probe.ts", `db.run(sql\`${sql}\`);`).writes).toHaveLength(1);
+  });
+});
+
+const ESCROW_MENTION_FILES = [
+  "apps/dashboard/src/api/gateway.ts",
+  "apps/dashboard/src/api/hooks/use-pcc-data.ts",
+  "apps/dashboard/src/api/wire-vocabulary.ts",
+  "apps/dashboard/src/components/ReadState.tsx",
+  "apps/dashboard/src/lib/job-execution-view.ts",
+  "apps/dashboard/src/pages/DashboardPage.tsx",
+  "apps/dashboard/src/pages/EscrowPage.tsx",
+  "apps/dashboard/src/pages/LandingPage.tsx",
+  "apps/dashboard/src/pages/RevenueDashboardPage.tsx",
+  "packages/bundler/src/paymaster.ts",
+  "packages/db/src/index.ts",
+  "packages/db/src/interfaces/IEscrowRepository.ts",
+  "packages/db/src/interfaces/index.ts",
+  "packages/db/src/migrate.ts",
+  "packages/db/src/repositories/index.ts",
+  "packages/db/src/repositories/settlement.ts",
+  "packages/db/src/schema/settlement.ts",
+  "packages/db/src/seed/escrow.ts",
+  "packages/gateway/src/contracts/escrow-client.ts",
+  "packages/gateway/src/facades/populators/settlement.populator.ts",
+  "packages/gateway/src/facades/settlement.facade.ts",
+  "packages/gateway/src/readmodels/job-execution.ts",
+  "packages/gateway/src/readmodels/operator-work.ts",
+  "packages/gateway/src/readmodels/product-home.ts",
+  "packages/gateway/src/routes/a2a-tasks.ts",
+  "packages/gateway/src/routes/commentary.ts",
+  "packages/gateway/src/routes/context-pack.ts",
+  "packages/gateway/src/routes/device-relay.ts",
+  "packages/gateway/src/routes/escrow.ts",
+  "packages/gateway/src/routes/negotiation.ts",
+  "packages/gateway/src/routes/paid-job-flow.ts",
+  "packages/gateway/src/routes/pcc-protocol.ts",
+  "packages/gateway/src/routes/product-home.ts",
+  "packages/gateway/src/services/buyer-funded-escrow.ts",
+  "packages/gateway/src/services/buyer-funding-verifier.ts",
+  "packages/gateway/src/services/commentary-narrator.ts",
+  "packages/gateway/src/services/escrow-reclaim.ts",
+  "packages/gateway/src/services/oracle-client.ts",
+  "packages/gateway/src/services/scope-acceptance.ts",
+  "packages/gateway/src/services/settlement-keeper.ts",
+  "packages/gateway/src/services/settlement-owned-status.ts",
+  "packages/spec/src/funding/index.ts",
+  "packages/spec/src/readmodels/product-home.ts",
+  "packages/spec/src/types/tool-catalog.ts",
+  "packages/gateway/src/services/buyer-funding-prepare.ts",
+];
+describe("scanEscrowWriters additional forms", () => {
+  for (const [id, probe] of [
+    ["WS1", 'const r = getRepos().escrows; r.updateStatus(id, "funded")'],
+    ["WS2", 'const { escrows } = getRepos(); escrows.updateStatus(id, "funded")'],
+    ["WS3", 'getRepos()["escrows"].updateStatus(id, "funded")'],
+    ["WS4", 'new EscrowRepository(db).updateStatus(id, "funded")'],
+    ["WS5", 'import {schema} from "@pcc/store"; sql`UPDATE ${schema.escrows} SET status = \'funded\'`'],
+    ["WS5 alias", 'import {schema} from "@pcc/store"; const rows = schema.escrows; sql`UPDATE ${rows} SET status = \'funded\'`'],
+    ["WS6", 'const { schema } = await import("@pcc/store"); db.update(schema.escrows).set({status:"funded"}).run()'],
+    ["WS6 namespace", 'const store = await import("@pcc/store"); db.update(store.schema.escrows).set({status:"funded"}).run()'],
+    ["WS7", 'import * as store from "@pcc/store"; db.update(store.schema.escrows).set({status:"funded"}).run()'],
+    ["WS8", 'db.run("UPDATE main.escrows SET status = \'funded\'")'],
+    ["WS9", 'db.run("UPDATE " + "escrows" + " SET status = \'funded\'")'],
+    ["WS9 concat", 'db.run("UPDATE ".concat("escrows", " SET status = \'funded\'"))'],
+    ["control drizzle", 'import {schema} from "@pcc/store"; db.update(schema.escrows).set({status:"funded"}).run()'],
+    ["control repo", 'repos.escrows.updateStatus(id,"funded")'],
+    ["WS1 repos binding", 'const repos = getRepos(); const r = repos.escrows; r.updateStatus(id,"funded")'],
+    ["WS1 destructured instance", 'const r = new EscrowRepository(db); r.updateStatus(id,"funded")'],
+  ]) it(`${id}: scanEscrowWriters recognizes the receiver or SQL expression`, () => {
+    const scan = scanEscrowWriters("probe.ts", probe!);
+    expect(scan.writes).toHaveLength(1); expect(scan.writes[0]!.table).toBe("escrows"); expect(scan.writes[0]!.statuses).toEqual(["funded"]);
+  });
+  it("WS10: productionFiles escrow mentions match the written inventory", () => {
+    expect(productionFiles(ROOT).filter(f => /\b(?:escrows|escrowMilestones|escrow_milestones|EscrowRepository)\b/.test(readFileSync(f, "utf8")))
+      .map(f => relative(ROOT, f)).sort()).toEqual([...ESCROW_MENTION_FILES].sort());
+  });
+  it("WS11: prepareBuyerFunding inserts only a created marker and pending milestone", () => {
+    const writes = realScan().writes.filter(w => w.file === "packages/gateway/src/services/buyer-funding-prepare.ts");
+    expect(writes.map(({ table, kind, statuses, versions, alias }) => ({ table, kind, statuses, versions, alias }))).toEqual([
+      { table: "escrows", kind: "drizzle_insert", statuses: ["created"], versions: [MARKER], alias: false },
+      { table: "escrow_milestones", kind: "drizzle_insert", statuses: ["pending"], versions: [], alias: false },
+    ]);
+  });
+  it("WS12: prepareBuyerFunding imports the marker and has no literal copy", () => {
+    const source = ts.createSourceFile("prepare.ts", readFileSync(join(ROOT, "packages/gateway/src/services/buyer-funding-prepare.ts"), "utf8"), ts.ScriptTarget.Latest, true);
+    const literals: string[] = []; const imports: string[] = [];
+    function walk(node: ts.Node) {
+      if (ts.isStringLiteralLike(node)) literals.push(node.text);
+      if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text === "./buyer-funded-escrow.js") {
+        const bindings = node.importClause?.namedBindings;
+        if (bindings && ts.isNamedImports(bindings)) imports.push(...bindings.elements.map(e => e.propertyName?.text ?? e.name.text));
+      }
+      ts.forEachChild(node, walk);
+    }
+    walk(source); expect(literals).not.toContain(MARKER); expect(imports).toContain("BUYER_FUNDED_ESCROW_VERSION");
   });
 });

@@ -87,6 +87,8 @@ import { authorityOf, EXPLICIT_CREDENTIAL_REQUIRED, provenByCookieOnly } from ".
 import { gateJobRead, refuseJobRead } from "../readmodels/job-read-gate.js";
 import { bindBuyer } from "../auth/buyer-identity.js";
 import { isMockSettlement } from "../services/settlement-mode.js";
+import { BuyerFundingSelectionError, commitBuyerFundingSelection } from "../services/buyer-funding-prepare.js";
+import { ESCROW_BUYER_FUNDED } from "../services/buyer-funded-escrow.js";
 import {
   acceptanceFor,
   buyerFundingRefusal,
@@ -283,6 +285,15 @@ export async function createJobFromSession(
   escrowStatus: string;
   /** N133: "active" only when the kernel's operator accepted and the buyer funded it. */
   scopeStatus: string;
+  fundingMode?: undefined;
+} | {
+  jobId: string;
+  scopeId: string;
+  escrowId: null;
+  escrowAddress: null;
+  escrowStatus: null;
+  scopeStatus: string;
+  fundingMode: "vnext_buyer";
 }> {
   const repos = getRepos();
   const { db } = getStore();
@@ -322,302 +333,306 @@ export async function createJobFromSession(
   // Job id is needed BEFORE escrow creation so V2 milestones can bind it on-chain
   // (keccak256(bytes(jobId)) is stored per-milestone for EAS payload validation).
   const jobId = session.jobId ?? `job-${crypto.randomUUID().slice(0, 12)}`;
+  const buyerFunding = commitBuyerFundingSelection(session.kernelId, buyer);
 
   // ── 1. Create or reference escrow ──────────────────────────────────
   const escrowId = `esc-${crypto.randomUUID().slice(0, 12)}`;
-  let escrowAddress: string;
-  let escrowStatus: string;
+  let escrowAddress: string | null = null;
+  let escrowStatus: string | null = null;
 
-  if (isMockSettlement()) {
-    escrowAddress = `mock-escrow-${Date.now().toString(36)}`;
-    escrowStatus = "funded";
-  } else {
-    // Real on-chain escrow via PCCProtocol factory
-    const network = process.env.PCC_NETWORK ?? "base-sepolia";
-    const pk = process.env.PCC_GATEWAY_PRIVATE_KEY as `0x${string}` | undefined;
-    if (!pk) throw new Error("PCC_GATEWAY_PRIVATE_KEY required for real settlement");
-
-    const deployment = getDeployment(network);
-    const account = privateKeyToAccount(pk);
-    const walletClient = createWalletClient({
-      account,
-      chain: deployment.chain,
-      transport: http(deployment.rpcUrl),
-    });
-    const publicClient = createPublicClient({
-      chain: deployment.chain,
-      transport: http(deployment.rpcUrl),
-    });
-
-    // Token: chain-config mockUSDC for this network FIRST (the token the payer
-    // actually holds), with MOCK_USDC_ADDRESS env as a fallback only where
-    // chain-config has no token (e.g. localhost). resolveMockUSDCAddress is the
-    // SAME resolver approveToken uses, so the escrow's `_token`, the approve
-    // target, and the fund pull all reference one token. A polluted env
-    // (MOCK_USDC_ADDRESS = Flow-EVM 0x5f2eb54d… on base-sepolia) no longer wins
-    // and strands fund() against a token the payer holds 0 of. Both V1
-    // createEscrow and V2 createEscrowV2 take the same (payer, arbiter, token,
-    // cwmId) shape; only the factory + fn name differ.
-    const tokenAddr = resolveMockUSDCAddress(network);
-    if (!tokenAddr) {
-      throw new Error(
-        `No MockUSDC token resolvable for network ${network} ` +
-          `(no chain-config mockUSDC and MOCK_USDC_ADDRESS env unset)`,
-      );
-    }
-    const cwmIdBytes = keccak256(toBytes(`pcc-session-${session.id}-${Date.now()}`));
-
-    if (useV3ModeA()) {
-      // ── V3 Mode-A (payer-approval, oracle-free) ─────────────────────────
-      // Deploy a MilestoneEscrowV3 clone via the V3 factory, add each milestone
-      // (V2 ABI works on V3 — identical addMilestone shape), THEN fund the escrow
-      // upfront (approveToken + fund) so it is ready for approveAndRelease at
-      // /complete. payer == arbiter == operator == the gateway signer, same as V2.
-      // Funding upfront (unlike V1/V2, which fund elsewhere) matches Mode A: the
-      // gateway holds the payer key and releases its own escrowed USDC on approval.
-      // Per-env V3 factory override (staging isolation): a non-prod deployment can
-      // point at its OWN factory — one bound to a throwaway staging oracle — via
-      // MILESTONE_ESCROW_FACTORY_V3, so the prod oracle trust root is never shared
-      // across environments. Falls back to the chain-config (prod) address when unset.
-      // See docs/ORACLE-TRUST-ARCHITECTURE.md.
-      const factoryAddrV3 =
-        (process.env.MILESTONE_ESCROW_FACTORY_V3 as `0x${string}` | undefined) ??
-        getContractAddress(network, "milestoneEscrowFactoryV3");
-
-      let totalFundAmount = 0n;
-      for (const ms of normalizedMilestones) {
-        totalFundAmount += parseUnits(ms.amount, 6);
-      }
-
-      escrowAddress = await withSignerLock(async () => {
-        // createEscrowV3 handles the factory write + EscrowCreated decode.
-        const addr = await createEscrowV3(
-          account.address, // payer  = gateway signer
-          account.address, // arbiter = gateway signer
-          tokenAddr,
-          cwmIdBytes,
-          factoryAddrV3,
-        );
-        console.log(
-          `[paid-job] Created on-chain V3 (Mode A) escrow: ${addr} (token: ${tokenAddr})`,
-        );
-
-        // Every milestone pays the gateway signer.
-        // requiredTier is carried for parity; Mode A ignores it at release.
-        for (const ms of normalizedMilestones) {
-          const stepIdBytes = keccak256(toBytes(ms.stepId));
-          const addTx = await walletClient.writeContract({
-            address: addr as `0x${string}`,
-            abi: MilestoneEscrowV2ABI,
-            functionName: "addMilestone",
-            args: [
-              stepIdBytes,
-              account.address,
-              parseUnits(ms.amount, 6),
-              parseUnits(ms.bondAmount ?? "0.00", 6),
-              BigInt(ms.challengeWindowSeconds ?? 0),
-              assuranceTier,
-              jobId,
-            ],
-            gas: GAS_LIMITS.addMilestone,
-          });
-          const addReceipt = await publicClient.waitForTransactionReceipt({ hash: addTx, timeout: 90_000 });
-          if (addReceipt.status !== "success") {
-            throw new Error(
-              `V3 addMilestone reverted (stepId=${ms.stepId}, tx=${addTx}, escrow ${addr})`,
-            );
-          }
-          console.log(
-            `[paid-job] V3 milestone added on-chain: stepId=${ms.stepId} amount=${ms.amount} (tx: ${addTx})`,
-          );
-        }
-
-        // Fund the escrow upfront: approve the escrow to pull totalFundAmount of
-        // the token, then fund(). Both use the MockUSDC / V2-fund ABIs which are
-        // byte-identical on V3. The escrow is now settle-ready for /complete.
-        const approveTx = await walletClient.writeContract({
-          address: tokenAddr,
-          abi: MockUSDCABI,
-          functionName: "approve",
-          args: [addr as `0x${string}`, totalFundAmount],
-          gas: GAS_LIMITS.approve,
-        });
-        const approveReceipt = await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 90_000 });
-        if (approveReceipt.status !== "success") {
-          throw new Error(`V3 approve reverted (tx=${approveTx}, escrow ${addr})`);
-        }
-
-        const fundTx = await walletClient.writeContract({
-          address: addr as `0x${string}`,
-          abi: MilestoneEscrowV3ABI,
-          functionName: "fund",
-          args: [],
-          gas: GAS_LIMITS.fund,
-        });
-        const fundReceipt = await publicClient.waitForTransactionReceipt({ hash: fundTx, timeout: 90_000 });
-        if (fundReceipt.status !== "success") {
-          throw new Error(`V3 fund reverted (tx=${fundTx}, escrow ${addr})`);
-        }
-        console.log(
-          `[paid-job] V3 escrow ${addr} funded upfront (${normalizedMilestones.length} milestone(s), ${totalFundAmount} base units)`,
-        );
-
-        return addr;
-      });
+  if (buyerFunding === null) {
+    if (isMockSettlement()) {
+      escrowAddress = `mock-escrow-${Date.now().toString(36)}`;
       escrowStatus = "funded";
     } else {
+      // Real on-chain escrow via PCCProtocol factory
+      const network = process.env.PCC_NETWORK ?? "base-sepolia";
+      const pk = process.env.PCC_GATEWAY_PRIVATE_KEY as `0x${string}` | undefined;
+      if (!pk) throw new Error("PCC_GATEWAY_PRIVATE_KEY required for real settlement");
 
-    // V2 (EAS): deploy an EAS-gated MilestoneEscrowV2 via the V2 factory.
-    // V1 (default): legacy createEscrow on the V1 protocol. Branch-by-abstraction
-    // on useEasV2() so existing deployments are untouched.
-    const v2 = useEasV2();
-    const factoryAddr = v2
-      ? getContractAddress(network, "milestoneEscrowFactoryV2")
-      : getContractAddress(network, "pccProtocol");
-    const factoryAbi = v2 ? PCCProtocolV2ABI : PCCProtocolABI;
-    const createFn = v2 ? "createEscrowV2" : "createEscrow";
+      const deployment = getDeployment(network);
+      const account = privateKeyToAccount(pk);
+      const walletClient = createWalletClient({
+        account,
+        chain: deployment.chain,
+        transport: http(deployment.rpcUrl),
+      });
+      const publicClient = createPublicClient({
+        chain: deployment.chain,
+        transport: http(deployment.rpcUrl),
+      });
 
-    // P0-1 + P2 settlement robustness. Three layers, all needed because the hot
-    // signer is shared and the public RPC is flaky:
-    //   (P2) withSignerLock serializes the WHOLE create->addMilestone sequence so
-    //        concurrent createJobFromSession requests can't read the same
-    //        getTransactionCount(pending) and collide on the nonce window.
-    //   (P0-1) explicit monotonic nonces WITHIN the locked sequence so create and
-    //        addMilestone can't share a nonce on RPC propagation lag.
-    //   (retry) if an addMilestone tx is DROPPED by the flaky RPC (receipt never
-    //        arrives within the window), the escrow ends up with too few milestones.
-    //        Retrying the milestone alone risks a duplicate (the dropped tx could
-    //        still mine), so we ABANDON the empty escrow and mint a FRESH one.
-    //        Abandoned escrows are inert (never funded, never referenced). A reverted
-    //        tx (vs a drop) is a real contract error and throws immediately.
-    const MAX_CREATE_ATTEMPTS = 3;
-    escrowAddress = await withSignerLock(async () => {
-      let lastAddr = "";
-      for (let attempt = 1; attempt <= MAX_CREATE_ATTEMPTS; attempt++) {
-        let nonce = await publicClient.getTransactionCount({
-          address: account.address,
-          blockTag: "pending",
-        });
-
-        const txHash = await walletClient.writeContract({
-          address: factoryAddr,
-          abi: factoryAbi,
-          functionName: createFn,
-          args: [account.address, account.address, tokenAddr, cwmIdBytes],
-          nonce: nonce++,
-          gas: GAS_LIMITS.createEscrow,
-        });
-        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-        const addr = extractEscrowCreatedAddress(receipt.logs, factoryAbi as typeof PCCProtocolV2ABI);
-        lastAddr = addr;
-        console.log(
-          `[paid-job] Created on-chain ${v2 ? "V2 (EAS) " : ""}escrow: ${addr} (tx: ${txHash}, token: ${tokenAddr}, attempt ${attempt}/${MAX_CREATE_ATTEMPTS})`,
-        );
-
-        // V1 has no on-chain milestones to add — the escrow IS the result.
-        if (!v2) return addr;
-
-        // createEscrowV2 mints an EMPTY escrow; without >=1 milestone fund() reverts.
-        // Add each milestone in sequence on the same (locked) signer, BEFORE fund().
-        // Every milestone pays the gateway signer.
-        let dropped = false;
-        for (const ms of normalizedMilestones) {
-          const stepIdBytes = keccak256(toBytes(ms.stepId));
-          const addTx = await walletClient.writeContract({
-            address: addr as `0x${string}`,
-            abi: MilestoneEscrowV2ABI,
-            functionName: "addMilestone",
-            args: [
-              stepIdBytes,
-              account.address,
-              parseUnits(ms.amount, 6),
-              parseUnits(ms.bondAmount ?? "0.00", 6),
-              BigInt(ms.challengeWindowSeconds ?? 0),
-              assuranceTier, // requiredTier (0-3); the smoke quote uses tier 0
-              jobId,
-            ],
-            nonce: nonce++,
-            gas: GAS_LIMITS.addMilestone,
-          });
-          // Drop vs revert: a dropped tx never produces a receipt -> waitForTransactionReceipt
-          // times out (caught -> retry with a fresh escrow). A mined-but-reverted tx is a real
-          // contract error -> throw immediately.
-          let addReceipt;
-          try {
-            addReceipt = await publicClient.waitForTransactionReceipt({ hash: addTx, timeout: 90_000 });
-          } catch {
-            dropped = true;
-            break;
-          }
-          if (addReceipt.status !== "success") {
-            throw new Error(
-              `addMilestone reverted (stepId=${ms.stepId}, tx=${addTx}, escrow ${addr})`,
-            );
-          }
-          console.log(
-            `[paid-job] V2 milestone added on-chain: stepId=${ms.stepId} amount=${ms.amount} tier=${assuranceTier} (tx: ${addTx})`,
-          );
-        }
-
-        if (!dropped) {
-          // Every addMilestone receipt mined with status "success" -> the milestones
-          // ARE on-chain. Do NOT re-read getMilestoneCount to "confirm": the public
-          // load-balanced RPC serves reads from a replica that lags the just-mined
-          // write, returning a phantom 0 that falsely abandons a VALID escrow (verified
-          // 2026-06-15 — 4/4 such "abandoned" escrows read getMilestoneCount=1 on-chain
-          // moments later). The mined receipts are the authoritative confirmation;
-          // read-lag is a consumer concern (/state + the smoke poll the count).
-          console.log(
-            `[paid-job] V2 escrow ${addr}: ${normalizedMilestones.length} milestone(s) added, receipts confirmed (attempt ${attempt}/${MAX_CREATE_ATTEMPTS})`,
-          );
-          return addr;
-        }
-
-        // Only reached when an addMilestone tx was genuinely DROPPED (its receipt timed
-        // out) -> that escrow is missing a milestone, so abandon it and mint a fresh one.
-        console.warn(
-          `[paid-job] escrow ${addr} had a dropped addMilestone tx (attempt ${attempt}/${MAX_CREATE_ATTEMPTS}) — retrying with a fresh escrow`,
+      // Token: chain-config mockUSDC for this network FIRST (the token the payer
+      // actually holds), with MOCK_USDC_ADDRESS env as a fallback only where
+      // chain-config has no token (e.g. localhost). resolveMockUSDCAddress is the
+      // SAME resolver approveToken uses, so the escrow's `_token`, the approve
+      // target, and the fund pull all reference one token. A polluted env
+      // (MOCK_USDC_ADDRESS = Flow-EVM 0x5f2eb54d… on base-sepolia) no longer wins
+      // and strands fund() against a token the payer holds 0 of. Both V1
+      // createEscrow and V2 createEscrowV2 take the same (payer, arbiter, token,
+      // cwmId) shape; only the factory + fn name differ.
+      const tokenAddr = resolveMockUSDCAddress(network);
+      if (!tokenAddr) {
+        throw new Error(
+          `No MockUSDC token resolvable for network ${network} ` +
+            `(no chain-config mockUSDC and MOCK_USDC_ADDRESS env unset)`,
         );
       }
-      throw new Error(
-        `createEscrowV2 + addMilestone could not land milestones after ${MAX_CREATE_ATTEMPTS} attempts ` +
-          `(last escrow ${lastAddr}). The signer-lock serialized the writes but the RPC kept dropping txs — ` +
-          `a dedicated RPC with failover is the durable fix (board P2).`,
-      );
+      const cwmIdBytes = keccak256(toBytes(`pcc-session-${session.id}-${Date.now()}`));
+
+      if (useV3ModeA()) {
+        if (buyerFunding !== null) throw new BuyerFundingSelectionError(ESCROW_BUYER_FUNDED);
+        // ── V3 Mode-A (payer-approval, oracle-free) ─────────────────────────
+        // Deploy a MilestoneEscrowV3 clone via the V3 factory, add each milestone
+        // (V2 ABI works on V3 — identical addMilestone shape), THEN fund the escrow
+        // upfront (approveToken + fund) so it is ready for approveAndRelease at
+        // /complete. payer == arbiter == operator == the gateway signer, same as V2.
+        // Funding upfront (unlike V1/V2, which fund elsewhere) matches Mode A: the
+        // gateway holds the payer key and releases its own escrowed USDC on approval.
+        // Per-env V3 factory override (staging isolation): a non-prod deployment can
+        // point at its OWN factory — one bound to a throwaway staging oracle — via
+        // MILESTONE_ESCROW_FACTORY_V3, so the prod oracle trust root is never shared
+        // across environments. Falls back to the chain-config (prod) address when unset.
+        // See docs/ORACLE-TRUST-ARCHITECTURE.md.
+        const factoryAddrV3 =
+          (process.env.MILESTONE_ESCROW_FACTORY_V3 as `0x${string}` | undefined) ??
+          getContractAddress(network, "milestoneEscrowFactoryV3");
+
+        let totalFundAmount = 0n;
+        for (const ms of normalizedMilestones) {
+          totalFundAmount += parseUnits(ms.amount, 6);
+        }
+
+        escrowAddress = await withSignerLock(async () => {
+          // createEscrowV3 handles the factory write + EscrowCreated decode.
+          const addr = await createEscrowV3(
+            account.address, // payer  = gateway signer
+            account.address, // arbiter = gateway signer
+            tokenAddr,
+            cwmIdBytes,
+            factoryAddrV3,
+          );
+          console.log(
+            `[paid-job] Created on-chain V3 (Mode A) escrow: ${addr} (token: ${tokenAddr})`,
+          );
+
+          // Every milestone pays the gateway signer.
+          // requiredTier is carried for parity; Mode A ignores it at release.
+          for (const ms of normalizedMilestones) {
+            const stepIdBytes = keccak256(toBytes(ms.stepId));
+            const addTx = await walletClient.writeContract({
+              address: addr as `0x${string}`,
+              abi: MilestoneEscrowV2ABI,
+              functionName: "addMilestone",
+              args: [
+                stepIdBytes,
+                account.address,
+                parseUnits(ms.amount, 6),
+                parseUnits(ms.bondAmount ?? "0.00", 6),
+                BigInt(ms.challengeWindowSeconds ?? 0),
+                assuranceTier,
+                jobId,
+              ],
+              gas: GAS_LIMITS.addMilestone,
+            });
+            const addReceipt = await publicClient.waitForTransactionReceipt({ hash: addTx, timeout: 90_000 });
+            if (addReceipt.status !== "success") {
+              throw new Error(
+                `V3 addMilestone reverted (stepId=${ms.stepId}, tx=${addTx}, escrow ${addr})`,
+              );
+            }
+            console.log(
+              `[paid-job] V3 milestone added on-chain: stepId=${ms.stepId} amount=${ms.amount} (tx: ${addTx})`,
+            );
+          }
+
+          // Fund the escrow upfront: approve the escrow to pull totalFundAmount of
+          // the token, then fund(). Both use the MockUSDC / V2-fund ABIs which are
+          // byte-identical on V3. The escrow is now settle-ready for /complete.
+          const approveTx = await walletClient.writeContract({
+            address: tokenAddr,
+            abi: MockUSDCABI,
+            functionName: "approve",
+            args: [addr as `0x${string}`, totalFundAmount],
+            gas: GAS_LIMITS.approve,
+          });
+          const approveReceipt = await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 90_000 });
+          if (approveReceipt.status !== "success") {
+            throw new Error(`V3 approve reverted (tx=${approveTx}, escrow ${addr})`);
+          }
+
+          const fundTx = await walletClient.writeContract({
+            address: addr as `0x${string}`,
+            abi: MilestoneEscrowV3ABI,
+            functionName: "fund",
+            args: [],
+            gas: GAS_LIMITS.fund,
+          });
+          const fundReceipt = await publicClient.waitForTransactionReceipt({ hash: fundTx, timeout: 90_000 });
+          if (fundReceipt.status !== "success") {
+            throw new Error(`V3 fund reverted (tx=${fundTx}, escrow ${addr})`);
+          }
+          console.log(
+            `[paid-job] V3 escrow ${addr} funded upfront (${normalizedMilestones.length} milestone(s), ${totalFundAmount} base units)`,
+          );
+
+          return addr;
+        });
+        escrowStatus = "funded";
+      } else {
+
+      // V2 (EAS): deploy an EAS-gated MilestoneEscrowV2 via the V2 factory.
+      // V1 (default): legacy createEscrow on the V1 protocol. Branch-by-abstraction
+      // on useEasV2() so existing deployments are untouched.
+      const v2 = useEasV2();
+      const factoryAddr = v2
+        ? getContractAddress(network, "milestoneEscrowFactoryV2")
+        : getContractAddress(network, "pccProtocol");
+      const factoryAbi = v2 ? PCCProtocolV2ABI : PCCProtocolABI;
+      const createFn = v2 ? "createEscrowV2" : "createEscrow";
+
+      // P0-1 + P2 settlement robustness. Three layers, all needed because the hot
+      // signer is shared and the public RPC is flaky:
+      //   (P2) withSignerLock serializes the WHOLE create->addMilestone sequence so
+      //        concurrent createJobFromSession requests can't read the same
+      //        getTransactionCount(pending) and collide on the nonce window.
+      //   (P0-1) explicit monotonic nonces WITHIN the locked sequence so create and
+      //        addMilestone can't share a nonce on RPC propagation lag.
+      //   (retry) if an addMilestone tx is DROPPED by the flaky RPC (receipt never
+      //        arrives within the window), the escrow ends up with too few milestones.
+      //        Retrying the milestone alone risks a duplicate (the dropped tx could
+      //        still mine), so we ABANDON the empty escrow and mint a FRESH one.
+      //        Abandoned escrows are inert (never funded, never referenced). A reverted
+      //        tx (vs a drop) is a real contract error and throws immediately.
+      const MAX_CREATE_ATTEMPTS = 3;
+      escrowAddress = await withSignerLock(async () => {
+        let lastAddr = "";
+        for (let attempt = 1; attempt <= MAX_CREATE_ATTEMPTS; attempt++) {
+          let nonce = await publicClient.getTransactionCount({
+            address: account.address,
+            blockTag: "pending",
+          });
+
+          const txHash = await walletClient.writeContract({
+            address: factoryAddr,
+            abi: factoryAbi,
+            functionName: createFn,
+            args: [account.address, account.address, tokenAddr, cwmIdBytes],
+            nonce: nonce++,
+            gas: GAS_LIMITS.createEscrow,
+          });
+          const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+          const addr = extractEscrowCreatedAddress(receipt.logs, factoryAbi as typeof PCCProtocolV2ABI);
+          lastAddr = addr;
+          console.log(
+            `[paid-job] Created on-chain ${v2 ? "V2 (EAS) " : ""}escrow: ${addr} (tx: ${txHash}, token: ${tokenAddr}, attempt ${attempt}/${MAX_CREATE_ATTEMPTS})`,
+          );
+
+          // V1 has no on-chain milestones to add — the escrow IS the result.
+          if (!v2) return addr;
+
+          // createEscrowV2 mints an EMPTY escrow; without >=1 milestone fund() reverts.
+          // Add each milestone in sequence on the same (locked) signer, BEFORE fund().
+          // Every milestone pays the gateway signer.
+          let dropped = false;
+          for (const ms of normalizedMilestones) {
+            const stepIdBytes = keccak256(toBytes(ms.stepId));
+            const addTx = await walletClient.writeContract({
+              address: addr as `0x${string}`,
+              abi: MilestoneEscrowV2ABI,
+              functionName: "addMilestone",
+              args: [
+                stepIdBytes,
+                account.address,
+                parseUnits(ms.amount, 6),
+                parseUnits(ms.bondAmount ?? "0.00", 6),
+                BigInt(ms.challengeWindowSeconds ?? 0),
+                assuranceTier, // requiredTier (0-3); the smoke quote uses tier 0
+                jobId,
+              ],
+              nonce: nonce++,
+              gas: GAS_LIMITS.addMilestone,
+            });
+            // Drop vs revert: a dropped tx never produces a receipt -> waitForTransactionReceipt
+            // times out (caught -> retry with a fresh escrow). A mined-but-reverted tx is a real
+            // contract error -> throw immediately.
+            let addReceipt;
+            try {
+              addReceipt = await publicClient.waitForTransactionReceipt({ hash: addTx, timeout: 90_000 });
+            } catch {
+              dropped = true;
+              break;
+            }
+            if (addReceipt.status !== "success") {
+              throw new Error(
+                `addMilestone reverted (stepId=${ms.stepId}, tx=${addTx}, escrow ${addr})`,
+              );
+            }
+            console.log(
+              `[paid-job] V2 milestone added on-chain: stepId=${ms.stepId} amount=${ms.amount} tier=${assuranceTier} (tx: ${addTx})`,
+            );
+          }
+
+          if (!dropped) {
+            // Every addMilestone receipt mined with status "success" -> the milestones
+            // ARE on-chain. Do NOT re-read getMilestoneCount to "confirm": the public
+            // load-balanced RPC serves reads from a replica that lags the just-mined
+            // write, returning a phantom 0 that falsely abandons a VALID escrow (verified
+            // 2026-06-15 — 4/4 such "abandoned" escrows read getMilestoneCount=1 on-chain
+            // moments later). The mined receipts are the authoritative confirmation;
+            // read-lag is a consumer concern (/state + the smoke poll the count).
+            console.log(
+              `[paid-job] V2 escrow ${addr}: ${normalizedMilestones.length} milestone(s) added, receipts confirmed (attempt ${attempt}/${MAX_CREATE_ATTEMPTS})`,
+            );
+            return addr;
+          }
+
+          // Only reached when an addMilestone tx was genuinely DROPPED (its receipt timed
+          // out) -> that escrow is missing a milestone, so abandon it and mint a fresh one.
+          console.warn(
+            `[paid-job] escrow ${addr} had a dropped addMilestone tx (attempt ${attempt}/${MAX_CREATE_ATTEMPTS}) — retrying with a fresh escrow`,
+          );
+        }
+        throw new Error(
+          `createEscrowV2 + addMilestone could not land milestones after ${MAX_CREATE_ATTEMPTS} attempts ` +
+            `(last escrow ${lastAddr}). The signer-lock serialized the writes but the RPC kept dropping txs — ` +
+            `a dedicated RPC with failover is the durable fix (board P2).`,
+        );
+      });
+      escrowStatus = "created";
+      } // end V1/V2 branch (else of useV3ModeA)
+    }
+
+    const totalPrice = quote?.totalPrice as string ?? "10.00";
+    const currency = quote?.currency as string ?? "USDC";
+    const deadline = (contractTerms?.deadline as string) ?? new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+
+    repos.escrows.insert({
+      id: escrowId,
+      cwmId: session.cwmId ?? `cwm-${crypto.randomUUID().slice(0, 12)}`,
+      contractAddress: escrowAddress,
+      payer: session.userAgentId,
+      totalAmount: totalPrice,
+      currency,
+      status: escrowStatus,
+      createdAt: now,
+      deadline,
+      // V3 dispatch: settled-later routes/facades read this and pick the V3
+      // write helpers (submitAttestationV3 / releaseMilestoneV3) vs V2.
+      version: useV3ModeA() ? "v3" : "v2",
     });
-    escrowStatus = "created";
-    } // end V1/V2 branch (else of useV3ModeA)
-  }
 
-  const totalPrice = quote?.totalPrice as string ?? "10.00";
-  const currency = quote?.currency as string ?? "USDC";
-  const deadline = (contractTerms?.deadline as string) ?? new Date(Date.now() + 24 * 60 * 60_000).toISOString();
-
-  repos.escrows.insert({
-    id: escrowId,
-    cwmId: session.cwmId ?? `cwm-${crypto.randomUUID().slice(0, 12)}`,
-    contractAddress: escrowAddress,
-    payer: session.userAgentId,
-    totalAmount: totalPrice,
-    currency,
-    status: escrowStatus,
-    createdAt: now,
-    deadline,
-    // V3 dispatch: settled-later routes/facades read this and pick the V3
-    // write helpers (submitAttestationV3 / releaseMilestoneV3) vs V2.
-    version: useV3ModeA() ? "v3" : "v2",
-  });
-
-  // Insert milestones (DB rows mirror the normalized set used on-chain above).
-  for (const ms of normalizedMilestones) {
-    repos.escrows.insertMilestone({
-      id: `ms-${crypto.randomUUID().slice(0, 12)}`,
-      escrowId,
-      stepId: ms.stepId,
-      amount: ms.amount,
-      status: escrowStatus === "funded" ? "funded" : "pending",
-      bondAmount: ms.bondAmount,
-    });
+    // Insert milestones (DB rows mirror the normalized set used on-chain above).
+    for (const ms of normalizedMilestones) {
+      repos.escrows.insertMilestone({
+        id: `ms-${crypto.randomUUID().slice(0, 12)}`,
+        escrowId,
+        stepId: ms.stepId,
+        amount: ms.amount,
+        status: escrowStatus === "funded" ? "funded" : "pending",
+        bondAmount: ms.bondAmount,
+      });
+    }
   }
 
   // ── 2. Create the job ──────────────────────────────────────────────
@@ -717,14 +732,18 @@ export async function createJobFromSession(
   pipelineTelemetry.emit(jobId, "job_submit", "completed", {
     metadata: {
       sessionId: session.id,
-      escrowId,
+      escrowId: buyerFunding === null ? escrowId : null,
       scopeId,
       kernelId: session.kernelId,
       capabilityType: session.capabilityType,
       mockSettlement: isMockSettlement(),
       scopeStatus,
+      ...(buyerFunding !== null ? { fundingMode: "vnext_buyer" } : {}),
     },
   });
+
+  if (buyerFunding !== null) return { jobId, scopeId, escrowId: null, escrowAddress: null, escrowStatus: null, scopeStatus, fundingMode: "vnext_buyer" };
+  if (escrowAddress === null || escrowStatus === null) throw new Error("createJobFromSession: escrow fields unset");
 
   return {
     jobId,
@@ -963,6 +982,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
               : result.scopeStatus === "awaiting_funding"
                 ? "Fast-track job created. Its scope waits for the buyer's own funding of the escrow."
                 : "Fast-track job created. The kernel's operator does not accept this buyer: its scope is not live.",
+        ...(result.fundingMode === "vnext_buyer" ? { fundingMode: "vnext_buyer" } : {}),
       });
     } catch (err) {
       return reply.status(500).send({
