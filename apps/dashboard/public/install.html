@@ -427,9 +427,9 @@ document.addEventListener('click', (e) => {
 });
 
 // Feedback form: submissions go to /api/feedback.
-// An email copy goes through formsubmit.co only when FEEDBACK_EMAIL is set.
-// Leave it empty until the capability.network role address forwards mail.
-// formsubmit.co then needs a one-time recipient verification click.
+// A formsubmit.co email copy is attempted only when FEEDBACK_EMAIL is non-empty.
+// The gateway CSP (connect-src, packages/gateway/src/middleware/security-hardening.ts)
+// does not allow formsubmit.co, so on capability.network the browser blocks that copy.
 const FEEDBACK_EMAIL = '';
 const fbForm = document.getElementById('feedback-form');
 const fbBtn = document.getElementById('fb-submit');
