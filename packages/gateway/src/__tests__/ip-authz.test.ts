@@ -12,6 +12,8 @@ import { __resetScopeCacheForTests, scopeChecker } from "../middleware/scope-che
 import { kernelRoutes } from "../routes/kernels.js";
 import { capabilityRoutes } from "../routes/capabilities.js";
 import { ipRoutes } from "../routes/ip.js";
+import { walletsRoutes } from "../routes/wallets.js";
+import { CONSENT_SHA256 } from "../services/wallet-links/consent.js";
 import { EVM_A, EVM_B } from "./helpers/kernel-registration-fixture.js";
 
 vi.mock("../services/posthog-service.js", () => ({ trackServerEvent: vi.fn() }));
@@ -471,5 +473,94 @@ describe("A11 E24b capability creator and admin act for the recorded operator", 
     const get = await f.app.inject({ url: `/api/ip/${ip}/licensing-terms`, headers: f.headers.OWNER_KEY });
     expect(get.statusCode).toBe(200);
     expect(get.json().terms.designerAddress).toBe(OWNER);
+  });
+});
+
+describe("A12 a self-link:device proof is not an owner proof", () => {
+  async function linked(role?: "device" | "agent") {
+    const app = Fastify({ logger: false });
+    apps.push(app);
+    app.decorateRequest("userId", null);
+    app.decorateRequest("apiKeyId", null);
+    app.decorateRequest("operatorId", null);
+    await app.register(cookie, { secret: "n176-signed-session-cookie-secret" });
+    await app.register(siweAuthPlugin);
+    await app.register(apiGate);
+    await app.register(scopeChecker);
+    await app.register(capabilityRoutes);
+    await app.register(kernelRoutes);
+    await app.register(walletsRoutes);
+    await app.register(ipRoutes);
+    await app.ready();
+
+    const headers = await credentials(app);
+    const k = await kernel(app, headers.OWNER_KEY);
+    const cap = await capability(app, headers.OWNER_KEY, k);
+    const ip = await register(app, headers.OWNER_KEY, cap);
+    const freshCap = await capability(app, headers.OWNER_KEY, k, "n10a-fresh-c");
+    job(k, cap.id, "n10a-fresh-j");
+    const terms = await app.inject({ method: "POST", url: "/api/ip/set-licensing-terms", headers: headers.OWNER_KEY,
+      payload: { ...termsBody(ip), defaultRevShare: 7 } });
+    expect(terms.statusCode, terms.body).toBe(200);
+    const otherHeaders = { ...bearer(provisionApiKey({ operatorId: "n10a-linked-account" }).rawKey), "x-pcc-wallet": OWNER };
+    if (role) {
+      const created = await app.inject({ method: "POST", url: "/api/wallets/link-requests", headers: otherHeaders,
+        payload: { keyType: "secp256k1", address: OWNER, chainId: 84532, role, label: "n10a-owner-wallet" } });
+      expect(created.statusCode, created.body).toBe(201);
+      const linkRequest = created.json<{ requestId: string; userCode: string; message: string }>();
+      const proof = await app.inject({ method: "POST", url: `/api/wallets/link-requests/${linkRequest.requestId}/proof`, headers: otherHeaders,
+        payload: { signature: await EVM_A.signMessage({ message: linkRequest.message }) } });
+      expect(proof.statusCode, proof.body).toBe(200);
+      expect(proof.json()).toEqual({ status: "awaiting_approval" });
+      const approved = await app.inject({ method: "POST", url: `/api/wallets/link-requests/${linkRequest.requestId}/approve`, headers: otherHeaders,
+        payload: { userCode: linkRequest.userCode, decision: "approve", consentSha256: CONSENT_SHA256 } });
+      expect(approved.statusCode, approved.body).toBe(200);
+    }
+    const f: Fixture = { app, headers, k, cap, ip, child: "", freshCap };
+    return { f, otherHeaders };
+  }
+
+  it.each(["register-capability", "register-job-evidence", "set-licensing-terms"] as const)("device / %s", async action => {
+    const { f, otherHeaders } = await linked("device");
+    const calls = spies();
+    const before = counts();
+    const termsUrl = `/api/ip/${f.ip}/licensing-terms`;
+    const prior = await f.app.inject({ url: termsUrl, headers: otherHeaders });
+    expect(prior.statusCode, prior.body).toBe(200);
+    const res = await f.app.inject({ method: "POST", ...request(f, action), headers: otherHeaders });
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json()).toEqual(bodies[action === "set-licensing-terms" ? "not_ip_owner" : "not_kernel_operator"]);
+    calls.forEach(spy => expect(spy).not.toHaveBeenCalled());
+    expect(counts()).toEqual(before);
+    const after = await f.app.inject({ url: termsUrl, headers: otherHeaders });
+    expect(after.statusCode, after.body).toBe(200);
+    expect(after.json()).toEqual(prior.json());
+  });
+  it("device / dispute", async () => {
+    const { f, otherHeaders } = await linked("device");
+    const spy = vi.spyOn(StoryIPService.prototype, "raiseDispute");
+    const res = await f.app.inject({ method: "POST", ...request(f, "dispute"), headers: otherHeaders });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toEqual({ dispute: expect.any(Object), raisedBy: OWNER, simulated: true });
+    expect(spy).toHaveBeenCalledWith(f.ip, { hash: disputeBody.evidenceHash, reason: disputeBody.reason });
+  });
+  it("agent control / register-capability", async () => {
+    const { f, otherHeaders } = await linked("agent");
+    const spy = vi.spyOn(StoryIPService.prototype, "registerCapabilityAsIP");
+    const before = counts();
+    const res = await f.app.inject({ method: "POST", ...request(f, "register-capability"), headers: otherHeaders });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(spy).toHaveBeenCalledWith(f.freshCap, expect.objectContaining({ designerAddress: OWNER }));
+    expect(counts()).toEqual({ ...before, registrations: before.registrations + 1 });
+  });
+  it("no link control / register-capability", async () => {
+    const { f, otherHeaders } = await linked();
+    const calls = spies();
+    const before = counts();
+    const res = await f.app.inject({ method: "POST", ...request(f, "register-capability"), headers: otherHeaders });
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json()).toEqual(bodies.wallet_proof_required);
+    calls.forEach(spy => expect(spy).not.toHaveBeenCalled());
+    expect(counts()).toEqual(before);
   });
 });
