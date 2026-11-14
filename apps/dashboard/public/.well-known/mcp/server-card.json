@@ -150,7 +150,7 @@
     },
     {
       "name": "pcc_setup_test_job",
-      "description": "Submit a test job for one device on a kernel (Step 4 of onboarding). The gateway runs it only for a kernel it operates in-process; for any other kernel it refuses and runs nothing. Every reply says whether the job ran and passed."
+      "description": "Submit a test job for one device on a kernel (Step 4 of onboarding). The gateway runs it only for a kernel it operates in-process; for any other kernel it refuses and runs nothing. The test-job handler includes ran and passed in its replies; authentication and other earlier refusals may omit them."
     },
     {
       "name": "pcc_setup_generate_env",
@@ -194,7 +194,7 @@
     },
     {
       "name": "pcc_ip_lineage",
-      "description": "Get the IP lineage PCC has recorded for an IP asset: ancestors (parent CSDs) and descendants (job evidence records and derivative CSDs). Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain."
+      "description": "Get the IP links PCC has recorded in this process for an IP asset: direct parents and up to two descendant levels from job-evidence records. Story Protocol (now The DATA Foundation). These tools make no on-chain call: nothing is registered, claimed or disputed on chain."
     },
     {
       "name": "pcc_ip_set_splits",

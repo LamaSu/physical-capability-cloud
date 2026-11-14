@@ -22,6 +22,10 @@ import { dirname, join } from "node:path";
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const PKG_PATH = join(REPO, "apps/dashboard/public/agent-package.json");
 const SKILLS = ["apps/dashboard/public/skills/pcc.md", "skills/pcc/SKILL.md", ".claude/skills/pcc/SKILL.md"];
+const PIN = "700dcfe9581bb75dad9206b8db49ae6f68ebe6e6";
+const PINNED = `pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@${PIN}#subdirectory=packages/pcc-node`;
+const INSTALL = /\b(?:pip3?|pipx|uv\s+pip|uv\s+tool)\b[^\n`;&|]*?\binstall\b[^\n`;&|]*pcc-node[^\n`;&|]*/gi;
+const SPEC = /pcc-node(?:\[[^\]]*\])?\s*[<>=!~]/;
 
 const pkgText = readFileSync(PKG_PATH, "utf8");
 const pkg = JSON.parse(pkgText) as {
@@ -101,14 +105,15 @@ describe("the agent pack tells agents only true things", () => {
     expect(announce!.description).toContain("create_capability");
   });
 
-  // 0.1.0 is yanked, so >=0.1.1. And without pynacl (the crypto extra) the node
-  // cannot sign evidence or register a signing key: log_capture.py and
-  // register.py fail closed, so a plain install can never reach a verified run.
-  it("installs a pcc-node that exists and can sign: pcc-node[crypto]>=0.1.1", () => {
+  // 0.1.0 is yanked and no later release is on PyPI, so the pack installs a commit
+  // pinned in full. And without pynacl (the crypto extra) the node cannot sign
+  // evidence or register a signing key: log_capture.py and register.py fail closed,
+  // so a plain install can never reach a verified run.
+  it("installs a pcc-node that exists and can sign: pcc-node[crypto] at a commit pinned in full", () => {
     for (const [file, text] of PACK) {
-      for (const m of text.matchAll(/pip3? install [^\n`]*pcc-node[^\n`]*/g)) {
-        // >=0.1.1, or (until 0.1.1 is on PyPI) a commit pinned in full: never a bare or older version.
-        expect(m[0], file).toMatch(/pcc-node\[(?:[^\]]*,\s*)?(?:crypto|all)(?:\s*,[^\]]*)?\](?:>=0\.1\.1| @ git\+https:\/\/github\.com\/LamaSu\/physical-capability-cloud@[0-9a-f]{40}#subdirectory=packages\/pcc-node)/);
+      for (const m of text.matchAll(INSTALL)) {
+        // A commit pinned in full, with the crypto (or all) extra: never a bare install or a version.
+        expect(m[0], file).toMatch(/pcc-node\[(?:[^\]]*,\s*)?(?:crypto|all)(?:\s*,[^\]]*)?\] @ git\+https:\/\/github\.com\/LamaSu\/physical-capability-cloud@[0-9a-f]{40}#subdirectory=packages\/pcc-node/);
       }
     }
   });
@@ -367,23 +372,17 @@ describe("verdict 102f: the pack's claims hold, and its schema enforces contract
     });
   });
 
-  it("F4: every pcc-node install line asks for >=0.1.1 only beside the pinned-commit fallback (the git fetch itself is not exercised here)", () => {
+  it("F4: every pcc-node install line installs the pinned commit with the crypto extra and names no version (the git fetch itself is not exercised here)", () => {
     let installs = 0;
-    for (const [file, raw] of [...PACK, ["CLAUDE.md", readFileSync(join(REPO, "CLAUDE.md"), "utf8")] as [string, string]]) {
+    for (const [file, raw] of [...PACK, ...["CLAUDE.md", "apps/dashboard/public/llms.txt"].map((file): [string, string] => [file, readFileSync(join(REPO, file), "utf8")])]) {
       const text = raw.replace(/\\\n\s*/g, " "); // join shell line continuations
-      const lines = [...text.matchAll(/pip3?\b[^\n`]*?\binstall\b[^\n`]*pcc-node[^\n`]*/gi)].map((m) => m[0]);
+      const lines = [...text.matchAll(INSTALL)].map((m) => m[0]);
       for (const line of lines) {
-        // Every install names >=0.1.1 or the pinned commit (102h): an unversioned install is refused.
-        expect(line, `${file}: ${line}`).toMatch(/pcc-node(?:\[[^\]]*\])?>=0\.1\.1|pcc-node\[crypto\] @ git\+https:\/\/github\.com\/LamaSu\/physical-capability-cloud@[0-9a-f]{40}#subdirectory=packages\/pcc-node/);
-        // A version spec on pcc-node is exactly >=0.1.1, or the pinned commit.
-        for (const spec of line.matchAll(/pcc-node(?:\[[^\]]*\])?\s*([<>=!~][^\s"'`;&|\\]*)/g)) {
-          expect(spec[1], `${file}: ${line}`).toBe(">=0.1.1");
-        }
+        // Every install is the pinned commit with the crypto extra, and names no version.
+        expect(line, `${file}: ${line}`).toContain(PINNED);
+        expect(line, `${file}: ${line}`).not.toMatch(SPEC);
       }
       installs += lines.length;
-      if (lines.some((l) => />=0\.1\.1/.test(l))) {
-        expect(text, `${file}: a >=0.1.1 install needs the pinned-commit fallback`).toMatch(/pcc-node\[crypto\] @ git\+https:\/\/github\.com\/LamaSu\/physical-capability-cloud@[0-9a-f]{40}#subdirectory=packages\/pcc-node/);
-      }
     }
     expect(installs).toBeGreaterThan(0); // never vacuous
   });
@@ -449,10 +448,10 @@ describe("verdict 102f: the pack's claims hold, and its schema enforces contract
   });
 
   it("0.1.1: nothing says the pcc-node daemon takes, processes or polls jobs", () => {
-    for (const [file, text] of [...PACK, ["CLAUDE.md", readFileSync(join(REPO, "CLAUDE.md"), "utf8")] as [string, string]]) {
+    for (const [file, text] of [...PACK, ...["CLAUDE.md", "apps/dashboard/public/llms.txt"].map((file): [string, string] => [file, readFileSync(join(REPO, file), "utf8")])]) {
       for (const line of text.split(/\\n|\n/)) {
         if (/pcc-node|daemon/.test(line)) {
-          expect(line, file).not.toMatch(/daemon that processes jobs|operator polling[^.\n]*pcc-node daemon|persistent operator polling[^.\n]*pcc-node/i);
+          expect(line, file).not.toMatch(/daemon that processes jobs|operator polling[^.\n]*pcc-node daemon|persistent operator polling[^.\n]*pcc-node|\bjob daemon\b/i);
         }
       }
     }

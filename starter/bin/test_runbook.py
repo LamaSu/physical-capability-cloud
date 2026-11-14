@@ -12,6 +12,10 @@ import unittest
 STARTER = pathlib.Path(__file__).resolve().parents[1]
 RUNBOOK = STARTER / "runbook"
 PHASES = ["prerequisites", "identify", "intake", "research", "build", "register", "verify", "operate", "publish", "session"]
+PIN = "700dcfe9581bb75dad9206b8db49ae6f68ebe6e6"
+PINNED = f"pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@{PIN}#subdirectory=packages/pcc-node"
+INSTALL = re.compile(r"\b(?:pip3?|pipx|uv\s+pip|uv\s+tool)\b[^\n`;&|]*?\binstall\b[^\n`;&|]*pcc-node[^\n`;&|]*", re.I)
+SPEC = re.compile(r"pcc-node(?:\[[^\]]*\])?\s*[<>=!~]")
 
 
 OUTCOMES = ["ok", "failed", "blocked", "skipped", "budget_stop", "abandoned", "in_progress"]
@@ -128,14 +132,15 @@ class TestTruths(unittest.TestCase):
                 if re.search(r"\bcurl\b", line):
                     self.assertNotIn("https://capability.network", line, f"{path.name}: {line}")
 
-    def test_pcc_node_is_installed_with_crypto_and_a_real_version(self):
+    def test_pcc_node_is_installed_with_crypto_from_the_pinned_commit(self):
         installs = 0
         for path, text in text_files():
-            for m in re.finditer(r"pip3? install [^\n`]*pcc-node[^\n`]*", text):
+            for m in INSTALL.finditer(text):
                 installs += 1
                 line = m.group(0)
                 self.assertRegex(line, r"pcc-node\[crypto\]", f"{path.name}: {line}")
-                self.assertRegex(line, r">=0\.1\.1|@[0-9a-f]{40}", f"{path.name}: {line}")
+                self.assertIn(PINNED, line, f"{path.name}: {line}")
+                self.assertNotRegex(line, SPEC, f"{path.name}: {line}")
         self.assertGreater(installs, 0)
 
     def test_pcc_job_complete_and_test_job_appear_only_as_warnings(self):
@@ -443,6 +448,19 @@ class TestOneCallRegistration(unittest.TestCase):
         self.assertTrue(bindings)
         self.assertIn("kernel-fields.json", ast.unparse(bindings[-1]))
         self.assertIn("kernel-id", ast.unparse(bindings[-1]))
+        self.assertEqual(ast.unparse(call), "register_kernel_signed(read('base'), read('api-key'), payload, pub, sec)")
+        k = next(i for i, statement in enumerate(tree.body) if any(node is call for node in ast.walk(statement)))
+        b = max(
+            i for i, statement in enumerate(tree.body[:k])
+            if isinstance(statement, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "payload" for target in statement.targets)
+        )
+        self.assertFalse(any(
+            isinstance(node, ast.Name) and node.id == "payload"
+            for statement in tree.body[b + 1:k] for node in ast.walk(statement)
+        ))
+        self.assertLess(k + 1, len(tree.body))
+        self.assertEqual(ast.unparse(tree.body[k + 1]), "json.dump(data, open('.pcc/kernel.json', 'w'))")
 
     def test_step_1_sends_nothing_and_picks_the_id(self):
         text = phase_text("05-register.md")
@@ -450,6 +468,7 @@ class TestOneCallRegistration(unittest.TestCase):
         kernel = between(text, "## 1.", "## 2.")
         self.assertIn("secrets.token_hex", kernel)
         self.assertNotIn("curl", kernel)
+        self.assertIn("[ -s .pcc/kernel-id ] ||", kernel)
 
     def test_the_id_is_checked_by_its_status_code_first(self):
         signing = between(phase_text("05-register.md"), "## 2.", "## 3.")
@@ -460,7 +479,7 @@ class TestOneCallRegistration(unittest.TestCase):
 
     def test_the_starter_names_no_pcc_node_version(self):
         for path, text in text_files():
-            self.assertNotRegex(text, r"\b0\.1\.\d+\b", path.name)
+            self.assertNotRegex(text, r"(?<![\d.])0\.1\.\d+\b", path.name)
 
     def test_the_signing_refusal_names_the_one_call(self):
         index = json.loads((RUNBOOK / "index.json").read_text(encoding="utf-8"))

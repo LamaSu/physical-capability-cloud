@@ -74,7 +74,11 @@ function scanLoopbackTrust(root: string, files: readonly string[]): Finding[] {
           return !!value.expression && walk(value.expression, declaration, depth + 1);
         });
       }
-      if (!descend) return false;
+      // isIp (descend = false) still follows value joins: both operands of ?? and ||, and both branches of ?:.
+      // It stays inside this walk, so the cycle guard and the visit budget are shared.
+      if (!descend) return ts.isBinaryExpression(node) && [ts.SyntaxKind.QuestionQuestionToken, ts.SyntaxKind.BarBarToken].includes(node.operatorToken.kind)
+        ? walk(node.left, at, depth + 1) || walk(node.right, at, depth + 1)
+        : ts.isConditionalExpression(node) ? walk(node.whenTrue, at, depth + 1) || walk(node.whenFalse, at, depth + 1) : false;
       let hit = false;
       ts.forEachChild(node, child => { if (!incomplete && ts.isExpression(child) && walk(child, at, depth + 1)) hit = true; });
       return hit;
@@ -100,7 +104,7 @@ function scanLoopbackTrust(root: string, files: readonly string[]): Finding[] {
       const member = callee && calleeName(callee);
       const collectionTrust = ts.isCallExpression(node) && receiver && ["has", "includes", "indexOf"].includes(member ?? "") && node.arguments.some(isIp) && holdsLoopback(receiver);
       const prefixTrust = ts.isCallExpression(node) && receiver && member === "startsWith" && isIp(receiver) && node.arguments.some(holdsPrefix);
-      const regexTrust = ts.isCallExpression(node) && receiver && member === "test" && holdsRegex(receiver) && node.arguments.some(isIp);
+      const regexTrust = ts.isCallExpression(node) && receiver && member === "test" && node.arguments.some(isIp) && holdsRegex(receiver);
       const switchTrust = ts.isCaseClause(node) && ts.isCaseBlock(node.parent) && ts.isSwitchStatement(node.parent.parent) && isIp(node.parent.parent.expression) && holdsLoopback(node.expression);
       if (collectionTrust || prefixTrust || regexTrust || switchTrust || (ts.isBinaryExpression(node) && comparisons.has(node.operatorToken.kind)
         && ((isIp(node.left) && holdsLoopback(node.right)) || (isIp(node.right) && holdsLoopback(node.left))))
@@ -372,6 +376,35 @@ describe("N258 W5 bounded loopback aliases", () => {
       mkdirSync(dirname(join(root, file)), { recursive: true });
       writeFileSync(join(root, file), source);
       expect(scanLoopbackTrust(root, [file])).toHaveLength(count);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("N289 E4a value joins and receiver order", () => {
+  for (const [name, source, count] of [
+    ["A-nullish", 'export function trust(req) { const ip = req.ip ?? req.socket.remoteAddress; return ip === "127.0.0.1"; }', 1],
+    ["A-or", 'export function trust(req) { const ip = req.ip || ""; return ip === "127.0.0.1"; }', 1],
+    ["A-cond", 'export function trust(req, proxied) { const ip = proxied ? req.ip : req.socket.remoteAddress; return ip === "::1"; }', 1],
+    ["A-direct-nullish", 'export function trust(req) { return (req.ip ?? "") === "127.0.0.1"; }', 1],
+    ["A-cond-then", 'export function trust(req, proxied) { const ip = proxied ? req.ip : req.headers["x-real-ip"]; return ip === "127.0.0.1"; }', 1],
+    ["A-cond-else", 'export function trust(req, proxied) { const ip = proxied ? req.headers["x-real-ip"] : req.ip; return ip === "127.0.0.1"; }', 1],
+    ["A-self-nullish", 'export function trust(req) { let ip = req.headers["x-real-ip"]; ip = ip ?? req.ip; return ip === "127.0.0.1"; }', 1],
+    ["A-nested-join", 'export function trust(req) { const ip = req.headers.x ?? (req.y || req.ip); return ip === "127.0.0.1"; }', 1],
+    ["S-nullish-other", 'export function check(req) { const h = req.hostname ?? "x"; return h === "localhost"; }', 0],
+    ["S-or-default-name", 'export function check(req) { const name = req.body.name || "localhost"; return name === "localhost"; }', 0],
+    ["S-self-or", 'export function check(req) { let h = req.hostname; h = h || "x"; return h === "localhost"; }', 0],
+    ["S-and-left", 'export function trust(req) { const ip = req.ip && "x"; return ip === "127.0.0.1"; }', 0],
+    ["S-cond-test", 'export function trust(req) { const v = req.ip ? "a" : "b"; return v === "127.0.0.1"; }', 0],
+    ["S-test-receiver-deep", `// 127\nconst RULES = ${"[".repeat(80)}"x"${"]".repeat(80)}; export function check(v) { return RULES.test(v.name); }`, 0],
+  ] as const) it(`N289 ${name}: an IP value join is loopback trust; near misses stay clean`, () => {
+    const root = mkdtempSync(join(tmpdir(), "pcc-loopback-n289-"));
+    const file = "packages/gateway/src/routes/planted.ts";
+    try {
+      mkdirSync(dirname(join(root, file)), { recursive: true });
+      writeFileSync(join(root, file), source);
+      const hits = scanLoopbackTrust(root, [file]);
+      expect(hits, JSON.stringify(hits)).toHaveLength(count);
+      expect(hits.filter(hit => hit.detail), JSON.stringify(hits)).toEqual([]);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

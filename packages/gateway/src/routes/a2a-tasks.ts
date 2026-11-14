@@ -758,7 +758,7 @@ async function handlePccAuthorIntegration(p: PccAuthorIntegrationParams): Promis
       availability: p.availability ?? null,
       agentCardUrl,
       proveNext: lane === "machine"
-        ? "POST /api/setup/test-job { kernelId, deviceId, assuranceTier } to prove + auto-activate"
+        ? "POST /api/setup/test-job { kernelId, deviceId, assuranceTier }: the gateway runs a test job only for a kernel it operates in-process, and a test job activates nothing"
         : "POST /api/onboard/registrations/:id/prove { evidence: photo + GPS } to activate at Tier 1",
       attachMoreChannels: `tasks/send { skill: "pcc-attach-channel", params: { operatorSlug: "${operatorSlug}", ... } }`,
     },

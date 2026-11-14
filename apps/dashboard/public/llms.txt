@@ -57,9 +57,9 @@ There are three "lanes" — three economic-agent shapes:
 - Human skill — a person offering a skill. Gets pinged, accepts within a window, finishes by a deadline.
 - Asset — a thing that posts outbound demand on its own behalf, bidding for capabilities within an owner-set budget.
 
-Flow: `POST /api/auth/provision` → `POST /api/onboard/analyze` (AI capability analysis) → `POST /api/kernels` (register your site/operator) → `POST /api/setup/register-device` → `POST /api/capabilities` (publish) → `POST /api/setup/test-job` (prove → auto-activate).
+Flow: `POST /api/auth/provision` → `POST /api/onboard/analyze` (AI capability analysis) → `POST /api/kernels` (register your site/operator) → `POST /api/setup/register-device` → `POST /api/capabilities` (publish) → `POST /api/setup/test-job` (in-process kernel only; activates nothing).
 
-CLI alternative: `pip install pcc-node && pcc-node start` auto-detects hardware, generates keys, provisions, registers, and starts the job daemon.
+CLI alternative: install this pinned commit, not a release from PyPI: `python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@700dcfe9581bb75dad9206b8db49ae6f68ebe6e6#subdirectory=packages/pcc-node"`. After an earlier pcc-node install, pip may keep that copy, because both report the same version: run that command again with `--force-reinstall --no-deps` after `install`. `pcc-node start` needs an API key: provision one first (`POST /api/auth/provision`) and pass it as `PCC_API_KEY` or `--api-key`. It auto-detects hardware, creates the node's signing key if there is none, registers the kernel and keeps it online. It takes no jobs.
 
 ## Core API surface
 
