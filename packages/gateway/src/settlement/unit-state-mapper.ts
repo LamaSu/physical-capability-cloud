@@ -325,7 +325,7 @@ const PHASE_BY_STATE: Readonly<Record<Exclude<UnitState, UnitState.AWAITING_FUND
  * discriminator is `backupLane`, which lives in the lifecycle view, not here.
  * State 3 follows `_appealWindow` (ESC:2125-2135), strictly capping due at the
  * non-zero emergency anchor (ESC:2132-2133). Missing either anchor fails closed.
- * States 2 and 5 are not capped: `challenge()` has no emergency gate (ESC:1729-1772).
+ * States 2 and 5 are not capped: `challenge()` has no emergency gate (ESC:1729-1756).
  */
 export function windowEndsAt(
   anchors: SettlementAnchors,
