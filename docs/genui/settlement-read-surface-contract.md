@@ -101,9 +101,8 @@ type SettlementReceiptDTO = {
     | "APPEAL_OVERTURN" | "EMERGENCY_OVERTURN" | "EMERGENCY_SILENCE"
     | "BACKUP_NO_RELEASE"                                  // one code for backup timeout and backup reject: the BACKUP_PENDING -> refund branch exits only on the
                                                           // assertion cutoff and emits Finalized(unitId, false, 2) for both, so "backup reject" is not a distinctly witnessable path.
-    | "COHORT_REVOKED" | "DEADLINE_RECLAIM"               // DEADLINE_RECLAIM (reclaimAfterDeadline) emits a BARE RefundAllocated with no companion event, so it is
-                                                          // identifiable only BY ELIMINATION, which any future bare-RefundAllocated path silently breaks.
-                                                          // Open ask to escrow: emit an explicit discriminator so the cause is witnessed, not inferred.
+    | "COHORT_REVOKED" | "DEADLINE_RECLAIM"               // DEADLINE_RECLAIM is witnessed by Finalized(unitId, false, 4) from
+                                                          // reclaimAfterDeadline (ESC:2224), and is never inferred by elimination.
     | null;                                               // null — no cause to report on a release path, or before a terminal refund; RefundReason has NO
                                                           // "NONE" member (the implemented route uses null; see matrix §B fixture 1a).
   authorizationId: string;                                // EAS UID | dispute id | reclaim id | (buyer path:) the execution receipt id
@@ -124,11 +123,10 @@ type SettlementReceiptDTO = {
                                                           //   (b) DEFERRED — a leg falls back to a collateralized claim; the unit sits at 6/7 until a later
                                                           //       dischargeClaim() zeros remainingClaimCount, emitting ClaimDischarged. finalizedBlock IS that block.
                                                           // LOG-derived either way (reorg-exposed): mark per rule 21.
-                                                          // IMPLEMENTATION GAP at master `ac86a404` (confirmed by trace, triage-350-r2 D2): the route/reader
-                                                          // ask ONLY for the deferred-case block (`readZeroingDischargeBlock`). For the inline case (a) there
-                                                          // is no zeroing-discharge event, the reader returns `undefined`, and `/receipt` currently emits
-                                                          // `finalizedBlock: null` for a unit that IS terminal. Gateway-owned fix: `SettlementUnitReader` needs
-                                                          // an allocation-block-aware read before this field's "non-null in 8/9" guarantee holds end-to-end.
+                                                          // The reader returns a FinalizationWitness: inline settlement (claimCount 0) uses the
+                                                          // allocation block; deferred settlement uses the zeroing job-class discharge.
+                                                          // The route reads this witness only at state 8 or 9 and renders "UNKNOWN" when a
+                                                          // terminal unit has no witness.
   // Asset reality and RELEASE-VERIFIED economics (rule 14). assetReality is a registry-derived classification, NOT inferred
   // from chainId alone (a fake mainnet token could pose as USDC).
   assetReality: "real" | "test" | "unknown";              // rule 15: registry-derived from the DEPLOYMENT TUPLE, never chainId; FAILS CLOSED to "unknown" for an unrecognized token

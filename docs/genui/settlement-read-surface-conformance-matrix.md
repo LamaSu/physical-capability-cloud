@@ -66,15 +66,13 @@ zero, and a reader must cover BOTH (§B fixtures 1a/1b):
   - **Deferred** (1b): a leg falls back to a collateralized claim; the unit sits at 6/7 until a later
     `dischargeClaim()` zeros `remainingClaimCount`, emitting `ClaimDischarged`. That block IS the settlement block.
 LOG-derived and source-marked either way.
-**Reader-port obligation:** the mapper's `deriveFinalizedBlock` TRUSTS its input block; it cannot itself prove which of
-the two shapes produced it. So covering both is a contract on the concrete `SettlementUnitReader`, not on the pure
-function — it must return the allocation block for the inline case and the zeroing-discharge block for the deferred
-case. A `readZeroingDischargeBlock` that only ever looks for `ClaimDischarged` covers the deferred case ONLY.
-**Implementation gap at master `ac86a404`** (confirmed by trace, `triage-350-r2` D2): the current route
-(`settlement-read.ts:365-370`) calls only `readZeroingDischargeBlock`, so an inline-settled terminal unit (fixture 1a)
-gets `finalizedBlock: null` today even though it IS terminal. This is a gateway-owned gap, not a gen-UI one: the
-`SettlementUnitReader` interface needs an allocation-block-aware read before this table's "non-null in 8/9" guarantee
-holds for inline settlement. Until fixed, a consumer MUST NOT treat `finalizedBlock: null` at 8/9 as "not yet settled".
+**Reader-port obligation:** `readFinalizationWitness` returns a `FinalizationWitness` containing the unit's
+allocation block and claimCount, plus the optional zeroing-discharge block. The mapper checks their consistency,
+but proving which discharge was the last job-class one (ClaimCreated classes 0-2, excluding bond and other
+auxiliary claims) remains the reader's job.
+**The implementation gap is closed:** the route reads the witness only at state 8 or 9. Inline settlement uses
+the allocation block when claimCount is 0; deferred settlement uses the zeroing discharge. At 8 or 9,
+`finalizedBlock` is a value or "UNKNOWN" when no witness is available, never null.
 
 **State 0 (AWAITING_FUNDING) is unreachable:** a unit is registered as existing only after its state is set to
 FUNDED_ACTIVE, so an existing unit is always ≥ state 1, and `unitState()` is `onlyExisting`, reverting `UnitNotFound` for
@@ -89,11 +87,10 @@ observable**; 6/7 are skippable (see the fixture note in §B); 0 is unreachable.
 ## §B: money-outcome fixtures → expected DTO
 1a. Release, every leg discharged INLINE during the allocation call → state 8 in the same tx as allocation,
     `refundReason: null` (no cause to name on a release path; `RefundReason` has no `NONE` member — see
-    `settlement-read.ts:353-363,400`). `finalizedBlock` SHOULD be the allocation block, but currently reads `null` at
-    master `ac86a404` (implementation gap — see the `finalizedBlock` derivation note in §A above).
+    `settlement-read.ts`). `finalizedBlock` IS the allocation block from the `FinalizationWitness` (claimCount 0).
 1b. Release, every leg discharged, but at least one via a DEFERRED `dischargeClaim()` after allocation → state 6 then
-    state 8 across two blocks, `refundReason: null`, `finalizedBlock` = the zeroing `dischargeClaim` block (this path
-    IS correctly covered by `readZeroingDischargeBlock` today).
+    state 8 across two blocks, `refundReason: null`, `finalizedBlock` = the zeroing `dischargeClaim` block named by
+    `FinalizationWitness.zeroingDischargeBlock`.
 2. Release, one **principal** claim pending → state 6, `finalizedBlock: null`, presentation "payment incomplete".
 3. Release, one **fee** claim pending → state 6 (same); auxiliary status exposed separately (rule 18).
 4. Refund, refund claim pending → state 7.

@@ -12,7 +12,7 @@
  * read plane is unbound.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import {
   settlementReadRoutes,
@@ -43,7 +43,7 @@ function makeReader(over: Partial<SettlementUnitReader> = {}): SettlementUnitRea
     },
     readAnchors: async () => ({ state: UnitState.SETTLED_RELEASED, remainingClaimCount: 0n }),
     readRefundWitness: async () => ({}),
-    readZeroingDischargeBlock: async () => 999n,
+    readFinalizationWitness: async () => ({ allocation: { block: 120n, claimCount: 0n } }),
     readEconomics: async () => ({
       amount: "1000000",
       feeAmount: "23500",
@@ -206,14 +206,14 @@ describe("receipt DTO — rule 2 (asserts nothing sound) and rule 21 (marked sou
     await app.close();
   });
 
-  it("marks finalizedBlock as LOG-derived, not staticcall (reorg-exposed)", async () => {
+  it("marks finalizedBlock as LOG-derived, not staticcall (reorg-exposed) (T17)", async () => {
     setSettlementUnitReader(makeReader());
     const app = await buildApp();
     const b = (await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` })).json();
     // rule 25: the envelope is enriched (chain, contract, block, finality,
     // completeness) — assert the load-bearing fields rather than an exact shape
     // that breaks every time the envelope legitimately grows.
-    expect(b.finalizedBlock.value).toBe("999");
+    expect(b.finalizedBlock.value).toBe("120");
     expect(b.finalizedBlock.source).toBe("log");
     expect(b.finalizedBlock.blockHash).toBe(SNAP_HASH);
     await app.close();
@@ -406,5 +406,86 @@ describe("v1.5 rule 26 — assetReality attests IDENTITY, not liveness", () => {
     // read identity as liveness.
     expect(b.assetReality.attests).toBe("identity-not-liveness");
     await app.close();
+  });
+});
+
+
+describe("settlement witnesses and emergency cap", () => {
+  it("T18 state 9 deferred settlement uses the zeroing block", async () => {
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state: UnitState.SETTLED_REFUNDED, remainingClaimCount: 0n }),
+      readFinalizationWitness: async () => ({ allocation: { block: 120n, claimCount: 2n }, zeroingDischargeBlock: 150n }),
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().finalizedBlock).toMatchObject({ value: "150", source: "log", blockHash: SNAP_HASH });
+    } finally { await app.close(); }
+  });
+
+  it.each([UnitState.RELEASE_ALLOCATED, UnitState.REFUND_ALLOCATED])("T19 state %i never reads finalization logs", async state => {
+    const readFinalizationWitness = vi.fn(async () => ({ allocation: { block: 120n, claimCount: 0n } }));
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state, remainingClaimCount: 1n }), readFinalizationWitness,
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().finalizedBlock).toBeNull();
+      expect(readFinalizationWitness).not.toHaveBeenCalled();
+    } finally { await app.close(); }
+  });
+
+  it("T20 state 9 deadline reclaim is witnessed by code 4", async () => {
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state: UnitState.SETTLED_REFUNDED, remainingClaimCount: 0n }),
+      readRefundWitness: async () => ({ finalized: { released: false, code: 4 } }),
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().refundReason).toMatchObject({ value: "DEADLINE_RECLAIM", source: "log", completeness: "complete" });
+    } finally { await app.close(); }
+  });
+
+  it("T21 state 3 lifecycle caps the appeal at the emergency anchor", async () => {
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state: UnitState.CHALLENGED, challengedAt: 2000n, emergencyAnchor: 5000n }),
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/lifecycle` });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().windowEndsAt).toBe("5000");
+    } finally { await app.close(); }
+  });
+
+  it.each([UnitState.SETTLED_REFUNDED, UnitState.SETTLED_RELEASED])("T22 state %i missing required logs is UNKNOWN even on a complete index", async state => {
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state, remainingClaimCount: 0n }),
+      readRefundWitness: async () => ({}), readFinalizationWitness: async () => ({}),
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().logCompleteness).toBe("complete");
+      if (state === UnitState.SETTLED_REFUNDED) expect(res.json().refundReason).toBe("UNKNOWN");
+      else expect(res.json().refundReason).toBeNull();
+      expect(res.json().finalizedBlock).toBe("UNKNOWN");
+    } finally { await app.close(); }
+  });
+
+  it("T23 inconsistent finalization anchors give no receipt DTO", async () => {
+    setSettlementUnitReader(makeReader({ readFinalizationWitness: async () => ({ zeroingDischargeBlock: 150n }) }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).not.toBe(200);
+      expect(res.json()).not.toHaveProperty("finalState");
+    } finally { await app.close(); }
   });
 });

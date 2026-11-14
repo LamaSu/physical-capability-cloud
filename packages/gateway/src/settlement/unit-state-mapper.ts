@@ -6,8 +6,8 @@
  * a total function of values the caller already read, so the money-critical
  * mapping can be tested exhaustively without a chain.
  *
- * AUTHORITY: escrow's DTO mapping (coord #667, verified against
- * VNextSettlementEscrow.sol @ 7f2c6ff5) and gen-UI read-surface contract v1.4
+ * AUTHORITY: escrow's DTO mapping (coord #667), verified against
+ * VNextSettlementEscrow.sol @ 01583c8e (master 7e109630), and gen-UI read-surface contract v1.4
  * (coord #666). Where this file and a reader's intuition disagree, #667 wins —
  * several of the rules below exist precisely because the intuitive version is
  * wrong.
@@ -115,9 +115,8 @@ export type Finality = "finalized" | "safe" | "unsafe";
  * rule 23 — ABSENCE IS NOT EVIDENCE. A log-derived field is trustworthy only if
  * the indexer is COMPLETE THROUGH the pinned block with a matching canonical
  * hash. If it is lagging, "no log found" must render UNKNOWN, never an
- * absence-based inference. The sharpest instances are `refundReason` by
- * elimination (DEADLINE_RECLAIM) and "no refund cause therefore released" —
- * both become UNKNOWN when the indexer is behind.
+ * absence-based inference. A required refund cause or settlement block without
+ * its witness is UNKNOWN even when the indexer reports complete.
  */
 export type Completeness = "complete" | "incomplete" | "unknown";
 
@@ -239,6 +238,15 @@ export interface SettlementAnchors {
   assertedAt?: bigint;
   /** Set when a bonded challenge opened; anchors the appeal window for state 3. */
   challengedAt?: bigint;
+  /**
+   * `escrow.emergencyAnchorOf(unitId)` at the pin (ESC:1276-1298): the
+   * declaration instant (`disabledAt`), or 0n when this unit has no emergency
+   * window. Do not re-derive the exclusions in the gateway (ESC:1276-1283).
+   * If the getter reverts (`_emergencyDeadline` at ESC:1295 calls `disabledAt()`
+   * without a try at ESC:1631), the reader throws or leaves this undefined;
+   * either way no appeal window is rendered.
+   */
+  emergencyAnchor?: bigint;
   /** Backup-lane assertion cutoff; anchors the window for state 4. */
   assertionCutoff?: bigint;
   /**
@@ -315,6 +323,9 @@ const PHASE_BY_STATE: Readonly<Record<Exclude<UnitState, UnitState.AWAITING_FUND
  * #667 trap: states 2 and 5 use the SAME rule (`assertedAt + CHALLENGE_WINDOW`).
  * A mapper that tries to tell them apart by window arithmetic is wrong — the
  * discriminator is `backupLane`, which lives in the lifecycle view, not here.
+ * State 3 follows `_appealWindow` (ESC:2125-2135), strictly capping due at the
+ * non-zero emergency anchor (ESC:2132-2133). Missing either anchor fails closed.
+ * States 2 and 5 are not capped: `challenge()` has no emergency gate (ESC:1729-1772).
  */
 export function windowEndsAt(
   anchors: SettlementAnchors,
@@ -326,10 +337,13 @@ export function windowEndsAt(
       return anchors.assertedAt === undefined
         ? null
         : anchors.assertedAt + windows.challengeWindow;
-    case UnitState.CHALLENGED:
-      return anchors.challengedAt === undefined
-        ? null
-        : anchors.challengedAt + windows.appealWindow;
+    case UnitState.CHALLENGED: {
+      if (anchors.challengedAt === undefined || anchors.emergencyAnchor === undefined) return null;
+      const due = anchors.challengedAt + windows.appealWindow;
+      return anchors.emergencyAnchor !== 0n && anchors.emergencyAnchor < due
+        ? anchors.emergencyAnchor
+        : due;
+    }
     case UnitState.BACKUP_PENDING:
       return anchors.assertionCutoff ?? null;
     default:
@@ -406,12 +420,10 @@ export function toLifecycleView(
 
 /** Witness events, per #667's mapping table. */
 export interface RefundWitness {
-  /** EscalationResolved(unitId, adjudicationId, role, upheld) — :1839 */
+  /** EscalationResolved(unitId, adjudicationId, role, upheld) — ESC:2024 */
   escalationResolved?: { role: "APPEAL" | "EMERGENCY"; upheld: boolean };
-  /** Finalized(unitId, released, code) — :1675 (code 3) / :1732 (code 2) */
+  /** Finalized(unitId, released, code) — ESC:1855-1856 (3), :1912-1913 (2), :2224 (4) */
   finalized?: { released: boolean; code: number };
-  /** reclaimAfterDeadline (:2027) emits a BARE RefundAllocated with no companion. */
-  bareRefundAllocated?: boolean;
 }
 
 /**
@@ -421,11 +433,7 @@ export interface RefundWitness {
  * answer, not a failure. Do NOT substitute a default: an unwitnessed cause
  * rendered as a specific one is a money-display lie.
  *
- * KNOWN FRAGILITY (gen-UI #666 residual ask to escrow): DEADLINE_RECLAIM emits
- * no discriminator, so it is derivable only BY ELIMINATION. Any future bare
- * `RefundAllocated` path silently breaks this. Escrow was asked for an explicit
- * discriminator; until it lands, treat DEADLINE_RECLAIM as the weakest inference
- * here and never harden anything on it.
+ * Deadline reclaim has been witnessed by Finalized code 4 since BATCH-1 (ESC:420-421, :2224); no cause is inferred by elimination.
  */
 export function deriveRefundReason(w: RefundWitness): Sourced<RefundReason> | null {
   if (w.escalationResolved && w.escalationResolved.upheld === false) {
@@ -441,26 +449,48 @@ export function deriveRefundReason(w: RefundWitness): Sourced<RefundReason> | nu
   if (w.finalized && w.finalized.released === false) {
     if (w.finalized.code === 3) return fromLog("EMERGENCY_SILENCE");
     if (w.finalized.code === 2) return fromLog("BACKUP_NO_RELEASE");
+    if (w.finalized.code === 4) return fromLog("DEADLINE_RECLAIM");
   }
-  // By elimination only — see KNOWN FRAGILITY above.
-  if (w.bareRefundAllocated) return fromLog("DEADLINE_RECLAIM");
   return null;
 }
 
+export interface FinalizationWitness {
+  /** The unit's single ReleaseAllocated | RefundAllocated(unitId, claimCount) at or before the pin. */
+  allocation?: { block: bigint; claimCount: bigint };
+  /** The ClaimDischarged that discharged the LAST job-class claim (ClaimCreated class 0-2). Bond and other auxiliary claims never count. */
+  zeroingDischargeBlock?: bigint;
+}
+
 /**
- * `finalizedBlock` — the block of the `dischargeClaim` that zeroed
- * `remainingClaimCount` (:1360-1362).
+ * `finalizedBlock` — the inline allocation block or the last job-class discharge.
  *
- * ANTI-TRAP (#666 F-2): do NOT derive this from a `Finalized` event. All four
- * `Finalized` sites (:1675/:1700/:1726/:1732) fire at ALLOCATION, and
- * `dischargeClaim` does the real 6→8 / 7→9 flip while emitting only
- * `ClaimDischarged` (:1347) — no `Finalized`. Using `Finalized` would stamp a
- * settlement with the block at which the money had NOT yet moved.
- *
- * Null for 6/7 (allocated but not settled) is correct and expected.
+ * ANTI-TRAP (#666 F-2): never take the block from `Finalized`. It is absent on
+ * the escalation path (ESC:2024), and with claims outstanding it marks allocation,
+ * not settlement. The inline block comes from the allocation event, which flips
+ * the state in the same call (ESC:1474-1476, :1491-1493).
+ * The reader must identify the last job-class discharge; the mapper cannot.
  */
-export function deriveFinalizedBlock(
-  zeroingDischargeBlock: bigint | undefined,
-): Sourced<bigint> | null {
+export function deriveFinalizedBlock(w: FinalizationWitness): Sourced<bigint> | null {
+  const { allocation, zeroingDischargeBlock } = w;
+  const nonNegativeBigint = (value: unknown): value is bigint => typeof value === "bigint" && value >= 0n;
+  if (
+    (allocation !== undefined && (!nonNegativeBigint(allocation.block) || !nonNegativeBigint(allocation.claimCount))) ||
+    (zeroingDischargeBlock !== undefined && !nonNegativeBigint(zeroingDischargeBlock))
+  ) {
+    throw new InconsistentAnchorsError("Finalization witness blocks and claimCount must be non-negative bigints.");
+  }
+  if (allocation === undefined) {
+    if (zeroingDischargeBlock === undefined) return null;
+    throw new InconsistentAnchorsError("Zeroing discharge has no allocation witness.");
+  }
+  if (allocation.claimCount === 0n) {
+    if (zeroingDischargeBlock !== undefined) {
+      throw new InconsistentAnchorsError("Inline allocation had no job claim to discharge.");
+    }
+    return fromLog(allocation.block);
+  }
+  if (zeroingDischargeBlock !== undefined && zeroingDischargeBlock < allocation.block) {
+    throw new InconsistentAnchorsError("Zeroing discharge precedes allocation.");
+  }
   return zeroingDischargeBlock === undefined ? null : fromLog(zeroingDischargeBlock);
 }
