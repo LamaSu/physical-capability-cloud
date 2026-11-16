@@ -517,6 +517,7 @@ describe("verdict controls for E4b", () => {
     ["D2e satisfies shape, empty annotations", 'server.tool("planted", { calldata: z.string(), recipient: z.string() } satisfies Record<string, unknown>, {}, h);'],
     ["D2e non-null shape, empty annotations", 'server.tool("planted", ({ calldata: z.string(), recipient: z.string() })!, {}, h);'],
     ["D2e type-assertion shape, empty annotations", 'server.tool("planted", <any>{ calldata: z.string(), recipient: z.string() }, {}, h);'],
+    ["D2e nested shape, empty annotations", 'server.tool("planted", (<any>(({ calldata: z.string(), recipient: z.string() } as any)! satisfies Record<string, unknown>)), {}, h);'],
     ["D4 const name", 'const NAME = "planted"; server.tool(NAME, "Relay", {calldata: z.string(), recipient: z.string()}, h);'],
   ]) it(`E4b-R1/R2 verdict ${name}: both forbidden bytes and address paths are inspected`, () => {
     const {root, files} = synthetic([], text);
@@ -763,6 +764,13 @@ describe("N289 X21 registerTool configs passed by name", () => {
     expect(scan.parameters.map(parameter => parameter.path)).toEqual(["safe"]);
   });
 
+  it("N289 X21 R4-idschema deep: a deeply wrapped config with an explicit inputSchema is inspected", () => {
+    const t = synthetic([], 'const cfg = { description: "Ok", inputSchema: { safe: z.string() } }; server.registerTool("pcc_ok", ((cfg as any))!, cb);');
+    const scan = scanToolReach(t.root, t.files);
+    expect(scan.findings, formatFindings(scan.findings)).toEqual([]);
+    expect(scan.parameters.map(parameter => parameter.path)).toEqual(["safe"]);
+  });
+
   it("N289 X21 cast: a wrapped config without inputSchema fails loudly", () => {
     const t = synthetic([], 'const cfg: any = { description: "x" }; cfg.inputSchema = { calldata: z.string(), recipient: z.string() }; server.registerTool("pcc_x", cfg as any, cb);');
     const scan = scanToolReach(t.root, t.files);
@@ -813,6 +821,14 @@ describe("N289 X21 registerTool configs passed by name", () => {
 
   it("N289 X21 deep: a wrapped config without inputSchema fails loudly", () => {
     const t = synthetic([], 'const cfg: any = { description: "x" }; cfg.inputSchema = { calldata: z.string(), recipient: z.string() }; server.registerTool("pcc_x", ((cfg as any))!, cb);');
+    const scan = scanToolReach(t.root, t.files);
+    expect(scan.findings, formatFindings(scan.findings)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rule: "E4b-R1", detail: expect.stringContaining("missing or opaque input shape") }),
+    ]));
+  });
+
+  it("N289 X21 inner: a wrapped config without inputSchema fails loudly", () => {
+    const t = synthetic([], 'const cfg: any = { description: "x" }; cfg.inputSchema = { calldata: z.string(), recipient: z.string() }; server.registerTool("pcc_x", (<any>(cfg satisfies any)!), cb);');
     const scan = scanToolReach(t.root, t.files);
     expect(scan.findings, formatFindings(scan.findings)).toEqual(expect.arrayContaining([
       expect.objectContaining({ rule: "E4b-R1", detail: expect.stringContaining("missing or opaque input shape") }),
