@@ -87,14 +87,16 @@ export function Sidebar({ groups, currentPath, onNavigate, collapsed = false, on
         )}
         {onToggle && (
           <button
+            type="button"
             onClick={onToggle}
             className="ml-auto transition-colors"
             style={{ color: "rgba(255,255,255,0.25)" }}
             onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "rgba(0, 255, 136, 0.7)"; }}
             onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.25)"; }}
             aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-expanded={!collapsed}
           >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
               <path
                 d={collapsed ? "M6 4l4 4-4 4" : "M10 4l-4 4 4 4"}
                 stroke="currentColor"
@@ -108,7 +110,7 @@ export function Sidebar({ groups, currentPath, onNavigate, collapsed = false, on
       </div>
 
       {/* Nav groups */}
-      <nav className="flex-1 overflow-y-auto py-4 px-2 space-y-6">
+      <nav className="flex-1 overflow-y-auto py-4 px-2 space-y-6" aria-label="Main">
         {groups.map((group) => (
           <div key={group.title}>
             {!collapsed && (
@@ -125,7 +127,10 @@ export function Sidebar({ groups, currentPath, onNavigate, collapsed = false, on
                 return (
                   <button
                     key={item.path}
+                    type="button"
                     onClick={() => onNavigate(item.path)}
+                    aria-current={isActive ? "page" : undefined}
+                    aria-label={item.label}
                     className={cn(
                       "w-full flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-all duration-150",
                       collapsed && "justify-center px-0",
@@ -160,7 +165,7 @@ export function Sidebar({ groups, currentPath, onNavigate, collapsed = false, on
                     }}
                     title={collapsed ? item.label : undefined}
                   >
-                    <span className="flex-shrink-0 w-5 h-5">{item.icon}</span>
+                    <span className="flex-shrink-0 w-5 h-5" aria-hidden="true">{item.icon}</span>
                     {!collapsed && <span className="truncate">{item.label}</span>}
                   </button>
                 );
