@@ -28,6 +28,15 @@ class RecordingWindow:
     op_count: int = 0
 
 
+class RecordingWindowBusy(Exception):
+    """Another job's recording window is open on the device (astra pack 473)."""
+
+    def __init__(self, device_id: str, job_id: str) -> None:
+        super().__init__(f"device {device_id} is recording job {job_id}")
+        self.device_id = device_id
+        self.job_id = job_id
+
+
 class EvidenceHandler(logging.Handler):
     """Routes PLR log records into JSON-RPC evidence notifications.
 
@@ -64,14 +73,23 @@ class EvidenceHandler(logging.Handler):
     # ── recording window lifecycle ─────────────────────────────────────────
 
     def start_recording(self, device_id: str, job_id: str) -> RecordingWindow:
-        window = RecordingWindow(
-            device_id=device_id,
-            job_id=job_id,
-            started_at=datetime.now(timezone.utc),
-        )
+        """Open the device's recording window for ``job_id``. A device has one: while another
+        job's is open the start is refused (RecordingWindowBusy), so that job's ops stay bound
+        to it and its barrier finds it (astra pack 473). The same job's open window is returned
+        as it is."""
         with self._lock:
+            current = self._windows.get(device_id)
+            if current is not None:
+                if current.job_id == job_id:
+                    return current
+                raise RecordingWindowBusy(device_id, current.job_id)
+            window = RecordingWindow(
+                device_id=device_id,
+                job_id=job_id,
+                started_at=datetime.now(timezone.utc),
+            )
             self._windows[device_id] = window
-        return window
+            return window
 
     def stop_recording(self, device_id: str, job_id: str) -> Optional[RecordingWindow]:
         """Close the device's window if it is this job's (another job's stays open). A

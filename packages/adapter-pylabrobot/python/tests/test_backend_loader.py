@@ -45,6 +45,19 @@ async def test_unknown_backend_raises_value_error():
 
 
 @pytest.mark.asyncio
+async def test_a_backend_missing_from_execution_modes_defaults_to_unverified(monkeypatch):
+    # R39 CRIT1: never "hardware" by default. If a future backend is wired into
+    # _create_machine's dispatch before EXECUTION_MODES is updated for it, the
+    # loader must fail safe to "unverified" rather than leak a None/crash.
+    from pcc_plr_sidecar import backend_loader
+
+    monkeypatch.delitem(backend_loader.EXECUTION_MODES, "stub")
+    loader = BackendLoader()
+    handle = await loader.load("stub", "dev-1", {})
+    assert handle.execution_mode == "unverified"
+
+
+@pytest.mark.asyncio
 async def test_unload_removes_device():
     loader = BackendLoader()
     await loader.load("stub", "dev-1", {})
