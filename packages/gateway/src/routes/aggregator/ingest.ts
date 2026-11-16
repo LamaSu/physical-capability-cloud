@@ -13,11 +13,11 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import {
   McpSourceAdapter,
   OpenApiSourceAdapter,
-  runPipeline,
   type PipelineRunResult,
 } from "@pcc/aggregator";
 import type { ToolSourceType } from "@pcc/spec";
 import { getAggregatorRegistry } from "./index.js";
+import { runPipelineVetted } from "./upstream-url-guard.js";
 
 function isAggregatorAdmin(operatorId: string | undefined | null): boolean {
   if (!operatorId) return false;
@@ -80,7 +80,9 @@ export async function ingestRoutes(app: FastifyInstance): Promise<void> {
         sourceType: body.sourceType,
         upstreamVendor: body.upstreamVendor,
       });
-      const result = await runPipeline(
+      // upstreamUrl comes from the ingested catalog, not from the admin: a tool whose
+      // upstream is not an allowed destination is refused before it is written.
+      const result = await runPipelineVetted(
         adapter,
         { url: body.url, headers: body.headers },
         getAggregatorRegistry(),
@@ -103,7 +105,8 @@ export async function ingestRoutes(app: FastifyInstance): Promise<void> {
         sourceType: body.sourceType,
         upstreamVendor: body.upstreamVendor,
       });
-      const result = await runPipeline(
+      // servers[0].url and absolute path keys are catalog content: vet each tool's upstream.
+      const result = await runPipelineVetted(
         adapter,
         { url: body.url, headers: body.headers },
         getAggregatorRegistry(),

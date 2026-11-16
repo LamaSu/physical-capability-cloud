@@ -24,11 +24,11 @@ import {
   AgntcyAdsPublisher,
   AgntcyAdsSourceAdapter,
   cosignShellSpawn,
-  runPipeline,
   type PipelineRunResult,
 } from "@pcc/aggregator";
 import type { IndexedTool } from "@pcc/spec";
 import { getAggregatorRegistry } from "./index.js";
+import { runPipelineVetted } from "./upstream-url-guard.js";
 
 // ── Bridge state (process-local; Phase 2 moves to DB) ─────────────────────
 
@@ -166,7 +166,8 @@ export async function agntcyAdminRoutes(app: FastifyInstance): Promise<void> {
           body.url ??
           process.env.AGNTCY_API_URL ??
           "https://prod.api.ads.outshift.io";
-        const result = await runPipeline(
+        // locators[].urls[0] is directory-record content (third-party authored): vet each tool's upstream.
+        const result = await runPipelineVetted(
           adapter,
           { url, headers: body.headers },
           getAggregatorRegistry(),

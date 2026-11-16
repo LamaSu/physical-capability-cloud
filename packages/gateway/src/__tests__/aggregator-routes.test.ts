@@ -18,6 +18,7 @@ import {
   _resetAggregatorRegistryForTests,
 } from "../routes/aggregator/index.js";
 import { initStore, closeStore } from "../db.js";
+import { _setOutboundDepsForTests } from "../services/outbound-url-guard.js";
 import {
   type IndexedTool,
   DigitalCaptureClass,
@@ -25,6 +26,29 @@ import {
 } from "@pcc/spec";
 
 const SHA = "sha256:" + "a".repeat(64);
+
+/**
+ * The invoke route now sends the upstream call through the outbound guard
+ * (SSRF), not global fetch. Call this right after `vi.spyOn(globalThis, "fetch")`
+ * to keep that spy as the single recording point: the guard's injected
+ * transport forwards to it. No real DNS, no real sockets, and every assertion on
+ * the spy is unchanged.
+ */
+function routeGuardedTransportThroughFetchSpy(): void {
+  _setOutboundDepsForTests({
+    resolve: async () => [{ address: "93.184.216.34", family: 4 }],
+    transport: async (req) => {
+      const res = await globalThis.fetch(req.url.href, { method: req.method, headers: req.headers, body: req.body });
+      return {
+        status: res.status,
+        headers: {},
+        bytesRead: 0,
+        truncated: false,
+        body: Buffer.from(await res.arrayBuffer()),
+      };
+    },
+  });
+}
 
 function makeTool(overrides: Partial<IndexedTool> = {}): IndexedTool {
   return {
@@ -66,6 +90,7 @@ describe("aggregator routes", () => {
   afterEach(() => {
     closeStore();
     vi.restoreAllMocks();
+    _setOutboundDepsForTests(null);
   });
 
   it("GET /tools/search returns empty when registry is empty", async () => {
@@ -144,6 +169,7 @@ describe("aggregator routes", () => {
         headers: { "Content-Type": "application/json" },
       }),
     );
+    routeGuardedTransportThroughFetchSpy();
 
     const app = Fastify();
     await app.register(aggregatorRoutes);
@@ -168,6 +194,7 @@ describe("aggregator routes", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response("{}", { status: 200 }),
     );
+    routeGuardedTransportThroughFetchSpy();
     const app = Fastify();
     await app.register(aggregatorRoutes);
     const res = await app.inject({
@@ -200,6 +227,7 @@ describe("aggregator routes", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response("{}", { status: 200 }),
     );
+    routeGuardedTransportThroughFetchSpy();
     const app = Fastify();
     await app.register(aggregatorRoutes);
     const invoke = await app.inject({

@@ -73,6 +73,12 @@ post. A 4xx/5xx response or `placed:false`/`valid:false` body fails the
 create with HTTP 400 `source_verify_failed`. Re-verification runs every 60s
 in the first 10 minutes, every 5 minutes after.
 
+`sourceVerifyUrl` must be a public `https` URL. Loopback, private,
+link-local and internal hosts, credentials in the URL and other schemes are
+refused up front with HTTP 400 `invalid_source_verify_url` (nothing is fetched
+or stored). Redirects are not followed, so give the final URL. A failed verify
+returns the source's HTTP status (`sourceStatus`) and never its response body.
+
 ### Open feed (PUBLIC — no API key needed)
 
 ```http
