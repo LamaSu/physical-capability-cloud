@@ -11,7 +11,10 @@
  * GET /api/analytics/geography    -> Country breakdown
  */
 
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
+import { isTenantEnforceOn } from "../config/tenant-enforce.js";
+import { countAdminKeyFields, hasSingleValidAdminKey } from "../middleware/relay-admin-gate.js";
+import { getCallerScopes } from "../middleware/scope-checker.js";
 
 // ---------------------------------------------------------------------------
 // Environment helpers
@@ -147,10 +150,37 @@ async function sentryGet<T = unknown>(path: string): Promise<T> {
 }
 
 // ---------------------------------------------------------------------------
+// Admins only: 403 before any read; from and to must be YYYY-MM-DD days or 400
+// ---------------------------------------------------------------------------
+
+const ANALYTICS_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+function isAnalyticsDay(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (typeof value !== "string" || !ANALYTICS_DAY.test(value)) return false;
+  const day = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(day.getTime()) && day.toISOString().slice(0, 10) === value;
+}
+
+function isAnalyticsAdmin(req: FastifyRequest): boolean {
+  const n = countAdminKeyFields(req);
+  if (n > 1) return false;
+  if (n === 1) return hasSingleValidAdminKey(req) && req.headers["x-admin-key"] !== "*";
+  if (!req.apiKeyId) return false;
+  const scopes = getCallerScopes(req);
+  return scopes.includes("admin") && !scopes.includes("*");
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
 export async function analyticsRoutes(app: FastifyInstance) {
+  app.addHook("onRequest", async (req, reply) => {
+    if (isTenantEnforceOn() || !isAnalyticsAdmin(req)) return reply.code(403).send({ error: "forbidden" });
+    const query = req.query as { from?: unknown; to?: unknown };
+    if (!isAnalyticsDay(query.from) || !isAnalyticsDay(query.to)) return reply.code(400).send({ error: "invalid_query", message: "from and to must be YYYY-MM-DD dates." });
+  });
   // -------------------------------------------------------------------------
   // GET /api/analytics/status
   // -------------------------------------------------------------------------
