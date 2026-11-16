@@ -162,7 +162,6 @@ describe("coarse by default: nobody reads the exact site or the street address",
       "/api/kernels/kernel-n68-a",
       "/api/capabilities/by-kernel/kernel-n68-a",
       `/api/capabilities/${capId}`,
-      "/api/telemetry/system",
       `/api/operators/${encodeURIComponent(ownerId)}/status`,
       "/api/kernels/kernel-n68-a/agent-package",
     ]) {
@@ -173,7 +172,7 @@ describe("coarse by default: nobody reads the exact site or the street address",
   });
 
   it("the raw dumps carry the projection, not the stored point", async () => {
-    const tele = (await app.inject({ method: "GET", url: "/api/telemetry/system", headers: bearer(strangerKey) })).json();
+    const tele = (await app.inject({ method: "GET", url: "/api/telemetry/system", headers: { ...bearer(strangerKey), "x-admin-key": ADMIN } })).json();
     const rows = JSON.stringify(tele);
     expect(rows).toContain("N68 canary FDM");
     expect(rows).toContain(`"locationCell":"${CELL}"`);
