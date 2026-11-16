@@ -554,6 +554,42 @@ describe("settlement witnesses and emergency cap", () => {
     } finally { await app.close(); }
   });
 
+  it.each([
+    { state: 9n, representation: "bigint" },
+    { state: "9", representation: "string" },
+  ])("T22e state 9 as $representation keeps an UNKNOWN refund reason and log finalization", async ({ state }) => {
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state: state as unknown as UnitState, remainingClaimCount: 0n }),
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      const b = res.json();
+      expect(b.finalState).toBe("SETTLED_REFUNDED");
+      expect(b.refundReason).toBe("UNKNOWN");
+      expect(b.finalizedBlock).toMatchObject({ value: "120", source: "log" });
+    } finally { await app.close(); }
+  });
+
+  it.each([
+    { state: 6n, representation: "bigint" },
+    { state: "6", representation: "string" },
+  ])("T22f state 6 as $representation never reads a refund witness or reports a refund reason", async ({ state }) => {
+    const readRefundWitness = vi.fn(async () => ({ finalized: { released: false, code: 2 } }));
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state: state as unknown as UnitState, remainingClaimCount: 1n }),
+      readRefundWitness,
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().refundReason).toBeNull();
+      expect(readRefundWitness).not.toHaveBeenCalled();
+    } finally { await app.close(); }
+  });
+
   it("T23 inconsistent finalization anchors give no receipt DTO", async () => {
     setSettlementUnitReader(makeReader({ readFinalizationWitness: async () => ({ zeroingDischargeBlock: 150n }) }));
     const app = await buildApp();
