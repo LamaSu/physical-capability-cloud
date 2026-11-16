@@ -361,7 +361,7 @@ describe("D neutral prepare", () => {
     expect((await f.run()).success).toBe(true);
     const events = method(f.bundles[0]!); expect(events).toHaveLength(1);
     expect(events[0]!.payload).toStrictEqual({ jobId: f.config.jobId, deviceJobId: f.machine.deviceJobId, inputHash: H });
-    expect(events[0]!.source).toStrictEqual(source);
+    expect(events[0]!.source).toStrictEqual({ ...source, writer: "kernel" });
   });
   it("D5 snapshots ack values and source before start mutates them", async () => {
     const f = setup(); const source = { ...f.machine.source }; const deviceJobId = f.machine.deviceJobId;
@@ -370,7 +370,7 @@ describe("D neutral prepare", () => {
     f.machine.beforeStart = () => { data.deviceJobId = "changed"; data.extra = 1; f.machine.source.deviceId = "changed-source"; };
     expect((await f.run()).success).toBe(true);
     expect(method(f.bundles[0]!)[0]!.payload).toStrictEqual({ jobId: f.config.jobId, deviceJobId, inputHash: H });
-    expect(method(f.bundles[0]!)[0]!.source).toStrictEqual(source);
+    expect(method(f.bundles[0]!)[0]!.source).toStrictEqual({ ...source, writer: "kernel" });
   });
   it("D6 signs the method proof and whole bundle", async () => {
     const signer = makeKernelEd25519Signer(new Uint8Array(32).fill(41)); const f = setup(new NeutralStub(), signer);
