@@ -62,7 +62,7 @@ const NOT_A_ROUTE: Record<string, string> = {
     "the job-offers store's patch (getJobOffersStore), a data write",
   "routes/job-offers.ts store.patch(req.params.id, poster, { pricing: b.pricing, deadlineIso: b.deadline, validUntil: b.validUntil, requirements: b.requirements, })":
     "the job-offers store's patch (getJobOffersStore), a data write",
-  'services/courier-jobs-store.ts store.patch(id, poster, { ...(patch.feeUSD !== undefined ? { pricing: { amount: patch.feeUSD ?? 0, currency: "USD", model: "fixed", }, } : {}), ...(patch.validUntil !== undefined ? { validUntil: patch.validUntil } : {}), ...(Object.keys(requirements).length > 0 ? { requirements } : {}), })':
+  'services/courier-jobs-store.ts store.patch(id, poster, { ...(patch.feeUSD !== undefined ? { pricing: { amount: typeof patch.feeUSD === "number" ? patch.feeUSD : null, currency: "USD", model: "fixed", }, } : {}), ...(patch.validUntil !== undefined ? { validUntil: patch.validUntil } : {}), ...(Object.keys(requirements).length > 0 ? { requirements } : {}), })':
     "the job-offers store's patch (getJobOffersStore), a data write",
   "routes/registry-snapshot.ts getRegistrySnapshotStore().put(registryDigest, bytes)": "the registry snapshot store's put, a content write",
   "routes/storage.ts storage.put(bytes, { mediaType })": "the content store's put, a content write",

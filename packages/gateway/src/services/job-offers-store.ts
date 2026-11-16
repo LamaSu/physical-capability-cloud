@@ -67,7 +67,7 @@ export type GeoFence = {
  *   • per-unit (e.g. $40/sample lab work, $2/gpu-hour compute)
  */
 export interface PricingSpec {
-  amount: number;                 // base amount or per-unit price
+  amount: number | null;          // null only from the courier shim: the poster sent no feeUSD
   currency: "USD" | "USDC" | "ETH" | "BTC" | string;
   model: "fixed" | "quote-required" | "per-unit";
   unit?: string;                  // e.g. "sample", "gpu-hour", "mile"
@@ -449,6 +449,9 @@ export class JobOffersStore {
 
   // ── Public API ───────────────────────────────────────────────────────────
 
+  /** Whether this store has SQLite write-through and boot recovery wired in. */
+  isDurable(): boolean { return !!this.sqlite; }
+
   /** True if an offer with this id is already in the store. */
   has(id: string): boolean { return this.offers.has(id); }
 
@@ -577,10 +580,10 @@ export class JobOffersStore {
     if (filters.currency) open = open.filter((o) => o.pricing.currency === filters.currency);
     if (filters.tier != null) open = open.filter((o) => o.assuranceTier === filters.tier);
     if (filters.minAmount != null && Number.isFinite(filters.minAmount)) {
-      open = open.filter((o) => o.pricing.amount >= (filters.minAmount as number));
+      open = open.filter((o) => o.pricing.amount != null && o.pricing.amount >= (filters.minAmount as number));
     }
     if (filters.maxAmount != null && Number.isFinite(filters.maxAmount)) {
-      open = open.filter((o) => o.pricing.amount <= (filters.maxAmount as number));
+      open = open.filter((o) => o.pricing.amount != null && o.pricing.amount <= (filters.maxAmount as number));
     }
     if (filters.within) {
       const { lat, lng, miles } = filters.within;
