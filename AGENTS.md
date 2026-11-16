@@ -57,6 +57,26 @@ npx tsx scripts/agent-e2e-simulation.ts     # agent-to-agent e2e
 npx tsx scripts/sovereign-e2e-simulation.ts # sovereign infra e2e
 ```
 
+## Agents: read before you edit (definition of done + conventions)
+
+**Definition of done — VERIFY before you return. Do not return code you have not built and test-run.**
+1. Typecheck the touched package(s): `pnpm --filter @pcc/<pkg> exec tsc --noEmit` (works offline against installed deps).
+2. Run the affected package's tests, e.g. `pnpm --filter @pcc/gateway test`. Gateway is the big suite; run it whenever you touch a route, facade, middleware, or schema.
+3. If your environment genuinely cannot run tests, say so explicitly ("written, not test-run — CI must verify") — NEVER imply a green you did not watch.
+
+**Gateway auth model — keep the two layers separate (this bites people):**
+- `middleware/api-gate.ts` owns **authentication** → returns **401** for a missing/invalid API key. Public routes are an explicit allowlist (`PUBLIC_PREFIXES` / `PUBLIC_EXACT` / regexes) and are **method-aware**. `GET /api/kernels` (listing) is public; `GET /api/kernels/:id` (detail) is **not** public (needs a Bearer); `POST /api/kernels` is auth-gated.
+- Facades (`facades/*.ts`) own **authorization** → return **403** for a non-owner, assuming an authenticated actor is already present (apiGate guarantees it). **Do NOT re-check "is there an actor" inside a facade** — that duplicates apiGate and breaks facade-unit tests. Enforce ownership only when `actorId` is present.
+
+**Gateway test architecture — know which layer your test wires:**
+- Facade/route **unit** tests (e.g. `kernel-signing-*.test.ts`) register ONLY the route under test (`app.register(kernelRoutes)`), **no apiGate** → requests carry no `actorId`; they exercise facade logic (SET-ONCE binding, proof validation) directly. A facade that hard-requires auth will wrongly 403 these.
+- **Integration** tests (e.g. `kernel-registration-auth.test.ts`) register `apiGate` + `provisionApiKey({operatorId}).rawKey` + `headers: { authorization: Bearer <key> }`; unauth requests get 401 here. When you add auth/ownership logic, cover it in BOTH layers.
+
+**Money-path invariants (settlement / signing / escrow):**
+- Fail **closed**: a wrong or absent proof must never clear settlement — when in doubt, reject.
+- SET-ONCE signer binding is an atomic DB CAS (`WHERE signer cols IS NULL`); a later *different* signer is a **409** conflict, never a silent overwrite.
+- Never weaken a security check to make a test pass. If a test breaks after a security change, decide whether the test asserted OLD behavior (update the test, preserving the guarantee it protected) or you introduced a regression (fix the code) — and state which.
+
 ## MCP Integration
 
 To add PCC tools to any MCP-compatible agent:
