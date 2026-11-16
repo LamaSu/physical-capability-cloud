@@ -867,8 +867,9 @@ const kernelAgent = new KernelAgent(bus, {
   location: { lat: 37.7749, lng: -122.4194 },
   capabilities: myCapabilities,
 
-  // How long mock jobs take (only for testing without real hardware)
-  mockPrintDuration: 3000,
+  // Your adapters from Step 3; their mockMode setting decides whether a job
+  // reaches the hardware. A slot you leave out runs a PCC mock device.
+  adapters: { machine, sensors: [powerSensor], camera },
 
   // Machine profiles for the contract builder (see Step 5)
   machineProfiles: myProfiles,
@@ -1475,6 +1476,8 @@ describe("Integration", () => {
 ```
 
 ### 11.3 End-to-end test with agents
+
+This test passes no `adapters`, so the kernel agent runs PCC's mock devices and checks the message flow without touching your hardware.
 
 ```typescript
 import { MessageBus } from "@pcc/a2a";

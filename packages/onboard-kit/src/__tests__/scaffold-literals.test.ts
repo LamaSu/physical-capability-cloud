@@ -21,7 +21,7 @@ const CRAFTED2 = 'x\\", extra: (globalThis.__N303 = 2), y: \\"';
 const POLL = "1); (globalThis.__N303 = 1); (0";
 const CLASS_NAMES = [
   "Array", "Buffer", "Date", "Error", "EvidenceEmitter", "EvidenceEvent", "EvidenceSource", "JSON", "JobRunner",
-  "MachineCommand", "MachineCommandResult", "MachineStatus", "Math", "Number", "Omit", "Promise", "Record",
+  "KernelAgent", "MachineCommand", "MachineCommandResult", "MachineStatus", "Math", "MessageBus", "Number", "Omit", "Promise", "Record",
   "Response", "ReturnType", "String", "TextEncoder", "Uint8Array",
 ];
 const VARIABLE_NAMES = [
@@ -31,6 +31,7 @@ const VARIABLE_NAMES = [
   "implements", "interface", "let", "package", "private", "protected", "public", "static", "arguments", "eval",
   "EvidenceEmitter", "JobRunner", "capabilities", "console", "evidenceEmitter", "jobRunner", "process",
 ];
+const AGENT_VARIABLE_NAMES = ["KernelAgent", "MessageBus", "bus", "kernelAgent", "profiles"];
 const WINDOWS_DEVICE_NAMES = [
   "con", "prn", "aux", "nul", "com0", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
   "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
@@ -49,6 +50,7 @@ const r1 = (v: unknown) => `${shown(v)} is not a PascalCase identifier (A-Z, the
 const r2 = (v: unknown) => `${shown(v)} is a name the generated code already uses; choose another class name`;
 const r4 = (v: unknown) => `${shown(v)} is not an adapter id the scaffold can use (a letter, then letters or digits with single "-" or "_" between them, at most 64 characters); the scaffold makes a variable and environment variables from it`;
 const r5variable = (v: string) => `${shown(v)} makes the variable ${camel(v)}, a name the generated kernel.ts already uses or JavaScript reserves`;
+const r5agent = (v: string) => `${shown(v)} makes the variable ${camel(v)}, a name the generated agent.ts already uses`;
 const r5env = (v: string, name: string) => `${shown(v)} makes the environment variable ${name}, which .env.example already defines`;
 const r5api = (v: string) => `${shown(v)} makes the environment variable ${envName(v)}_API_KEY, which other software already reads as its API key; choose another adapter id`;
 const r7 = "contains a line break; the scaffold writes it as one line of .env.example";
@@ -312,7 +314,7 @@ const PINS = [
       ],
       [
         "src/agent.ts",
-        "82cac4a8f3d4be9db774523c9acfaffd8c9cd6d3a6625e9d4e18a0fa5a725662"
+        "bdd2128e930f369c31694500f62ebf91beab20bedfcb55d5f972db088803e81e"
       ],
       [
         ".env.example",
@@ -327,7 +329,7 @@ const PINS = [
         "b9559e1f12b7c79aaafb27a074672404e7426660c6ab9b9dd84250a46e42f9ba"
       ]
     ],
-    "scaffold": "1873cb270f3c5b5ade8092c0b848c7067fd1b8a5b949545f6797262ce5dddd2c",
+    "scaffold": "e22fb96ee7401f7e4fc5c8a47a8c7ff8b92b05412ad3f19cdbe02583811350e6",
     "validate": "a753f02e3272427ccd7734b6c75d296948d64c016fe62681f0a28d11d997ed4d"
   },
   {
@@ -358,7 +360,7 @@ const PINS = [
       ],
       [
         "src/agent.ts",
-        "0e3a45ddace1406799c97458d3bba51287df50ed38ddf1fc5b0687920cde17b9"
+        "3380c348e64cb61b6d67b302ac407734bc41e25c0b9f750a022326b9e1cd9d17"
       ],
       [
         ".env.example",
@@ -369,7 +371,7 @@ const PINS = [
         "94c55fb9f6fbf0b8f2c2d66f583c66bc26ec5bd74e3cce4c7687f8f36518aec1"
       ]
     ],
-    "scaffold": "2d57bdf03f11b285be04fa1e3478c2d0c29e76bfc8ae0f3fe4901048ffdd1bf0",
+    "scaffold": "8d3ab2f5678088342910ce9503b4ed2f0f098c05f983397bb6dc8afd90627c7a",
     "validate": "28e6ab06ee92daafbef35b8727d7b0284059f9c5f8bd1ad52801d3a8007aeb73"
   },
   {
@@ -396,7 +398,7 @@ const PINS = [
       ],
       [
         "src/agent.ts",
-        "f664612e2ee0e37636fd83244aea9a2b1c211c7f9f23bba60db84da194608c66"
+        "711bf957c35d73f7a170e6195e8621b1ce5d44e4e3da699178e4c3cd792f71fd"
       ],
       [
         ".env.example",
@@ -407,7 +409,7 @@ const PINS = [
         "678d506a5aad6fd913bf4ee0a68d296f239583699f54a46041e1f47bd5a7d7ed"
       ]
     ],
-    "scaffold": "3d7a6f1b0f57253127bfb1d43021ea9f9d78def061c007a196dadc081c20f0c6",
+    "scaffold": "fc723cb85c6449494a7acb8d2e0186e8958b18689a779afc501a74fca2ce613d",
     "validate": "9ec827ddd8d466e3249c0be24fe783c7d0f68461822210f11c4bbddbcc72ada2"
   },
   {
@@ -434,7 +436,7 @@ const PINS = [
       ],
       [
         "src/agent.ts",
-        "f664612e2ee0e37636fd83244aea9a2b1c211c7f9f23bba60db84da194608c66"
+        "711bf957c35d73f7a170e6195e8621b1ce5d44e4e3da699178e4c3cd792f71fd"
       ],
       [
         ".env.example",
@@ -445,7 +447,7 @@ const PINS = [
         "07b3f348e9fce0352c4bca1774f22e7a3a8c8cf65b2baf59d487597556fe73c9"
       ]
     ],
-    "scaffold": "654e4c8237ec7179d58cb49be3ae2ab56e7d62a4deed1f6f03cf8273381af8f4",
+    "scaffold": "8f17fbadc1ce495be4e36687eab83add65e4bee8526bbba9245835c0e64d3506",
     "validate": "0fcc2b524c3fccd4b255cfc448c548294ed9ec0340d6b3393940b6acf18f7c3a"
   },
   {
@@ -472,7 +474,7 @@ const PINS = [
       ],
       [
         "src/agent.ts",
-        "ad153a91663f9ca8353036ba99d32f96b9a5edd79328f76a11023500c553e7a5"
+        "c6db09df9eebc955010443f2d2c38a40f2834a185914ab00e1125a25549b55c2"
       ],
       [
         ".env.example",
@@ -483,7 +485,7 @@ const PINS = [
         "42794155a59877959c140673303cf0beb159af4c4c7de4537f57369d841b8a7f"
       ]
     ],
-    "scaffold": "7cf0777f0b27fb54fd4b03c145a607af8c8c5c5e8a191bd452b24ca44821e73f",
+    "scaffold": "aec146bf744808943e5ac9b4f2f983766df436a03dfcafe0f21a6df0fde83d85",
     "validate": "27982cc03d8ccf42262bcdeb67a4ea446e8b04aa243006c37ec111daa4a515b5"
   }
 ];
@@ -497,6 +499,14 @@ describe("N303 scaffold literals and identifier rules", () => {
     inspect(content(config, "src/capabilities.ts"), QUOTED);
     expect((await importCapabilities(config))[0].name).toBe(QUOTED);
     expect(diagnostics(config)).toEqual(diagnostics(example()));
+  }, 30000);
+  it("A2 wiring adds no type error to the example's agent.ts", () => {
+    const lines = diagnostics(example());
+    expect(lines.filter(line => line.startsWith("src/kernel.ts|"))).toEqual([]);
+    const agentLines = lines.filter(line => line.startsWith("src/agent.ts|"));
+    expect(agentLines).toHaveLength(1);
+    expect(agentLines[0]).toMatch(/^src\/agent\.ts\|2322\|/);
+    expect(agentLines[0].split("\n")[0]).toMatch(/is not assignable to type 'MachineProfile\[\]'\.$/);
   }, 30000);
   it("SL1b control characters stay one literal", () => {
     const config = example(); config.capabilities[0].name = CONTROL;
@@ -643,7 +653,7 @@ describe("N303 scaffold literals and identifier rules", () => {
   it("SL6d class name list covers the generated declarations and globals", () => {
     for (const config of [example(), fdmExample()]) {
       const own = new Set(config.adapters.flatMap(a => [a.className, `${a.className}Config`]));
-      for (const f of scaffold({ config }).files.filter(f => f.path.startsWith("src/adapters/") || f.path === "src/kernel.ts" || f.path === "src/__tests__/adapters.test.ts")) {
+      for (const f of scaffold({ config }).files.filter(f => f.path.startsWith("src/adapters/") || f.path === "src/kernel.ts" || f.path === "src/agent.ts" || f.path === "src/__tests__/adapters.test.ts")) {
         for (const name of moduleOrFreeNames(f.content)) {
           if (/^[A-Z][A-Za-z0-9]*$/.test(name) && !own.has(name)) expect(CLASS_NAMES, `${f.path}: ${name}`).toContain(name);
         }
@@ -703,8 +713,11 @@ describe("N303 scaffold literals and identifier rules", () => {
   it("SL7f variable name list covers the generated kernel declarations and globals", () => {
     for (const config of [example(), fdmExample()]) {
       const own = new Set(config.adapters.flatMap(a => [a.className, camel(a.adapterId)]));
-      for (const name of moduleOrFreeNames(content(config, "src/kernel.ts"))) {
-        if (/^[A-Za-z][A-Za-z0-9]*$/.test(name) && !own.has(name)) expect(VARIABLE_NAMES, name).toContain(name);
+      for (const path of ["src/kernel.ts", "src/agent.ts"]) {
+        const names = path === "src/agent.ts" ? [...VARIABLE_NAMES, ...AGENT_VARIABLE_NAMES] : VARIABLE_NAMES;
+        for (const name of moduleOrFreeNames(content(config, path))) {
+          if (/^[A-Za-z][A-Za-z0-9]*$/.test(name) && !own.has(name)) expect(names, `${path}: ${name}`).toContain(name);
+        }
       }
     }
   });
@@ -718,6 +731,12 @@ describe("N303 scaffold literals and identifier rules", () => {
     for (const id of ["openai-sim", "pcc-node", "ot2", "trilobio", "clip", "lit-sensor"]) {
       const config = sensorConfig(); config.adapters[0].adapterId = id;
       expect(fieldErrors(config, "adapterId"), id).toEqual([]);
+    }
+  });
+  it("SL7h adapter variables differ from names the generated agent.ts uses", () => {
+    for (const id of AGENT_VARIABLE_NAMES) {
+      const config = sensorConfig(); config.adapters[0].adapterId = id;
+      refusal(config, `adapter[${id}].adapterId`, r5agent(id));
     }
   });
   it("SL8a CLI reports the class name rule before writing files", () => {
@@ -750,4 +769,32 @@ describe("N303 scaffold literals and identifier rules", () => {
       expect(hash(validate({ config }).summary)).toBe(PINS[index].validate);
     });
   }
+  it("A6 the agent builds each adapter with kernel.ts's statement", () => {
+    for (const [label, fixture] of fixtures) {
+      const config = fixture();
+      const classes = new Set(config.adapters.map(a => a.className));
+      const statements = (path: string) => parse(content(config, path), path).statements.filter(statement => {
+        if (!ts.isVariableStatement(statement) || statement.declarationList.declarations.length !== 1) return false;
+        const init = statement.declarationList.declarations[0].initializer;
+        return init !== undefined && ts.isNewExpression(init) && ts.isIdentifier(init.expression) && classes.has(init.expression.text);
+      }).map(statement => statement.getText());
+      const agent = statements("src/agent.ts"), kernel = statements("src/kernel.ts");
+      expect(agent, label).toEqual(kernel);
+      expect(agent, label).toHaveLength(config.adapters.length);
+    }
+  });
+  it("A8 the agent's code has no type casts", () => {
+    for (const [label, fixture] of fixtures) {
+      const text = content(fixture(), "src/agent.ts");
+      const sf = parse(text, "src/agent.ts");
+      const casts: ts.Node[] = [];
+      function visit(node: ts.Node): void {
+        if (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) casts.push(node);
+        ts.forEachChild(node, visit);
+      }
+      visit(sf);
+      expect(casts, label).toEqual([]);
+      for (const directive of ["@ts-ignore", "@ts-expect-error", "@ts-nocheck"]) expect(text, label).not.toContain(directive);
+    }
+  });
 });

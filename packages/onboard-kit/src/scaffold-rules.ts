@@ -26,7 +26,7 @@ export function toEnvVar(str: string): string {
 
 const RESERVED_CLASS_NAMES = new Set([
   "Array", "Buffer", "Date", "Error", "EvidenceEmitter", "EvidenceEvent", "EvidenceSource", "JSON", "JobRunner",
-  "MachineCommand", "MachineCommandResult", "MachineStatus", "Math", "Number", "Omit", "Promise", "Record",
+  "KernelAgent", "MachineCommand", "MachineCommandResult", "MachineStatus", "Math", "MessageBus", "Number", "Omit", "Promise", "Record",
   "Response", "ReturnType", "String", "TextEncoder", "Uint8Array",
 ]);
 const RESERVED_VARIABLE_NAMES = new Set([
@@ -36,6 +36,7 @@ const RESERVED_VARIABLE_NAMES = new Set([
   "implements", "interface", "let", "package", "private", "protected", "public", "static", "arguments", "eval",
   "EvidenceEmitter", "JobRunner", "capabilities", "console", "evidenceEmitter", "jobRunner", "process",
 ]);
+const AGENT_VARIABLE_NAMES = new Set(["KernelAgent", "MessageBus", "bus", "kernelAgent", "profiles"]);
 const WINDOWS_DEVICE_NAMES = new Set([
   "con", "prn", "aux", "nul", "com0", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
   "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
@@ -101,6 +102,8 @@ export function scaffoldRuleProblems(config: OnboardConfig): Array<{ name: strin
       const envClash = [`${env}_URL`, `${env}_API_KEY`].find(name => reservedEnvNames.has(name));
       if (RESERVED_VARIABLE_NAMES.has(variable)) {
         add(`${prefix}.adapterId`, `${display(id)} makes the variable ${variable}, a name the generated kernel.ts already uses or JavaScript reserves`);
+      } else if (AGENT_VARIABLE_NAMES.has(variable)) {
+        add(`${prefix}.adapterId`, `${display(id)} makes the variable ${variable}, a name the generated agent.ts already uses`);
       } else if (otherClass) {
         add(`${prefix}.adapterId`, `${display(id)} makes the variable ${variable}, which is the class name of adapter[${text(otherClass.adapterId)}]`);
       } else if (envClash) {
