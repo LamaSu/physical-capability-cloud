@@ -484,8 +484,10 @@ describe("T2.2 — Edit / Delete Registration", () => {
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
-    expect(body.registration.description).toBe("Updated description");
-    expect(body.registration.complianceRegulations).toEqual(["AS9100:2016"]);
+    const stored = getRepos().registrations.findById(opId);
+    expect(stored?.description).toBe("Updated description");
+    expect(stored?.complianceRegulations).toEqual(["AS9100:2016"]);
+    expect(Object.keys(body.registration).sort()).toEqual(["createdAt", "id", "name", "status"]);
     await a.close();
   });
 
