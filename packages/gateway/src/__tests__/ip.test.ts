@@ -22,6 +22,8 @@ import { initStore, closeStore } from "../db.js";
 import { getLicensingEngine, resetStoryIPService, StoryIPService, StoryNotExecutedError } from "@pcc/contracts";
 import { getRepos } from "../db.js";
 
+const OWNER = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
 // Ensure mock mode for all tests
 process.env.STORY_MOCK = "true";
 
@@ -39,8 +41,23 @@ const CLAIM_501 = { error: "not_executed", operation: "claimRevenue", message: N
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   initStore({ seed: true });
+  const repos = getRepos();
+  repos.kernels.update("kernel-nyc", { operatorAddress: OWNER });
+  const cap = repos.capabilities.findById("cap-nyc-fdm")!;
+  for (const id of ["cap-test-001", "cap-c7-reg"]) {
+    repos.capabilities.insert({ ...cap, id });
+  }
+  const job = repos.jobs.findById("job-001")!;
+  for (const id of ["job-test-001", "job-lineage-001", "job-c7"]) {
+    repos.jobs.insert({ ...job, id, capabilityId: "cap-test-001" });
+  }
 
   const app = Fastify({ logger: false });
+  app.addHook("onRequest", async (req) => {
+    req.provenWallet = OWNER;
+    req.provenWalletVia = "siwe-session";
+    req.provenWalletCarrier = "key";
+  });
   await app.register(ipRoutes);
   await app.ready();
   return app;
@@ -49,6 +66,14 @@ async function buildApp(): Promise<FastifyInstance> {
 // ---------------------------------------------------------------------------
 // Shared fixture
 // ---------------------------------------------------------------------------
+
+function recordIp(ipId: string, capabilityId: string) {
+  getRepos().story.insertIpRegistration({
+    ipId, capabilityId, nftTokenId: "1", licenseTermsId: "1", txHash: "0xtest",
+    csdUrl: `pcc://capabilities/${capabilityId}`, chain: "story-aeneid",
+    registeredAt: new Date().toISOString(),
+  });
+}
 
 const CAPABILITY_BODY = {
   capability: {
@@ -175,7 +200,7 @@ describe("POST /api/ip/register-job-evidence", () => {
         parentIpId,
         jobId: "job-test-001",
         evidenceBundleHash: "sha256:testevidence123",
-        operatorAddress: "0xCAFEBABE",
+        operatorAddress: OWNER,
         operatorName: "Bob",
       },
     });
@@ -617,7 +642,7 @@ describe("GET /api/ip/:ipId/lineage", () => {
         parentIpId: ipId,
         jobId: "job-lineage-001",
         evidenceBundleHash: "sha256:lineage123",
-        operatorAddress: "0xOP",
+        operatorAddress: OWNER,
         operatorName: "Operator",
       },
     });
@@ -838,7 +863,7 @@ describe("IP routes — DB persistence", () => {
         parentIpId: ipId,
         jobId: "job-001",  // seeded job ID
         evidenceBundleHash: "sha256:dbpersist",
-        operatorAddress: "0xOP",
+        operatorAddress: OWNER,
         operatorName: "Operator",
       },
     });
@@ -1180,6 +1205,7 @@ describe("C5 (R2) real mode Story refusals become 501", () => {
 
   it("register-job-evidence in real mode returns 501 registerJobAsDerivative", async () => {
     const a = await buildRealApp();
+    recordIp("0x1111111111111111111111111111111111111111", "cap-nyc-fdm");
     const res = await a.inject({
       method: "POST",
       url: "/api/ip/register-job-evidence",
@@ -1187,7 +1213,7 @@ describe("C5 (R2) real mode Story refusals become 501", () => {
         parentIpId: "0x1111111111111111111111111111111111111111",
         jobId: "job-001",
         evidenceBundleHash: "sha256:test",
-        operatorAddress: "0xOP",
+        operatorAddress: OWNER,
         operatorName: "Operator",
       },
     });
@@ -1230,6 +1256,7 @@ describe("C5 (R2) real mode Story refusals become 501", () => {
 
   it("POST dispute in real mode returns 501 raiseDispute", async () => {
     const a = await buildRealApp();
+    recordIp("0x1111111111111111111111111111111111111111", "cap-nyc-fdm");
     const res = await a.inject({
       method: "POST",
       url: "/api/ip/0x1111111111111111111111111111111111111111/dispute",
@@ -1347,7 +1374,7 @@ describe("C7 (R3) Story routes carry simulated true", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/ip/register-job-evidence",
-      payload: { parentIpId: ipId, jobId: "job-c7", evidenceBundleHash: "sha256:c7", operatorAddress: "0xOP", operatorName: "Operator" },
+      payload: { parentIpId: ipId, jobId: "job-c7", evidenceBundleHash: "sha256:c7", operatorAddress: OWNER, operatorName: "Operator" },
     });
     expect(res.statusCode).toBe(200);
     expect(res.json<{ simulated: unknown }>().simulated).toBe(true);
@@ -1445,7 +1472,7 @@ describe("C9 (R3) LicensingEngine routes carry basis prediction", () => {
 
   const termsBody = (ipId: string) => ({
     ipId,
-    designerAddress: "0xDESIGNER",
+    designerAddress: OWNER,
     autoLicense: {
       minRevSharePercent: 5,
       minAssuranceTier: 0,
@@ -1464,6 +1491,7 @@ describe("C9 (R3) LicensingEngine routes carry basis prediction", () => {
 
   it("set-licensing-terms 200 body has basis prediction and persisted false", async () => {
     const ipId = "0xc901000000000000000000000000000000000001";
+    recordIp("0xc901000000000000000000000000000000000001", "cap-nyc-fdm");
     const res = await app.inject({ method: "POST", url: "/api/ip/set-licensing-terms", payload: termsBody(ipId) });
     expect(res.statusCode).toBe(200);
     const body = res.json<{ basis: unknown; persisted: unknown }>();
@@ -1473,6 +1501,7 @@ describe("C9 (R3) LicensingEngine routes carry basis prediction", () => {
 
   it("licensing-terms 200 body has basis prediction and persisted false", async () => {
     const ipId = "0xc902000000000000000000000000000000000002";
+    recordIp("0xc902000000000000000000000000000000000002", "cap-test-001");
     await app.inject({ method: "POST", url: "/api/ip/set-licensing-terms", payload: termsBody(ipId) });
     const res = await app.inject({ method: "GET", url: `/api/ip/${encodeURIComponent(ipId)}/licensing-terms` });
     expect(res.statusCode).toBe(200);
@@ -1591,6 +1620,7 @@ describe("Story refusal messages and revenue flag", () => {
     process.env.STORY_MOCK = "true";
     resetStoryIPService();
     app = await buildApp();
+    recordIp("0x1111111111111111111111111111111111111111", "cap-nyc-fdm");
   });
 
   afterEach(async () => {
@@ -1621,7 +1651,7 @@ describe("Story refusal messages and revenue flag", () => {
         parentIpId: "0x1111111111111111111111111111111111111111",
         jobId: "job-001",
         evidenceBundleHash: "sha256:test",
-        operatorAddress: "0xOP",
+        operatorAddress: OWNER,
         operatorName: "Operator",
       },
     },
@@ -1666,6 +1696,16 @@ describe("Story refusal messages and revenue flag", () => {
       operation: c.operation,
       message: "Story operation was refused",
     });
+  });
+
+  it.each(cases)("C12 coded plain object with a non-string message omits message for $operation", async (c) => {
+    const spy = vi.spyOn(StoryIPService.prototype, c.operation).mockRejectedValueOnce({
+      code: "STORY_NOT_EXECUTED", operation: c.operation, message: 42,
+    });
+    const res = await app.inject({ method: c.method, url: c.url, payload: c.payload });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(res.statusCode).toBe(501);
+    expect(res.json()).toEqual({ error: "not_executed", operation: c.operation });
   });
 
   it("C12 coded plain object without message omits message", async () => {
