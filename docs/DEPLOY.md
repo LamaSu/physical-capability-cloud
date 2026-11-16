@@ -295,8 +295,7 @@ The reader also refuses, with no warning, when `PCC_VNEXT_RECORD_NETWORK` is uns
 package; or when the record file or one of its directories is missing, unreadable, a symlink, or
 not a regular file or directory.
 
-The `escrow_funding` and `funding_prepares` tables start empty. **Nothing activates** via this
-path until both S1.1 (prepared TTL terms) and S1.2 (the production funding-store wiring) land.
+The `escrow_funding` and `funding_prepares` tables start empty. A scope activates through this path only when its kernel's operator policy selects buyer funding (`vnextBuyerFunding`), the deployment record and RPC settings are set for the window, the buyer prepares and funds, and the sweep verifies the funding.
 
 ### Buyer-funding verifier sweep (S1.2)
 
@@ -314,6 +313,15 @@ starts nothing, reads nothing and writes nothing.
 Credentials in the user part and any `#` are refused. This is the window's fourth setting: unset
 it along with `PCC_VNEXT_RECORD_NETWORK`, `PCC_VNEXT_ALLOW_TESTNET_RECORD` and
 `PCC_VNEXT_TESTNET_BUYERS` after the window.
+
+The endpoint must serve full block history (archive state is not needed). A verify of a funded prepare reads block headers at any height, back to block 0, to find the block at the prepare's creation time, then reads the escrow's `Funded` logs from that block on. With a node that has dropped old blocks, every such verify refuses, normally with `chain_read_failed`, and records nothing. A funded prepare that can't be proven can be searched in full again on every pass until its scope closes, so give the endpoint a request budget for a whole pass of such searches.
+
+Select buyer funding in the kernel's operator policy with `vnextBuyerFunding: "dry-run-unit-testnet-v1"`.
+The buyer uses `POST /api/buyer-funding/scopes/:scopeId/prepare` and
+`GET /api/buyer-funding/scopes/:scopeId/prepare`; the operator uses
+`GET /api/operator/scopes/:scopeId/funding-prepare` and
+`POST /api/operator/scopes/:scopeId/funding-prepare/signature` to sign offline.
+Every route answers 503 `buyer_funding_unavailable` while the record or RPC URL is unset.
 
 `PCC_VNEXT_FUNDING_SWEEP_INTERVAL_SEC` is optional: a decimal integer from 60 to 180 seconds,
 default 60. The `escrows.version` value `vnext-buyer` marks a buyer-funded V-next row.

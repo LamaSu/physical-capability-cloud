@@ -19,6 +19,8 @@ export interface VNextChainReads {
   fundedLogs(escrow: Address, fromBlock: bigint, toBlock: bigint): Promise<Array<{ blockNumber: bigint; blockHash: Hex }>>;
 }
 
+export type VNextPrepareReads = VNextChainReads & { latestBlock(): Promise<VNextBlock> };
+
 export function vnextRpcUrl(env: NodeJS.ProcessEnv = process.env): string | null {
   const value = env === process.env ? process.env.PCC_VNEXT_RPC_URL : env.PCC_VNEXT_RPC_URL;
   if (!value) return null;
@@ -37,7 +39,7 @@ export function __setVNextTransportForTest(transport: Transport | null): void {
   testTransport = transport;
 }
 
-export function createVNextChainReads(url: string): VNextChainReads {
+export function createVNextChainReads(url: string): VNextPrepareReads {
   registerOutboundSecretUrl(url);
   const client = createPublicClient({
     ccipRead: false, batch: { multicall: false },
@@ -47,13 +49,14 @@ export function createVNextChainReads(url: string): VNextChainReads {
     try { return await withSuppressedTracing(fn); }
     catch { throw new Error("chain_read_failed"); }
   };
-  const block = async (request: { blockTag: "finalized" } | { blockNumber: bigint }): Promise<VNextBlock> => {
+  const block = async (request: { blockTag: "finalized" } | { blockTag: "latest" } | { blockNumber: bigint }): Promise<VNextBlock> => {
     const b = await client.getBlock(request);
     if (b.number === null || b.hash === null) throw new Error("chain_read_failed");
     return { number: b.number, hash: b.hash, timestamp: b.timestamp };
   };
   return {
     chainId: () => safe(() => client.getChainId()),
+    latestBlock: () => safe(() => block({ blockTag: "latest" })),
     finalizedBlock: () => safe(() => block({ blockTag: "finalized" })),
     blockByNumber: n => safe(() => block({ blockNumber: n })),
     code: (address, blockHash) => safe(() => client.request({ method: "eth_getCode", params: [address, { blockHash, requireCanonical: true }] } as never) as Promise<Hex>),

@@ -1,3 +1,4 @@
+import { CHAIN_CLOCK_LEAD_MAX_SECONDS, buyerFundingUnitEntry, DRY_RUN_UNIT_ID } from "../services/buyer-funding-prepare.js";
 import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import { eq, schema, sql } from "@pcc/store";
 import { zeroAddress, zeroHash } from "viem";
@@ -315,6 +316,27 @@ describe("N325 funding search by timestamp", () => {
     const calls = vi.mocked(j.reads.fundedLogs).mock.calls;
     expect(calls).toHaveLength(34);
     expect(calls[0]![1]).toBe(4_997_900n);
+  });
+
+  describe("buyerFundingUnitEntry search edges", () => {
+    it("MC5a: the maximum lead and acceptance fit the log budget", async () => {
+      expect(CHAIN_CLOCK_LEAD_MAX_SECONDS).toBe(2640n);
+      expect(buyerFundingUnitEntry(DRY_RUN_UNIT_ID)!.maxAcceptanceSeconds).toBe(1200n);
+      const j = await buyerFundingJob(f, { prepare: { createdAt: new Date(T0 + (900 - 1200 - Number(CHAIN_CLOCK_LEAD_MAX_SECONDS)) * 1000).toISOString() } });
+      chain(j, 5_055_502n, 5_004_504n, fastTimestamp);
+      expect(await run(j)).toMatchObject({ kind: "recorded", record: { fundingBlockNumber: "5004504", fundedAt: Number(t0 + 900n) } });
+      const calls = vi.mocked(j.reads.fundedLogs).mock.calls;
+      expect(calls).toHaveLength(100);
+      expect(calls[0]![1]).toBe(4_984_700n);
+    });
+    it("MC5b: the maximum lag includes funding in the first chain second", async () => {
+      const j = await buyerFundingJob(f, { prepare: { createdAt: new Date(T0 - 180_000).toISOString() } });
+      chain(j, 5_055_502n, 4_998_500n, fastTimestamp);
+      expect(await run(j)).toMatchObject({ kind: "recorded", record: { fundingBlockNumber: "4998500", fundedAt: Number(t0 - 300n) } });
+      const calls = vi.mocked(j.reads.fundedLogs).mock.calls;
+      expect(calls).toHaveLength(1);
+      expect(calls[0]![1]).toBe(4_998_500n);
+    });
   });
 
   it("C8: finds the threshold across a switch from two-second to 200 ms blocks", async () => {

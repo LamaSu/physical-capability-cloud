@@ -76,7 +76,7 @@ export type RecordScopeRefusal = RecordRefusal | "record_scope_mismatch" | Testn
  * entries or whitespace is permitted. isAddress's strict checksum check precedes getAddress.
  */
 export function testnetBuyerRefusal(
-  record: FundingVerificationRecord,
+  record: Pick<FundingVerificationRecord, "buyer">,
   allowance: TestnetBuyerAllowance,
 ): TestnetBuyerRefusal | null {
   if (allowance?.testnetOnly === false) return null;

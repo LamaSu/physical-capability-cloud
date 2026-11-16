@@ -236,7 +236,7 @@ describe("the configured sources today", () => {
     expect(configuredVNextChainId(root)).toBe(84532);
   });
 
-  it("(neg-ttl-default) the TTL comes from S1.1's prepared terms, which do not exist yet: null", () => {
+  it("(neg-ttl-default) with no served prepare for the scope, the TTL is null", () => {
     expect(preparedActivationTtlMs({ id: "scope_x", jobId: "job_x", kernelId: "kernel-nyc" })).toBeNull();
   });
 
@@ -284,5 +284,46 @@ describe("a test-installed source", () => {
       set("PCC_VNEXT_RECORD_LABEL", saved.LABEL);
     }
     expect(paidScopeActivationTerms({ id: "scope_a", jobId: null, kernelId: "k" })).toEqual({ expectedChainId: 84532, postActivationTtlMs: 1000, testnetOnly: false });
+  });
+});
+
+
+import { beforeEach, vi } from "vitest";
+import { schema } from "@pcc/store";
+import { closeStore } from "../db.js";
+import { servedPrepareTtlMs } from "../services/funding-prepare-ttl.js";
+import { prepareBuyerFunding, servePrepareSignature, prepareRowAnswer, fundingPrepareRow, __setBuyerFundingTestUnitForTest } from "../services/buyer-funding-prepare.js";
+import { __setVNextTransportForTest } from "../services/vnext-rpc-client.js";
+import { setUpFixture, tearDownFixture, scopeRow, db, BUYER, type Fixture } from "./helpers/paid-scope-fixture.js";
+import { C, configure, seedPrepare, prepareReads, payload } from "./helpers/buyer-funding-prepare-fixture.js";
+
+describe("preparedActivationTtlMs served prepare source", () => {
+  let fixture: Fixture;
+  beforeEach(async () => { vi.stubEnv("DATABASE_URL", ":memory:"); fixture = await setUpFixture(); configure(); vi.setSystemTime(Number(C) * 1000); });
+  afterEach(async () => {
+    __setVNextTransportForTest(null); __setBuyerFundingTestUnitForTest(null);
+    await tearDownFixture(fixture); vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.useRealTimers();
+  });
+  async function pending() {
+    const j = seedPrepare(); const answer = await prepareBuyerFunding(j.scopeId, prepareReads().deps);
+    if (answer.kind !== "answer") throw new Error(answer.code);
+    return { j, row: answer.row };
+  }
+  it("TTL1: preparedActivationTtlMs ignores absent, pending and expired rows", async () => {
+    expect(preparedActivationTtlMs({ id: "absent", kernelId: "k", jobId: null })).toBeNull();
+    const { j, row } = await pending(); expect(preparedActivationTtlMs(scopeRow(j.scopeId))).toBeNull();
+    prepareRowAnswer(row, (row.expiry - 600) * 1000 + 1); expect(preparedActivationTtlMs(scopeRow(j.scopeId))).toBeNull();
+  });
+  it("TTL2: preparedActivationTtlMs returns the served golden TTL", async () => {
+    const { j } = await pending(); expect((await servePrepareSignature(j.scopeId, payload.fund.acceptance.operatorSignature)).status).toBe(200);
+    expect(preparedActivationTtlMs(scopeRow(j.scopeId))).toBe(900000);
+  });
+  it("TTL3: servedPrepareTtlMs handles a closed store", () => { closeStore(); expect(servedPrepareTtlMs("absent")).toBeNull(); });
+  it("TTL4: servedPrepareTtlMs refuses a zero interval", async () => {
+    const { j } = await pending(); await servePrepareSignature(j.scopeId, payload.fund.acceptance.operatorSignature);
+    const row = fundingPrepareRow(j.scopeId)!;
+    db().insert(schema.fundingPrepares).values({ ...row, id: "zero-ttl", scopeId: "zero-scope", escrow: BUYER,
+      scopeExpiresAt: new Date(row.reconcileUntil * 1000).toISOString() }).run();
+    expect(servedPrepareTtlMs("zero-scope")).toBeNull();
   });
 });

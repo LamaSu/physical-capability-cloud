@@ -582,4 +582,45 @@ export async function operatorRoutes(app: FastifyInstance) {
       return reply.status(500).send({ error: "Failed to accept the scope" });
     }
   });
+
+  const { buyerFundingAvailable, prepareRefusalAnswer, operatorPrepareView, servePrepareSignature } =
+    await import("../services/buyer-funding-prepare.js");
+
+  app.get<{ Params: { scopeId: string } }>("/api/operator/scopes/:scopeId/funding-prepare", async (req, reply) => {
+    if (!buyerFundingAvailable()) {
+      const answer = prepareRefusalAnswer("buyer_funding_unavailable");
+      return reply.code(answer.status).send(answer.body);
+    }
+    const authority = authorityOf(req);
+    if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+    const scope = getStore().db.select().from(executionScopes).where(eq(executionScopes.id, req.params.scopeId)).get();
+    if (!scope) {
+      const answer = prepareRefusalAnswer("scope_not_found");
+      return reply.code(answer.status).send(answer.body);
+    }
+    const refusal = refuseKernelAction(req, authority, scope.kernelId, "decide");
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
+    const answer = operatorPrepareView(scope.id);
+    if (answer.contentType) reply.type(answer.contentType);
+    return reply.code(answer.status).send(answer.body);
+  });
+
+  app.post<{ Params: { scopeId: string }; Body: { signature?: unknown } }>("/api/operator/scopes/:scopeId/funding-prepare/signature", async (req, reply) => {
+    if (!buyerFundingAvailable()) {
+      const answer = prepareRefusalAnswer("buyer_funding_unavailable");
+      return reply.code(answer.status).send(answer.body);
+    }
+    const authority = authorityOf(req);
+    if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+    const scope = getStore().db.select().from(executionScopes).where(eq(executionScopes.id, req.params.scopeId)).get();
+    if (!scope) {
+      const answer = prepareRefusalAnswer("scope_not_found");
+      return reply.code(answer.status).send(answer.body);
+    }
+    const refusal = refuseKernelAction(req, authority, scope.kernelId, "decide");
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
+    const answer = await servePrepareSignature(scope.id, req.body?.signature);
+    if (answer.contentType) reply.type(answer.contentType);
+    return reply.code(answer.status).send(answer.body);
+  });
 }
