@@ -18,7 +18,9 @@ function isWalletLinkUrl(value: unknown): boolean {
   if (typeof value !== "string") return false;
   try {
     const path = new URL(value, "https://pcc.invalid").pathname;
-    return path === "/api/wallets" || path.startsWith("/api/wallets/");
+    return path === "/api/wallets" || path.startsWith("/api/wallets/") ||
+      path === "/api/buyer-funding" || path.startsWith("/api/buyer-funding/") ||
+      /^\/api\/jobs\/[^/]+\/funding\/?$/.test(path);
   } catch {
     return false;
   }
@@ -126,6 +128,7 @@ export function initTelemetry(): void {
 // ---------------------------------------------------------------------------
 
 export function trackPageView(path: string): void {
+  if (/^\/fund\/[^/]+\/?$/.test(path)) path = "/fund/:jobId";
   // PostHog
   if (POSTHOG_KEY) {
     posthog.capture("$pageview", {
