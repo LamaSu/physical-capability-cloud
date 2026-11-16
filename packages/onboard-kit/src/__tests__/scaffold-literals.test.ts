@@ -314,7 +314,7 @@ const PINS = [
       ],
       [
         "src/agent.ts",
-        "bdd2128e930f369c31694500f62ebf91beab20bedfcb55d5f972db088803e81e"
+        "8c67932723abfa0a1d009ebed86a53b34686227002a53d1fd12b49a72c9d9dcf"
       ],
       [
         ".env.example",
@@ -329,7 +329,7 @@ const PINS = [
         "b9559e1f12b7c79aaafb27a074672404e7426660c6ab9b9dd84250a46e42f9ba"
       ]
     ],
-    "scaffold": "e22fb96ee7401f7e4fc5c8a47a8c7ff8b92b05412ad3f19cdbe02583811350e6",
+    "scaffold": "5244e9e64e12fe1e7d03f8045283d091b6cdb7d1c1fe54b943cd85a2f5398256",
     "validate": "a753f02e3272427ccd7734b6c75d296948d64c016fe62681f0a28d11d997ed4d"
   },
   {
@@ -360,7 +360,7 @@ const PINS = [
       ],
       [
         "src/agent.ts",
-        "3380c348e64cb61b6d67b302ac407734bc41e25c0b9f750a022326b9e1cd9d17"
+        "d6ed02af0e7517d8ab3af376b748e32bd38dbe1acf62221b25c471b5314df8eb"
       ],
       [
         ".env.example",
@@ -371,7 +371,7 @@ const PINS = [
         "94c55fb9f6fbf0b8f2c2d66f583c66bc26ec5bd74e3cce4c7687f8f36518aec1"
       ]
     ],
-    "scaffold": "8d3ab2f5678088342910ce9503b4ed2f0f098c05f983397bb6dc8afd90627c7a",
+    "scaffold": "8b11ccc4f1ba9c7ef838b738f84d158aaf6315a6efbc726b64598370e413877f",
     "validate": "28e6ab06ee92daafbef35b8727d7b0284059f9c5f8bd1ad52801d3a8007aeb73"
   },
   {
@@ -398,7 +398,7 @@ const PINS = [
       ],
       [
         "src/agent.ts",
-        "711bf957c35d73f7a170e6195e8621b1ce5d44e4e3da699178e4c3cd792f71fd"
+        "a346a3d9b43d76eecbce62bf4dc1a08acf5298c6bb10a7216ff36d21b5c1c5c8"
       ],
       [
         ".env.example",
@@ -409,7 +409,7 @@ const PINS = [
         "678d506a5aad6fd913bf4ee0a68d296f239583699f54a46041e1f47bd5a7d7ed"
       ]
     ],
-    "scaffold": "fc723cb85c6449494a7acb8d2e0186e8958b18689a779afc501a74fca2ce613d",
+    "scaffold": "42f4c3cc60615c5e19c1ddccfbe3e4ba6827d67ac59d187b228dc3f25efea54b",
     "validate": "9ec827ddd8d466e3249c0be24fe783c7d0f68461822210f11c4bbddbcc72ada2"
   },
   {
@@ -436,7 +436,7 @@ const PINS = [
       ],
       [
         "src/agent.ts",
-        "711bf957c35d73f7a170e6195e8621b1ce5d44e4e3da699178e4c3cd792f71fd"
+        "fd6081eb71d52697cf08ff44875cbf9b8f5b975dee7455c2492c52f89ccd7968"
       ],
       [
         ".env.example",
@@ -447,7 +447,7 @@ const PINS = [
         "07b3f348e9fce0352c4bca1774f22e7a3a8c8cf65b2baf59d487597556fe73c9"
       ]
     ],
-    "scaffold": "8f17fbadc1ce495be4e36687eab83add65e4bee8526bbba9245835c0e64d3506",
+    "scaffold": "6cad02e91b1e2d20661919413c9265acedcdc8e3d5b66d45d6ffbd3556f16f77",
     "validate": "0fcc2b524c3fccd4b255cfc448c548294ed9ec0340d6b3393940b6acf18f7c3a"
   },
   {
@@ -474,7 +474,7 @@ const PINS = [
       ],
       [
         "src/agent.ts",
-        "c6db09df9eebc955010443f2d2c38a40f2834a185914ab00e1125a25549b55c2"
+        "88ce6ab4d4834241f514fbe08d86d4921e9a8fee9c77ca5f71c25f9fa6a18afd"
       ],
       [
         ".env.example",
@@ -485,7 +485,7 @@ const PINS = [
         "42794155a59877959c140673303cf0beb159af4c4c7de4537f57369d841b8a7f"
       ]
     ],
-    "scaffold": "aec146bf744808943e5ac9b4f2f983766df436a03dfcafe0f21a6df0fde83d85",
+    "scaffold": "40bd492948b21c561ab32d787b893080df987f7a4a6b6acad7895e2bb7fd0d63",
     "validate": "27982cc03d8ccf42262bcdeb67a4ea446e8b04aa243006c37ec111daa4a515b5"
   }
 ];

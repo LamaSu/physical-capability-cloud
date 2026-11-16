@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { scaffold } from "../scaffolder.js";
+import { validate } from "../validate.js";
 
 type OnboardConfig = Parameters<typeof scaffold>[0]["config"];
 const packageDir = fileURLToPath(new URL("../..", import.meta.url));
@@ -24,6 +25,13 @@ function content(config: OnboardConfig, path: string): string {
 function once(text: string, block: string): void {
   expect(text.split(block)).toHaveLength(2);
 }
+function refusal(config: OnboardConfig, name: string, message: string): void {
+  expect(validate({ config }).errors).toContainEqual({ name, message, passed: false, severity: "error" });
+  let error: unknown;
+  try { scaffold({ config }); } catch (e) { error = e; }
+  expect(error).toBeInstanceOf(Error);
+  expect((error as Error).message).toContain(`${name}: ${message}`);
+}
 
 describe("scaffold agent wiring", () => {
   it("A1 the example's agent imports, builds and wires its three adapters", () => {
@@ -36,12 +44,19 @@ import { QCCamera } from "./adapters/qc-camera.js";
 
 const KERNEL_ID = "kernel_acme_cnc_sf";`);
     once(text, `  capabilities,
-  adapters: { machine: devHaasVf2, sensors: [devPowerMeter], camera: devQcCamera },
+  // MOCK_MODE=true passes no generated adapter, so every slot runs a PCC mock.
+  ...(process.env.MOCK_MODE === "true" ? {} : { adapters: { machine: devHaasVf2, sensors: [devPowerMeter], camera: devQcCamera } }),
   machineProfiles: profiles,`);
     once(text, 'console.log(`  Wallet: ${kernelAgent.wallet?.address ?? "not configured"}`);\n'
-      + 'console.log("  Machine: HaasVF2Adapter (dev-haas-vf2)");\n'
-      + 'console.log("  Sensors: ShopPowerMeter (dev-power-meter)");\n'
-      + 'console.log("  Camera: QCCamera (dev-qc-camera)");\n'
+      + 'console.log(process.env.MOCK_MODE === "true"\n'
+      + '  ? "  Machine: PCC mock (MOCK_MODE=true)"\n'
+      + '  : "  Machine: HaasVF2Adapter (dev-haas-vf2); its jobs are refused until KernelAgent passes inputHash, inputData and tierLadder");\n'
+      + 'console.log(process.env.MOCK_MODE === "true"\n'
+      + '  ? "  Sensors: PCC mock (MOCK_MODE=true)"\n'
+      + '  : "  Sensors: ShopPowerMeter (dev-power-meter)");\n'
+      + 'console.log(process.env.MOCK_MODE === "true"\n'
+      + '  ? "  Camera: PCC mock (MOCK_MODE=true)"\n'
+      + '  : "  Camera: QCCamera (dev-qc-camera)");\n'
       + 'console.log(`  Mock mode: ${process.env.MOCK_MODE === "true"}`);');
     expect(text).not.toContain("mockPrintDuration");
   });
@@ -52,9 +67,9 @@ const KERNEL_ID = "kernel_acme_cnc_sf";`);
   [devPowerMeter, devPowerB],
   devQcCamera,`);
     const text = content(config, "src/agent.ts");
-    once(text, "  adapters: { machine: devHaasVf2, sensors: [devPowerMeter, devPowerB], camera: devQcCamera },");
-    expect(text).toContain('console.log("  Machine: HaasVF2Adapter (dev-haas-vf2)");');
-    expect(text).toContain('console.log("  Sensors: ShopPowerMeter (dev-power-meter), PowerMeterB (dev-power-b)");');
+    once(text, '  ...(process.env.MOCK_MODE === "true" ? {} : { adapters: { machine: devHaasVf2, sensors: [devPowerMeter, devPowerB], camera: devQcCamera } }),');
+    expect(text).toContain('  : "  Machine: HaasVF2Adapter (dev-haas-vf2); its jobs are refused until KernelAgent passes inputHash, inputData and tierLadder");');
+    expect(text).toContain('  : "  Sensors: ShopPowerMeter (dev-power-meter), PowerMeterB (dev-power-b)");');
     for (const statement of [
       "const devHaasVf2 = new HaasVF2Adapter(", "const devPowerMeter = new ShopPowerMeter(",
       "const devQcCamera = new QCCamera(", "const devMillB = new MillBAdapter(", "const devPowerB = new PowerMeterB(",
@@ -62,20 +77,21 @@ const KERNEL_ID = "kernel_acme_cnc_sf";`);
   });
   it("A3 with no sensor adapter the sensor slot is a PCC mock", () => {
     const text = content(noSensor(), "src/agent.ts");
-    once(text, "  adapters: { machine: devHaasVf2, camera: devQcCamera },");
+    once(text, '  ...(process.env.MOCK_MODE === "true" ? {} : { adapters: { machine: devHaasVf2, camera: devQcCamera } }),');
     expect(text).not.toContain("sensors:");
     expect(text).toContain('console.log("  Sensors: PCC mock (no sensor adapter in config)");');
-    expect(text).toContain('console.log("  Machine: HaasVF2Adapter (dev-haas-vf2)");');
-    expect(text).toContain('console.log("  Camera: QCCamera (dev-qc-camera)");');
+    expect(text).toContain('  : "  Machine: HaasVF2Adapter (dev-haas-vf2); its jobs are refused until KernelAgent passes inputHash, inputData and tierLadder");');
+    expect(text).toContain('  : "  Camera: QCCamera (dev-qc-camera)");');
     expect(text).not.toContain("mockPrintDuration");
   });
   it("A4 with no machine adapter the machine and camera slots are PCC mocks", () => {
     const text = content(sensorOnly(), "src/agent.ts");
     once(text, `  mockPrintDuration: 3000,  // Fast mock for testing
-  adapters: { sensors: [devPowerMeter] },`);
-    once(text, "  adapters: ");
+  // MOCK_MODE=true passes no generated adapter, so every slot runs a PCC mock.
+  ...(process.env.MOCK_MODE === "true" ? {} : { adapters: { sensors: [devPowerMeter] } }),`);
+    once(text, "{ adapters: ");
     expect(text).toContain('console.log("  Machine: PCC mock (no machine adapter in config)");');
-    expect(text).toContain('console.log("  Sensors: ShopPowerMeter (dev-power-meter)");');
+    expect(text).toContain('  : "  Sensors: ShopPowerMeter (dev-power-meter)");');
     expect(text).toContain('console.log("  Camera: PCC mock (no camera adapter in config)");');
   });
   it("A7 the next steps put MOCK_MODE on the command line", () => {
@@ -86,20 +102,35 @@ const KERNEL_ID = "kernel_acme_cnc_sf";`);
     expect(lines.slice(start, start + 4)).toEqual([
       step4,
       "  5. Test with agents: MOCK_MODE=true npx tsx src/agent.ts",
-      "  5b. The agent runs your generated adapters; MOCK_MODE=true keeps them off hardware. Nothing loads .env, so export its variables or put them on the command line. A slot with no adapter in the config runs a PCC mock, and the start-up banner says so.",
-      "  6. Connect to live network: set GATEWAY_URL in .env",
+      "  5b. Without MOCK_MODE=true the agent runs your generated adapters; with it, every slot runs a PCC mock. A machine whose capability class isn't fdm takes the prepare path, and its jobs are refused until KernelAgent passes inputHash, inputData and tierLadder. Nothing loads .env, so export its variables or put them on the command line. A slot with no adapter in the config runs a PCC mock, and the start-up banner says so.",
+      "  6. Connect to live network: export GATEWAY_URL",
     ]);
     expect(lines).not.toContain("  4. Test mock mode: npx tsx src/kernel.ts");
     expect(lines).not.toContain("  5. Test with agents: npx tsx src/agent.ts");
   });
   it("A9 with no adapters the agent keeps every PCC mock and says so", () => {
     const text = content(noAdapters(), "src/agent.ts");
-    for (const absent of ["  adapters: ", "./adapters/", "Initialize adapters"]) expect(text).not.toContain(absent);
+    for (const absent of ["  adapters: ", "./adapters/", "Initialize adapters", 'MOCK_MODE === "true" ?']) expect(text).not.toContain(absent);
     expect(text).toContain("  mockPrintDuration: 3000,  // Fast mock for testing");
     once(text, 'console.log(`  Wallet: ${kernelAgent.wallet?.address ?? "not configured"}`);\n'
       + 'console.log("  Machine: PCC mock (no machine adapter in config)");\n'
       + 'console.log("  Sensors: PCC mock (no sensor adapter in config)");\n'
       + 'console.log("  Camera: PCC mock (no camera adapter in config)");\n'
       + 'console.log(`  Mock mode: ${process.env.MOCK_MODE === "true"}`);');
+  });
+  it("E5 adapter ids make no _URL name that a dependency of the generated agent reads", () => {
+    for (const id of ["anthropic-base", "anthropic_base", "editor", "lit-api", "lit_api", "nats", "NATS", "unbrowse"]) {
+      const config = sensorOnly();
+      config.adapters[0].adapterId = id;
+      const name = id.replace(/-/g, "_").toUpperCase();
+      refusal(config, `adapter[${id}].adapterId`, `${JSON.stringify(id)} makes the environment variable ${name}_URL, which a package the generated agent depends on already reads; choose another adapter id`);
+    }
+    const allowed = sensorOnly();
+    allowed.adapters[0].adapterId = "nats1";
+    expect(validate({ config: allowed }).errors.some(e => e.name === "adapter[nats1].adapterId")).toBe(false);
+    expect(scaffold({ config: allowed }).files.length).toBeGreaterThan(0);
+    const apiKey = sensorOnly();
+    apiKey.adapters[0].adapterId = "lit";
+    refusal(apiKey, "adapter[lit].adapterId", '"lit" makes the environment variable LIT_API_KEY, which other software already reads as its API key; choose another adapter id');
   });
 });

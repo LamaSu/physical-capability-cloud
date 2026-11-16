@@ -867,8 +867,10 @@ const kernelAgent = new KernelAgent(bus, {
   location: { lat: 37.7749, lng: -122.4194 },
   capabilities: myCapabilities,
 
-  // Your adapters from Step 3; their mockMode setting decides whether a job
-  // reaches the hardware. A slot you leave out runs a PCC mock device.
+  // KernelAgent runs the adapters you pass (yours from Step 3). Until it
+  // passes inputHash, inputData and tierLadder, a prepare-path machine's
+  // jobs are refused (see §7.1). In each job that runs, the sensor and
+  // camera read their devices. A slot you leave out runs a PCC mock device.
   adapters: { machine, sensors: [powerSensor], camera },
 
   // Machine profiles for the contract builder (see Step 5)

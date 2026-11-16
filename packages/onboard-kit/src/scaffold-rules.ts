@@ -47,6 +47,8 @@ const API_KEY_STEMS = new Set([
   "GOOGLE", "GROQ", "INSFORGE", "LIT", "LOB", "MISTRAL", "OPENAI", "OPENROUTER", "PCC", "PCC_DECOMPOSE", "PCC_REVOKE", "PCC_SMITHERY",
   "POSTHOG", "POSTHOG_PERSONAL", "RESEND", "XAI", "YELLOWCARD",
 ]);
+// Stems of _URL variables that packages the generated agent depends on already read.
+const URL_STEMS = new Set(["ANTHROPIC_BASE", "EDITOR", "LIT_API", "NATS", "UNBROWSE"]);
 const CLASS_NAME = /^[A-Z][A-Za-z0-9]{0,63}$/;
 const ADAPTER_ID = /^[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*$/;
 const ENV_VAR_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -110,6 +112,8 @@ export function scaffoldRuleProblems(config: OnboardConfig): Array<{ name: strin
         add(`${prefix}.adapterId`, `${display(id)} makes the environment variable ${envClash}, which .env.example already defines`);
       } else if (API_KEY_STEMS.has(env)) {
         add(`${prefix}.adapterId`, `${display(id)} makes the environment variable ${env}_API_KEY, which other software already reads as its API key; choose another adapter id`);
+      } else if (URL_STEMS.has(env)) {
+        add(`${prefix}.adapterId`, `${display(id)} makes the environment variable ${env}_URL, which a package the generated agent depends on already reads; choose another adapter id`);
       } else if (variables.has(variable)) {
         add(`${prefix}.adapterId`, `${display(id)} makes the variable ${variable}, which adapter[${variables.get(variable)}] also makes`);
       } else if (envNames.has(env)) {
