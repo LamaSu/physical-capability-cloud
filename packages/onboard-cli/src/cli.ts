@@ -110,6 +110,7 @@ Conversational onboarding for Physical Capability Cloud.
 
 ${term.bold("Usage:")}
   npx @pcc/onboard [options]
+  onboard wallet <init|link|fund|status|revoke|export-address> [options]
 
 ${term.bold("Options:")}
   --api-key <key>      Anthropic API key (env: ANTHROPIC_API_KEY)
@@ -301,6 +302,10 @@ async function runInteractiveChat(args: ParsedArgs): Promise<number> {
 }
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
+  if (argv[0] === "wallet") {
+    const { main: walletMain } = await import("./wallet/cli.js");
+    return walletMain(argv.slice(1));
+  }
   const args = parseArgs(argv);
 
   if (args.help) {
