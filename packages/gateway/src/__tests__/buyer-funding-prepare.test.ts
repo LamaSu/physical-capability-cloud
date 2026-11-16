@@ -536,7 +536,7 @@ describe("servePrepareSignature", () => {
     if (kind === "expired") expect(fundingPrepareRow(j.scopeId)!.endedAt).toBe(new Date().toISOString());
     if (kind === "version") expect(fundingPrepareRow(j.scopeId)).toMatchObject({ operatorSignature: null, servedPayload: null, signatureVerifiedAt: null });
   });
-  for (const version of ["v2", "v3", null]) it(`SIG6 version ${String(version)}: servePrepareSignature refuses a marker escrow of version ${String(version)}`, async () => {
+  for (const version of ["v2", "v3", null, "v4"]) it(`SIG6 version ${String(version)}: servePrepareSignature refuses a marker escrow of version ${String(version)}`, async () => {
     const j = seedPrepare(); await prepare(j);
     db().update(schema.escrows).set({ version }).where(eq(schema.escrows.id, marker(j).id)).run();
     expect(await servePrepareSignature(j.scopeId, good)).toEqual({ status: 409,
