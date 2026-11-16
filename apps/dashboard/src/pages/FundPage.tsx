@@ -21,6 +21,7 @@ const BUTTON = "rounded-lg border border-white/20 px-5 py-3 text-sm font-medium 
 export function FundPage({ jobId }: { jobId: string | null }) {
   const { address } = useAuth();
   const sessionToken = useAuthStore((state) => state.sessionToken);
+  const keyEpoch = useAuthStore((state) => state.keyEpoch);
   const generation = useRef(0);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prepareFlight = useRef<number | null>(null);
@@ -146,7 +147,7 @@ export function FundPage({ jobId }: { jobId: string | null }) {
       generation.current++;
       stopTimer();
     };
-  }, [jobId, address, sessionToken]);
+  }, [jobId, address, sessionToken, keyEpoch]);
 
   async function signInAgain(login: () => Promise<void>) {
     if (signInFlight.current) return;
@@ -200,6 +201,7 @@ export function FundPage({ jobId }: { jobId: string | null }) {
             <dt>Fund by</dt><dd><time dateTime={view.terms.fundBy}>{view.terms.fundBy}</time></dd>
           </dl>
           <p>{FUND_COPY.L20}</p>
+          <p>{FUND_COPY.L25}</p>
           <p>{PCC_BETA_STATUS}</p>
           <button className={BUTTON} onClick={() => reload.current()}>Check again</button>
         </>}

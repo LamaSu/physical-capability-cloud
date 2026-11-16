@@ -40,7 +40,7 @@ import { readFunding, readPrepare, readServedTerms, requestPrepare } from "../li
 import { FUND_COPY } from "../lib/fund-copy.js";
 import { PCC_BETA_STATUS } from "../lib/positioning.js";
 import { SIGN_IN_EXPIRED, SIGN_IN_REFUSED } from "../lib/wallet-link-api.js";
-import { useAuthStore } from "../stores/auth-store.js";
+import { adoptApiKey, useAuthStore } from "../stores/auth-store.js";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const NOW = 1_800_000_000_000;
@@ -232,7 +232,14 @@ describe("time-based polls", () => {
   });
   it("C7 P2: a non-202 answer stops the poll", async () => {
     replyPrepare(pending, 202); await render(); authorizedFetch.mockResolvedValue(json({ error: "prepare_expired" }, 410));
-    await advance(5_000); text(FUND_COPY.L10a); await stoppedForTwoHours();
+    await advance(5_000); text(FUND_COPY.L10a); expect(vi.getTimerCount()).toBe(0);
+    await stoppedForTwoHours(); text(FUND_COPY.L10a); expect(container.textContent).not.toContain(FUND_COPY.L10b);
+  });
+  it("C7 P2: a 401 mid-poll stops the poll and keeps the sign-in remedy", async () => {
+    replyPrepare(pending, 202); await render(); authorizedFetch.mockResolvedValue(json({}, 401));
+    await advance(5_000); text(SIGN_IN_EXPIRED); expect(vi.getTimerCount()).toBe(0);
+    await stoppedForTwoHours(); text(SIGN_IN_EXPIRED); expect(button("Sign in again")).toBeDefined();
+    expect(container.textContent).not.toContain(FUND_COPY.L10b);
   });
   it("C7 P2: the deadline also ends an in-flight poll, dropping its late answer", async () => {
     replyPrepare(pending, 202); await render(); await advance(590_000);
@@ -286,7 +293,7 @@ describe("served terms and display boundary", () => {
   it("C9: blocks automatic capture on the root", async () => { await render(); expect(container.querySelector("main.ph-no-capture.sentry-block")).not.toBeNull(); });
   it("C10: the gateway golden displays only amount, escrow and fund-by", async () => {
     vi.setSystemTime((Number(golden.expiry) - Number(DEFAULT_MARGIN_SECONDS) - 1) * 1000);
-    replyPrepare(golden); await render(); text(FUND_COPY.L19); text(FUND_COPY.L20); text(PCC_BETA_STATUS);
+    replyPrepare(golden); await render(); text(FUND_COPY.L19); text(FUND_COPY.L20); text(FUND_COPY.L25); text(PCC_BETA_STATUS);
     const { formatUnits } = await import("viem");
     text(`${formatUnits(BigInt(golden.totalGross), 6)} test USDC`); text(golden.escrow);
     text(new Date((Number(golden.expiry) - Number(DEFAULT_MARGIN_SECONDS)) * 1000).toISOString());
@@ -336,6 +343,28 @@ describe("sign-in recovery uses a new session token", () => {
     authorizedFetch.mockResolvedValue(json(funding([scope("cancelled")])));
     login.mockImplementation(async () => { useAuthStore.setState({ sessionToken: "successful-session", error: null, authNotice: null }); });
     await click("Sign in again"); text(FUND_COPY.L12); expect(authorizedFetch).toHaveBeenCalledTimes(count + 1);
+  });
+  it("C15b: a key minted after the new session token recovers on the first re-sign", async () => {
+    const mint = deferred<void>();
+    useAuthStore.setState({ sessionToken: "cookie" });
+    authorizedFetch.mockImplementation(() => Promise.resolve(json({}, 401)));
+    login.mockImplementation(async () => {
+      useAuthStore.setState({ sessionToken: "new-session" });
+      await mint.promise;
+      authorizedFetch.mockImplementation(() => Promise.resolve(json(funding([scope("cancelled")]))));
+      adoptApiKey("placeholder");
+    });
+    try {
+      await render(); text(SIGN_IN_EXPIRED);
+      await click("Sign in again"); text(SIGN_IN_EXPIRED);
+      expect(authorizedFetch).toHaveBeenCalledTimes(2);
+      await act(async () => mint.resolve());
+      text(FUND_COPY.L12); expect(container.textContent).not.toContain(SIGN_IN_EXPIRED);
+      expect(login).toHaveBeenCalledTimes(1); expect(posts()).toHaveLength(0);
+    } finally {
+      await act(async () => root.unmount()); unmounted = true;
+      adoptApiKey(null);
+    }
   });
   it("C16: gateway stop survives re-sign and no local stop panel appears", async () => {
     replyPrepare({}, 401); await render(); text(SIGN_IN_EXPIRED);
