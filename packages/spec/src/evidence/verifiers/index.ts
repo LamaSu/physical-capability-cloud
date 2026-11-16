@@ -22,5 +22,6 @@
  */
 export * from "./drift-predicates.js";
 export * from "./log-chain.js";
+export * from "./registered-key.js";
 export * from "./oracle-binding.js";
 export * from "./registered-signer.js";
