@@ -16,13 +16,16 @@
  *   ai/research/capture-verification-protocol.md §3
  */
 
-import { createHash, randomBytes, randomUUID } from "node:crypto";
-import type {
-  WorkflowChallenge,
-  ExecutionProof,
-  BlockAnchor,
-  CaptureNonceChallengePayload,
-  VisualNonce,
+import { randomBytes, randomUUID } from "node:crypto";
+import {
+  computeExecutionProofHash,
+  verifyCaptureFreshness,
+  verifyExecutionFreshness,
+  type WorkflowChallenge,
+  type ExecutionProof,
+  type BlockAnchor,
+  type CaptureNonceChallengePayload,
+  type VisualNonce,
 } from "@pcc/spec";
 
 /** Default challenge validity window: 10 minutes */
@@ -113,47 +116,9 @@ export class ChallengeService {
     proof: ExecutionProof;
     currentBlockTimestamp: bigint;
   }): { valid: boolean; failures: string[] } {
-    const { challenge, proof, currentBlockTimestamp } = params;
-    const failures: string[] = [];
-
-    // 1. challengeId must match
-    if (proof.challengeId !== challenge.challengeId) {
-      failures.push(
-        `challengeId mismatch: expected ${challenge.challengeId}, got ${proof.challengeId}`,
-      );
-    }
-
-    // 2. proofHash must equal SHA256(challengeId + blockHash + workOutputRoot)
-    const expectedHash = this.computeProofHash(
-      challenge.challengeId,
-      challenge.anchor.blockHash,
-      proof.workOutputRoot,
-    );
-    if (proof.proofHash !== expectedHash) {
-      failures.push(
-        `proofHash mismatch: expected ${expectedHash}, got ${proof.proofHash}`,
-      );
-    }
-
-    // 3. computedAtBlock must be strictly greater than anchor block
-    if (proof.computedAtBlock <= challenge.anchor.blockNumber) {
-      failures.push(
-        `computedAtBlock ${proof.computedAtBlock} must be strictly greater than anchor block ${challenge.anchor.blockNumber}`,
-      );
-    }
-
-    // 4. Time elapsed must not exceed maxAgeSeconds
-    const elapsed = currentBlockTimestamp - challenge.anchor.timestamp;
-    if (elapsed > BigInt(challenge.maxAgeSeconds)) {
-      failures.push(
-        `challenge expired: ${elapsed}s elapsed, max is ${challenge.maxAgeSeconds}s`,
-      );
-    }
-
-    return {
-      valid: failures.length === 0,
-      failures,
-    };
+    // The checks live in @pcc/spec (fresh.challenge_bound), so this service
+    // and the oracle run the same code.
+    return verifyExecutionFreshness(params);
   }
 
   /**
@@ -249,36 +214,7 @@ export class ChallengeService {
       visualNonceEcho: string;
     },
   ): { valid: boolean; reason?: string } {
-    if (response.challengeId !== challenge.challengeId) {
-      return {
-        valid: false,
-        reason: `challengeId mismatch: expected ${challenge.challengeId}, got ${response.challengeId}`,
-      };
-    }
-
-    if (response.submittedAt < challenge.blockTimestamp) {
-      return {
-        valid: false,
-        reason: `submittedAt ${response.submittedAt} is earlier than anchor blockTimestamp ${challenge.blockTimestamp}`,
-      };
-    }
-
-    const elapsed = response.submittedAt - challenge.blockTimestamp;
-    if (elapsed > challenge.maxAgeSeconds) {
-      return {
-        valid: false,
-        reason: `challenge expired: ${elapsed}s elapsed, max is ${challenge.maxAgeSeconds}s`,
-      };
-    }
-
-    if (response.visualNonceEcho !== challenge.visualNonce.payload) {
-      return {
-        valid: false,
-        reason: "visualNonce mismatch: echo does not match issued payload",
-      };
-    }
-
-    return { valid: true };
+    return verifyCaptureFreshness(challenge, response);
   }
 
   /**
@@ -289,11 +225,7 @@ export class ChallengeService {
     blockHash: string,
     workOutputRoot: string,
   ): string {
-    const hash = createHash("sha256");
-    hash.update(challengeId);
-    hash.update(blockHash);
-    hash.update(workOutputRoot);
-    return hash.digest("hex");
+    return computeExecutionProofHash(challengeId, blockHash, workOutputRoot);
   }
 
   /**
