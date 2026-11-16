@@ -445,6 +445,8 @@ describe("POST /api/courier-jobs/:id/events", () => {
         method: "POST", url: "/api/courier-jobs",
         payload: { deliveryId: "j-ev", pickup: { name: "A" }, dropoff: { name: "B" } },
       });
+      // N81: a pickup needs a claim first (an unclaimed job is refused, 409).
+      await app.inject({ method: "POST", url: "/api/courier-jobs/j-ev/claim", payload: { driverAgent: "d1" } });
       const r1 = await app.inject({
         method: "POST", url: "/api/courier-jobs/j-ev/events",
         payload: { event: "pickup", driverAgent: "d1" },
