@@ -684,7 +684,7 @@ export async function createGateway(port = 3200) {
   await app.register(escrowRoutes);
   // Settlement READ routes (#573) — receipt/lifecycle/provenance to gen-UI
   // contract v1.4. Answers 503 INDEX_NOT_READY until a SettlementUnitReader is
-  // registered (gated on escrow's deployed V-next address, artifact D).
+  // registered.
   await app.register(settlementReadRoutes);
   await app.register(pccProtocolRoutes);
   await app.register(agentRoutes);

@@ -2,9 +2,9 @@
 
 Run 1 ships the data kit at `@pcc/spec/recheck` in this clone and the public discovery document at `/.well-known/pcc-settlement-recheck.json`. No settlement reader is registered by this change; the unbound settlement routes continue to answer 503 INDEX_NOT_READY.
 
-Current kitVersion: `1.0.0`.
+Current kitVersion: `1.0.1`.
 
-Current kitSha256: `76eaac0a40b6a8adc2c57f4c5040f0b2ab009d826c54e45b0b6b2a4d516cc817`.
+Current kitSha256: `6bcc742fc79db0d01bbe18056d530ba169850ce634867e993d879176efaba97d`.
 
 ## What a MATCH proves
 
@@ -26,7 +26,7 @@ The ABI is included verbatim in the descriptor's `abi` member and in [abi.ts](..
 
 Each row is one (route, JSON pointer); `*` denotes an array index. Money rows are marked yes. Null economics is NOT_CLAIMED; non-null economics supports one payout leg only. The receipt's amount is the recipient's amount (net of the fee), the payee's net n, never the buyer's gross g = n + f. Its token is chain-checkable against USDC(), while the assetReality verdict remains registry-only.
 
-The kit follows the contract's refund causes, inline settlement and emergency cap. Until the separate mapper row lands, a gateway following the current mapper can produce MISMATCH with knownDrift E4.1, E4.2 or E4.3. E2 marks the single-leg economics and registry limitations. Off-chain leaves and revisions remain NOT_CHAIN_CHECKABLE.
+The gateway mapper follows the contract's refund causes, inline settlement and emergency cap on these rows. E2 marks the single-leg economics and registry limitations. Off-chain leaves and revisions remain NOT_CHAIN_CHECKABLE.
 
 | Route | Pointer | Source | Reads | Rule | Money | Drift |
 |---|---|---|---|---|---|---|
@@ -74,7 +74,7 @@ The kit follows the contract's refund causes, inline settlement and emergency ca
 | lifecycle | `/isTerminal` | derived | inputs: /unitState | True exactly when state is in TERMINAL_STATES {8, 9}. | yes |  |
 | lifecycle | `/isAllocated` | derived | inputs: /unitState | True exactly when state is in ALLOCATED_STATES {6, 7}. | yes |  |
 | receipt | `/isAllocated` | derived | inputs: /unitState | True exactly when state is in ALLOCATED_STATES {6, 7}. | yes |  |
-| lifecycle | `/windowEndsAt` | derived | escrow.settlement(unitId) → assertedAt_; escrow.settlement(unitId) → challengedAt_; escrow.unitTerms(unitId) → reclaimAt_; escrow.emergencyAnchorOf(unitId); inputs: /unitState, deployment.challengeWindowSec, deployment.appealWindowSec | States 2 and 5: assertedAt + challengeWindowSec; state 3: challengedAt + appealWindowSec, capped at a non-zero emergency anchor; state 4: reclaimAt - challengeWindowSec - appealWindowSec; otherwise null, with non-null results as decimal strings. | yes | E4.3 |
+| lifecycle | `/windowEndsAt` | derived | escrow.settlement(unitId) → assertedAt_; escrow.settlement(unitId) → challengedAt_; escrow.unitTerms(unitId) → reclaimAt_; escrow.emergencyAnchorOf(unitId); inputs: /unitState, deployment.challengeWindowSec, deployment.appealWindowSec | States 2 and 5: assertedAt + challengeWindowSec; state 3: challengedAt + appealWindowSec, capped at a non-zero emergency anchor; state 4: reclaimAt - challengeWindowSec - appealWindowSec; otherwise null, with non-null results as decimal strings. | yes |  |
 | receipt | `/network` | echo | none | An object with exactly chainId. | yes |  |
 | receipt | `/network/chainId` | echo | inputs: /chainId | Equals /chainId. | yes |  |
 | receipt | `/assetReality` | registry | none | Null or the registry envelope, whose verdict is NOT_CHAIN_CHECKABLE. | yes | E2 |
@@ -89,8 +89,8 @@ The kit follows the contract's refund causes, inline settlement and emergency ca
 | receipt | `/economics/recipient` | chain-state | escrow.payoutAt(unitId, 0) → recipient | Equals payoutAt recipient, compared lower-case. | yes | E2 |
 | receipt | `/economics/token` | chain-state | escrow.USDC() | Equals USDC() and the known deployment's usdc. | yes |  |
 | receipt | `/economics/assuranceTier` | chain-state | escrow.requiredTierOf(unitId) | Equals requiredTierOf; at funding requiredTier must equal requestedTier. | yes | E2 |
-| receipt | `/refundReason` | chain-log | escrow.Finalized (unitId topic 1); escrow.EscalationResolved (unitId topic 1) | Null unless state is 7 or 9; witnessed causes are Finalized reason 2 BACKUP_NO_RELEASE, 3 EMERGENCY_SILENCE, 4 DEADLINE_RECLAIM, or EscalationResolved not upheld with role 1 APPEAL_OVERTURN or role 2 EMERGENCY_OVERTURN; UNKNOWN is NOT_CLAIMED. | yes | E4.1 |
-| receipt | `/refundReason/value` | chain-log | escrow.Finalized (unitId topic 1); escrow.EscalationResolved (unitId topic 1) | Equals the witnessed refund cause. | yes | E4.1 |
+| receipt | `/refundReason` | chain-log | escrow.Finalized (unitId topic 1); escrow.EscalationResolved (unitId topic 1) | Null unless state is 7 or 9; witnessed causes are Finalized reason 2 BACKUP_NO_RELEASE, 3 EMERGENCY_SILENCE, 4 DEADLINE_RECLAIM, or EscalationResolved not upheld with role 1 APPEAL_OVERTURN or role 2 EMERGENCY_OVERTURN; UNKNOWN is NOT_CLAIMED. | yes |  |
+| receipt | `/refundReason/value` | chain-log | escrow.Finalized (unitId topic 1); escrow.EscalationResolved (unitId topic 1) | Equals the witnessed refund cause. | yes |  |
 | receipt | `/refundReason/source` | derived | none | The constant log. | no |  |
 | receipt | `/refundReason/chain` | derived | inputs: /chainId | Equals eip155: followed by chainId. | no |  |
 | receipt | `/refundReason/contractOrRegistryId` | echo | inputs: /escrow | Equals /escrow. | no |  |
@@ -98,8 +98,8 @@ The kit follows the contract's refund causes, inline settlement and emergency ca
 | receipt | `/refundReason/blockHash` | echo | inputs: /asOfBlockHash | Equals /asOfBlockHash. | no |  |
 | receipt | `/refundReason/finality` | echo | inputs: /finality | Equals /finality. | no |  |
 | receipt | `/refundReason/completeness` | echo | inputs: /logCompleteness | Equals /logCompleteness. | no |  |
-| receipt | `/finalizedBlock` | chain-log | escrow.ReleaseAllocated (unitId topic 1); escrow.RefundAllocated (unitId topic 1); escrow.ClaimCreated (unitId topic 2); escrow.ClaimDischarged (unitId topic 2) | Null unless state is 8 or 9; inline settlement uses the allocation event block when claimCount is 0, and deferred settlement uses the ClaimDischarged block that discharged the last job-class claim (classes 0-2); UNKNOWN is NOT_CLAIMED. | yes | E4.2 |
-| receipt | `/finalizedBlock/value` | chain-log | escrow.ReleaseAllocated (unitId topic 1); escrow.RefundAllocated (unitId topic 1); escrow.ClaimCreated (unitId topic 2); escrow.ClaimDischarged (unitId topic 2) | Equals that settlement block number as a decimal string. | yes | E4.2 |
+| receipt | `/finalizedBlock` | chain-log | escrow.ReleaseAllocated (unitId topic 1); escrow.RefundAllocated (unitId topic 1); escrow.ClaimCreated (unitId topic 2); escrow.ClaimDischarged (unitId topic 2) | Null unless state is 8 or 9; inline settlement uses the allocation event block when claimCount is 0, and deferred settlement uses the ClaimDischarged block that discharged the last job-class claim (classes 0-2); UNKNOWN is NOT_CLAIMED. | yes |  |
+| receipt | `/finalizedBlock/value` | chain-log | escrow.ReleaseAllocated (unitId topic 1); escrow.RefundAllocated (unitId topic 1); escrow.ClaimCreated (unitId topic 2); escrow.ClaimDischarged (unitId topic 2) | Equals that settlement block number as a decimal string. | yes |  |
 | receipt | `/finalizedBlock/source` | derived | none | The constant log. | no |  |
 | receipt | `/finalizedBlock/chain` | derived | inputs: /chainId | Equals eip155: followed by chainId. | no |  |
 | receipt | `/finalizedBlock/contractOrRegistryId` | echo | inputs: /escrow | Equals /escrow. | no |  |

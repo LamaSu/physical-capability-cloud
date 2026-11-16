@@ -5,7 +5,7 @@ import { KIT_ABI } from "./abi.js";
 import { KNOWN_DEPLOYMENTS } from "./deployments.js";
 
 /** Bump deliberately whenever kit content changes; C10 pins this with its digest. */
-export const KIT_VERSION = "1.0.0";
+export const KIT_VERSION = "1.0.1";
 
 /** Discovery only: clients trust their own embedded kit, not a gateway copy. */
 export function recheckKitDescriptor() {

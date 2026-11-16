@@ -37,9 +37,9 @@ function reader(state: UnitState, over: Partial<SettlementUnitReader> = {}): Set
   return {
     binding: async () => ({ chainId: 84532, escrow: "0xEscrow", deployment: DEPLOYMENT, windows: { challengeWindow: 600n, appealWindow: 1500n } }),
     pinSnapshot: async () => SNAP,
-    readAnchors: async () => ({ state, assertedAt: 1000n, challengedAt: 2000n, assertionCutoff: 3000n, remainingClaimCount: state >= 8 ? 0n : state >= 6 ? 1n : undefined }),
+    readAnchors: async () => ({ state, assertedAt: 1000n, challengedAt: 2000n, emergencyAnchor: 0n, assertionCutoff: 3000n, remainingClaimCount: state >= 8 ? 0n : state >= 6 ? 1n : undefined }),
     readRefundWitness: async () => ({ finalized: { released: false, code: 2 } }),
-    readZeroingDischargeBlock: async () => 99n,
+    readFinalizationWitness: async () => ({ allocation: { block: 99n, claimCount: 0n } }),
     readEconomics: async () => ({ amount: "100", feeAmount: "5", recipient: "0xPayee", token: "0xUSDC", assuranceTier: 1 }),
     readAssetIdentity: async () => ({ assetReality: "test", registryId: "r1", revision: 3 }),
     readProvenance: async () => ({ availability: "AVAILABLE", compositionRoot: "0xroot", revision: 1, leaves: [{ kind: "a", value: "one" }, { kind: "b", value: "two" }], nextCursor: "cursor-2" }),
@@ -60,7 +60,7 @@ async function collect(state: UnitState, over: Partial<SettlementUnitReader> = {
 }
 beforeAll(async () => {
   for (const state of [1,2,3,4,5,6,7,8,9] as UnitState[]) await collect(state);
-  await collect(UnitState.SETTLED_REFUNDED, { pinSnapshot: async () => ({ ...SNAP, logCompleteness: "incomplete" }), readRefundWitness: async () => ({}), readZeroingDischargeBlock: async () => undefined });
+  await collect(UnitState.SETTLED_REFUNDED, { pinSnapshot: async () => ({ ...SNAP, logCompleteness: "incomplete" }), readRefundWitness: async () => ({}), readFinalizationWitness: async () => ({}) });
   await collect(UnitState.FUNDED_ACTIVE, { readEconomics: async () => undefined });
   await collect(UnitState.FUNDED_ACTIVE, { readAssetIdentity: async () => ({ assetReality: "unknown", registryId: "r2" }) });
   for (const availability of ["WITHHELD", "UNANCHORED"] as const) await collect(UnitState.FUNDED_ACTIVE, { readProvenance: async () => ({ availability }) });
@@ -211,8 +211,22 @@ describe("N266 kit conformance", () => {
     expect(doc.split(text)).toHaveLength(3);
     expect(doc).not.toMatch(/retain/i);
   });
-  it("C10 deliberate version/hash pair", () => {
-    expect([KIT_VERSION, recheckKitDescriptor().kitSha256]).toEqual(["1.0.0", "76eaac0a40b6a8adc2c57f4c5040f0b2ab009d826c54e45b0b6b2a4d516cc817"]);
+  it("C9c doc and map drift annotations agree in both directions (T27)", () => {
+    const doc = read(join(repoRoot, "docs/SETTLEMENT_RECHECK.md"));
+    const documented = doc.split("\n").filter(line => /^\| (lifecycle|receipt|provenance) \|/.test(line)).map(line => {
+      const cells = line.split("|").slice(1, -1).map(cell => cell.trim());
+      expect(cells).toHaveLength(7);
+      return [`${cells[0]} ${cells[1]!.replace(/`/g, "")}`, cells[6]] as const;
+    });
+    const mapped = MAP.flatMap(row => row.routes.map(route => [`${route} ${row.pointer}`, row.knownDrift ?? ""] as const));
+    expect(new Set(documented.map(([key]) => key)).size).toBe(documented.length);
+    expect(sorted(documented.map(([key]) => key))).toEqual(sorted(mapped.map(([key]) => key)));
+    const docRows = new Map(documented), mapRows = new Map(mapped);
+    for (const [key, drift] of documented) expect(mapRows.get(key), key).toBe(drift);
+    for (const [key, drift] of mapped) expect(docRows.get(key), key).toBe(drift);
+  });
+  it("C10 deliberate version/hash pair (T26)", () => {
+    expect([KIT_VERSION, recheckKitDescriptor().kitSha256]).toEqual(["1.0.1", "6bcc742fc79db0d01bbe18056d530ba169850ce634867e993d879176efaba97d"]);
   });
   it("C11 public static descriptor, exact serialization, hash, headers and no env read", async () => {
     const app = Fastify(); await app.register(settlementRecheckKitRoutes);

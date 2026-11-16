@@ -19,7 +19,8 @@ function fake(over: Partial<SettlementUnitReader> = {}) {
     binding: vi.fn(async () => ({ chainId: 84532, escrow: "0xEscrow", deployment: DEPLOYMENT, windows: WINDOWS })),
     pinSnapshot: vi.fn(async () => SNAP),
     readAnchors: async () => ({ state: UnitState.SETTLED_RELEASED, remainingClaimCount: 0n }),
-    readRefundWitness: async () => ({}), readZeroingDischargeBlock: async () => 99n,
+    readRefundWitness: async () => ({}),
+    readFinalizationWitness: async () => ({ allocation: { block: 99n, claimCount: 0n } }),
     readEconomics: async () => ({ amount: "100", feeAmount: "5", recipient: "0xPayee", token: "0xUSDC", assuranceTier: 1 }),
     readAssetIdentity: async () => ({ assetReality: "test" as const, registryId: "r1", revision: 1 }),
     readProvenance: async () => ({ availability: "AVAILABLE" as const, compositionRoot: "0xroot", revision: 1, leaves: [], nextCursor: null }),
@@ -102,7 +103,7 @@ describe("N266 deployment identity", () => {
     }
   });
   it.each([[2, "1600", "173800"], [3, "3500", "434000"]] as const)("I7 state %s takes windows from each binding", async (state, short, long) => {
-    const r = fake({ readAnchors: async () => ({ state, assertedAt: 1000n, challengedAt: 2000n }) });
+    const r = fake({ readAnchors: async () => ({ state, assertedAt: 1000n, challengedAt: 2000n, emergencyAnchor: 0n }) });
     r.binding.mockImplementation(async (id: string) => ({ chainId: 84532, escrow: "0xEscrow", deployment: DEPLOYMENT, windows: id === UNIT ? WINDOWS : { challengeWindow: 172800n, appealWindow: 432000n } }));
     const app = await appFor(r);
     for (const [id, end] of [[UNIT, short], [SECOND, long]]) {

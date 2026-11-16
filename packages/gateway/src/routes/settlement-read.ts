@@ -50,6 +50,7 @@ import {
   type SettlementAnchors,
   type WindowConstants,
   type RefundWitness,
+  type FinalizationWitness,
   type LifecycleView,
   type Finality,
   type Completeness,
@@ -141,7 +142,13 @@ export interface SettlementUnitReader {
   pinSnapshot(asOf?: string): Promise<ChainSnapshot>;
   readAnchors(unitId: string, snap: ChainSnapshot): Promise<SettlementAnchors>;
   readRefundWitness(unitId: string, snap: ChainSnapshot): Promise<RefundWitness>;
-  readZeroingDischargeBlock(unitId: string, snap: ChainSnapshot): Promise<bigint | undefined>;
+  /**
+   * Allocation and optional zeroing discharge at or before the pin. For
+   * zeroingDischargeBlock, proving which discharge was the LAST job-class one
+   * (ClaimCreated classes 0-2, excluding bond and other auxiliary claims) is the
+   * reader's obligation; the mapper cannot check it.
+   */
+  readFinalizationWitness(unitId: string, snap: ChainSnapshot): Promise<FinalizationWitness>;
   readEconomics(unitId: string, snap: ChainSnapshot): Promise<EconomicsRecord | undefined>;
   /**
    * rule 11 + 25 + 26 — REGISTRY-derived, pinned separately from the chain block,
@@ -200,8 +207,7 @@ function requireReader(reply: FastifyReply): SettlementUnitReader | null {
   fail(
     reply,
     "INDEX_NOT_READY",
-    "The settlement read plane is not bound yet: the V-next escrow address is " +
-      "not published (escrow M-2 / artifact D). Retry once deployment lands.",
+    "The settlement read plane is not bound yet: no settlement reader is registered on this gateway. Retry later.",
   );
   return null;
 }
@@ -396,10 +402,9 @@ export async function settlementReadRoutes(app: FastifyInstance) {
         finality: snap.finality,
       };
 
-      // rule 23 — ABSENCE IS NOT EVIDENCE. If the log index is not complete
-      // through the pinned block, a missing witness means UNKNOWN, not "no
-      // refund cause therefore released" and not DEADLINE_RECLAIM by elimination.
-      const indexComplete = snap.logCompleteness === "complete";
+      // rule 23 — ABSENCE IS NOT EVIDENCE. A required refund cause without a
+      // witness is UNKNOWN regardless of index completeness; never infer a cause
+      // by elimination or turn a missing cause into a release.
       const isRefundPath =
         lifecycle.finalState === "SETTLED_REFUNDED" || lifecycle.unitState === 7;
 
@@ -410,17 +415,19 @@ export async function settlementReadRoutes(app: FastifyInstance) {
         const derived = deriveRefundReason(witness);
         if (derived) {
           refundReason = { ...derived, ...chainCtx, completeness: snap.logCompleteness };
-        } else if (!indexComplete) {
+        } else {
           refundReasonUnknown = true;
         }
       }
 
-      const zeroing = await r.readZeroingDischargeBlock(unitId, snap);
-      const fb = deriveFinalizedBlock(zeroing);
+      // rule 21: staticcall state is authoritative; logs cannot make 6/7 settled.
+      const fb = lifecycle.isTerminal
+        ? deriveFinalizedBlock(await r.readFinalizationWitness(unitId, snap))
+        : null;
       const finalizedBlock = fb ? { ...fb, ...chainCtx, completeness: snap.logCompleteness } : null;
-      // Same rule-23 logic: terminal but no discharge block found while the index
-      // is behind is UNKNOWN, not "no discharge happened".
-      const finalizedBlockUnknown = lifecycle.isTerminal && !fb && !indexComplete;
+      // Same rule-23 logic: a terminal unit without a settlement witness is
+      // UNKNOWN even on a complete index. Non-terminal units keep null.
+      const finalizedBlockUnknown = lifecycle.isTerminal && !fb;
 
       const economics = await r.readEconomics(unitId, snap);
 
