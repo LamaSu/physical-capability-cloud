@@ -1,9 +1,11 @@
 /**
  * Adapter + device-role DEFAULT emitter manifests — the supply-side DATA.
  *
- * One entry per adapter family present in packages/kernel/src/adapters/
- * (octoprint / ipp / opcua / sila / modbus / generic-http / mock) and per
- * evidence-only device ROLE (camera / sensor). Each declares, in the bounded
+ * One entry per machine adapter the kernel's factory registers
+ * (packages/kernel/src/adapter-factory.ts: octoprint / ipp / opcua / sila /
+ * modbus / opentrons / hamilton / generic-http / mock; a kernel test keeps the
+ * two in step) and per evidence-only device ROLE (camera / sensor).
+ * PyLabRobot is not a kernel AdapterType, so it has no entry here. Each declares, in the bounded
  * vocabulary, which primitives that adapter/role can EMIT. Auto-discovery reads
  * these to write structured `evidence.tierN.primitives[]` instead of free-text
  * `required[]`, turning an onboarded device from tier-0-capped into
@@ -90,6 +92,21 @@ export const ADAPTER_DEFAULT_MANIFESTS: Readonly<Record<string, EvidenceEmitterM
 
   // PLC / fieldbus via Modbus.
   modbus: adapterManifest("modbus", [...DIGITAL_RECEIPT_CORE]),
+
+  // Liquid handlers (evidence review of #418, #3251). Neither adapter feeds
+  // LogCaptureService (only printer-log-adapter does), so no
+  // machine.execution_log, and neither emits telemetry.
+  //   - hamilton (kernel/src/adapters/hamilton-adapter.ts): real runs emit the
+  //     vocabulary's execution_started / execution_completed /
+  //     execution_failed, inside the kernel job pipeline whose EvidenceEmitter
+  //     signs each job-step bundle and marks mock/simulated events fabricated
+  //     (kernel/src/evidence-emitter.ts). It carries the receipt core.
+  //   - opentrons (kernel/src/opentrons/adapter.ts): real runs emit only
+  //     non-vocabulary types (protocol_uploaded, run_action, run_*) and no
+  //     real completion event, so it claims the tier-0 floor only, until its
+  //     events are mapped to the vocabulary (evidence offered the mapping).
+  hamilton: adapterManifest("hamilton", [...DIGITAL_RECEIPT_CORE]),
+  opentrons: adapterManifest("opentrons", [{ id: "decl.self_attested" }]),
 
   // Arbitrary external HTTP capability. Adds target-system confirmation via the
   // upstream's own channel (api) — a natural fit for HTTP-backed work.
