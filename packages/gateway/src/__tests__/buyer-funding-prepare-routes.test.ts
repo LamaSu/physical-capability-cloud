@@ -8,6 +8,7 @@ import { VNextSettlementEscrowABI, VNextSettlementEscrowFactoryABI, policySalt, 
 import { buyerFundingRoutes } from "../routes/buyer-funding.js";
 import { operatorRoutes } from "../routes/operator.js";
 import { negotiationRoutes } from "../routes/negotiation.js";
+import { getStore } from "../db.js";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { deviceRelayRoutes } from "../routes/device-relay.js";
 import { walletsRoutes } from "../routes/wallets.js";
@@ -47,7 +48,7 @@ const gateRequired = { error: "api_key_required", message: "This endpoint requir
   provision_url: "/api/auth/provision", docs: "https://capability.network/whitepaper.md" };
 const operatorRequired = { error: "forbidden", reason: "operator_proof_required",
   message: "This needs the gateway admin secret, or proof that you control the kernel's operator wallet (wallet sign-in proof, WP-A). An API key's claimed identity is not proof." };
-function installTransport(fail = false, onCall?: (functionName: string) => void) {
+function installTransport(fail = false, onCall?: (functionName: string) => void | Promise<void>) {
   const record = configuredVNextDeploymentRecord()!;
   const abi = [...VNextSettlementEscrowABI, ...VNextSettlementEscrowFactoryABI];
   __setVNextTransportForTest(custom({ request: async ({ method, params = [] }: any) => {
@@ -62,7 +63,7 @@ function installTransport(fail = false, onCall?: (functionName: string) => void)
     const result = decoded.functionName === "predictEscrow"
       ? predictEscrow({ factory: record.factory, implementation: record.implementation, salt: policySalt(decoded.args![0] as never) })
       : values[decoded.functionName];
-    onCall?.(decoded.functionName);
+    await onCall?.(decoded.functionName);
     return encodeFunctionResult({ abi, functionName: decoded.functionName, result: result as never });
   } }, { retryCount: 0 }));
 }
@@ -193,6 +194,71 @@ describe("buyerFundingRoutes and operatorRoutes", () => {
     expect(response.statusCode).toBe(late ? 409 : 202);
     expect(response.json()).toEqual(late ? prepareRefusalAnswer("window_too_short").body : pendingBody);
     if (late) { expect(counts()).toEqual(before); expect(fundingPrepareRow(j.scopeId)).toBeUndefined(); }
+  });
+  it("RT10: the POST answers a new row at its transaction time, not at reply time", async () => {
+    // buyerFundingRoutes serves an inserted row at prepareBuyerFunding's transaction time.
+    const j = seedPrepare({ scopeExp: C + 2800n });
+    const atMs = Number(C + 100n) * 1000; vi.setSystemTime(atMs);
+    const store = getStore(); const transaction = store.db.transaction.bind(store.db);
+    vi.spyOn(store.db, "transaction").mockImplementation((...args) => {
+      const result = transaction(...args);
+      if (result && typeof result === "object" && "kind" in result && result.kind === "answer") vi.setSystemTime(atMs + 1000);
+      return result;
+    });
+    const response = await app.inject({ method: "POST", url: buyerPath(j.scopeId), headers: asKey(inputs.payer) });
+    expect(response.statusCode).toBe(202); expect(response.json()).toEqual(pendingBody);
+    expect(fundingPrepareRow(j.scopeId)!.state).toBe("pending_signature");
+    expect(Date.now()).toBe(atMs + 1000);
+  });
+  it("RT10 control: a GET one second after the POST's transaction answers 410", async () => {
+    // buyerFundingRoutes serves a GET through prepareRowAnswer at reply time.
+    const j = seedPrepare({ scopeExp: C + 2800n });
+    const atMs = Number(C + 100n) * 1000; vi.setSystemTime(atMs);
+    const headers = asKey(inputs.payer);
+    expect((await app.inject({ method: "POST", url: buyerPath(j.scopeId), headers })).statusCode).toBe(202);
+    vi.setSystemTime(atMs + 1000);
+    const response = await app.inject({ method: "GET", url: buyerPath(j.scopeId), headers });
+    expect(response.statusCode).toBe(410); expect(response.json()).toEqual(prepareRefusalAnswer("prepare_expired").body);
+    expect(fundingPrepareRow(j.scopeId)!.state).toBe("expired");
+  });
+  it("RT11: a racing loser's POST answers the winner's row at reply time", async () => {
+    // prepareBuyerFunding's racing winner return leaves buyerFundingRoutes to read reply time.
+    const j = seedPrepare({ scopeExp: C + 2800n });
+    const atMs = Number(C + 100n) * 1000; vi.setSystemTime(atMs);
+    const releases: Array<() => void> = [];
+    let bothArrived!: () => void;
+    const arrived = new Promise<void>(resolve => { bothArrived = resolve; });
+    installTransport(false, name => {
+      if (name !== "policyNonceFloor") return;
+      const gate = new Promise<void>(resolve => { releases.push(resolve); });
+      if (releases.length === 2) bothArrived();
+      return gate;
+    });
+    const before = counts(); const order: number[] = [];
+    let firstSettled!: () => void;
+    const settled = new Promise<void>(resolve => { firstSettled = resolve; });
+    const posts = [0, 1].map(index => app.inject({ method: "POST", url: buyerPath(j.scopeId), headers: asKey(inputs.payer) })
+      .then(response => { order.push(index); firstSettled(); return response; }));
+    await arrived; releases[0]!(); await settled;
+    expect(order).toHaveLength(1); expect(Date.now()).toBe(atMs);
+    vi.setSystemTime(atMs + 1000); releases[1]!();
+    const responses = await Promise.all(posts);
+    const winner = responses[order[0]!]!, loser = responses[order[1]!]!;
+    expect(winner.statusCode).toBe(202); expect(winner.json()).toEqual(pendingBody);
+    expect(loser.statusCode).toBe(410); expect(loser.json()).toEqual(prepareRefusalAnswer("prepare_expired").body);
+    expect(fundingPrepareRow(j.scopeId)!.state).toBe("expired");
+    expect(counts()).toEqual(before.map(n => n + 1));
+  });
+  it("RT12: a repeat POST answers the existing row at reply time", async () => {
+    // buyerFundingRoutes answers its existing-row path through prepareRowAnswer at reply time.
+    const j = seedPrepare({ scopeExp: C + 2800n });
+    const atMs = Number(C + 100n) * 1000; vi.setSystemTime(atMs);
+    const headers = asKey(inputs.payer);
+    expect((await app.inject({ method: "POST", url: buyerPath(j.scopeId), headers })).statusCode).toBe(202);
+    vi.setSystemTime(atMs + 1000);
+    const response = await app.inject({ method: "POST", url: buyerPath(j.scopeId), headers });
+    expect(response.statusCode).toBe(410); expect(response.json()).toEqual(prepareRefusalAnswer("prepare_expired").body);
+    expect(fundingPrepareRow(j.scopeId)!.state).toBe("expired");
   });
   it("RT8a: operatorRoutes requires explicit credentials to view the signing input", async () => {
     const j = seedPrepare();
