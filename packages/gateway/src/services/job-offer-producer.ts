@@ -3,6 +3,20 @@
  * the job-offers marketplace (coord #1276: "a decomposed request never
  * becomes a claimable job offer").
  *
+ * v4 (composition 8a0f4de0's #1827 Finding C): the digest-gap degrade path used
+ * to treat "matchedCapabilityDigest is absent" and "matchedCapabilityDigest is
+ * PRESENT but fails DIGEST_PATTERN" as the same thing, because @pcc/spec's
+ * validatePlan emits the identical DIGEST_VIOLATION_SUFFIX for both. They are
+ * not the same: absent means the field genuinely hasn't been populated yet
+ * (expected — direct-match nodes never carry one; older agentic matches predate
+ * PR #300) and is safe to route around. Present-but-malformed means something
+ * upstream produced a digest-shaped value and got it wrong, which the degrade
+ * path must not silently swallow forever — that is exactly the kind of
+ * data-integrity signal this whole file exists to protect. See
+ * `hasMalformedPresentDigest` below: a malformed-but-present digest on any
+ * agentically-matched node now forces a HOLD even when every violation string
+ * still reads as "just" the digest gap.
+ *
  * v3 hardening (post-#312 merge, sol round-2 review via the full-source bundle
  * recipe — a diff-only review had missed both of these): (1) the hold-vs-degrade
  * check no longer trusts @pcc/spec's `report.blockedOn` directly (it uses `.some()`
@@ -63,7 +77,7 @@
  */
 
 import type { CapabilityNode, CapabilityRequest } from "@pcc/spec";
-import { commitmentReportForRequest } from "@pcc/spec";
+import { commitmentReportForRequest, DIGEST_VIOLATION_SUFFIX, DIGEST_PATTERN } from "@pcc/spec";
 import { getJobOffersStore, type CreateJobOfferInput } from "./job-offers-store.js";
 import type { RoutedCapabilityNode } from "./request-decomposer.js";
 
@@ -109,6 +123,27 @@ function resolveMatch(node: CapabilityNode): ResolvedMatch | null {
     }
   }
   return null;
+}
+
+/**
+ * True when at least one AGENTICALLY-matched node carries a matchedCapabilityDigest
+ * that is PRESENT but fails DIGEST_PATTERN, as opposed to the field being absent.
+ * @pcc/spec's validatePlan emits the identical DIGEST_VIOLATION_SUFFIX for both
+ * cases, so the "purely a digest gap" signal derived from violation strings alone
+ * cannot distinguish them -- this producer draws the line itself (composition
+ * 8a0f4de0's #1827 Finding C). Only agentic matches are checked: the routed/
+ * direct-match convention never carries a real digest for its own capabilityId
+ * (see normalizeForCommitment's clearing below), so a malformed value there is
+ * already-known garbage, not a new integrity signal.
+ */
+function hasMalformedPresentDigest(dag: readonly CapabilityNode[]): boolean {
+  for (const node of dag) {
+    const match = resolveMatch(node);
+    if (!match || !match.viaAgenticConvention) continue;
+    const digest = node.matchedCapabilityDigest;
+    if (digest && !DIGEST_PATTERN.test(digest)) return true;
+  }
+  return false;
 }
 
 /**
@@ -201,17 +236,22 @@ export async function produceJobOffersForRequest(
     // finding. Requiring EVERY violation to mention the digest closes that: any
     // other simultaneous problem correctly falls through to the hold below.
     //
-    // Match the FIXED SUFFIX composition-commitment.ts's validatePlan emits for
-    // this exact violation, not a bare substring -- a decomposer node id is
-    // buyer/LLM-influenced text that only ever lands in the "node <id>: " PREFIX
-    // of a violation string, so anchoring on the literal tail after it is immune
-    // to a node id that happens to itself contain "matchedCapabilityDigest"
-    // (sol round-2-followup: `.includes` was spoofable via a crafted node id).
-    const DIGEST_VIOLATION_SUFFIX = ": matched node missing/invalid matchedCapabilityDigest (0x + 64 hex)";
+    // Anchor on @pcc/spec's own FIXED SUFFIX for this exact violation (imported,
+    // not retyped -- one string, not a second copy that can drift), not a bare
+    // substring -- a decomposer node id is buyer/LLM-influenced text that only
+    // ever lands in the "node <id>: " PREFIX of a violation string, so anchoring
+    // on the literal tail after it is immune to a node id that happens to itself
+    // contain "matchedCapabilityDigest" (sol round-2-followup: `.includes` was
+    // spoofable via a crafted node id).
+    //
+    // v4 / Finding C: "every violation is the digest one" is necessary but not
+    // sufficient -- it's also true when a digest is PRESENT but malformed, which
+    // must hold rather than degrade (see hasMalformedPresentDigest above).
     const purelyDigestGap =
       commitment.unmatchedNodes.length === 0 &&
       commitment.violations.length > 0 &&
-      commitment.violations.every((v) => v.endsWith(DIGEST_VIOLATION_SUFFIX));
+      commitment.violations.every((v) => v.endsWith(DIGEST_VIOLATION_SUFFIX)) &&
+      !hasMalformedPresentDigest(dag);
     if (!purelyDigestGap) {
       result.skippedUnmatched = commitment.unmatchedNodes;
       result.held = {
