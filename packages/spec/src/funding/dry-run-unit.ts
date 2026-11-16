@@ -1,6 +1,6 @@
 import { isAddress, type Address, type Hex } from "viem";
 import {
-  AcceptedPolicyDigestInputError, computeBindingsRoot, computeSubjectBlockHash,
+  AcceptedPolicyDigestInputError, snapshotSubjectBlock, subjectBlockHashOfSnapshot, bindingsRootAndCount,
   type SubjectBinding, type SubjectBlockFields,
 } from "../evidence/accepted-policy.js";
 import { formatOperatorPrincipalId, principalTupleWord } from "../evidence/principal-id.js";
@@ -118,7 +118,8 @@ export interface DryRunUnitTestnetExpectationInput {
 
 /**
  * Fix independent N145 NS-6 dry-run buyer intent before prepareFunding. Every refusal is local;
- * public evidence producers own the subject and bindings roots. A dry-run buyer never passes allowUnchecked.
+ * The evidence module's internal read-once entries validate and hash the subject and bindings.
+ * The dry-run compares that snapshot. A dry-run buyer never passes allowUnchecked.
  * prepareFunding derives ratified v2.1 termsHash from the actual funded configs (#8165), then
  * computes acceptedPolicyDigest with these public roots and rechecks live chain timing.
  */
@@ -133,33 +134,33 @@ export function dryRunUnitTestnetExpectation(input: DryRunUnitTestnetExpectation
     refuse("BAD_EXPECTATION", "dry-run latestBlockTimestamp and its reclaim window must fit non-negative uint256 chain seconds");
   }
   try {
-    // The public producer first validates the full subject's shape and canonical field spellings.
+    // Validate the subject through the internal read-once entry, then compare and hash its snapshot.
+    const snapshot = snapshotSubjectBlock(subject);
     let subjectBlockHash: Hex;
     try {
-      subjectBlockHash = computeSubjectBlockHash(subject);
+      subjectBlockHash = subjectBlockHashOfSnapshot(snapshot);
     } catch (error) {
-      // The producer validates the original plain data object before reading address words.
-      // Only its address-casing refusal is retried; no accessor or Proxy is copied or read.
+      // Admission has already captured every subject field in the snapshot.
+      // Retry only the address-casing refusal, using that same snapshot.
       if (!(error instanceof AcceptedPolicyDigestInputError) || error.field !== "subject.operatorSettlementAddress") throw error;
-      const settlementAddress = Object.getOwnPropertyDescriptor(subject, "operatorSettlementAddress");
-      if (!settlementAddress?.enumerable || !Object.prototype.hasOwnProperty.call(settlementAddress, "value") ||
-          typeof settlementAddress.value !== "string" || !isAddress(settlementAddress.value, { strict: false })) throw error;
-      subjectBlockHash = computeSubjectBlockHash({ ...subject,
-        operatorSettlementAddress: settlementAddress.value.toLowerCase() as Address });
+      const settlementAddress = snapshot.operatorSettlementAddress;
+      if (typeof settlementAddress !== "string" || !isAddress(settlementAddress, { strict: false })) throw error;
+      subjectBlockHash = subjectBlockHashOfSnapshot({ ...snapshot,
+        operatorSettlementAddress: settlementAddress.toLowerCase() as Address });
     }
     const mismatch = (field: string, got: unknown, want: unknown): never =>
       refuse("INTENT_MISMATCH", `dry-run subject.${field} is ${String(got)}; the buyer expects ${String(want)}`);
-    if (subject.committedProgramHash !== p.committedProgramHash) mismatch("committedProgramHash", subject.committedProgramHash, p.committedProgramHash);
-    if (subject.operatorSettlementAddress.toLowerCase() !== operator.toLowerCase()) mismatch("operatorSettlementAddress", subject.operatorSettlementAddress, operator);
-    if (subject.payer !== payer) mismatch("payer", subject.payer, payer);
-    if (subject.operatorPrincipal !== operatorPrincipal) mismatch("operatorPrincipal", subject.operatorPrincipal, operatorPrincipal);
+    if (snapshot.committedProgramHash !== p.committedProgramHash) mismatch("committedProgramHash", snapshot.committedProgramHash, p.committedProgramHash);
+    if ((snapshot.operatorSettlementAddress as string).toLowerCase() !== operator.toLowerCase()) mismatch("operatorSettlementAddress", snapshot.operatorSettlementAddress, operator);
+    if (snapshot.payer !== payer) mismatch("payer", snapshot.payer, payer);
+    if (snapshot.operatorPrincipal !== operatorPrincipal) mismatch("operatorPrincipal", snapshot.operatorPrincipal, operatorPrincipal);
     for (const field of Object.keys(p.zeroSubjectFields) as (keyof typeof p.zeroSubjectFields)[]) {
-      if (subject[field] !== p.zeroSubjectFields[field]) mismatch(field, subject[field], p.zeroSubjectFields[field]);
+      if (snapshot[field] !== p.zeroSubjectFields[field]) mismatch(field, snapshot[field], p.zeroSubjectFields[field]);
     }
-    if (subject.integrityGrade !== 0 && subject.integrityGrade !== 0n && subject.integrityGrade !== "0") mismatch("integrityGrade", subject.integrityGrade, 0);
-    // Validate bindings via the public producer even though the only admitted array is empty.
-    const bindingsRoot = computeBindingsRoot(bindings);
-    if (bindings.length !== 0) refuse("INTENT_MISMATCH", "dry-run bindings must be exactly []; this unit admits no subject bindings");
+    if (snapshot.integrityGrade !== 0 && snapshot.integrityGrade !== 0n && snapshot.integrityGrade !== "0") mismatch("integrityGrade", snapshot.integrityGrade, 0);
+    // Validate and count the bindings snapshot through the internal read-once entry.
+    const { root: bindingsRoot, count } = bindingsRootAndCount(bindings);
+    if (count !== 0) refuse("INTENT_MISMATCH", "dry-run bindings must be exactly []; this unit admits no subject bindings");
     return {
       jobId, operator: operator, payer: fundingWallet, payees: [operator], maxFeeBps: p.feeBps,
       feeRecipients: [p.feeRecipient], tiers: [p.requestedTier],

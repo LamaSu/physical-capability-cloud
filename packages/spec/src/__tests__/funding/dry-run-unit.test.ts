@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { zeroAddress, zeroHash, type Address, type Hex } from "viem";
 import {
   computeAcceptedPolicyDigest, computeBindingsRoot, computeSubjectBlockHash,
@@ -11,7 +11,22 @@ import { computeTermsHashV21 } from "../../funding/terms-hash-v21.js";
 import type { UnitConfig } from "../../funding/vnext.js";
 import { NOW, OTHER, buildFixture, makeChain, newAccount, testPins, type FixtureOptions } from "./fixture.js";
 
-const api = () => import("../../funding/dry-run-unit.js");
+type ModuleInstance = typeof import("../../funding/dry-run-unit.js") & { prepareFunding: typeof prepareFunding };
+const api = (instance?: ModuleInstance) => instance ?? import("../../funding/dry-run-unit.js");
+let noHost: ModuleInstance;
+beforeAll(async () => {
+  const realProcess = globalThis.process;
+  vi.resetModules();
+  vi.stubGlobal("process", { ...realProcess, getBuiltinModule: undefined });
+  try {
+    const dryRun = await import("../../funding/dry-run-unit.js");
+    const preparation = await import("../../funding/prepare.js");
+    noHost = { ...dryRun, prepareFunding: preparation.prepareFunding };
+  } finally {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  }
+});
 const TOKEN: Address = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
 const EMPTY_ROOT = "0x569e75fc77c1a856f6daaf9e69d8a9566ca34aa47f9133711ce065a571af0cfd";
 const ONE: Hex = "0x0000000000000000000000000000000000000000000000000000000000000001";
@@ -38,8 +53,9 @@ const digestFor = (subject: SubjectBlockFields, termsHash: Hex) => computeAccept
   termsHash, subjectBlockHash: computeSubjectBlockHash(subject), bindingsRoot: computeBindingsRoot([]),
 });
 
-async function setup() {
-  const { dryRunUnitTestnetExpectation } = await api();
+async function setup(instance?: ModuleInstance) {
+  const { dryRunUnitTestnetExpectation } = await api(instance);
+  const prepareFromInstance = instance?.prepareFunding ?? prepareFunding;
   const parties = { payer: newAccount(), operator: newAccount() };
   const subject = subjectFor(parties.operator.address, parties.payer.address);
   const input = { jobId: "n145-ns6-dry-run-test", operator: parties.operator.address, fundingWallet: parties.payer.address,
@@ -62,12 +78,12 @@ async function setup() {
   };
   const fx = await buildConfigured();
   const chain = makeChain(fx);
-  const prepare = () => prepareFunding({ payload: fx.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
+  const prepare = () => prepareFromInstance({ payload: fx.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
     quote: { maxTotalGross: 1_000_000n }, expect: own, pins: testPins(fx) });
   const substituted = async (change: FixtureOptions, marginSeconds?: bigint) => {
     const changed = await buildConfigured(change);
     const fake = makeChain(changed);
-    const pending = prepareFunding({ payload: changed.wire(), wallet: fake.wallet(), publicClient: fake.publicClient,
+    const pending = prepareFromInstance({ payload: changed.wire(), wallet: fake.wallet(), publicClient: fake.publicClient,
       quote: { maxTotalGross: 3_000_000n }, expect: own, pins: testPins(changed), marginSeconds });
     return { pending, fake };
   };
@@ -124,6 +140,35 @@ describe("N145 NS-6 dry-run unit pins", () => {
       chainId: 84532n, earliestReclaimAt: 1_800_004_500n, latestReclaimAt: 1_800_007_800n,
     };
     expect(dryRunUnitTestnetExpectation({ jobId: "n145-ns6-golden", operator, fundingWallet, subject,
+      bindings: [], latestBlockTimestamp: 1_800_000_000n })).toEqual(golden);
+    expect(computeTermsHashV21({ token: TOKEN, assuranceTier: 1, milestones: [{ milestoneIndex: 0n,
+      stepId: "0x3333333333333333333333333333333333333333333333333333333333333333",
+      amount: 1_000_000n, deadline: 1_800_000_000n + 7_200n }] }))
+      .toBe("0x23b7b4c95315521028e56549416e3c891bd819be170914c21961ac6b1d14355d");
+  });
+  it("C1a C2 N: matches independent viem golden literals for the complete expectation and v2.1 terms", async () => {
+    const { dryRunUnitTestnetExpectation, dryRunUnitPrincipalWord } = await api(noHost);
+    const operator: Address = "0x1111111111111111111111111111111111111111";
+    const fundingWallet: Address = "0x2222222222222222222222222222222222222222";
+    const subject = { ...subjectFor(operator, fundingWallet), payer: dryRunUnitPrincipalWord(fundingWallet),
+      operatorPrincipal: dryRunUnitPrincipalWord(operator) };
+    expect(subject.payer).toBe("0xe7d52eb68e3fa4cc93ceb971c1023b7c110fb4b2a8e9cc2b3c11b123d49e73e1");
+    expect(subject.operatorPrincipal).toBe("0x9dc007e4546d8dd00e447a142d139429ec83c3bb6909f549c23e3c6222b745fb");
+    const golden: FundingExpectations = {
+      jobId: "dry-run-golden", operator: "0x1111111111111111111111111111111111111111",
+      payer: "0x2222222222222222222222222222222222222222", payees: ["0x1111111111111111111111111111111111111111"],
+      maxFeeBps: 0, feeRecipients: ["0x0000000000000000000000000000000000000000"], tiers: [1],
+      termsHash: { derive: "v2.1", token: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", assuranceTier: 1 },
+      acceptedPolicyDigest: {
+        subjectBlockHash: "0x3fe34ba95c62233e0b2f8c96b9d76f7f8f87a88b75faa92b129a7ef7084942d3",
+        bindingsRoot: "0x569e75fc77c1a856f6daaf9e69d8a9566ca34aa47f9133711ce065a571af0cfd",
+      },
+      compositionRoots: ["0x0000000000000000000000000000000000000000000000000000000000000000"],
+      compositionSchemaVersion: 0, unitCount: 1, unitGross: 1_000_000n,
+      unitPayouts: [{ recipient: "0x1111111111111111111111111111111111111111", amount: 1_000_000n }],
+      chainId: 84532n, earliestReclaimAt: 1_800_004_500n, latestReclaimAt: 1_800_007_800n,
+    };
+    expect(dryRunUnitTestnetExpectation({ jobId: "dry-run-golden", operator, fundingWallet, subject,
       bindings: [], latestBlockTimestamp: 1_800_000_000n })).toEqual(golden);
     expect(computeTermsHashV21({ token: TOKEN, assuranceTier: 1, milestones: [{ milestoneIndex: 0n,
       stepId: "0x3333333333333333333333333333333333333333333333333333333333333333",
@@ -250,6 +295,116 @@ describe("dry-run buyer expectation", () => {
     expect(() => dryApi.dryRunUnitTestnetExpectation({ ...input,
       subject: { ...input.subject, committedProgramHash: "0x1234" } }))
       .toThrow(expect.objectContaining({ code: "BAD_EXPECTATION" }));
+    expect(chain.state.log).toEqual([]);
+  });
+  it("C1a N: prepares its own exact unit and binds all commitments", async () => {
+    const { prepare, own, input, fx, chain } = await setup(noHost);
+    chain.state.block.timestamp = NOW + 60n;
+    expect(own).toMatchObject({ jobId: input.jobId, operator: input.operator, payer: input.fundingWallet,
+      payees: [input.operator], maxFeeBps: 0, feeRecipients: [zeroAddress], tiers: [1],
+      termsHash: { derive: "v2.1", token: TOKEN, assuranceTier: 1 },
+      acceptedPolicyDigest: { subjectBlockHash: computeSubjectBlockHash(input.subject), bindingsRoot: computeBindingsRoot([]) },
+      compositionRoots: [zeroHash], compositionSchemaVersion: 0, unitCount: 1, unitGross: 1_000_000n,
+      unitPayouts: fx.configs[0]!.payouts, chainId: 84532n, earliestReclaimAt: NOW + 4_500n, latestReclaimAt: NOW + 7_800n });
+    const prepared = await prepare();
+    expect(prepared.expect.payer).toBe(input.fundingWallet);
+    expect(prepared.unchecked).toEqual([]);
+    expect(prepared.configs).toEqual(fx.configs);
+    expect(prepared.totalGross).toBe(1_000_000n);
+    expect(prepared.typedData.message.termsHash).toBe(termsFor(fx.configs));
+    expect(prepared.typedData.message.acceptedPolicyDigest).toBe(digestFor(input.subject, termsFor(fx.configs)));
+  });
+  it.each(configChanges)("C1a N: INTENT_MISMATCH before any RPC: %s", async (_field, change) => {
+    const { substituted, input } = await setup(noHost);
+    const { pending, fake } = await substituted({ configure: change });
+    await expect(pending).rejects.toMatchObject({ code: "INTENT_MISMATCH" });
+    const messages: Record<string, string> = {
+      "g -1": "unitGross (fund.configs[0].g) is 999999; the buyer expects 1000000",
+      "g 1": "unitGross (fund.configs[0].g) is 1000001; the buyer expects 1000000",
+      "payout amount": "unitPayouts (fund.configs[0].payouts[0].amount) is 999999; the buyer expects 1000000",
+      "payout recipient": `unitPayouts (fund.configs[0].payouts[0].recipient) is 0x0000000000000000000000000000000000000bad; the buyer expects ${input.operator}`,
+      "second payout leg": "unitPayouts (fund.configs[0].payouts.length) is 2; the buyer expects 1",
+      "feeBps 1": "unitPayouts (fund.configs[0].payouts[0].amount) is 999900; the buyer expects 1000000",
+      "requiredTier 0": "assuranceTier (fund.configs[0].requiredTier) is 0; the buyer expects 1",
+      "requestedTier 0": "assuranceTier (fund.configs[0].requestedTier) is 0; the buyer expects 1",
+      "both tiers 0": "assuranceTier (fund.configs[0].requiredTier) is 0; the buyer expects 1",
+      "compositionSchemaVersion 1": "compositionSchemaVersion (fund.configs[0].compositionSchemaVersion) is 1; the buyer expects 0",
+      "nonzero compositionRoot": "compositionRoots (fund.configs[0].compositionRoot) is 0x0000000000000000000000000000000000000000000000000000000000000001; the buyer expects [0x0000000000000000000000000000000000000000000000000000000000000000]",
+      "unitCount 2": "unitCount (fund.configs.length) is 2; the buyer expects 1",
+      "reclaim floor -1": "earliestReclaimAt (fund.configs[0].reclaimAt) is 1800004499; the buyer expects 1800004500",
+      "reclaim ceiling +1": "latestReclaimAt (fund.configs[0].reclaimAt) is 1800007801; the buyer expects 1800007800",
+    };
+    await expect(pending).rejects.toMatchObject({ name: "FundingRefusal", code: "INTENT_MISMATCH",
+      message: `INTENT_MISMATCH: ${messages[_field]}` });
+    expect(fake.state.log).toEqual([]);
+  });
+  it.each(subjectChanges)("C1a N: INTENT_MISMATCH before any RPC: subject %s", async (field, change) => {
+    const { input, chain } = await setup(noHost);
+    const subject = { ...input.subject }; change(subject);
+    const dryApi = await api(noHost);
+    expect(() => dryApi.dryRunUnitTestnetExpectation({ ...input, subject })).toThrow(expect.objectContaining({
+      code: "INTENT_MISMATCH", message: expect.stringContaining(field),
+    }));
+    const want = field === "operatorSettlementAddress" ? input.operator : input.subject[field as keyof SubjectBlockFields];
+    expect(() => dryApi.dryRunUnitTestnetExpectation({ ...input, subject })).toThrow(expect.objectContaining({
+      name: "FundingRefusal", code: "INTENT_MISMATCH",
+      message: `INTENT_MISMATCH: dry-run subject.${field} is ${subject[field as keyof SubjectBlockFields]}; the buyer expects ${want}`,
+    }));
+    expect(chain.state.log).toEqual([]);
+  });
+  it("C1a N: INTENT_MISMATCH before any RPC: non-empty bindings", async () => {
+    const { input, chain } = await setup(noHost);
+    const binding: SubjectBinding = { planUnitKey: ONE, requirementIdHash: ONE,
+      sourceKind: 0, propositionKind: 0, valueRef: ONE };
+    const dryApi = await api(noHost);
+    expect(() => dryApi.dryRunUnitTestnetExpectation({ ...input, bindings: [binding] }))
+      .toThrow(expect.objectContaining({ name: "FundingRefusal", code: "INTENT_MISMATCH",
+        message: "INTENT_MISMATCH: dry-run bindings must be exactly []; this unit admits no subject bindings" }));
+    expect(chain.state.log).toEqual([]);
+  });
+  it("C1a N: INTENT_MISMATCH before any RPC: policy carried to 8453", async () => {
+    const { substituted } = await setup(noHost);
+    const { pending, fake } = await substituted({ chainId: 8453, usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" });
+    await expect(pending).rejects.toMatchObject({ code: "INTENT_MISMATCH", message: "INTENT_MISMATCH: chainId is 8453; the buyer expects 84532" });
+    expect(fake.state.log).toEqual([]);
+  });
+  it.each(["jobId", "operator", "fundingWallet", "latestBlockTimestamp"] as const)(
+    "C1a N: BAD_EXPECTATION before any RPC: malformed %s", async (field) => {
+      const { input, chain } = await setup(noHost);
+      const bad = { jobId: 7, operator: "0x1234", fundingWallet: "0x1234", latestBlockTimestamp: -1n };
+      const dryApi = await api(noHost);
+      expect(() => dryApi.dryRunUnitTestnetExpectation({ ...input, [field]: bad[field] } as unknown as typeof input))
+        .toThrow(expect.objectContaining({ code: "BAD_EXPECTATION" }));
+      const messages = {
+        jobId: "BAD_EXPECTATION: dry-run jobId must be a string",
+        operator: "BAD_EXPECTATION: dry-run principal address must be 0x followed by exactly 40 hex digits",
+        fundingWallet: "BAD_EXPECTATION: dry-run principal address must be 0x followed by exactly 40 hex digits",
+        latestBlockTimestamp: "BAD_EXPECTATION: dry-run latestBlockTimestamp and its reclaim window must fit non-negative uint256 chain seconds",
+      };
+      expect(() => dryApi.dryRunUnitTestnetExpectation({ ...input, [field]: bad[field] } as unknown as typeof input))
+        .toThrow(expect.objectContaining({ name: "FundingRefusal", code: "BAD_EXPECTATION", message: messages[field] }));
+      expect(chain.state.log).toEqual([]);
+    },
+  );
+  it.each([7_800n, 4_500n])("C1a N: accepts expectation edge %s with the live margin satisfied", async (delay) => {
+    const { substituted } = await setup(noHost);
+    const { pending } = await substituted({ reclaimAt: [NOW + delay] }, delay === 4_500n ? 0n : undefined);
+    expect((await pending).unchecked).toEqual([]);
+  });
+  it.each(["checksum", "uppercase"])("C1a N: accepts settlement-address %s casing through the producer retry", async (casing) => {
+    const { input, own } = await setup(noHost);
+    const address = casing === "checksum" ? input.operator : `0x${input.operator.slice(2).toUpperCase()}` as Address;
+    const subject = Object.freeze({ ...input.subject, operatorSettlementAddress: address });
+    expect((await api(noHost)).dryRunUnitTestnetExpectation({ ...input, subject })).toEqual(own);
+    expect(subject.operatorSettlementAddress).toBe(address);
+  });
+  it("C1a N: BAD_EXPECTATION before any RPC: malformed subject is mapped from the public producer", async () => {
+    const { input, chain } = await setup(noHost);
+    const dryApi = await api(noHost);
+    expect(() => dryApi.dryRunUnitTestnetExpectation({ ...input,
+      subject: { ...input.subject, committedProgramHash: "0x1234" } }))
+      .toThrow(expect.objectContaining({ name: "FundingRefusal", code: "BAD_EXPECTATION",
+        message: "BAD_EXPECTATION: acceptedPolicyDigest input subject.committedProgramHash: expected 0x + 64 lowercase hex characters" }));
     expect(chain.state.log).toEqual([]);
   });
 });

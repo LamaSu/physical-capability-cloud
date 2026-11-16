@@ -95,4 +95,12 @@ export * from "./emitter-manifest.js";
 export * from "./adapter-manifests.js";
 // acceptedPolicyDigest — the PUBLIC producer the V-next escrow's CREATE2 policy salt needs
 // (composition's accept route #391, escrow's encoder #367); byte-exact with the #270 mirror.
-export * from "./accepted-policy.js";
+export {
+  AcceptedPolicyDigestInputError, SUBJECT_DOMAIN, POLICY_DOMAIN, PLANUNIT_DOMAIN, TERMS_DOMAIN, POLICY_VERSION,
+  computeMilestonesRoot, computeTermsHash, computeSubjectBlockHash, computeAuthorizedTuplesRoot,
+  canonicalAuthorizedTuples, computeBindingsRoot, computeAcceptedPolicyDigest, computePlanUnitKey,
+} from "./accepted-policy.js";
+export type {
+  Bytes32Hex, AddressHex, UintInput, CanonicalMilestoneTermsV1, CanonicalJobTermsV1,
+  SubjectBlockFields, SubjectBinding, AcceptedPolicyDigestInputs,
+} from "./accepted-policy.js";
