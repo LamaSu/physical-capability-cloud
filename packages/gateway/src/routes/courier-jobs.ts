@@ -35,6 +35,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { offerCaller } from "../services/job-offer-event-rules.js";
 import { getCourierJobsStore } from "../services/courier-jobs-store.js";
+import { IDEMPOTENCY_CONFLICT } from "../services/job-offers-store.js";
 
 // Posting identity helper — prefers API key operatorId, falls back to
 // SIWE-session userId, else X-Posted-By header (matches v0.2 surface for
@@ -100,6 +101,7 @@ async function handleCreate(
     postedBy: poster,
   }, caller);
   if (!result.ok) {
+    if (result.reason === "idempotency_conflict") return reply.code(409).send(IDEMPOTENCY_CONFLICT);
     return reply.code(400).send({
       error: "source_verify_failed",
       reason: result.reason,

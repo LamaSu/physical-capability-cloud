@@ -312,8 +312,8 @@ describe("N343 real gateway offer authorization", () => {
     const id = await create();
     const before = await read(id);
     const replay = await app.inject({ method: "POST", url: "/api/job-offers", headers: bearer(strangerKey), payload: { id, capabilityType: "pizza.order", requirements: { shopId: "shop-1", items: ["margherita"] }, pricing: { amount: 18.5, currency: "USD", model: "fixed" } } });
-    expect(replay.statusCode, replay.body).toBe(200);
-    expect(replay.json()).toMatchObject({ id, note: "already posted" });
+    expect(replay.statusCode, replay.body).toBe(409);
+    expect(replay.json()).toEqual({ error: "idempotency_conflict", message: "This id or idempotencyKey belongs to another caller's offer." });
     expect(await read(id)).toEqual(before);
     await refuseEvent(id, "cancelled", bearer(strangerKey), "poster");
     expect((await edit(id, "PATCH", bearer(posterKey))).statusCode).toBe(200);

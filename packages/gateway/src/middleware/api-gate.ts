@@ -137,7 +137,7 @@ const PUBLIC_READ_REGEX: PublicRead[] = [
   // any remote A2A agent.
   { methods: GET, match: "regex", path: /^\/api\/kernels\/[^/]+\/agent-card\.json$/, why: "per-kernel A2A agent card (federated discovery)" },
   // Operator agents read an offer without a key. POST/PATCH/DELETE on the same
-  // path stay gated (the route also checks requirePoster).
+  // path stay gated, and the route checks the caller's recorded role.
   { methods: GET, match: "regex", path: /^\/api\/job-offers\/[^/]+$/, why: "job-offer detail reads" },
   { methods: GET, match: "regex", path: /^\/api\/courier-jobs\/(?:jobs\/)?[^/]+$/, why: "courier-job detail reads (legacy v0.2 public GET)" },
   // On-Ramp §5.3: a shared /a/:slug link and cross-agent discovery must work
