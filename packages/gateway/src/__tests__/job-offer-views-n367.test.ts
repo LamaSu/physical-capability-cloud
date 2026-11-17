@@ -2,6 +2,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { getRepos, getStore } from "../db.js";
 import { isOfferDetailRead } from "../middleware/api-gate.js";
@@ -12,24 +13,36 @@ import {
   publicCourierJob, publicEvent, publicEvents, publicOffer,
   publicViewCourierJob, publicViewEvent, publicViewEvents, publicViewOffer, publicViewValue,
 } from "../services/job-offer-public.js";
+import { CONSENT_SHA256 } from "../services/wallet-links/consent.js";
 
-const W = "0x" + "ab".repeat(20);
+const wallet = privateKeyToAccount(generatePrivateKey());
+const W = wallet.address.toLowerCase();
 const V = "0x" + "cd".repeat(20);
-const REQ = { shopId: "shop-n367", items: ["margherita"],
+const deepFreeze = <T>(value: T): T => {
+  if (value !== null && typeof value === "object") {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+};
+const REQ = deepFreeze({ shopId: "shop-n367", items: ["margherita"],
   customer: { name: "N367 Customer", phone: "+1-555-0100" },
   deliveryAddress: "1 Test Way, SF",
   raw: { vendor: "n367" },
   pickup: { name: "N367 Shop", address: "2 Shop Way, SF", lat: 37.774929, lng: -122.419416 },
-  dropoff: { name: "N367 Customer", line1: "1 Test Way", lat: 37.793743, lng: -122.392914 } };
-const PUBLIC_REQ = { shopId: "shop-n367", items: ["margherita"], pickup: { lat: 37.77, lng: -122.42 }, dropoff: { lat: 37.79, lng: -122.39 } };
-const PICKUP = { name: "N367 Shop", address: "2 Shop Way, SF", lat: 37.774929, lng: -122.419416 };
-const DROPOFF = { name: "N367 Customer", address: "1 Test Way, SF", lat: 37.793743, lng: -122.392914 };
+  dropoff: { name: "N367 Customer", line1: "1 Test Way", lat: 37.793743, lng: -122.392914 } });
+const PUBLIC_REQ = deepFreeze({ shopId: "shop-n367", items: ["margherita"], pickup: { lat: 37.77, lng: -122.42 }, dropoff: { lat: 37.79, lng: -122.39 } });
+const PICKUP = deepFreeze({ name: "N367 Shop", address: "2 Shop Way, SF", lat: 37.774929, lng: -122.419416 });
+const DROPOFF = deepFreeze({ name: "N367 Customer", address: "1 Test Way, SF", lat: 37.793743, lng: -122.392914 });
+const freshRequirements = () => structuredClone(REQ);
+const freshPickup = () => structuredClone(PICKUP);
+const freshDropoff = () => structuredClone(DROPOFF);
 type Headers = Record<string, string>;
 type Family = "job-offers" | "courier-jobs";
 type Served = Record<string, unknown>;
 type Detail = { offer?: Served; job?: Served; events: JobOfferEvent[] };
 type Key = ReturnType<typeof provisionApiKey>;
-type CallerCase = { name: string; fixture: "A" | "B" | "C"; headers: Headers; view: "party" | "public" | "401" };
+type CallerCase = { name: string; fixture: "A" | "B" | "C"; headers: Headers; view: "party" | "public" | "401"; prepare?: () => Promise<void> };
 const chain = (depth: number, leaf: Served = {}, key = "a"): Served => {
   let result = leaf;
   for (let i = 0; i < depth; i++) result = { [key]: result };
@@ -58,6 +71,11 @@ describe("N367 offer views and real gateway readers", () => {
   let claimEqualKey: Key;
   let claimEqualIdKey: Key;
   let walletClaimKey: Key;
+  let agentSelfLinkKey: Key;
+  let deviceSelfLinkKey: Key;
+  let unlinkedWalletKey: Key;
+  let activeSelfLink: { key: Key; linkId: string } | undefined;
+  let linkRequestCount = 0;
   let cookieW: Headers;
   let cookieV: Headers;
   let bearerW: Headers;
@@ -83,8 +101,8 @@ describe("N367 offer views and real gateway readers", () => {
   const create = async (headers: Headers = bearer(posterKey), family: Family = "job-offers", overrides: Served = {}) => {
     const id = `n367-${randomUUID()}`;
     const payload = family === "job-offers"
-      ? { id, capabilityType: "n367.delivery", requirements: REQ, pricing: { amount: 21.71, currency: "USD", model: "fixed" }, idempotencyKey: `n367-key-${randomUUID()}`, ...overrides }
-      : { deliveryId: id, pickup: PICKUP, dropoff: DROPOFF, feeUSD: 7, raw: { vendor: "n367" }, ...overrides };
+      ? { id, capabilityType: "n367.delivery", requirements: freshRequirements(), pricing: { amount: 21.71, currency: "USD", model: "fixed" }, idempotencyKey: `n367-key-${randomUUID()}`, ...structuredClone(overrides) }
+      : { deliveryId: id, pickup: freshPickup(), dropoff: freshDropoff(), feeUSD: 7, raw: { vendor: "n367" }, ...structuredClone(overrides) };
     const result = await app.inject({ method: "POST", url: `/api/${family}`, headers, payload });
     expect(result.statusCode, result.body).toBe(201);
     expect(result.json<{ id: string }>().id).toBe(id);
@@ -106,6 +124,27 @@ describe("N367 offer views and real gateway readers", () => {
     expect(getJobOffersStore().get(C)!.posterDid).toBe(W);
     return { A, B, C };
   };
+  const selfLink = async (key: Key, role: "agent" | "device") => {
+    // Only one link to a wallet on a chain can be active; switch roles through
+    // the real revoke and signing routes, keeping each role on its own key.
+    if (activeSelfLink) {
+      const revoked = await app.inject({ method: "POST", url: `/api/wallets/${activeSelfLink.linkId}/revoke`, headers: bearer(activeSelfLink.key), payload: {} });
+      expect(revoked.statusCode, revoked.body).toBe(200);
+    }
+    const created = await app.inject({ method: "POST", url: "/api/wallets/link-requests", headers: bearer(key),
+      // The ceremony has its own per-IP quota, independent of beforeEach's reset.
+      remoteAddress: `127.0.1.${++linkRequestCount}`,
+      payload: { keyType: "secp256k1", address: W, chainId: 84532, role, label: "n367-self-link" } });
+    expect(created.statusCode, created.body).toBe(201);
+    const request = created.json<{ requestId: string; userCode: string; message: string }>();
+    const signature = await wallet.signMessage({ message: request.message });
+    const proof = await app.inject({ method: "POST", url: `/api/wallets/link-requests/${request.requestId}/proof`, payload: { signature } });
+    expect(proof.statusCode, proof.body).toBe(200);
+    const approved = await app.inject({ method: "POST", url: `/api/wallets/link-requests/${request.requestId}/approve`, headers: bearer(key),
+      payload: { userCode: request.userCode, decision: "approve", consentSha256: CONSENT_SHA256 } });
+    expect(approved.statusCode, approved.body).toBe(200);
+    activeSelfLink = { key, linkId: approved.json<{ linkId: string }>().linkId };
+  };
   const callerCases = (): CallerCase[] => [
     { name: "poster key", fixture: "A", headers: bearer(posterKey), view: "party" },
     { name: "claimer key", fixture: "A", headers: bearer(claimerKey), view: "party" },
@@ -117,6 +156,10 @@ describe("N367 offer views and real gateway readers", () => {
     { name: "wallet session key", fixture: "B", headers: bearer(sessionKeyW1), view: "party" },
     { name: "cookie and failing bearer", fixture: "B", headers: { ...cookieW, ...badBearer }, view: "party" },
     { name: "proven posterDid wallet", fixture: "C", headers: cookieW, view: "party" },
+    { name: "agent self-link and wallet header", fixture: "C", headers: { ...bearer(agentSelfLinkKey), "x-pcc-wallet": W }, view: "party", prepare: () => selfLink(agentSelfLinkKey, "agent") },
+    { name: "agent self-link without wallet header", fixture: "C", headers: bearer(agentSelfLinkKey), view: "public" },
+    { name: "device self-link and wallet header", fixture: "C", headers: { ...bearer(deviceSelfLinkKey), "x-pcc-wallet": W }, view: "public", prepare: () => selfLink(deviceSelfLinkKey, "device") },
+    { name: "wallet header without self-link", fixture: "C", headers: { ...bearer(unlinkedWalletKey), "x-pcc-wallet": W }, view: "public" },
     { name: "anonymous", fixture: "A", headers: {}, view: "public" },
     { name: "stranger key", fixture: "A", headers: bearer(strangerKey), view: "public" },
     { name: "basic key", fixture: "A", headers: bearer(basicKey), view: "public" },
@@ -156,6 +199,7 @@ describe("N367 offer views and real gateway readers", () => {
       C: entity(await read(ids.C, bearer(walletClaimKey), family, alias)),
     };
     for (const row of callerCases()) {
+      await row.prepare?.();
       const result = await app.inject({ method: "GET", url: path(ids[row.fixture], family, alias), headers: row.headers });
       expect(result.statusCode, `${row.name}: ${result.body}`).toBe(row.view === "401" ? 401 : 200);
       if (row.view === "401") expect(result.json()).toStrictEqual(exact401);
@@ -199,6 +243,9 @@ describe("N367 offer views and real gateway readers", () => {
     claimEqualKey = provisionApiKey({ operatorId: "poster@example.com", scopes: ["*"] });
     claimEqualIdKey = provisionApiKey({ operatorId: posterKey.record!.id, scopes: ["*"] });
     walletClaimKey = provisionApiKey({ operatorId: W, scopes: ["*"] });
+    agentSelfLinkKey = provisionApiKey({ operatorId: "n367-agent-link@example.com", scopes: ["*"] });
+    deviceSelfLinkKey = provisionApiKey({ operatorId: "n367-device-link@example.com", scopes: ["*"] });
+    unlinkedWalletKey = provisionApiKey({ operatorId: "n367-no-link@example.com", scopes: ["*"] });
     cookieW = session(W).headers;
     cookieV = session(V).headers;
     bearerW = { authorization: `Bearer ${session(W).token}` };
@@ -244,6 +291,16 @@ describe("N367 offer views and real gateway readers", () => {
     for (const value of [null, undefined, true, 4, "kept"]) expect(publicViewValue(value)).toStrictEqual(value);
     const places = { pickup: Object.create({ lat: 1, lng: 2 }) as Served, dropoff: Object.defineProperty({ lat: 1.234 }, "lng", { value: 5.678, enumerable: false }) };
     expect(publicViewValue(places)).toStrictEqual({ pickup: {}, dropoff: { lat: 1.23 } });
+    for (const invalid of ["37.774929", null, true, { value: 37.774929 }, [37.774929], NaN, Infinity, -Infinity, undefined]) {
+      for (const place of ["pickup", "dropoff"] as const) for (const coordinate of ["lat", "lng"] as const) {
+        const point = { lat: 37.774929, lng: -122.419416, [coordinate]: structuredClone(invalid) };
+        const input = { [place]: point, nested: { deeper: { [place]: structuredClone(point) } } };
+        const before = structuredClone(input);
+        const roundedPartner = coordinate === "lat" ? { lng: -122.42 } : { lat: 37.77 };
+        expect(publicViewValue(input)).toStrictEqual({ [place]: roundedPartner, nested: { deeper: { [place]: roundedPartner } } });
+        expect(input).toStrictEqual(before);
+      }
+    }
   });
 
   it("N367 V2: depth starts at zero, stops at 32, and bounds deep and cyclic inputs", () => {
@@ -288,15 +345,18 @@ describe("N367 offer views and real gateway readers", () => {
   });
 
   it("N367 V5: composed public views walk their specified roots and stay safe as map callbacks", () => {
-    const offer = { id: `n367-${randomUUID()}`, posterDid: W, driverContact: "driver@example.com", idempotencyKey: "n367-unit-key", requirements: REQ, serviceAreaGeofence: { lat: 37.774929, customer: "kept" } } as unknown as JobOffer;
+    const offer = { id: `n367-${randomUUID()}`, posterDid: W, driverContact: "driver@example.com", idempotencyKey: "n367-unit-key", requirements: freshRequirements(), serviceAreaGeofence: { lat: 37.774929, customer: "kept" } } as unknown as JobOffer;
+    const beforeOffer = structuredClone(offer);
     expect(publicViewOffer(offer)).toStrictEqual({ id: offer.id, requirements: PUBLIC_REQ, serviceAreaGeofence: { lat: 37.774929, customer: "kept" } });
     noIdentity(publicViewOffer(offer) as unknown as Served);
-    const job = { id: `n367-${randomUUID()}`, postedBy: W, driverContact: "driver@example.com", pickup: PICKUP, dropoff: DROPOFF, raw: { vendor: "n367" }, description: "kept" } as unknown as CourierJob;
+    const job = { id: `n367-${randomUUID()}`, postedBy: W, driverContact: "driver@example.com", pickup: freshPickup(), dropoff: freshDropoff(), raw: { vendor: "n367" }, description: "kept" } as unknown as CourierJob;
+    const beforeJob = structuredClone(job);
     const jobResult = publicViewCourierJob(job);
     expect(jobResult).toStrictEqual({ id: job.id, pickup: { lat: 37.77, lng: -122.42 }, dropoff: { lat: 37.79, lng: -122.39 }, description: "kept" });
     noIdentity(jobResult as unknown as Served);
     expect("raw" in jobResult).toBe(false);
-    const event: JobOfferEvent = { event: "note", at: "n367-at", by: W, before: REQ, after: REQ, payload: REQ, note: { customer: "kept", lat: 37.774929 } };
+    const event: JobOfferEvent = { event: "note", at: "n367-at", by: W, before: freshRequirements(), after: freshRequirements(), payload: freshRequirements(), note: { customer: "kept", lat: 37.774929 } };
+    const beforeEvent = structuredClone(event);
     expect(publicViewEvent(event)).toStrictEqual({ event: "note", at: "n367-at", by: null, before: PUBLIC_REQ, after: PUBLIC_REQ, payload: PUBLIC_REQ, note: { customer: "kept", lat: 37.774929 } });
     expect(publicViewEvent({ at: "n367-at", event: "note" })).toStrictEqual({ at: "n367-at", event: "note", by: null });
     const deepOffer = { ...offer, requirements: chain(32) };
@@ -306,12 +366,15 @@ describe("N367 offer views and real gateway readers", () => {
     expect([job, deepJob].map(publicViewCourierJob)[1]).toStrictEqual(publicViewCourierJob(deepJob));
     expect([event, deepEvent].map(publicViewEvent)[1]).toStrictEqual(publicViewEvent(deepEvent));
     expect(publicViewEvents([event, deepEvent])).toStrictEqual([publicViewEvent(event), publicViewEvent(deepEvent)]);
-    expect(offer.requirements).toStrictEqual(REQ);
+    expect(offer.requirements).toStrictEqual(beforeOffer.requirements);
     expect(job.raw).toStrictEqual({ vendor: "n367" });
+    expect(offer).toStrictEqual(beforeOffer);
+    expect(job).toStrictEqual(beforeJob);
+    expect(event).toStrictEqual(beforeEvent);
   });
 
   it("N367 V6: party projections omit the replay key and preserve whole requirements, jobs and events", () => {
-    const offer = { id: `n367-${randomUUID()}`, posterDid: W, driverContact: "driver@example.com", idempotencyKey: "n367-unit-key", requirements: REQ } as unknown as JobOffer;
+    const offer = { id: `n367-${randomUUID()}`, posterDid: W, driverContact: "driver@example.com", idempotencyKey: "n367-unit-key", requirements: freshRequirements() } as unknown as JobOffer;
     const result = publicOffer(offer);
     expect(result).toStrictEqual({ id: offer.id, requirements: REQ });
     expect(result.requirements).toStrictEqual(REQ);
@@ -336,7 +399,7 @@ describe("N367 offer views and real gateway readers", () => {
   it("N367 K1: create, replay, feeds, detail, claim and PATCH omit the stored idempotency key", async () => {
     const id = `n367-${randomUUID()}`;
     const idempotencyKey = `n367-key-${randomUUID()}`;
-    const payload = { id, capabilityType: "n367.delivery", requirements: REQ, pricing: { amount: 21.71, currency: "USD", model: "fixed" }, idempotencyKey };
+    const payload = { id, capabilityType: "n367.delivery", requirements: freshRequirements(), pricing: { amount: 21.71, currency: "USD", model: "fixed" }, idempotencyKey };
     const posted = await app.inject({ method: "POST", url: "/api/job-offers", headers: bearer(posterKey), payload });
     expect(posted.statusCode, posted.body).toBe(201);
     expect("idempotencyKey" in posted.json<Served>()).toBe(false);
@@ -386,6 +449,14 @@ describe("N367 offer views and real gateway readers", () => {
         expect(result.statusCode, result.body).toBe(headers === badKey ? 401 : 200);
         if (headers !== badKey) expect(result.headers["cache-control"]).toBe("no-store");
       }
+      const ids = await fixtures(family);
+      for (const row of callerCases()) {
+        await row.prepare?.();
+        const result = await app.inject({ method: "HEAD", url: path(ids[row.fixture], family, family === "courier-jobs"), headers: row.headers });
+        expect(result.statusCode, `${row.name}: ${result.body}`).toBe(row.view === "401" ? 401 : 200);
+        if (row.view !== "401") expect(result.headers["cache-control"], row.name).toBe("no-store");
+        expect(result.body, row.name).toBe("");
+      }
     }
   });
 
@@ -434,6 +505,33 @@ describe("N367 offer views and real gateway readers", () => {
     }
   });
 
+  it("N367 P5: detail and feeds omit nonnumber and nonfinite place coordinates while party detail keeps posted places", async () => {
+    const requirements = { ...freshRequirements(),
+      pickup: { ...freshPickup(), lat: "37.774929" },
+      dropoff: { ...freshDropoff(), lng: null } };
+    const before = structuredClone(requirements);
+    const id = await create(bearer(posterKey), "job-offers", { capabilityType: "n367.coordinates", requirements });
+    const store = getJobOffersStore();
+    expect(store.get(id)!.requirements).toStrictEqual(before);
+    expect(entity(await read(id, bearer(posterKey))).requirements).toStrictEqual(before);
+    const expected = { ...PUBLIC_REQ, pickup: { lng: -122.42 }, dropoff: { lat: 37.79 } };
+    expect(entity(await read(id, bearer(strangerKey))).requirements).toStrictEqual(expected);
+    const feed = await app.inject({ method: "GET", url: "/api/job-offers/open?capabilityType=n367.coordinates&limit=1000" });
+    expect(feed.statusCode, feed.body).toBe(200);
+    const served = feed.json<{ offers: Served[] }>().offers.find((offer) => offer.id === id);
+    expect(served).toBeDefined();
+    expect(served!.requirements).toStrictEqual(expected);
+
+    // JSON transport would change Infinity to null; create this case in the store.
+    const nonfiniteId = `n367-${randomUUID()}`;
+    const nonfinite = { ...freshRequirements(), pickup: { ...freshPickup(), lat: Infinity } };
+    const created = await store.create({ id: nonfiniteId, capabilityType: "n367.coordinates", requirements: nonfinite,
+      pricing: { amount: 21.71, currency: "USD", model: "fixed" } });
+    expect(created.ok).toBe(true);
+    expect((store.get(nonfiniteId)!.requirements.pickup as Served).lat).toBe(Infinity);
+    expect(entity(await read(nonfiniteId)).requirements).toStrictEqual({ ...PUBLIC_REQ, pickup: { lng: -122.42 } });
+  });
+
   it("N367 F1: every feed caller gets the public view while feed and health credentials remain optional", async () => {
     const offer = await create();
     const courier = await create(bearer(posterKey), "courier-jobs");
@@ -459,8 +557,8 @@ describe("N367 offer views and real gateway readers", () => {
   });
 
   it("N367 W1: both feeds measure within from the rounded public pickup", async () => {
-    const pickup = { ...PICKUP, lat: 37.7749, lng: -122.4194 };
-    const offer = await create(bearer(posterKey), "job-offers", { capabilityType: "n367.within", requirements: { ...REQ, pickup } });
+    const pickup = { ...freshPickup(), lat: 37.7749, lng: -122.4194 };
+    const offer = await create(bearer(posterKey), "job-offers", { capabilityType: "n367.within", requirements: { ...freshRequirements(), pickup } });
     const courier = await create(bearer(posterKey), "courier-jobs", { pickup });
     for (const [point, listed] of [["37.7749,-122.4194,0.1", false], ["37.77,-122.42,0.1", true]] as const) {
       for (const [base, key, id] of [["/api/job-offers/open?capabilityType=n367.within&limit=1000", "offers", offer], ["/api/courier-jobs/open?", "jobs", courier]] as const) {
@@ -469,10 +567,20 @@ describe("N367 offer views and real gateway readers", () => {
         expect(result.json<Record<string, Served[]>>()[key]!.some((value) => value.id === id)).toBe(listed);
       }
     }
+    const longitudePickup = { ...freshPickup(), lat: 37.77, lng: -122.4151 };
+    const longitudeOffer = await create(bearer(posterKey), "job-offers", { capabilityType: "n367.within-lng", requirements: { ...freshRequirements(), pickup: longitudePickup } });
+    const longitudeCourier = await create(bearer(posterKey), "courier-jobs", { pickup: longitudePickup });
+    for (const [point, listed] of [["37.77,-122.42,0.1", true], ["37.77,-122.4151,0.1", false]] as const) {
+      for (const [base, key, id] of [["/api/job-offers/open?capabilityType=n367.within-lng&limit=1000", "offers", longitudeOffer], ["/api/courier-jobs/open?", "jobs", longitudeCourier]] as const) {
+        const result = await app.inject({ method: "GET", url: `${base}&within=${point}` });
+        expect(result.statusCode, result.body).toBe(200);
+        expect(result.json<Record<string, Served[]>>()[key]!.some((value) => value.id === id)).toBe(listed);
+      }
+    }
   });
 
   it("N367 R1: successful claim, PATCH and event writes keep the whole party view", async () => {
-    const payload = { customer: { name: "N367 Customer" }, pickup: PICKUP, lat: 37.774929 };
+    const payload = { customer: { name: "N367 Customer" }, pickup: freshPickup(), lat: 37.774929 };
     for (const family of ["job-offers", "courier-jobs"] as const) {
       const id = await create(bearer(posterKey), family);
       const changes = family === "job-offers" ? { requirements: { customer: { name: "N367 Updated" } } } : { feeUSD: 9 };
@@ -508,13 +616,17 @@ describe("N367 offer views and real gateway readers", () => {
   });
 
   it("N367 S1: all caller, feed and within reads leave the stored offer, events and row unchanged", async () => {
-    const id = await create();
+    const requirements = freshRequirements();
+    const expectedRequirements = structuredClone(requirements);
+    const id = await create(bearer(posterKey), "job-offers", { requirements });
     const store = getJobOffersStore();
+    expect(store.get(id)!.requirements).toStrictEqual(expectedRequirements);
     const row = () => (raw.prepare("SELECT data FROM job_offers WHERE id = ?").get(id) as { data: string }).data;
     const beforeOffer = structuredClone(store.get(id));
     const beforeEvents = structuredClone(store.getEvents(id));
     const beforeRow = structuredClone(row());
     for (const caller of callerCases()) {
+      await caller.prepare?.();
       const result = await app.inject({ method: "GET", url: path(id), headers: caller.headers });
       expect(result.statusCode, result.body).toBe(caller.view === "401" ? 401 : 200);
     }

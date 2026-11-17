@@ -127,7 +127,11 @@ Status transitions: `pickup` → `in_transit`; `delivered` → `delivered`;
 
 - `GET /api/courier-jobs/healthz` — PUBLIC. Returns counts per status +
   ISO timestamp.
-- `GET /api/courier-jobs/:id` — full job + event log. Auth required.
+- `GET /api/courier-jobs/:id` — PUBLIC. The job and its event log: whole
+  for its poster, its claimer and the gateway's admins, and in the public
+  view (`docs/JOB_OFFERS.md`, "Diagnostics") for any other reader,
+  including a read with no credential. A failing `Authorization` header
+  gets `401`.
 
 ### Backward-compat aliases (v0.2 paths)
 
@@ -138,7 +142,7 @@ also serves:
 
 - `POST /api/courier-jobs/jobs` (alias for create)
 - `GET  /api/courier-jobs/jobs/open` (alias for the feed; PUBLIC)
-- `GET  /api/courier-jobs/jobs/:id` (alias for detail; auth required)
+- `GET  /api/courier-jobs/jobs/:id` (alias for detail; PUBLIC, same views)
 
 These mirror v0.2's `POST /jobs` / `GET /jobs/open` / `GET /jobs/:id`. No
 client change is needed to redirect broadcasts to the gateway.
