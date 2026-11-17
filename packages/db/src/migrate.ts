@@ -2371,6 +2371,24 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS kernel_registration_challenges_expires_at_idx
       ON kernel_registration_challenges(expires_at);
   `);
+  safeAddColumn("machine_registrations", "created_by_key_id", "TEXT");
+  sqlite.exec(`
+    CREATE TRIGGER IF NOT EXISTS machine_registrations_creator_key_set_once
+      BEFORE UPDATE OF created_by_key_id ON machine_registrations
+      WHEN NEW.created_by_key_id IS NOT OLD.created_by_key_id
+      BEGIN
+        SELECT RAISE(ABORT, 'machine_registrations_creator_key_set_once');
+      END;
+    CREATE TRIGGER IF NOT EXISTS machine_registrations_creator_key_no_replace
+      BEFORE INSERT ON machine_registrations
+      WHEN EXISTS (
+        SELECT 1 FROM machine_registrations
+        WHERE id = NEW.id AND created_by_key_id IS NOT NEW.created_by_key_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'machine_registrations_creator_key_set_once');
+      END;
+  `);
   scrubOperatorWalletPrivateKeys(sqlite);
 }
 

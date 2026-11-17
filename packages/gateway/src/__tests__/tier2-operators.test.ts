@@ -202,6 +202,7 @@ describe("T2.4 — Discoverability Diagnostics", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    vi.stubEnv("PCC_ADMIN_KEY", "synthetic-n345-tier2-admin");
     _clearMatchLogForTests();
     app = await buildApp();
   });
@@ -209,6 +210,7 @@ describe("T2.4 — Discoverability Diagnostics", () => {
   afterEach(async () => {
     await app.close();
     closeStore();
+    vi.unstubAllEnvs();
     _clearMatchLogForTests();
   });
 
@@ -217,6 +219,7 @@ describe("T2.4 — Discoverability Diagnostics", () => {
     const res = await app.inject({
       method: "GET",
       url: `/api/operators/${regId}/discoverability`,
+      headers: { "x-admin-key": "synthetic-n345-tier2-admin" },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -244,6 +247,7 @@ describe("T2.4 — Discoverability Diagnostics", () => {
     const res = await app.inject({
       method: "GET",
       url: `/api/operators/${regId}/discoverability`,
+      headers: { "x-admin-key": "synthetic-n345-tier2-admin" },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -468,11 +472,26 @@ describe("T2.2 — Edit / Delete Registration", () => {
     return a;
   }
 
+  async function buildOwnerApp(wallet: string): Promise<FastifyInstance> {
+    process.env.PCC_DB_PATH = ":memory:";
+    initStore({ seed: true });
+    const a = Fastify({ logger: false });
+    a.addHook("preHandler", async (req) => {
+      req.provenWallet = wallet.toLowerCase();
+      req.provenWalletVia = "siwe-session";
+      req.provenWalletCarrier = "key";
+    });
+    await a.register(onboardRoutes);
+    await a.register(operatorsPublicRoutes);
+    await a.ready();
+    return a;
+  }
+
   it("PATCH happy path: owner can update mutable fields", async () => {
-    const wallet = "0xowner000000000000000000000000000000acme";
+    const wallet = "0xaAbBcCdDeEfF00112233445566778899aAbBcCdD";
     const opId = await registerMachine(app, { name: "Acme", operatorWallet: wallet });
     await app.close();
-    const a = await buildAuthedApp(wallet);
+    const a = await buildOwnerApp(wallet);
 
     const res = await a.inject({
       method: "PATCH",
@@ -487,7 +506,7 @@ describe("T2.2 — Edit / Delete Registration", () => {
     const stored = getRepos().registrations.findById(opId);
     expect(stored?.description).toBe("Updated description");
     expect(stored?.complianceRegulations).toEqual(["AS9100:2016"]);
-    expect(Object.keys(body.registration).sort()).toEqual(["createdAt", "id", "name", "status"]);
+    expect(body.registration).toEqual(JSON.parse(JSON.stringify(stored)));
     await a.close();
   });
 
@@ -508,10 +527,10 @@ describe("T2.2 — Edit / Delete Registration", () => {
   });
 
   it("PATCH rejects status changes with 400 (immutable via this route)", async () => {
-    const wallet = "0xowner000000000000000000000000000000acme";
+    const wallet = "0xaAbBcCdDeEfF00112233445566778899aAbBcCdD";
     const opId = await registerMachine(app, { name: "Acme", operatorWallet: wallet });
     await app.close();
-    const a = await buildAuthedApp(wallet);
+    const a = await buildOwnerApp(wallet);
 
     const res = await a.inject({
       method: "PATCH",
@@ -535,10 +554,10 @@ describe("T2.2 — Edit / Delete Registration", () => {
   });
 
   it("DELETE soft-deletes (sets status=deleted, row stays in DB)", async () => {
-    const wallet = "0xowner000000000000000000000000000000acme";
+    const wallet = "0xaAbBcCdDeEfF00112233445566778899aAbBcCdD";
     const opId = await registerMachine(app, { name: "Acme", operatorWallet: wallet });
     await app.close();
-    const a = await buildAuthedApp(wallet);
+    const a = await buildOwnerApp(wallet);
 
     const res = await a.inject({
       method: "DELETE",
@@ -572,10 +591,10 @@ describe("T2.2 — Edit / Delete Registration", () => {
   });
 
   it("DELETE is idempotent (already-deleted returns 200 with alreadyDeleted flag)", async () => {
-    const wallet = "0xowner000000000000000000000000000000acme";
+    const wallet = "0xaAbBcCdDeEfF00112233445566778899aAbBcCdD";
     const opId = await registerMachine(app, { name: "Acme", operatorWallet: wallet });
     await app.close();
-    const a = await buildAuthedApp(wallet);
+    const a = await buildOwnerApp(wallet);
 
     const first = await a.inject({
       method: "DELETE",
@@ -594,10 +613,10 @@ describe("T2.2 — Edit / Delete Registration", () => {
   });
 
   it("PATCH on a soft-deleted registration returns 410", async () => {
-    const wallet = "0xowner000000000000000000000000000000acme";
+    const wallet = "0xaAbBcCdDeEfF00112233445566778899aAbBcCdD";
     const opId = await registerMachine(app, { name: "Acme", operatorWallet: wallet });
     await app.close();
-    const a = await buildAuthedApp(wallet);
+    const a = await buildOwnerApp(wallet);
 
     await a.inject({
       method: "DELETE",
