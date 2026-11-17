@@ -242,6 +242,18 @@ export function validatesPresentedCredential(url: string, method?: string): bool
   );
 }
 
+/**
+ * GET or HEAD of one job offer or one courier job (N367). A detail read checks a presented
+ * Authorization header as a private route does; one without that header goes on with no caller.
+ */
+export function isOfferDetailRead(url: string, method?: string): boolean {
+  const m = (method ?? "").toUpperCase();
+  if (m !== "GET" && m !== "HEAD") return false;
+  const path = url.split("?")[0];
+  return !PUBLIC_READ_EXACT.some((entry) => entry.path === path)
+    && (/^\/api\/job-offers\/[^/]+$/.test(path) || /^\/api\/courier-jobs\/(?:jobs\/)?[^/]+$/.test(path));
+}
+
 /** True only for the explicitly listed methods and paths in the private admin-key table. */
 export function acceptsAdminKey(url: string, method?: string): boolean {
   const path = url.split("?")[0];
@@ -299,7 +311,8 @@ async function apiGateImpl(app: FastifyInstance) {
         message: "Send the key as Authorization: Bearer <key>; X-PCC-API-Key is not read." });
     }
     // A presented credential on create must be validated even though create is public.
-    if (isPublicRoute(req.url, req.method) && !(optionalCreate && req.headers.authorization !== undefined)) return;
+    // A detail read is authenticated as a private read is; one without an Authorization header goes on with no caller.
+    if (isPublicRoute(req.url, req.method) && !isOfferDetailRead(req.url, req.method) && !(optionalCreate && req.headers.authorization !== undefined)) return;
 
     // These private settlement routes also accept the gateway admin secret itself.
     if (acceptsAdminKey(req.url, req.method) && hasSingleValidAdminKey(req)) return;
@@ -328,6 +341,8 @@ async function apiGateImpl(app: FastifyInstance) {
         req.headers.authorization === `Bearer ${session.token}` ? "bearer-session" : "cookie");
       return;
     }
+
+    if (isOfferDetailRead(req.url, req.method) && req.headers.authorization === undefined) return;
 
     // No auth — reject
     return reply.status(401).send({

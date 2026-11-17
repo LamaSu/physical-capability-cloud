@@ -60,6 +60,7 @@ let adminDeclarations: typeof import("../middleware/api-gate.js").ADMIN_KEY_ROUT
 type Matcher = (url: string, method?: string) => boolean;
 let isPublicRoute: Matcher;
 let validatesPresentedCredential: Matcher;
+let isOfferDetailRead: Matcher;
 let acceptsAdminKey: Matcher;
 const environmentKeys = ["PCC_DB_PATH", "NODE_ENV", "PCC_SEED_DATA", "SERVE_DASHBOARD", "DASHBOARD_PATH"] as const;
 const savedEnvironment = new Map(environmentKeys.map((key) => [key, process.env[key]]));
@@ -80,6 +81,7 @@ beforeAll(async () => {
   declarations = gate.PUBLIC_ROUTES;
   adminDeclarations = gate.ADMIN_KEY_ROUTES;
   validatesPresentedCredential = gate.validatesPresentedCredential;
+  isOfferDetailRead = gate.isOfferDetailRead;
   acceptsAdminKey = gate.acceptsAdminKey;
 
   // Close before the second boot because createGateway initialises a shared database store.
@@ -530,6 +532,20 @@ const EXPECTED_ADMIN_KEY_SURFACE = [
 ];
 
 describe("N43: the registered /api/* surface the gate's allowlist opens", () => {
+  it("N367 G2: only the six public offer detail routes authenticate detail readers", () => {
+    expect(surfaceOf(bootRoutes, (r) => isOfferDetailRead(samplePath(r.url), r.method))).toEqual([
+      "GET /api/courier-jobs/:id",
+      "GET /api/courier-jobs/jobs/:id",
+      "GET /api/job-offers/:id",
+      "HEAD /api/courier-jobs/:id",
+      "HEAD /api/courier-jobs/jobs/:id",
+      "HEAD /api/job-offers/:id",
+    ]);
+    for (const route of bootRoutes.filter((r) => isOfferDetailRead(samplePath(r.url), r.method))) {
+      expect(isPublic(route), `${route.method} ${route.url}`).toBe(true);
+    }
+  });
+
   it("DECLARATIONS: methods, HEAD policy, match, literal path, regex source/flags and why are pinned", () => {
     expect(declarations).toBeInstanceOf(Array);
     expect(Object.isFrozen(declarations)).toBe(true);
