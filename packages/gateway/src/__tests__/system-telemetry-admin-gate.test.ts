@@ -58,7 +58,7 @@ beforeAll(async () => {
   const { createGateway } = await import("../server.js");
   app = (await createGateway(0)).app as unknown as FastifyInstance;
   await app.ready();
-  keys = [["admin"], ["*"], ["*", "admin"], ["operator:basic"]].map((scopes, index) =>
+  keys = [["admin"], ["*"], ["*", "admin"], ["operator:basic"], ["admin", "*"]].map((scopes, index) =>
     provisionApiKey({ operatorId: `synthetic-n339-operator-${index}`, name: `synthetic-n339-key-${index}`, scopes }),
   );
   const repos = getRepos();
@@ -86,6 +86,11 @@ describe("system telemetry is admin only, with 403 before any read otherwise", (
     expectShape(await request(bearer()));
     expect(readSpies["kernelFacade.list"]).toHaveBeenCalledTimes(1);
     expect(readSpies["auditService.query"]).toHaveBeenCalledTimes(1);
+    expect(Object.keys(readSpies).sort()).toEqual([
+      "kernelFacade.list", "jobFacade.list", "evidence.findAll", "kernels.findAll",
+      "capabilities.findAll", "registrations.findAll", "auditService.query", "isAgentBridgeReady",
+    ].sort());
+    for (const [name, spy] of Object.entries(readSpies)) expect(spy, name).toHaveBeenCalled();
   });
 
   it("SG2 a self-service key with one valid admin header receives the system shape", async () => {
@@ -100,7 +105,7 @@ describe("system telemetry is admin only, with 403 before any read otherwise", (
     await expectForbidden({ cookie: `pcc_session=${app.signCookie(token)}` });
     const head = await request(bearer(3), "HEAD");
     expectNoRead();
-    expect(head.statusCode).not.toBe(200);
+    expect(head.statusCode).toBe(403);
   });
 
   it("SG4 a self-service key with a wrong admin header receives 403 before any read", async () => {
@@ -118,6 +123,8 @@ describe("system telemetry is admin only, with 403 before any read otherwise", (
 
   it("SG7 wildcard scopes with admin receive 403 before any read", async () => {
     await expectForbidden(bearer(2));
+    expect(JSON.parse(keys[4].record!.scopes)).toEqual(["admin", "*"]);
+    await expectForbidden(bearer(4));
   });
 
   it("SG8 a wildcard-only key receives 403 before any read", async () => {
@@ -129,6 +136,8 @@ describe("system telemetry is admin only, with 403 before any read otherwise", (
     await expectForbidden(bearer());
     await expectForbidden({ ...bearer(3), "x-admin-key": secret });
     delete process.env.TENANT_ENFORCE;
+    expectShape(await request(bearer()));
+    vi.stubEnv("TENANT_ENFORCE", "false");
     expectShape(await request(bearer()));
   });
 
@@ -144,5 +153,19 @@ describe("system telemetry is admin only, with 403 before any read otherwise", (
     req.raw.rawHeaders = [];
     delete req.headers["x-admin-key"];
     expect(isAdminCaller(req)).toBe(true);
+  });
+
+  it("SG11 an empty or all-space admin secret grants no one access, 403 before any read", async () => {
+    for (const blank of ["", "   "]) {
+      vi.stubEnv("PCC_ADMIN_KEY", blank);
+      await expectForbidden({ ...bearer(3), "x-admin-key": blank });
+    }
+  });
+
+  it("SG12 the admin test refuses when it cannot read the request", () => {
+    const req = {
+      get raw() { throw new Error("synthetic unreadable request"); },
+    } as unknown as FastifyRequest;
+    expect(isAdminCaller(req)).toBe(false);
   });
 });
