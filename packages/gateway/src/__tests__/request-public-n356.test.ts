@@ -57,6 +57,7 @@ describe("request replies and requester writes for the admin", () => {
       { name: "siwe", headers: { authorization: `Bearer ${sessionKey.rawKey}` }, admin: false },
       { name: "admin key", headers: { authorization: `Bearer ${adminKey.rawKey}` }, admin: true },
       { name: "admin header", headers: { ...plainHeaders, "x-admin-key": adminSecret }, admin: true },
+      { name: "wrong admin header", headers: { ...plainHeaders, "x-admin-key": `wrong-admin-${randomUUID()}` }, admin: false },
     ];
   }, 120_000);
 
