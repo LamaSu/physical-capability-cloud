@@ -289,29 +289,20 @@ describe("onboard admin gates and registration replies", () => {
     await expectStateWrite("approve", bearer(tbAdminKey), TA);
   });
 
-  it("OA10 owner PATCH, DELETE, repeated DELETE and prove replies carry the listing's fields", async () => {
-    const headers = bearer(ownerKey);
-    const patchRow = seed();
-    clearSpies();
-    const patch = await app.inject({ method: "PATCH", url: url(patchRow.id), headers, payload: {} });
-    expectProjection(patch, patchRow);
-    expect(stored(patchRow.id)).toEqual(patchRow);
-    const deleteRow = seed();
-    clearSpies();
-    const deleted = await app.inject({ method: "DELETE", url: url(deleteRow.id), headers });
-    expectProjection(deleted, { ...deleteRow, status: "deleted" });
-    expect(deleted.json()).toMatchObject({ soft: true, deletedAt: expect.any(String) });
-    expect(stored(deleteRow.id).status).toBe("deleted");
-    clearSpies();
-    const again = await app.inject({ method: "DELETE", url: url(deleteRow.id), headers });
-    expectProjection(again, { ...deleteRow, status: "deleted" });
-    expect(again.json().alreadyDeleted).toBe(true);
-    const proveRow = seed();
-    clearSpies();
-    const proved = await app.inject({ method: "POST", url: url(proveRow.id, "prove"), headers, payload: evidence });
-    expectProjection(proved, { ...proveRow, status: "active" });
-    expect(proved.json()).toMatchObject({ autoApproved: true, activated: true });
-    expect(stored(proveRow.id).status).toBe("active");
+  it("OA10 a key that only claims the owner's id gets 403 on PATCH, DELETE and prove, before any write or operator audit", async () => {
+    for (const [method, action, payload, verb] of [
+      ["PATCH", undefined, {}, "edit"],
+      ["DELETE", undefined, undefined, "delete"],
+      ["POST", "prove", evidence, "prove"],
+    ] as const) {
+      const row = seed();
+      clearSpies();
+      const res = await app.inject({ method, url: url(row.id, action), headers: bearer(ownerKey), payload });
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toStrictEqual({ error: "forbidden", message: `You can only ${verb} your own registration` });
+      expect(stored(row.id)).toEqual(row);
+      expectNoOperatorAudit();
+    }
   });
 
   it("OA11 owner with a valid admin header receives the full mutation replies", async () => {
