@@ -324,6 +324,22 @@ describe("registration owner access", () => {
     expect(registrationAccess({ headers: {}, raw: { rawHeaders: [] }, apiKeyId: KEY_REG.record!.id } as unknown as FastifyRequest, keyGetter, "read")).toBe("none");
   });
 
+  it("RW11 the recorded key is matched by the caller's own key id, never by a claimed operator id", async () => {
+    const otherKey = provisionApiKey({ operatorId: KEY_REG.record!.id, scopes: ["operator:basic"] });
+    const headers = keyHeaders(otherKey);
+    for (const write of writes) await refuse(write, seed(WALLET_B, KEY_REG.record!.id), headers);
+    const row = seed(WALLET_B, KEY_REG.record!.id);
+    vi.mocked(listMatchQueriesForOperator).mockClear();
+    await refuseRead(row.id, headers);
+    expect(listMatchQueriesForOperator).not.toHaveBeenCalled();
+    expect(stored(row.id)).toStrictEqual(row);
+    const detailRow = seed(WALLET_B, KEY_REG.record!.id);
+    const detail = await app.inject({ url: url(detailRow.id), headers });
+    expect(detail.statusCode, detail.body).toBe(200);
+    expect(detail.json()).toStrictEqual({ registration: listed(detailRow) });
+    await pass("PATCH", seed(WALLET_B, KEY_REG.record!.id), keyHeaders(KEY_REG));
+  });
+
   it("RR1 discoverability answers the admin and the proven owner by any carrier, the cookie included", async () => {
     const row = seed();
     for (const headers of [admin(), sessionA.key, sessionA.bearer, sessionA.cookie, proof()]) {
