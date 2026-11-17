@@ -34,7 +34,8 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { offerCaller } from "../services/job-offer-event-rules.js";
-import { getCourierJobsStore } from "../services/courier-jobs-store.js";
+import { publicCourierJob, publicEvent, publicEvents } from "../services/job-offer-public.js";
+import { getCourierJobsStore, type CourierJob } from "../services/courier-jobs-store.js";
 
 // Posting identity helper — prefers API key operatorId, falls back to
 // SIWE-session userId, else X-Posted-By header (matches v0.2 surface for
@@ -150,14 +151,14 @@ async function handleListOpen(req: FastifyRequest<{ Querystring: CourierOpenQuer
     maxFeeUSD: maxFee != null && Number.isFinite(maxFee) ? maxFee : null,
     within,
   });
-  return { jobs: open, count: open.length, ts: new Date().toISOString() };
+  return { jobs: open.map(publicCourierJob), count: open.length, ts: new Date().toISOString() };
 }
 
 async function handleGetById(req: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) {
   const store = getCourierJobsStore();
   const j = store.get(req.params.id);
   if (!j) return reply.code(404).send({ error: "not_found" });
-  return { job: j, events: store.getEvents(j.id) };
+  return { job: publicCourierJob(j), events: publicEvents(store.getEvents(j.id)) };
 }
 
 export async function courierJobsRoutes(app: FastifyInstance) {
@@ -219,7 +220,7 @@ export async function courierJobsRoutes(app: FastifyInstance) {
         });
       }
     }
-    return { ok: true, job: (result as { ok: true; job: unknown }).job };
+    return { ok: true, job: publicCourierJob((result as { ok: true; job: CourierJob }).job) };
   });
 
   // ── POST /api/courier-jobs/:id/events ───────────────────────────────────
@@ -270,7 +271,7 @@ export async function courierJobsRoutes(app: FastifyInstance) {
           });
       }
     }
-    return { ok: true, status: result.status, event: result.event };
+    return { ok: true, status: result.status, event: publicEvent(result.event) };
   });
 
   // ── PATCH /api/courier-jobs/:id ─────────────────────────────────────────
@@ -303,7 +304,7 @@ export async function courierJobsRoutes(app: FastifyInstance) {
         });
       }
     }
-    return { ok: true, job: (result as { ok: true; job: unknown }).job };
+    return { ok: true, job: publicCourierJob((result as { ok: true; job: CourierJob }).job) };
   });
 
   // ── DELETE /api/courier-jobs/:id ────────────────────────────────────────

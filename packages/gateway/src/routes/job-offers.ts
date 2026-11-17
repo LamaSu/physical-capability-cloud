@@ -40,12 +40,14 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { offerCaller } from "../services/job-offer-event-rules.js";
+import { publicEvent, publicEvents, publicOffer } from "../services/job-offer-public.js";
 import {
   getJobOffersStore,
   type ClaimInput,
   type CreateJobOfferInput,
   type EvidenceRequirements,
   type GeoFence,
+  type JobOffer,
   type PricingSpec,
 } from "../services/job-offers-store.js";
 
@@ -235,7 +237,7 @@ export async function jobOffersRoutes(app: FastifyInstance) {
       tier: tier != null && (tier === 0 || tier === 1 || tier === 2 || tier === 3) ? tier as 0|1|2|3 : null,
       within,
     });
-    const offers = all.slice(offset, offset + limit);
+    const offers = all.slice(offset, offset + limit).map(publicOffer);
     return {
       offers,
       count: offers.length,
@@ -251,7 +253,7 @@ export async function jobOffersRoutes(app: FastifyInstance) {
     const store = getJobOffersStore();
     const o = store.get(req.params.id);
     if (!o) return reply.code(404).send({ error: "not_found" });
-    return { offer: o, events: store.getEvents(o.id) };
+    return { offer: publicOffer(o), events: publicEvents(store.getEvents(o.id)) };
   });
 
   // ── POST /api/job-offers/:id/claim ─────────────────────────────────────
@@ -284,7 +286,7 @@ export async function jobOffersRoutes(app: FastifyInstance) {
         });
       }
     }
-    return { ok: true, offer: (result as { ok: true; offer: unknown }).offer };
+    return { ok: true, offer: publicOffer((result as { ok: true; offer: JobOffer }).offer) };
   });
 
   // ── POST /api/job-offers/:id/events ────────────────────────────────────
@@ -336,7 +338,7 @@ export async function jobOffersRoutes(app: FastifyInstance) {
           });
       }
     }
-    return { ok: true, status: result.status, event: result.event };
+    return { ok: true, status: result.status, event: publicEvent(result.event) };
   });
 
   // ── PATCH /api/job-offers/:id ──────────────────────────────────────────
@@ -378,7 +380,7 @@ export async function jobOffersRoutes(app: FastifyInstance) {
         });
       }
     }
-    return { ok: true, offer: (result as { ok: true; offer: unknown }).offer };
+    return { ok: true, offer: publicOffer((result as { ok: true; offer: JobOffer }).offer) };
   });
 
   // ── DELETE /api/job-offers/:id ─────────────────────────────────────────
