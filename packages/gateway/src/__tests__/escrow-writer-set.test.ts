@@ -424,6 +424,7 @@ const ESCROW_MENTION_FILES = [
   "packages/gateway/src/services/buyer-funded-escrow.ts",
   "packages/gateway/src/services/buyer-funding-verifier.ts",
   "packages/gateway/src/services/commentary-narrator.ts",
+  "packages/gateway/src/services/escrow-drive-gate.ts",
   "packages/gateway/src/services/escrow-reclaim.ts",
   "packages/gateway/src/services/oracle-client.ts",
   "packages/gateway/src/services/scope-acceptance.ts",
