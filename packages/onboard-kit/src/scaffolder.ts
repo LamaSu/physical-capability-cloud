@@ -118,9 +118,10 @@ export function scaffold(options: ScaffoldOptions): ScaffoldResult {
     "  1. Copy .env.example to .env and fill in your device credentials",
     "  2. Run: pnpm install",
     "  3. Run: pnpm build",
-    "  4. Test mock mode: npx tsx src/kernel.ts",
-    "  5. Test with agents: npx tsx src/agent.ts",
-    "  6. Connect to live network: set GATEWAY_URL in .env",
+    "  4. Test mock mode: MOCK_MODE=true npx tsx src/kernel.ts",
+    "  5. Test with agents: MOCK_MODE=true npx tsx src/agent.ts",
+    "  5b. Without MOCK_MODE=true the agent runs your generated adapters; with it, every slot runs a PCC mock. A machine whose capability class isn't fdm takes the prepare path, and its jobs are refused until KernelAgent passes inputHash, inputData and tierLadder. Nothing loads .env, so export its variables or put them on the command line. A slot with no adapter in the config runs a PCC mock, and the start-up banner says so.",
+    "  6. Connect to live network: export GATEWAY_URL",
   ].join("\n");
 
   return { files, summary };
@@ -783,12 +784,14 @@ ${caps}
 `;
 }
 
-function generateKernelEntryPoint(config: OnboardConfig): string {
-  const adapterImports = config.adapters.map(a =>
+function generateAdapterImports(config: OnboardConfig): string {
+  return config.adapters.map(a =>
     `import { ${a.className} } from ${lit(`./adapters/${toKebabCase(a.className)}.js`)};`
   ).join("\n");
+}
 
-  const adapterInits = config.adapters.map(a => {
+function generateAdapterInstances(config: OnboardConfig): string {
+  return config.adapters.map(a => {
     if (a.adapterType === "machine") {
       return `const ${toCamelCase(a.adapterId)} = new ${a.className}(${lit(a.adapterId)}, {
   baseUrl: process.env.${toEnvVar(a.adapterId)}_URL ?? ${lit(a.connectionString)},
@@ -807,15 +810,25 @@ function generateKernelEntryPoint(config: OnboardConfig): string {
   mockMode: process.env.MOCK_MODE === "true",
 });`;
   }).join("\n\n");
+}
+
+function selectAdapters(config: OnboardConfig) {
+  const machineAdapter = config.adapters.find(a => a.adapterType === "machine");
+  const sensorAdapters = config.adapters.filter(a => a.adapterType === "sensor");
+  const cameraAdapter = config.adapters.find(a => a.adapterType === "camera");
+  return { machineAdapter, sensorAdapters, cameraAdapter };
+}
+
+function generateKernelEntryPoint(config: OnboardConfig): string {
+  const adapterImports = generateAdapterImports(config);
+  const adapterInits = generateAdapterInstances(config);
 
   const jobGuidance = config.adapters.filter(a => a.adapterType === "machine").map(a =>
     machineCapabilityClass(config, a) === "fdm"
       ? `// ${commentText(a.adapterId)}: run({ jobId, stepId, gcodeHash, assuranceTier }).`
       : `// ${commentText(a.adapterId)}: run({ jobId, stepId, inputHash, inputData, assuranceTier, tierLadder }), with tierLadder from compileTierLadder(<your capability's CSD>).`
   ).join("\n");
-  const machineAdapter = config.adapters.find(a => a.adapterType === "machine");
-  const sensorAdapters = config.adapters.filter(a => a.adapterType === "sensor");
-  const cameraAdapter = config.adapters.find(a => a.adapterType === "camera");
+  const { machineAdapter, sensorAdapters, cameraAdapter } = selectAdapters(config);
 
   return `/**
  * Shop Kernel entry point for ${commentText(config.kernel.name)}
@@ -866,6 +879,30 @@ export { KERNEL_ID, capabilities, jobRunner, evidenceEmitter };
 }
 
 function generateAgentEntryPoint(config: OnboardConfig): string {
+  const adapterImports = generateAdapterImports(config);
+  const adapterInits = generateAdapterInstances(config);
+  const { machineAdapter, sensorAdapters, cameraAdapter } = selectAdapters(config);
+  const adapterParts = [
+    ...(machineAdapter ? [`machine: ${toCamelCase(machineAdapter.adapterId)}`] : []),
+    ...(sensorAdapters.length ? [`sensors: [${sensorAdapters.map(a => toCamelCase(a.adapterId)).join(", ")}]`] : []),
+    ...(cameraAdapter ? [`camera: ${toCamelCase(cameraAdapter.adapterId)}`] : []),
+  ];
+  const adapterConfig = [
+    ...(machineAdapter ? [] : ["  mockPrintDuration: 3000,  // Fast mock for testing"]),
+    ...(adapterParts.length ? [
+      "  // MOCK_MODE=true passes no generated adapter, so every slot runs a PCC mock.",
+      `  ...(process.env.MOCK_MODE === "true" ? {} : { adapters: { ${adapterParts.join(", ")} } }),`,
+    ] : []),
+  ].join("\n");
+  const label = (a: AdapterManifest) => `${a.className} (${a.adapterId})`;
+  const machineNote = machineAdapter && machineCapabilityClass(config, machineAdapter) !== "fdm"
+    ? "; its jobs are refused until KernelAgent passes inputHash, inputData and tierLadder"
+    : "";
+  const banner = (slot: string, labels?: string) => labels
+    ? `console.log(process.env.MOCK_MODE === "true"
+  ? ${lit(`  ${slot}: PCC mock (MOCK_MODE=true)`)}
+  : ${lit(`  ${slot}: ${labels}`)});`
+    : `console.log(${lit(`  ${slot}: PCC mock (no ${slot === "Sensors" ? "sensor" : slot.toLowerCase()} adapter in config)`)});`;
   return `/**
  * Kernel Agent entry point for ${commentText(config.kernel.name)}
  * Generated by @pcc/onboard-kit scaffolder
@@ -877,12 +914,16 @@ function generateAgentEntryPoint(config: OnboardConfig): string {
 import { MessageBus } from "@pcc/a2a";
 import { KernelAgent } from "@pcc/agent-kernel";
 import { capabilities } from "./capabilities.js";
-${config.profiles?.length ? 'import { profiles } from "./profiles.js";\n' : ""}
+${config.profiles?.length ? 'import { profiles } from "./profiles.js";\n' : ""}${adapterImports ? `${adapterImports}\n` : ""}
 
 const KERNEL_ID = ${lit(config.kernel.kernelId)};
 const GATEWAY_URL = process.env.GATEWAY_URL ?? ${lit(config.kernel.gatewayUrl)};
 
-// ── Create message bus ────────────────────────────────────────────
+${adapterInits ? `// ── Initialize adapters ───────────────────────────────────────────
+
+${adapterInits}
+
+` : ""}// ── Create message bus ────────────────────────────────────────────
 
 const bus = new MessageBus();
 
@@ -893,7 +934,7 @@ const kernelAgent = new KernelAgent(bus, {
   name: ${lit(config.kernel.name)},
   location: ${JSON.stringify(config.kernel.location)},
   capabilities,
-  mockPrintDuration: 3000,  // Fast mock for testing
+${adapterConfig}
   ${config.profiles?.length ? "machineProfiles: profiles," : "// machineProfiles: [],  // Add machine profiles for contract builder"}
   gatewayUrl: GATEWAY_URL,
 });
@@ -907,6 +948,10 @@ console.log(\`  Kernel: \${KERNEL_ID}\`);
 console.log(\`  Capabilities: \${capabilities.map(c => c.type).join(", ")}\`);
 console.log(\`  Gateway: \${GATEWAY_URL}\`);
 console.log(\`  Wallet: \${kernelAgent.wallet?.address ?? "not configured"}\`);
+${banner("Machine", machineAdapter ? label(machineAdapter) + machineNote : undefined)}
+${banner("Sensors", sensorAdapters.length ? sensorAdapters.map(label).join(", ") : undefined)}
+${banner("Camera", cameraAdapter ? label(cameraAdapter) : undefined)}
+console.log(\`  Mock mode: \${process.env.MOCK_MODE === "true"}\`);
 console.log("");
 console.log("Waiting for jobs from the PCC network...");
 
