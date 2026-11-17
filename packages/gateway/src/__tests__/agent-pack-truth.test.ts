@@ -711,7 +711,7 @@ describe("idempotencyKey is a random token made once per order, never the user's
   it("I2: no idempotencyKey text holds an email, name, phone, address or street placeholder, or an @", () => {
     for (const [file, text] of PACK) {
       for (const window of keyWindows(text)) {
-        expect(window, file).not.toMatch(/\{[^{}\s]*(?:e-?mail|name|phone|address|street)[^{}\s]*\}/i);
+        expect(window, file).not.toMatch(/\{[^{}\s]*(?:mail|name|phone|address|addr|street|customer|user|zip|postcode|postal|tel|mobile|city)[^{}\s]*\}/i);
         expect(window, file).not.toContain("@");
       }
     }
@@ -728,7 +728,7 @@ describe("idempotencyKey is a random token made once per order, never the user's
 
   it("I4: every example idempotencyKey value is a per-order {uuid} token", () => {
     for (const [file, text] of PACK) {
-      const values = Array.from(text.matchAll(/idempotencyKey["'`]?\s*[:=]\s*(["'`])([^"'`\s]+)\1/g), (match) => match[2]);
+      const values = Array.from(text.matchAll(/idempotencyKey(?:\\?["'`])?\s*[:=]\s*\\?(["'`])([^"'`\s\\]+)\\?\1/g), (match) => match[2]);
       expect(values.length, file).toBeGreaterThan(0);
       for (const value of values) expect(value, file).toContain("{uuid}");
     }

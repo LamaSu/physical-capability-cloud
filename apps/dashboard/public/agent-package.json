@@ -5739,7 +5739,7 @@
         "id": "string (offer-…)",
         "capabilityType": "string",
         "status": "open|claimed|in_progress|delivered|settled|cancelled|expired|disputed",
-        "requirements": "object (echoed; pickupReadyAt, externalRef and other category fields live here)",
+        "requirements": "object (echoed whole to the offer's parties on GET /api/job-offers/:id; the feeds, and readers who are not parties, get the public view described under dtos.RequirementsByCategory.examples; pickupReadyAt, externalRef and other category fields live here)",
         "pricing": {
           "amount": "number, or null when the poster stated none",
           "currency": "string",
