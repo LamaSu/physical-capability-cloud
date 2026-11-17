@@ -5749,7 +5749,6 @@
         "evidenceRequirements": "object or null",
         "verified": "boolean: the poster's sourceVerifyUrl answered 2xx and did not say placed:false or valid:false. Not proof of fulfillment or delivery.",
         "requireHeartbeat": "boolean",
-        "posterDid": "string or null (DID of the agent that posted)",
         "validUntil": "ISO timestamp",
         "postedAt": "ISO timestamp",
         "claimedByKernelId": "string or null (kernelId, set on claim)",

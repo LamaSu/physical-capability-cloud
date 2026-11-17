@@ -164,7 +164,7 @@ describe("rehearsal R0: the pack matches the gateway it describes", () => {
     const shape = full.dtos.JobOffer.shape;
     expect(shape.claimedByKernelId).toBeDefined();
     expect(shape.claimedBy).toBeUndefined();
-    expect(shape.posterDid).toBeDefined();
+    expect(shape.posterDid).toBeUndefined();
     expect(shape.requireHeartbeat).toBeDefined();
   });
 
