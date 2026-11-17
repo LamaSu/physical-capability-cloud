@@ -75,7 +75,7 @@ Content-Type: application/json
   },
   "pricing": { "amount": 6.70, "currency": "USD", "model": "fixed" },
   "sourceVerifyUrl": "https://domino-pos.example.com/orders/xyz/status",
-  "idempotencyKey": "dominos-7764-2026-06-19T18:00:00Z-driver-fee"
+  "idempotencyKey": "pizza-{uuid}"
 }
 ```
 
