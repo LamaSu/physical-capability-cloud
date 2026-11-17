@@ -49,6 +49,15 @@ const stubVerify: VerifyFn = async (url) => {
 
 async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
+  app.addHook("onRequest", async (req) => {
+    const key = req.headers["x-test-key"];
+    if (typeof key === "string") req.apiKeyId = key;
+    const wallet = req.headers["x-test-wallet"];
+    if (typeof wallet === "string") {
+      req.provenWallet = wallet.toLowerCase();
+      req.provenWalletVia = "siwe-session";
+    }
+  });
   await app.register(jobOffersRoutes);
   await app.ready();
   return app;
@@ -543,9 +552,9 @@ describe("POST /api/job-offers/:id/claim", () => {
   it("claims a courier offer with kernelId, returns ok+offer", async () => {
     const app = await buildApp();
     try {
-      await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-claim") });
+      await app.inject({ method: "POST", url: "/api/job-offers", headers: { "x-test-key": "poster" }, payload: courierOffer("c-claim") });
       const res = await app.inject({
-        method: "POST", url: "/api/job-offers/c-claim/claim",
+        method: "POST", url: "/api/job-offers/c-claim/claim", headers: { "x-test-key": "claimer" },
         payload: { kernelId: "kernel-driver-7" },
       });
       expect(res.statusCode).toBe(200);
@@ -561,9 +570,9 @@ describe("POST /api/job-offers/:id/claim", () => {
   it("claims a lab.hplc offer just as well — same route, different capability_type", async () => {
     const app = await buildApp();
     try {
-      await app.inject({ method: "POST", url: "/api/job-offers", payload: hplcOffer("h-claim") });
+      await app.inject({ method: "POST", url: "/api/job-offers", headers: { "x-test-key": "poster" }, payload: hplcOffer("h-claim") });
       const res = await app.inject({
-        method: "POST", url: "/api/job-offers/h-claim/claim",
+        method: "POST", url: "/api/job-offers/h-claim/claim", headers: { "x-test-key": "claimer" },
         payload: { kernelId: "kernel-lab-berkeley" },
       });
       expect(res.statusCode).toBe(200);
@@ -577,9 +586,9 @@ describe("POST /api/job-offers/:id/claim", () => {
   it("returns 400 when kernelId missing", async () => {
     const app = await buildApp();
     try {
-      await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-mc") });
+      await app.inject({ method: "POST", url: "/api/job-offers", headers: { "x-test-key": "poster" }, payload: courierOffer("c-mc") });
       const res = await app.inject({
-        method: "POST", url: "/api/job-offers/c-mc/claim", payload: {},
+        method: "POST", url: "/api/job-offers/c-mc/claim", headers: { "x-test-key": "claimer" }, payload: {},
       });
       expect(res.statusCode).toBe(400);
       expect(res.json().error).toBe("missing_field");
@@ -592,7 +601,7 @@ describe("POST /api/job-offers/:id/claim", () => {
     const app = await buildApp();
     try {
       const res = await app.inject({
-        method: "POST", url: "/api/job-offers/missing/claim",
+        method: "POST", url: "/api/job-offers/missing/claim", headers: { "x-test-key": "claimer" },
         payload: { kernelId: "k1" },
       });
       expect(res.statusCode).toBe(404);
@@ -604,9 +613,9 @@ describe("POST /api/job-offers/:id/claim", () => {
   it("race-safe: 10 concurrent claims yield exactly 1 winner and 9 × 409", async () => {
     const app = await buildApp();
     try {
-      await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("race") });
+      await app.inject({ method: "POST", url: "/api/job-offers", headers: { "x-test-key": "poster" }, payload: courierOffer("race") });
       const claims = Array.from({ length: 10 }, (_, i) => app.inject({
-        method: "POST", url: "/api/job-offers/race/claim",
+        method: "POST", url: "/api/job-offers/race/claim", headers: { "x-test-key": "claimer" },
         payload: { kernelId: `kernel-${i}` },
       }));
       const results = await Promise.all(claims);
@@ -633,15 +642,19 @@ describe("POST /api/job-offers/:id/events", () => {
   it("event=in_progress → status=in_progress; event=delivered → status=delivered", async () => {
     const app = await buildApp();
     try {
-      await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-ev") });
+      await app.inject({ method: "POST", url: "/api/job-offers", headers: { "x-test-key": "poster" }, payload: courierOffer("c-ev") });
+      await app.inject({
+        method: "POST", url: "/api/job-offers/c-ev/claim", headers: { "x-test-key": "claimer" },
+        payload: { kernelId: "kernel-driver-1" },
+      });
       const r1 = await app.inject({
-        method: "POST", url: "/api/job-offers/c-ev/events",
+        method: "POST", url: "/api/job-offers/c-ev/events", headers: { "x-test-key": "claimer" },
         payload: { event: "in_progress", by: "kernel-driver-1" },
       });
       expect(r1.statusCode).toBe(200);
       expect(r1.json().status).toBe("in_progress");
       const r2 = await app.inject({
-        method: "POST", url: "/api/job-offers/c-ev/events",
+        method: "POST", url: "/api/job-offers/c-ev/events", headers: { "x-test-key": "claimer" },
         payload: { event: "delivered", by: "kernel-driver-1" },
       });
       expect(r2.statusCode).toBe(200);
@@ -654,9 +667,9 @@ describe("POST /api/job-offers/:id/events", () => {
   it("free-form event 'progress_update' (no status change) is accepted with payload", async () => {
     const app = await buildApp();
     try {
-      await app.inject({ method: "POST", url: "/api/job-offers", payload: opentronsOffer("ot-ev") });
+      await app.inject({ method: "POST", url: "/api/job-offers", headers: { "x-test-key": "poster" }, payload: opentronsOffer("ot-ev") });
       const res = await app.inject({
-        method: "POST", url: "/api/job-offers/ot-ev/events",
+        method: "POST", url: "/api/job-offers/ot-ev/events", headers: { "x-test-key": "poster" },
         payload: {
           event: "progress_update",
           payload: { step: 3, totalSteps: 12, instrument: "OT-2" },
@@ -673,9 +686,9 @@ describe("POST /api/job-offers/:id/events", () => {
   it("returns 400 missing_field when event is missing", async () => {
     const app = await buildApp();
     try {
-      await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-ev2") });
+      await app.inject({ method: "POST", url: "/api/job-offers", headers: { "x-test-key": "poster" }, payload: courierOffer("c-ev2") });
       const res = await app.inject({
-        method: "POST", url: "/api/job-offers/c-ev2/events",
+        method: "POST", url: "/api/job-offers/c-ev2/events", headers: { "x-test-key": "poster" },
         payload: { note: "missing event field" },
       });
       expect(res.statusCode).toBe(400);
@@ -689,17 +702,17 @@ describe("POST /api/job-offers/:id/events", () => {
 // ── PATCH /api/job-offers/:id — ownership ──────────────────────────────────
 
 describe("PATCH /api/job-offers/:id", () => {
-  it("patches pricing + requirements with matching X-Posted-By", async () => {
+  it("patches pricing + requirements with the posting key", async () => {
     const app = await buildApp();
     try {
       await app.inject({
         method: "POST", url: "/api/job-offers",
-        headers: { "x-posted-by": "alice" },
+        headers: { "x-posted-by": "alice", "x-test-key": "alice" },
         payload: courierOffer("p1"),
       });
       const res = await app.inject({
         method: "PATCH", url: "/api/job-offers/p1",
-        headers: { "x-posted-by": "alice" },
+        headers: { "x-posted-by": "alice", "x-test-key": "alice" },
         payload: {
           pricing: { amount: 8.5, currency: "USD", model: "fixed" },
           requirements: { tipUSD: 2 },
@@ -721,12 +734,12 @@ describe("PATCH /api/job-offers/:id", () => {
     try {
       await app.inject({
         method: "POST", url: "/api/job-offers",
-        headers: { "x-posted-by": "alice" },
+        headers: { "x-posted-by": "alice", "x-test-key": "alice" },
         payload: courierOffer("p2"),
       });
       const res = await app.inject({
         method: "PATCH", url: "/api/job-offers/p2",
-        headers: { "x-posted-by": "mallory" },
+        headers: { "x-posted-by": "mallory", "x-test-key": "mallory" },
         payload: { pricing: { amount: 999, currency: "USD", model: "fixed" } },
       });
       expect(res.statusCode).toBe(403);
@@ -741,7 +754,7 @@ describe("PATCH /api/job-offers/:id", () => {
     try {
       await app.inject({
         method: "POST", url: "/api/job-offers",
-        headers: { "x-posted-by": "alice" },
+        headers: { "x-posted-by": "alice", "x-test-key": "alice" },
         payload: courierOffer("p3"),
       });
       const res = await app.inject({
@@ -749,7 +762,10 @@ describe("PATCH /api/job-offers/:id", () => {
         payload: { pricing: { amount: 99, currency: "USD", model: "fixed" } },
       });
       expect(res.statusCode).toBe(401);
-      expect(res.json().error).toBe("missing_identity");
+      expect(res.json()).toEqual({
+        error: "missing_identity",
+        message: "This action needs your API key or a wallet sign-in.",
+      });
     } finally {
       await app.close();
     }
@@ -764,12 +780,12 @@ describe("DELETE /api/job-offers/:id", () => {
     try {
       await app.inject({
         method: "POST", url: "/api/job-offers",
-        headers: { "x-posted-by": "alice" },
+        headers: { "x-posted-by": "alice", "x-test-key": "alice" },
         payload: hplcOffer("d1"),
       });
       const res = await app.inject({
         method: "DELETE", url: "/api/job-offers/d1",
-        headers: { "x-posted-by": "alice" },
+        headers: { "x-posted-by": "alice", "x-test-key": "alice" },
       });
       expect(res.statusCode).toBe(200);
       expect(res.json().status).toBe("cancelled");
@@ -790,13 +806,13 @@ describe("POST /api/job-offers/:id/heartbeat", () => {
     try {
       await app.inject({
         method: "POST", url: "/api/job-offers",
-        headers: { "x-posted-by": "alice" },
+        headers: { "x-posted-by": "alice", "x-test-key": "alice" },
         payload: { ...pizzaOffer("hb1"), requireHeartbeat: true },
       });
       advance(1000);
       const res = await app.inject({
         method: "POST", url: "/api/job-offers/hb1/heartbeat",
-        headers: { "x-posted-by": "alice" }, payload: {},
+        headers: { "x-posted-by": "alice", "x-test-key": "alice" }, payload: {},
       });
       expect(res.statusCode).toBe(200);
       expect(res.json().lastHeartbeatAt).toBeDefined();

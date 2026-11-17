@@ -55,6 +55,15 @@ const now = () => new Date(mockNowMs);
 
 async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
+  app.addHook("onRequest", async (req) => {
+    const key = req.headers["x-test-key"];
+    if (typeof key === "string") req.apiKeyId = key;
+    const wallet = req.headers["x-test-wallet"];
+    if (typeof wallet === "string") {
+      req.provenWallet = wallet.toLowerCase();
+      req.provenWalletVia = "siwe-session";
+    }
+  });
   await app.register(courierJobsRoutes);
   await app.register(printAndMailRoutes);
   await app.ready();
@@ -99,7 +108,7 @@ async function createAndClaimJob(
       pickup: { name: "PCC Shop", address: "1 Shop Way, SF" },
       dropoff: { name: "USPS Rincon Center", address: "180 Steuart St, SF" },
     },
-    headers: { "x-posted-by": "did:pcc:operator-poster" },
+    headers: { "x-posted-by": "did:pcc:operator-poster", "x-test-key": "poster" },
   });
   if (create.statusCode !== 201 && create.statusCode !== 200) {
     throw new Error(`job create failed: ${create.statusCode} ${create.body}`);
@@ -107,6 +116,7 @@ async function createAndClaimJob(
   const claim = await app.inject({
     method: "POST",
     url: `/api/courier-jobs/${opts.jobId}/claim`,
+    headers: { "x-test-key": "claimer" },
     payload: { driverAgent: opts.driver ?? DRIVER },
   });
   if (claim.statusCode !== 200) {

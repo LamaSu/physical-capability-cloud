@@ -552,7 +552,7 @@ describe("verdict 102g: offers are claims, the report schema is contract v1, and
     }
   });
 
-  it("F1 (binding): on this gateway any key can mark an offer delivered, with no evidence", async () => {
+  it("F1 (binding): a key that neither posted nor claimed an offer cannot mark it delivered", async () => {
     const created = await app.inject({
       method: "POST", url: "/api/job-offers", headers: { authorization: `Bearer ${posterKey}` },
       payload: { capabilityType: "pizza.order", requirements: { shopId: "shop-1", items: ["margherita"] },
@@ -565,10 +565,10 @@ describe("verdict 102g: offers are claims, the report schema is contract v1, and
       method: "POST", url: `/api/job-offers/${id}/events`, headers: { authorization: `Bearer ${strangerKey}` },
       payload: { event: "delivered" },
     });
-    expect(delivered.statusCode, delivered.body).toBe(200);
+    expect(delivered.statusCode, delivered.body).toBe(403);
     const got = await app.inject({ method: "GET", url: `/api/job-offers/${id}` });
-    // If this stops holding (claimant binding or required evidence), the pack's offer text must change.
-    expect((got.json() as { offer: { status: string } }).offer.status).toBe("delivered");
+    // The pack's offer text still says any authenticated caller can post one; row N341 changes that text (#13597 P4).
+    expect((got.json() as { offer: { status: string } }).offer.status).toBe("open");
   });
 
   it("FT4 (R2 binding): the skills' quote-required example is a body POST /api/job-offers accepts, and without its amount and currency it is refused", async () => {
