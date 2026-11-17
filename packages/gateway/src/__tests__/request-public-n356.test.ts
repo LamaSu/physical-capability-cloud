@@ -51,6 +51,9 @@ describe("request replies and requester writes for the admin", () => {
     const plainKey = provisionApiKey({ operatorId: "member@example.com", scopes: ["*"] });
     const sessionKey = provisionApiKey({ operatorId: W, scopes: ["*"], metadata: { source: "siwe-session" } });
     const adminKey = provisionApiKey({ operatorId: "admin-n356", scopes: ["admin"] });
+    const adminStarKey = provisionApiKey({ operatorId: "admin-star-n356", scopes: ["admin", "*"] });
+    const cookieSession = createSession("0x" + "11".repeat(20));
+    const bearerSession = createSession("0x" + "22".repeat(20));
     plainHeaders = { authorization: `Bearer ${plainKey.rawKey}` };
     callers = [
       { name: "plain", headers: plainHeaders, admin: false },
@@ -58,6 +61,11 @@ describe("request replies and requester writes for the admin", () => {
       { name: "admin key", headers: { authorization: `Bearer ${adminKey.rawKey}` }, admin: true },
       { name: "admin header", headers: { ...plainHeaders, "x-admin-key": adminSecret }, admin: true },
       { name: "wrong admin header", headers: { ...plainHeaders, "x-admin-key": `wrong-admin-${randomUUID()}` }, admin: false },
+      { name: "cookie session", headers: { cookie: `pcc_session=${app.signCookie(cookieSession)}` }, admin: false },
+      { name: "bearer session", headers: { authorization: `Bearer ${bearerSession}` }, admin: false },
+      { name: "admin and every scope", headers: { authorization: `Bearer ${adminStarKey.rawKey}` }, admin: false },
+      { name: "admin key, wrong header", headers: { authorization: `Bearer ${adminKey.rawKey}`, "x-admin-key": `wrong-admin-${randomUUID()}` }, admin: false },
+      { name: "admin key, empty header", headers: { authorization: `Bearer ${adminKey.rawKey}`, "x-admin-key": "" }, admin: false },
     ];
   }, 120_000);
 
@@ -74,7 +82,26 @@ describe("request replies and requester writes for the admin", () => {
     }
   });
 
-  async function createRequest() {
+  function createSession(walletAddress: string): string {
+    const token = randomUUID();
+    const now = Date.now();
+    getRepos().sessions.insert({
+      id: token,
+      token,
+      walletAddress,
+      createdAt: new Date(now).toISOString(),
+      lastActiveAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + 86_400_000).toISOString(),
+    });
+    return token;
+  }
+
+  async function createRequest(
+    requesterFields: Pick<CapabilityRequest, "requesterEmail" | "requesterWallet"> = {
+      requesterEmail: "buyer@example.com",
+      requesterWallet: R,
+    },
+  ) {
     const response = await app.inject({
       method: "POST",
       url: "/api/requests",
@@ -86,8 +113,7 @@ describe("request replies and requester writes for the admin", () => {
         currency: "USDC",
         deadline: "2026-12-31T23:59:59Z",
         urgency: "standard",
-        requesterEmail: "buyer@example.com",
-        requesterWallet: R,
+        ...requesterFields,
       },
     });
     expect(response.statusCode).toBe(201);
@@ -224,6 +250,28 @@ describe("request replies and requester writes for the admin", () => {
     }
   });
 
+  it("N356 G6: a request holding one requester field serves it only to the admin", async () => {
+    const adminKeyCaller = callers.find((caller) => caller.name === "admin key")!;
+    for (const requesterFields of [
+      { requesterEmail: "buyer@example.com", requesterWallet: R },
+      { requesterWallet: R },
+      { requesterEmail: "buyer@example.com" },
+    ]) {
+      const { id } = await createRequest(requesterFields);
+      for (const caller of callers.filter((entry) => !entry.admin)) {
+        const list = await app.inject({ method: "GET", url: "/api/requests", headers: caller.headers });
+        expect(list.statusCode, caller.name).toBe(200);
+        for (const request of list.json().requests) expectNoRequesterFields(request, list.body);
+        const detail = await app.inject({ method: "GET", url: `/api/requests/${id}`, headers: caller.headers });
+        expect(detail.statusCode, caller.name).toBe(200);
+        expectNoRequesterFields(detail.json().request, detail.body);
+      }
+      const detail = await app.inject({ method: "GET", url: `/api/requests/${id}`, headers: adminKeyCaller.headers });
+      expect(detail.statusCode).toBe(200);
+      expect(detail.json().request).toMatchObject(requesterFields);
+    }
+  });
+
   it("N356 F1: only each admin caller may filter requests by requesterEmail, before any stored read", async () => {
     const { id } = await createRequest();
     for (const caller of callers.filter((entry) => entry.admin)) {
@@ -238,7 +286,7 @@ describe("request replies and requester writes for the admin", () => {
     const findAll = vi.spyOn(getRepos().requests, "findAll");
     try {
       for (const caller of callers.filter((entry) => !entry.admin)) {
-        for (const query of ["?requesterEmail=buyer%40example.com", "?requesterEmail=", "?requesterEmail=nobody%40example.com"]) {
+        for (const query of ["?requesterEmail=buyer%40example.com", "?requesterEmail=", "?requesterEmail=nobody%40example.com", "?requesterEmail=buyer%40example.com&requesterEmail=nobody%40example.com"]) {
           const response = await app.inject({ method: "GET", url: `/api/requests${query}`, headers: caller.headers });
           expect(response.statusCode, `${caller.name} ${query}`).toBe(403);
           expect(response.body).toBe('{"error":"forbidden","reason":"requester_filter_admin_only"}');
@@ -277,6 +325,44 @@ describe("request replies and requester writes for the admin", () => {
     expect(snapshot(id)).toEqual(before);
   });
 
+  it("N356 I1: a caller whose claimed identity equals the requester's is not the admin", async () => {
+    const { id } = await createRequest();
+    const before = snapshot(id);
+    const requesterKey = provisionApiKey({ operatorId: "buyer@example.com", scopes: ["*"] });
+    const identityCallers: Caller[] = [
+      { name: "requester email key", headers: { authorization: `Bearer ${requesterKey.rawKey}` }, admin: false },
+      { name: "requester wallet session", headers: { cookie: `pcc_session=${app.signCookie(createSession(R))}` }, admin: false },
+    ];
+    for (const caller of identityCallers) {
+      const list = await app.inject({ method: "GET", url: "/api/requests", headers: caller.headers });
+      expect(list.statusCode, caller.name).toBe(200);
+      for (const request of list.json().requests) expectNoRequesterFields(request, list.body);
+      const detail = await app.inject({ method: "GET", url: `/api/requests/${id}`, headers: caller.headers });
+      expect(detail.statusCode, caller.name).toBe(200);
+      expectNoRequesterFields(detail.json().request, detail.body);
+
+      const findAll = vi.spyOn(getRepos().requests, "findAll");
+      try {
+        const filtered = await app.inject({ method: "GET", url: "/api/requests?requesterEmail=buyer%40example.com", headers: caller.headers });
+        expect(filtered.statusCode, caller.name).toBe(403);
+        expect(filtered.body).toBe('{"error":"forbidden","reason":"requester_filter_admin_only"}');
+        expect(findAll).not.toHaveBeenCalled();
+      } finally {
+        findAll.mockRestore();
+      }
+
+      const response = await app.inject({
+        method: "PUT",
+        url: `/api/requests/${id}`,
+        headers: caller.headers,
+        payload: { requesterWallet: "0x" + "ef".repeat(20) },
+      });
+      expect(response.statusCode, caller.name).toBe(403);
+      expect(response.body).toBe('{"error":"forbidden","reason":"requester_fields_admin_only"}');
+      expect(snapshot(id)).toEqual(before);
+    }
+  });
+
   it("N356 P1: a nonadmin PUT may not name either requester field, including null, and writes nothing", async () => {
     const { id } = await createRequest();
     const before = snapshot(id);
@@ -297,7 +383,7 @@ describe("request replies and requester writes for the admin", () => {
     }
   });
 
-  it("N356 P2: plain and siwe PUT bodies may name other request fields", async () => {
+  it("N356 P2: a nonadmin PUT body that names only other request fields passes the requester-field freeze", async () => {
     const { id } = await createRequest();
     for (const caller of callers.filter((entry) => !entry.admin)) {
       const title = `N356 title by ${caller.name}`;
