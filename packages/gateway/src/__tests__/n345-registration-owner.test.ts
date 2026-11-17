@@ -340,6 +340,57 @@ describe("registration owner access", () => {
     await pass("PATCH", seed(WALLET_B, KEY_REG.record!.id), keyHeaders(KEY_REG));
   });
 
+  it("RW12 under TENANT_ENFORCE a caller the rule refuses gets 404, not 403, on another tenant's row", async () => {
+    vi.stubEnv("TENANT_ENFORCE", "true");
+    for (const headers of [keyHeaders(KEY_PLAIN), sessionB.key, proof(WALLET_B), sessionA.cookie]) {
+      const otherTenant = { ...headers, "x-test-tenant": "tenant-n345-b" };
+      for (const write of writes) {
+        vi.mocked(listMatchQueriesForOperator).mockClear();
+        await refuse(write, seed(WALLET_A, KEY_REG.record!.id, "tenant-n345-a"), otherTenant, 404, { error: "not_found" });
+        expect(listMatchQueriesForOperator).not.toHaveBeenCalled();
+      }
+      const row = seed(WALLET_A, KEY_REG.record!.id, "tenant-n345-a");
+      vi.mocked(listMatchQueriesForOperator).mockClear();
+      await refuseRead(row.id, otherTenant, 404);
+      expect(listMatchQueriesForOperator).not.toHaveBeenCalled();
+      expect(stored(row.id)).toStrictEqual(row);
+    }
+  });
+
+  it("RW13 a refused caller gets the route's 403 before /prove's status and evidence checks and PATCH's status check", async () => {
+    for (const [headers, proveBody, editBody] of [
+      [keyHeaders(KEY_PLAIN), forbidden("prove"), forbidden("PATCH")],
+      [sessionA.cookie, EXPLICIT_CREDENTIAL_REQUIRED, EXPLICIT_CREDENTIAL_REQUIRED],
+    ] as const) {
+      for (const status of ["active", "rejected"] as const)
+        await refuse("prove", seed(WALLET_A, null, null, { status }), headers, 403, proveBody);
+      for (const [method, suffix, payload, body] of [
+        ["POST", "/prove", {}, proveBody],
+        ["PATCH", "", { status: "active" }, editBody],
+      ] as const) {
+        const row = seed();
+        const before = stored(row.id);
+        clearEffects();
+        const res = await app.inject({ method, url: url(row.id) + suffix, headers, payload });
+        expect(res.statusCode, res.body).toBe(403);
+        expect(res.json()).toStrictEqual(body);
+        expectNoEffects();
+        expect(stored(row.id)).toStrictEqual(before);
+      }
+    }
+  });
+
+  it("RW14 a cookie-only session gets 403 EXPLICIT_CREDENTIAL_REQUIRED on every write when it proves another wallet or the row has no usable wallet", async () => {
+    for (const [headers, wallet, keyId] of [
+      [sessionB.cookie, WALLET_A, null],
+      [sessionB.cookie, WALLET_A, KEY_REG.record!.id],
+      [sessionA.cookie, ZERO, null],
+      [sessionA.cookie, "", null],
+      [sessionA.cookie, "operator-n345-not-a-wallet", null],
+    ] as const) for (const write of writes)
+      await refuse(write, seed(wallet, keyId), headers, 403, EXPLICIT_CREDENTIAL_REQUIRED);
+  });
+
   it("RR1 discoverability answers the admin and the proven owner by any carrier, the cookie included", async () => {
     const row = seed();
     for (const headers of [admin(), sessionA.key, sessionA.bearer, sessionA.cookie, proof()]) {
@@ -458,7 +509,7 @@ describe("registration owner access", () => {
 
   it("RD1 by-compliance hides the gateway's own status notes and keeps an operator's text", async () => {
     const descriptions = ["PROVED: {}", "REJECTED: synthetic reason", "DELETED at 2026-11-16T00:00:00.000Z by admin",
-      "An operator's own words", "Our machine PROVED: fast", "proved: lower case"];
+      "An operator's own words", "Our machine PROVED: fast", "proved: lower case", " PROVED: leading space"];
     const rows = descriptions.map(description => seed(WALLET_A, null, null, { status: "approved", description }));
     const res = await app.inject({ url: "/api/operators/by-compliance/N345-REG", headers: keyHeaders(KEY_PLAIN) });
     expect(res.statusCode, res.body).toBe(200);
