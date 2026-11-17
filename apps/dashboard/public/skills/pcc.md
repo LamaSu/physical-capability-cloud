@@ -78,7 +78,7 @@ Never report "ordered", "delivered", "complete" or "done" from a status alone: o
 
 - Discover before quoting. Catalog first, then offer.
 - Present the quote back to the user with provider name, price, ETA, and any reputation signal you have, before posting an offer.
-- Use `idempotencyKey` (a stable string the user could regenerate — e.g. `{user-email}-{date}-{request-shortname}`) on every job-offer POST. Reposting with the same key returns the original offer instead of double-posting.
+- Use `idempotencyKey` on every job-offer POST: a random token you create once per order (a UUID, for example) and reuse on every retry of that post. Never the user's email, name, phone or address. Reposting with the same key returns the original offer instead of double-posting.
 - Use `requirements.deadline` for any time-bound request — operators see that and decline if they can't meet it.
 - Tell the user when a capability isn't covered by any registered operator. Don't fake a result.
 
@@ -160,7 +160,7 @@ User: "Order me a pizza for delivery to 728 Geary St SF."
 
 1. `GET /api/capabilities?type=pizza.order&within=37.78,-122.41,10` — find pizza shops near Geary St.
 2. Pick the best-rated one (check `reputation`), present to user with price + ETA.
-3. On user confirmation: `POST /api/job-offers` with `capabilityType=pizza.order`, `requirements={ shopId, items, deliveryAddress, customer }`, `pricing={ model:'fixed', amount: shopPrice, currency:'USD' }`, `idempotencyKey='pizza-728geary-{timestamp}'`.
+3. On user confirmation: `POST /api/job-offers` with `capabilityType=pizza.order`, `requirements={ shopId, items, deliveryAddress, customer }`, `pricing={ model:'fixed', amount: shopPrice, currency:'USD' }`, `idempotencyKey='pizza-{uuid}'`.
 4. Separately: `GET /api/capabilities?type=courier.dispatch&within=...` — find a driver.
    Present the driver's price from the listing to the user, as in step 2, and post step 5's offer only once they confirm that price.
 5. `POST /api/job-offers` with `capabilityType=courier.dispatch`, `requirements={ pickup:{shopAddress}, dropoff:{userAddress}, pickupReadyAt }`, `pricing={ model:'fixed', amount: driverPrice, currency:'USD' }`.

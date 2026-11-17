@@ -189,12 +189,14 @@ curl -X POST "$PCC_BASE/api/job-offers" \
     "capabilityType": "manufacturing.fdm",
     "requirements": { "stl_cid": "bafy...", "material": "PLA" },
     "pricing": { "amount": 0, "currency": "USDC", "model": "quote-required" },
-    "idempotencyKey": "stl-print-2026-07-13"
+    "idempotencyKey": "print-{uuid}"
   }'
 ```
 
 `pricing.model` is `fixed`, `quote-required`, or `per-unit`. Always set
-`idempotencyKey` — reposting the same key returns the original offer
+`idempotencyKey`: a random token you create once per order (a UUID, for
+example) and reuse on every retry of that post. Never the user's email,
+name, phone or address. Reposting the same key returns the original offer
 instead of double-posting. An operator claims it
 (`POST /api/job-offers/:id/claim`), and you poll `GET /api/job-offers/:id`,
 which answers `{offer, events}`: read `offer.status`. A `delivered` status is only a
