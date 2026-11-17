@@ -418,6 +418,58 @@ describe("v1.5 rule 23 — ABSENCE IS NOT EVIDENCE", () => {
       expect(res.json().finalizedBlock).toMatchObject({ value: "120", source: "log", completeness: "complete" });
     } finally { await app.close(); }
   });
+
+  it("T25b a lagging index marks a settled release's finalized block incomplete at the pinned block", async () => {
+    setSettlementUnitReader(makeReader({
+      pinSnapshot: async () => ({ asOfBlock: 100n, asOfBlockHash: SNAP_HASH, finality: "finalized", logCompleteness: "incomplete" }),
+      readAnchors: async () => ({ state: UnitState.SETTLED_RELEASED, remainingClaimCount: 0n }),
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      const b = res.json();
+      expect(b.logCompleteness).toBe("incomplete");
+      expect(b.finalState).toBe("SETTLED_RELEASED");
+      expect(b.refundReason).toBeNull();
+      expect(b.finalizedBlock).toEqual({
+        value: "120",
+        source: "log",
+        completeness: "incomplete",
+        chain: "eip155:84532",
+        contractOrRegistryId: "0xEsCrOw",
+        blockNumber: "100",
+        blockHash: SNAP_HASH,
+        finality: "finalized",
+      });
+    } finally { await app.close(); }
+  });
+
+  it("T24b a lagging index marks an allocated refund's witnessed cause incomplete at the pinned block", async () => {
+    setSettlementUnitReader(makeReader({
+      pinSnapshot: async () => ({ asOfBlock: 100n, asOfBlockHash: SNAP_HASH, finality: "finalized", logCompleteness: "incomplete" }),
+      readAnchors: async () => ({ state: UnitState.REFUND_ALLOCATED, remainingClaimCount: 1n }),
+      readRefundWitness: async () => ({ finalized: { released: false, code: 2 } }),
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      const b = res.json();
+      expect(b.logCompleteness).toBe("incomplete");
+      expect(b.finalizedBlock).toBeNull();
+      expect(b.refundReason).toEqual({
+        value: "BACKUP_NO_RELEASE",
+        source: "log",
+        completeness: "incomplete",
+        chain: "eip155:84532",
+        contractOrRegistryId: "0xEsCrOw",
+        blockNumber: "100",
+        blockHash: SNAP_HASH,
+        finality: "finalized",
+      });
+    } finally { await app.close(); }
+  });
 });
 
 describe("v1.5 rule 26 — assetReality attests IDENTITY, not liveness", () => {
