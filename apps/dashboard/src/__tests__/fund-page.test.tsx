@@ -690,8 +690,8 @@ describe("real auth funding recovery", () => {
     const step = 10;
     const fetchStub = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
       const path = pathOf(input);
-      const fundingRead = path === fundingPath && init.method === "GET" ? reads() : null;
       await new Promise<void>((resolve) => setTimeout(resolve, step));
+      const fundingRead = path === fundingPath && init.method === "GET" ? reads() : null;
       if (path === "/api/auth/me") return json({ address: wallet.address });
       if (path === mintPath && init.method === "POST") return mintReply(mints());
       if (fundingRead !== null) return fundingRead % 2 === 1 ? json({}, 401) : json(funding());
