@@ -58,7 +58,7 @@ const url = (id: string, action?: string) => `/api/onboard/registrations/${id}${
 const stored = (id: string): Row => JSON.parse(JSON.stringify(getRepos().registrations.findById(id)));
 const listed = (row: Row) => ({ id: row.id, status: row.status, name: row.name, createdAt: row.createdAt });
 
-function seed(status = "submitted", tenantId?: string): Row {
+function seed(status = "submitted", tenantId?: string | null): Row {
   const n = ++sequence;
   const mark = (column: string) => `MARK-n344-${n}-${column}`;
   const row = getRepos().registrations.insert({
@@ -78,7 +78,7 @@ function seed(status = "submitted", tenantId?: string): Row {
     pricing: { baseCost: mark("pricing"), minimum: "0", currency: "USDC" },
     operator: { walletAddress: ownerId, displayName: mark("operator"), certifications: [], trainingAcknowledgments: {} },
     complianceRegulations: [mark("complianceRegulations")],
-    tenantId: tenantId ?? mark("tenantId"),
+    tenantId: tenantId === undefined ? mark("tenantId") : tenantId,
     status,
     createdAt: "2026-01-01T00:00:00.000Z",
     submittedAt: mark("submittedAt"),
@@ -115,7 +115,7 @@ async function expectRefused(id: string, action: typeof actions[number], headers
   expect(res.body).toBe('{"error":"forbidden"}');
 }
 
-async function expectStateWrite(action: typeof actions[number], headers: Headers, tenantId?: string) {
+async function expectStateWrite(action: typeof actions[number], headers: Headers, tenantId?: string | null) {
   const before = seed(action === "activate" ? "approved" : "submitted", tenantId);
   clearSpies();
   const res = await app.inject({
@@ -255,23 +255,27 @@ describe("onboard admin gates and registration replies", () => {
     }
   });
 
-  it("OA9 TENANT_ENFORCE makes another tenant's row missing, admins included", async () => {
+  it("OA9 TENANT_ENFORCE makes other-tenant and tenant-less rows missing for tenant-scoped callers, admins included", async () => {
     vi.stubEnv("TENANT_ENFORCE", "true");
+    const tenantless = seed("submitted", null);
+    expect(stored(tenantless.id).tenantId).toBeNull();
     for (const headers of [bearer(tbAdminKey), withAdmin(tbStrangerKey)]) {
-      const row = seed("submitted", TA);
-      clearSpies();
-      const res = await app.inject({ url: url(row.id), headers });
-      expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ error: "not_found" });
-      expect(stored(row.id)).toEqual(row);
-      for (const action of actions) {
-        const target = seed(action === "activate" ? "approved" : "submitted", TA);
+      for (const row of [seed("submitted", TA), tenantless]) {
         clearSpies();
-        const refused = await app.inject({ method: "POST", url: url(target.id, action), headers });
-        expect(refused.statusCode).toBe(404);
-        expect(refused.body).toBe('{"error":"not_found"}');
-        expectNoOperatorAudit();
-        expect(stored(target.id)).toEqual(target);
+        const res = await app.inject({ url: url(row.id), headers });
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toEqual({ error: "not_found" });
+        expect(stored(row.id)).toEqual(row);
+        for (const action of actions) {
+          const target = seed(action === "activate" ? "approved" : "submitted", row.tenantId);
+          if (row.tenantId === null) expect(stored(target.id).tenantId).toBeNull();
+          clearSpies();
+          const refused = await app.inject({ method: "POST", url: url(target.id, action), headers });
+          expect(refused.statusCode).toBe(404);
+          expect(refused.body).toBe('{"error":"not_found"}');
+          expectNoOperatorAudit();
+          expect(stored(target.id)).toEqual(target);
+        }
       }
     }
     const row = seed("submitted", TA);
@@ -281,6 +285,11 @@ describe("onboard admin gates and registration replies", () => {
     expect(detail.json()).toEqual({ registration: stored(row.id) });
     for (const action of ["approve", "activate", "reject"] as const) await expectStateWrite(action, bearer(taAdminKey), TA);
     delete process.env.TENANT_ENFORCE;
+    clearSpies();
+    const tenantlessDetail = await app.inject({ url: url(tenantless.id), headers: bearer(tbAdminKey) });
+    expect(tenantlessDetail.statusCode).toBe(200);
+    expect(tenantlessDetail.json()).toEqual({ registration: stored(tenantless.id) });
+    await expectStateWrite("approve", bearer(tbAdminKey), null);
     const crossTenant = seed("submitted", TA);
     clearSpies();
     const unscoped = await app.inject({ url: url(crossTenant.id), headers: bearer(tbAdminKey) });
