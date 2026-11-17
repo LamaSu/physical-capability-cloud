@@ -590,6 +590,111 @@ describe("settlement witnesses and emergency cap", () => {
     } finally { await app.close(); }
   });
 
+  it.each([
+    { state: 9n, representation: "bigint", finalState: "SETTLED_REFUNDED", refundReason: "UNKNOWN" },
+    { state: "9", representation: "string", finalState: "SETTLED_REFUNDED", refundReason: "UNKNOWN" },
+    { state: "09", representation: "zero-padded string", finalState: "SETTLED_REFUNDED", refundReason: "UNKNOWN" },
+    { state: 8n, representation: "bigint", finalState: "SETTLED_RELEASED", refundReason: null },
+    { state: "8", representation: "string", finalState: "SETTLED_RELEASED", refundReason: null },
+    { state: "08", representation: "zero-padded string", finalState: "SETTLED_RELEASED", refundReason: null },
+  ])("T22g state $state as $representation missing both settlement witnesses is UNKNOWN on a complete index", async ({ state, finalState, refundReason }) => {
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state: state as unknown as UnitState, remainingClaimCount: 0n }),
+      readRefundWitness: async () => ({}), readFinalizationWitness: async () => ({}),
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      const b = res.json();
+      expect(b.logCompleteness).toBe("complete");
+      expect(b.finalState).toBe(finalState);
+      expect(b.refundReason).toBe(refundReason);
+      expect(b.finalizedBlock).toBe("UNKNOWN");
+    } finally { await app.close(); }
+  });
+
+  it.each([
+    { state: 8n, representation: "bigint", finalState: "SETTLED_RELEASED", refundReason: null },
+    { state: "8", representation: "string", finalState: "SETTLED_RELEASED", refundReason: null },
+    { state: "08", representation: "zero-padded string", finalState: "SETTLED_RELEASED", refundReason: null },
+    { state: "09", representation: "zero-padded string", finalState: "SETTLED_REFUNDED", refundReason: "UNKNOWN" },
+  ])("T22h state $state as $representation reads the finalized block from the logs", async ({ state, finalState, refundReason }) => {
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state: state as unknown as UnitState, remainingClaimCount: 0n }),
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      const b = res.json();
+      expect(b.finalState).toBe(finalState);
+      expect(b.refundReason).toBe(refundReason);
+      expect(b.finalizedBlock).toMatchObject({ value: "120", source: "log" });
+    } finally { await app.close(); }
+  });
+
+  it.each([
+    { state: 6n, representation: "bigint", refundReason: null },
+    { state: "6", representation: "string", refundReason: null },
+    { state: "06", representation: "zero-padded string", refundReason: null },
+    { state: 7n, representation: "bigint", refundReason: "UNKNOWN" },
+    { state: "7", representation: "string", refundReason: "UNKNOWN" },
+    { state: "07", representation: "zero-padded string", refundReason: "UNKNOWN" },
+  ])("T19c state $state as $representation never reads finalization logs", async ({ state, refundReason }) => {
+    const readFinalizationWitness = vi.fn(async () => ({ allocation: { block: 120n, claimCount: 0n } }));
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state: state as unknown as UnitState, remainingClaimCount: 1n }),
+      readFinalizationWitness,
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().refundReason).toBe(refundReason);
+      expect(res.json().finalizedBlock).toBeNull();
+      expect(readFinalizationWitness).not.toHaveBeenCalled();
+    } finally { await app.close(); }
+  });
+
+  it.each([
+    { state: 1n, representation: "bigint" },
+    { state: "1", representation: "string" },
+    { state: "01", representation: "zero-padded string" },
+    { state: 2n, representation: "bigint" },
+    { state: "2", representation: "string" },
+    { state: "02", representation: "zero-padded string" },
+    { state: 3n, representation: "bigint" },
+    { state: "3", representation: "string" },
+    { state: "03", representation: "zero-padded string" },
+    { state: 4n, representation: "bigint" },
+    { state: "4", representation: "string" },
+    { state: "04", representation: "zero-padded string" },
+    { state: 5n, representation: "bigint" },
+    { state: "5", representation: "string" },
+    { state: "05", representation: "zero-padded string" },
+  ])("T19d state $state as $representation with zero remaining claims never reads either settlement witness", async ({ state }) => {
+    const readFinalizationWitness = vi.fn(async () => ({ allocation: { block: 120n, claimCount: 0n } }));
+    const readRefundWitness = vi.fn(async () => ({}));
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({
+        state: state as unknown as UnitState, remainingClaimCount: 0n, assertedAt: 1000n, challengedAt: 2000n,
+        emergencyAnchor: 5000n, assertionCutoff: 6000n,
+      }),
+      readFinalizationWitness, readRefundWitness,
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().finalState).toBeNull();
+      expect(res.json().refundReason).toBeNull();
+      expect(res.json().finalizedBlock).toBeNull();
+      expect(readFinalizationWitness).not.toHaveBeenCalled();
+      expect(readRefundWitness).not.toHaveBeenCalled();
+    } finally { await app.close(); }
+  });
+
   it("T23 inconsistent finalization anchors give no receipt DTO", async () => {
     setSettlementUnitReader(makeReader({ readFinalizationWitness: async () => ({ zeroingDischargeBlock: 150n }) }));
     const app = await buildApp();
