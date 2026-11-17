@@ -240,6 +240,10 @@ export class CourierJobsStore {
     return o ? offerToCourierJob(o) : undefined;
   }
 
+  isParty(id: string, caller: OfferCaller | null): boolean {
+    return getJobOffersStore().isParty(id, caller);
+  }
+
   getEvents(id: string): CourierJobEvent[] {
     return eventsToCourier(getJobOffersStore().getEvents(id));
   }

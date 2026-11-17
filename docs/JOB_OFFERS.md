@@ -114,7 +114,7 @@ Filters:
 | `minAmount=N` / `maxAmount=N` | no | Pricing range filter |
 | `currency=USD\|USDC\|ETH\|...` | no | Pricing currency filter |
 | `tier=0..3` | no | Assurance tier filter |
-| `within=lat,lng,miles` | no | Haversine distance filter (probes `requirements.pickup` / `.location` / `.origin` for coords) |
+| `within=lat,lng,miles` | no | Haversine distance filter (probes `requirements.pickup` / `.location` / `.origin` for coords). It uses the same rounded point the feeds serve (see Diagnostics) |
 | `limit=N` / `offset=N` | no | Pagination (default limit=100, max=1000) |
 
 Returns:
@@ -206,13 +206,40 @@ Refusals leave the offer and its event log unchanged:
 ### Diagnostics
 
 - `GET /api/job-offers/healthz` — PUBLIC. Counts per status + ISO timestamp.
-- `GET /api/job-offers/:id` — PUBLIC. The offer and its event log.
+- `GET /api/job-offers/:id` — PUBLIC. The offer and its event log: whole for
+  the offer's parties, and in the public view below for any other reader.
 
-Served offers carry no `posterDid` or `driverContact`, and served courier
-jobs carry no `postedBy` or `driverContact`. This holds for both open
-feeds, every `GET /:id` and the claim and PATCH replies. Every served
-event carries `by`, which is `"poster"`, `"claimer"` or `null`; an event
-recorded with any other value serves `null`.
+Served offers carry no `posterDid`, `driverContact` or `idempotencyKey`,
+and served courier jobs carry no `postedBy` or `driverContact`. This holds
+for every caller, on both open feeds, every `GET /:id` and the claim and
+PATCH replies. Every served event carries `by`, which is `"poster"`,
+`"claimer"` or `null`; an event recorded with any other value serves `null`.
+
+An offer's parties are its poster, its claimer and the gateway's admins.
+They read the whole offer on `GET /api/job-offers/:id`,
+`GET /api/courier-jobs/:id` and `GET /api/courier-jobs/jobs/:id`. The open
+feeds serve the public view to every reader, parties included, and those
+three reads serve it to every reader who is not a party:
+
+- `customer`, `deliveryAddress` and `raw` are removed at any depth, so a
+  courier job is served without its `raw`.
+- `pickup` and `dropoff`, at any depth, keep only their `lat` and `lng`. One
+  that is not an object is served as `{}`.
+- A `lat` or `lng` that is a finite number is rounded to 2 decimals (about
+  1 km). Any other value under those keys is removed.
+- An object or array nested more than 32 levels deep is removed.
+- An event's `before`, `after` and `payload` get the same view.
+
+The feeds' location filter uses the same rounded point the feeds serve.
+Contact under any other key, coordinates under other key names or in other
+shapes (an array of numbers, for example), the fields outside
+`requirements` (such as `serviceAreaGeofence`) and an event's other keys
+are served as posted.
+
+On those three reads, an `Authorization` header is checked as on a private
+route, and one that fails gets `401`. A session cookie that proves a
+sign-in identifies its wallet, and one that fails is ignored. A read with
+neither gets the public view.
 
 ## Per-capability-type quick-starts
 
@@ -255,6 +282,10 @@ Driver agents poll `GET /api/job-offers/open?capabilityType=courier.dispatch&wit
 Pizza-shop kernels poll `GET /api/job-offers/open?capabilityType=pizza.order&within=37.77,-122.42,2`.
 After completion they `POST /:id/events { event: "delivered" }` so the
 courier handoff is unblocked.
+
+A delivery's contact goes only under `customer` and `deliveryAddress` in
+`requirements`. Only the offer's parties read those keys (see Diagnostics).
+Contact under any other key is served to every reader as posted.
 
 ### lab.hplc (scientific protocol execution)
 
