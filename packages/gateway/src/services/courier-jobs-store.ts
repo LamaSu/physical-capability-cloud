@@ -43,6 +43,7 @@ import {
   haversineMiles,
   computeValidUntilMs,
 } from "./job-offers-store.js";
+import type { OfferCaller } from "./job-offer-event-rules.js";
 
 // Re-export everything callers might still import. Source-compat.
 export type {
@@ -267,6 +268,7 @@ export class CourierJobsStore {
 
   async create(
     input: CreateJobInput,
+    caller?: OfferCaller | null,
   ): Promise<{ ok: true; job: CourierJob; created: boolean } | (VerifyFail & { ok: false })> {
     const store = getJobOffersStore();
     const requirements: Record<string, unknown> = {
@@ -292,7 +294,7 @@ export class CourierJobsStore {
       sourceVerifyUrl: input.sourceVerifyUrl ?? null,
       requireHeartbeat: !!input.requireHeartbeat,
       posterDid: input.postedBy ?? null,
-    });
+    }, caller);
     if (!result.ok) {
       // Schema validation never fires in shim path (graceful degrade).
       if (result.reason === "schema_validation_failed") {
@@ -328,8 +330,10 @@ export class CourierJobsStore {
   async claim(
     id: string,
     claim: ClaimInput,
+    caller: OfferCaller | null,
   ): Promise<
     | { ok: true; job: CourierJob }
+    | { ok: false; reason: "missing_identity" }
     | { ok: false; reason: "not_found" }
     | { ok: false; reason: "not_open"; currentStatus: CourierJobStatus; claimedBy: string | null }
   > {
@@ -337,7 +341,7 @@ export class CourierJobsStore {
       kernelId: claim.driverAgent,    // v0.2 names this driverAgent
       etaMin: claim.etaMin,
       contact: claim.contact,
-    });
+    }, caller);
     if (!result.ok) {
       if (result.reason === "not_found") return { ok: false, reason: "not_found" };
       if (result.reason === "not_open") {
@@ -350,6 +354,7 @@ export class CourierJobsStore {
           claimedBy: result.claimedBy,
         };
       }
+      return result;
     }
     return { ok: true, job: offerToCourierJob((result as { ok: true; offer: JobOffer }).offer) };
   }
@@ -357,12 +362,21 @@ export class CourierJobsStore {
   recordEvent(
     id: string,
     event: "pickup" | "delivered" | "cancelled" | "note",
-    by: string | null,
+    caller: OfferCaller | null,
     proof: unknown,
     note: string | null,
-  ): { ok: true; status: CourierJobStatus; event: CourierJobEvent } | { ok: false; reason: "not_found" } {
-    const result = getJobOffersStore().recordEvent(id, event, by, proof, note);
-    if (!result.ok) return { ok: false, reason: "not_found" };
+  ):
+    | { ok: true; status: CourierJobStatus; event: CourierJobEvent }
+    | { ok: false; reason: "reserved_event" | "missing_identity" | "not_found" }
+    | { ok: false; reason: "not_participant"; need: "claimer" | "poster" | "poster_or_claimer" }
+    | { ok: false; reason: "invalid_transition"; currentStatus: CourierJobStatus } {
+    const result = getJobOffersStore().recordEvent(id, event, caller, proof, note);
+    if (!result.ok) {
+      if (result.reason === "invalid_transition") {
+        return { ...result, currentStatus: genericStatusToCourier(result.currentStatus) };
+      }
+      return result;
+    }
     // Re-project status: generic "in_progress" → v0.2 "in_transit"
     const o = getJobOffersStore().get(id)!;
     return { ok: true, status: offerToCourierJob(o).status, event: result.event };
@@ -370,10 +384,11 @@ export class CourierJobsStore {
 
   patch(
     id: string,
-    poster: string,
+    caller: OfferCaller | null,
     patch: Partial<Pick<CourierJob, "pickupReadyAt" | "feeUSD" | "description" | "validUntil">>,
   ):
     | { ok: true; job: CourierJob }
+    | { ok: false; reason: "missing_identity" }
     | { ok: false; reason: "not_found" }
     | { ok: false; reason: "forbidden" }
     | { ok: false; reason: "not_editable"; currentStatus: CourierJobStatus } {
@@ -381,7 +396,7 @@ export class CourierJobsStore {
     const requirements: Record<string, unknown> = {};
     if (patch.pickupReadyAt !== undefined) requirements.pickupReadyAt = patch.pickupReadyAt;
     if (patch.description !== undefined) requirements.description = patch.description;
-    const result = store.patch(id, poster, {
+    const result = store.patch(id, caller, {
       ...(patch.feeUSD !== undefined ? {
         pricing: {
           amount: patch.feeUSD ?? 0,
@@ -402,25 +417,28 @@ export class CourierJobsStore {
           currentStatus: genericStatusToCourier(result.currentStatus),
         };
       }
+      return result;
     }
     return { ok: true, job: offerToCourierJob((result as { ok: true; offer: JobOffer }).offer) };
   }
 
-  cancel(id: string, poster: string):
+  cancel(id: string, caller: OfferCaller | null):
     | { ok: true; status: CourierJobStatus }
+    | { ok: false; reason: "missing_identity" }
     | { ok: false; reason: "not_found" }
     | { ok: false; reason: "forbidden" } {
-    const result = getJobOffersStore().cancel(id, poster);
+    const result = getJobOffersStore().cancel(id, caller);
     if (!result.ok) return result;
     const o = getJobOffersStore().get(id)!;
     return { ok: true, status: offerToCourierJob(o).status };
   }
 
-  heartbeat(id: string, poster: string):
+  heartbeat(id: string, caller: OfferCaller | null):
     | { ok: true; lastHeartbeatAt: string }
+    | { ok: false; reason: "missing_identity" }
     | { ok: false; reason: "not_found" }
     | { ok: false; reason: "forbidden" } {
-    return getJobOffersStore().heartbeat(id, poster);
+    return getJobOffersStore().heartbeat(id, caller);
   }
 
   async sweep(): Promise<{ expired: number; reverified: number; autoCancelled: number }> {
