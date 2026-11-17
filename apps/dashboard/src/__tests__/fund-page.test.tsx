@@ -401,6 +401,35 @@ describe("generation boundaries", () => {
       adoptApiKey(null);
     }
   });
+  it.each(["jobId", "address", "sessionToken"] as const)(
+    "r5 F-1: a %s change during a key-restart first pass starts a new generation", async (identity) => {
+      useAuthStore.setState({ sessionKeyId: "held-session-key" });
+      authorizedFetch.mockImplementation(() => Promise.resolve(json(funding([scope("cancelled")]))));
+      try {
+        await render(); text(FUND_COPY.L12);
+        const held = deferred<Response>();
+        authorizedFetch.mockReturnValueOnce(held.promise);
+        await act(async () => {
+          adoptApiKey("first-placeholder", false);
+          useAuthStore.setState({ sessionKeyId: "first-session-key" });
+        });
+        text("Loading order…");
+        const readsBeforeIdentity = authorizedFetch.mock.calls.length;
+        await act(async () => {
+          if (identity === "jobId") root.render(<FundPage jobId="new/job" />);
+          else useAuthStore.setState(identity === "address" ? { address: "0x2222222222222222222222222222222222222222" } : { sessionToken: "new-session" });
+        });
+        expect(authorizedFetch).toHaveBeenCalledTimes(readsBeforeIdentity + 1);
+        if (identity === "jobId") expect(authorizedFetch.mock.calls.at(-1)?.[0]).toBe("/api/jobs/new%2Fjob/funding");
+        text(FUND_COPY.L12);
+        await act(async () => held.resolve(json(funding([scope("expired")]))));
+        text(FUND_COPY.L12); expect(container.textContent).not.toContain(FUND_COPY.L11); expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        await act(async () => root.unmount()); unmounted = true;
+        adoptApiKey(null);
+      }
+    },
+  );
   it("C8: generation changes cancel an existing timer", async () => {
     replyPrepare(pending, 202); await render();
     authorizedFetch.mockResolvedValue(json(funding([scope("cancelled")])));
