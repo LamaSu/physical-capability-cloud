@@ -23,6 +23,9 @@ export function FundPage({ jobId }: { jobId: string | null }) {
   const sessionToken = useAuthStore((state) => state.sessionToken);
   const keyEpoch = useAuthStore((state) => state.keyEpoch);
   const generation = useRef(0);
+  const identity = useRef({ jobId, address, sessionToken, keyEpoch });
+  const keyRestartRead = useRef<number | null>(null);
+  const stopGeneration = useRef<() => void>(() => {});
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prepareFlight = useRef<number | null>(null);
   const signInFlight = useRef(false);
@@ -34,8 +37,19 @@ export function FundPage({ jobId }: { jobId: string | null }) {
   const [signIn, setSignIn] = useState({ attempted: false, pending: false, failedBeforeMint: false, error: null as string | null, notice: null as string | null });
 
   useEffect(() => {
+    const previous = identity.current;
+    identity.current = { jobId, address, sessionToken, keyEpoch };
+    const keyRestart = previous.keyEpoch !== keyEpoch && previous.jobId === jobId &&
+      previous.address === address && previous.sessionToken === sessionToken;
+    if (keyRestart && keyRestartRead.current !== null && useAuthStore.getState().sessionKeyId !== null) {
+      // Let this read's renewal finish its retry, including a final 401 remedy.
+      keyRestartRead.current = null;
+      return;
+    }
+    stopGeneration.current();
     mounted.current = true;
     const current = ++generation.current;
+    keyRestartRead.current = keyRestart && useAuthStore.getState().sessionKeyId !== null ? current : null;
     const firstRead = Date.now();
     let firstPending: number | null = null;
     let pendingTimedOut = false;
@@ -103,7 +117,9 @@ export function FundPage({ jobId }: { jobId: string | null }) {
       }
       if (showLoading) setView({ kind: "loading" });
       try {
-        const scopes = await readFunding(jobId);
+        const scopes = await readFunding(jobId).finally(() => {
+          if (keyRestartRead.current === current && useAuthStore.getState().keyEpoch === keyEpoch) keyRestartRead.current = null;
+        });
         if (!active()) return;
         const newest = scopes.at(-1);
         if (!newest) message(FUND_COPY.L22);
@@ -142,12 +158,14 @@ export function FundPage({ jobId }: { jobId: string | null }) {
       });
     };
     void loadFunding();
-    return () => {
+    stopGeneration.current = () => {
       mounted.current = false;
       generation.current++;
       stopTimer();
     };
   }, [jobId, address, sessionToken, keyEpoch]);
+
+  useEffect(() => () => stopGeneration.current(), []);
 
   async function signInAgain(login: () => Promise<void>) {
     if (signInFlight.current) return;
@@ -201,7 +219,7 @@ export function FundPage({ jobId }: { jobId: string | null }) {
             <dt>Fund by</dt><dd><time dateTime={view.terms.fundBy}>{view.terms.fundBy}</time></dd>
           </dl>
           <p>{FUND_COPY.L20}</p>
-          <p>{FUND_COPY.L25}</p>
+          <p>{FUND_COPY.L26}</p>
           <p>{PCC_BETA_STATUS}</p>
           <button className={BUTTON} onClick={() => reload.current()}>Check again</button>
         </>}

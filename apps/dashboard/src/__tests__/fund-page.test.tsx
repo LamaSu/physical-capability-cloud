@@ -4,16 +4,38 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import golden from "../../../../packages/gateway/src/__tests__/fixtures/vnext-dry-run-prepare-v1.payload.json";
 
-const { authorizedFetch, login, sdkSpies, authMount, sharedMount } = vi.hoisted(() => ({
+const { authorizedFetch, login, sdkSpies, authMount, sharedMount, authModules, wallet } = vi.hoisted(() => ({
   authorizedFetch: vi.fn(), login: vi.fn(), sdkSpies: [] as ReturnType<typeof vi.fn>[],
   authMount: { clearError: false }, sharedMount: { key: 0 },
+  authModules: { real: false },
+  wallet: {
+    address: "0x1111111111111111111111111111111111111111" as `0x${string}`,
+    signMessageAsync: vi.fn(async () => "signed"),
+    disconnect: vi.fn(),
+    onDisconnect: undefined as (() => void) | undefined,
+  },
 }));
-vi.mock("../lib/authorized-fetch.js", async (original) => ({ ...await original<typeof import("../lib/authorized-fetch.js")>(), authorizedFetch }));
-vi.mock("../hooks/use-auth.js", () => ({ useAuth: () => {
-  const state = useAuthStore();
-  React.useEffect(() => { if (authMount.clearError) useAuthStore.setState({ error: null }); }, []);
-  return { ...state, isConnected: true, login };
-} }));
+vi.mock("../lib/authorized-fetch.js", async (original) => {
+  const real = await original<typeof import("../lib/authorized-fetch.js")>();
+  return { ...real, authorizedFetch: (...args: Parameters<typeof real.authorizedFetch>) =>
+    authModules.real ? real.authorizedFetch(...args) : authorizedFetch(...args) };
+});
+vi.mock("../hooks/use-auth.js", async (original) => {
+  const real = await original<typeof import("../hooks/use-auth.js")>();
+  return { useAuth: () => {
+    if (authModules.real) return real.useAuth();
+    const state = useAuthStore();
+    React.useEffect(() => { if (authMount.clearError) useAuthStore.setState({ error: null }); }, []);
+    return { ...state, isConnected: true, login };
+  } };
+});
+vi.mock("wagmi", () => ({
+  useAccount: () => ({ address: wallet.address, isConnected: true, chainId: 1 }),
+  useSignMessage: () => ({ signMessageAsync: wallet.signMessageAsync }),
+  useConnect: () => ({ connectors: [], connect: vi.fn() }),
+  useDisconnect: () => ({ disconnect: wallet.disconnect }),
+  useConnectionEffect: ({ onDisconnect }: { onDisconnect: () => void }) => { wallet.onDisconnect = onDisconnect; },
+}));
 vi.mock("../components/ConnectWallet.js", () => ({
   ConnectWallet: () => <span>Connect wallet</span>,
   SignInAgainButton: ({ login: signIn, isVerifying }: { login: () => Promise<void>; isVerifying: boolean }) =>
@@ -68,11 +90,13 @@ beforeEach(() => {
   originalAuth = useAuthStore.getState();
   useAuthStore.setState({ address: "0x1111111111111111111111111111111111111111", sessionToken: "initial-session", isAuthenticated: true, error: null, authNotice: null });
   authMount.clearError = false; sharedMount.key = 0;
+  authModules.real = false; wallet.signMessageAsync.mockClear(); wallet.disconnect.mockClear(); wallet.onDisconnect = undefined;
   container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container); unmounted = false;
 });
 afterEach(async () => {
   if (!unmounted) await act(async () => root.unmount());
   container.remove(); useAuthStore.setState(originalAuth);
+  authModules.real = false;
   for (const spy of sdkSpies) expect(spy, "C12: no SDK export is called").not.toHaveBeenCalled();
   vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks();
 });
@@ -193,6 +217,7 @@ describe("requests and newest scope", () => {
     const newest = { ...scope("funded_verified", "new"), verification: { escrowAddress: golden.escrow, fundedAt: NOW / 1000 } };
     authorizedFetch.mockResolvedValueOnce(json(funding([scope("awaiting_funding", "old"), newest])));
     await render(); text(FUND_COPY.L17); text(golden.escrow); text(new Date(NOW).toISOString());
+    expect(container.textContent).not.toContain(FUND_COPY.L26);
     expect(prepares()).toHaveLength(0); await stoppedForTwoHours();
   });
   it("C4: Check again on unknown only re-runs R1", async () => {
@@ -248,6 +273,18 @@ describe("time-based polls", () => {
     await advance(5000); text(FUND_COPY.L10b);
     await act(async () => held.resolve(json(terms()))); text(FUND_COPY.L10b); await stoppedForTwoHours();
   });
+  it.each([410, 401])("NIT-2: a late %s cannot replace the in-flight poll deadline", async (status) => {
+    replyPrepare(pending, 202); await render(); await advance(590_000);
+    const held = deferred<Response>(); authorizedFetch.mockReturnValueOnce(held.promise);
+    await advance(5000); text(FUND_COPY.L9); expect(vi.getTimerCount()).toBe(1);
+    await advance(5000); text(FUND_COPY.L10b);
+    await act(async () => held.resolve(json(status === 410 ? { error: "prepare_expired" } : {}, status)));
+    text(FUND_COPY.L10b);
+    for (const absent of [FUND_COPY.L10a, SIGN_IN_EXPIRED, FUND_COPY.L4]) expect(container.textContent).not.toContain(absent);
+    expect([...container.querySelectorAll("button")].some((item) => item.textContent === "Sign in again")).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    await stoppedForTwoHours();
+  });
   it("C7: only one poll timer is live and unmount cancels it", async () => {
     replyPrepare(pending, 202); await render(); expect(vi.getTimerCount()).toBe(1);
     await advance(10_000); expect(vi.getTimerCount()).toBe(1);
@@ -257,21 +294,29 @@ describe("time-based polls", () => {
 });
 
 describe("generation boundaries", () => {
-  it.each((["jobId", "address", "sessionToken"] as const).flatMap((identity) => (["funding", "prepare", "post"] as const).map((request) => ({ identity, request }))))(
+  it.each((["jobId", "address", "sessionToken", "keyEpoch"] as const).flatMap((identity) => (["funding", "prepare", "post"] as const).map((request) => ({ identity, request }))))(
     "C8: drops late $request after $identity changes", async ({ identity, request }) => {
       const held = deferred<Response>();
       if (request === "funding") authorizedFetch.mockReturnValueOnce(held.promise);
       if (request === "prepare") authorizedFetch.mockResolvedValueOnce(json(funding())).mockReturnValueOnce(held.promise);
-      await render();
-      if (request === "post") { authorizedFetch.mockReturnValueOnce(held.promise); await click(FUND_COPY.L8); }
-      authorizedFetch.mockResolvedValue(json(funding([scope("cancelled")])));
-      await act(async () => {
-        if (identity === "jobId") root.render(<FundPage jobId="new/job" />);
-        else useAuthStore.setState(identity === "address" ? { address: "0x2222222222222222222222222222222222222222" } : { sessionToken: "new-session" });
-      });
-      text(FUND_COPY.L12);
-      await act(async () => held.resolve(request === "funding" ? json(funding([scope("prepared")])) : json(pending, 202)));
-      text(FUND_COPY.L12); expect(container.textContent).not.toContain(FUND_COPY.L9); expect(vi.getTimerCount()).toBe(0);
+      try {
+        await render();
+        if (request === "post") { authorizedFetch.mockReturnValueOnce(held.promise); await click(FUND_COPY.L8); }
+        authorizedFetch.mockResolvedValue(json(funding([scope("cancelled")])));
+        await act(async () => {
+          if (identity === "jobId") root.render(<FundPage jobId="new/job" />);
+          else if (identity === "keyEpoch") adoptApiKey("placeholder", false);
+          else useAuthStore.setState(identity === "address" ? { address: "0x2222222222222222222222222222222222222222" } : { sessionToken: "new-session" });
+        });
+        text(FUND_COPY.L12);
+        await act(async () => held.resolve(request === "funding" ? json(funding([scope("prepared")])) : json(pending, 202)));
+        text(FUND_COPY.L12); expect(container.textContent).not.toContain(FUND_COPY.L9); expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        if (identity === "keyEpoch") {
+          await act(async () => root.unmount()); unmounted = true;
+          adoptApiKey(null);
+        }
+      }
     },
   );
   it("C8: generation changes cancel an existing timer", async () => {
@@ -293,7 +338,11 @@ describe("served terms and display boundary", () => {
   it("C9: blocks automatic capture on the root", async () => { await render(); expect(container.querySelector("main.ph-no-capture.sentry-block")).not.toBeNull(); });
   it("C10: the gateway golden displays only amount, escrow and fund-by", async () => {
     vi.setSystemTime((Number(golden.expiry) - Number(DEFAULT_MARGIN_SECONDS) - 1) * 1000);
-    replyPrepare(golden); await render(); text(FUND_COPY.L19); text(FUND_COPY.L20); text(FUND_COPY.L25); text(PCC_BETA_STATUS);
+    replyPrepare(golden); await render(); text(FUND_COPY.L19); text(FUND_COPY.L20); text(FUND_COPY.L26); text(PCC_BETA_STATUS);
+    text("Don't send tokens to the escrow address yourself. A transfer won't fund this order.");
+    const content = container.textContent!;
+    expect(content.indexOf(FUND_COPY.L20)).toBeLessThan(content.indexOf(FUND_COPY.L26));
+    expect(content.indexOf(FUND_COPY.L26)).toBeLessThan(content.indexOf(PCC_BETA_STATUS));
     const { formatUnits } = await import("viem");
     text(`${formatUnits(BigInt(golden.totalGross), 6)} test USDC`); text(golden.escrow);
     text(new Date((Number(golden.expiry) - Number(DEFAULT_MARGIN_SECONDS)) * 1000).toISOString());
@@ -352,7 +401,8 @@ describe("sign-in recovery uses a new session token", () => {
       useAuthStore.setState({ sessionToken: "new-session" });
       await mint.promise;
       authorizedFetch.mockImplementation(() => Promise.resolve(json(funding([scope("cancelled")]))));
-      adoptApiKey("placeholder");
+      adoptApiKey("placeholder", false);
+      useAuthStore.setState({ sessionKeyId: "minted-session-key" });
     });
     try {
       await render(); text(SIGN_IN_EXPIRED);
@@ -394,6 +444,96 @@ describe("sign-in recovery uses a new session token", () => {
     expect(container.textContent).not.toContain("Mint refusal notice");
     await act(async () => held.resolve()); text("Mint refusal notice"); text(SIGN_IN_EXPIRED);
     expect(authorizedFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("real auth funding recovery", () => {
+  const fundingPath = "/api/jobs/job%2Fone/funding";
+  const mintPath = "/api/auth/session-key";
+  const pathOf = (input: RequestInfo | URL) => new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, window.location.origin).pathname;
+  const mintReply = (number: number) => json({
+    operator_id: wallet.address, api_key: `placeholder-mint-${number}`, key_id: `session-key-${number}`,
+    expires_at: new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString(),
+  }, 201);
+
+  it("F-A: a 401 on the read a key change started ends at the remedy", async () => {
+    authModules.real = true;
+    adoptApiKey("held-placeholder", false);
+    useAuthStore.setState({ sessionKeyId: "held-session-key" });
+    const step = 10;
+    const fetchStub = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
+      const path = pathOf(input);
+      await new Promise<void>((resolve) => setTimeout(resolve, step));
+      if (path === "/api/auth/me") return json({ address: wallet.address });
+      if (path === "/api/auth/nonce") return json({ nonce: "nonce" });
+      if (path === "/api/auth/verify") return json({ token: "signed-in-session", address: wallet.address });
+      if (path === mintPath && init.method === "POST") return mintReply(mints());
+      if (path === fundingPath) return json({}, 401);
+      throw new Error("Unexpected auth recovery request");
+    });
+    const mints = () => fetchStub.mock.calls.filter(([input, init]) => pathOf(input) === mintPath && init?.method === "POST").length;
+    const reads = () => fetchStub.mock.calls.filter(([input]) => pathOf(input) === fundingPath).length;
+    vi.stubGlobal("fetch", fetchStub);
+    try {
+      await render();
+      let readsAtRemedy: number | null = null;
+      for (let elapsed = 0; elapsed < 2000; elapsed += step) {
+        await advance(step);
+        if (readsAtRemedy === null && container.textContent?.includes(SIGN_IN_EXPIRED)) readsAtRemedy = reads();
+      }
+      expect(mints()).toBeLessThanOrEqual(2);
+      text(SIGN_IN_EXPIRED); expect(button("Sign in again")).toBeDefined();
+      expect(readsAtRemedy).not.toBeNull(); expect(reads()).toBe(readsAtRemedy);
+    } finally {
+      await act(async () => root.unmount()); unmounted = true;
+      adoptApiKey(null);
+    }
+  });
+
+  it.each(["before", "after"] as const)("F-A control: one Sign in again from a cookie-only session recovers (401 %s mint)", async (order) => {
+    authModules.real = true;
+    adoptApiKey(null);
+    useAuthStore.setState({ address: wallet.address, sessionToken: null, sessionKeyId: null, isAuthenticated: false });
+    const mint = deferred<Response>();
+    const tokenRead = deferred<Response>();
+    let verified = false;
+    const fetchStub = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
+      const path = pathOf(input);
+      if (path === "/api/auth/me") return json({ address: wallet.address });
+      if (path === "/api/auth/nonce") return json({ nonce: "nonce" });
+      if (path === "/api/auth/verify") {
+        verified = true;
+        return json({ token: "signed-in-session", address: wallet.address });
+      }
+      if (path === mintPath && init.method === "POST") return mint.promise;
+      if (path === fundingPath) {
+        if (new Headers(init.headers).get("Authorization") === "Bearer placeholder-mint-1") return json(funding([scope("cancelled")]));
+        if (verified && order === "after") return tokenRead.promise;
+        return json({}, 401);
+      }
+      throw new Error("Unexpected auth recovery request");
+    });
+    vi.stubGlobal("fetch", fetchStub);
+    try {
+      await render(); text(SIGN_IN_EXPIRED);
+      const readsBeforeClick = fetchStub.mock.calls.filter(([input]) => pathOf(input) === fundingPath).length;
+      await click("Sign in again");
+      expect(fetchStub.mock.calls.filter(([input]) => pathOf(input) === fundingPath)).toHaveLength(readsBeforeClick + 1);
+      if (order === "before") text(SIGN_IN_EXPIRED);
+      else text("Loading order…");
+      await act(async () => mint.resolve(mintReply(1)));
+      text(FUND_COPY.L12); expect(container.textContent).not.toContain(SIGN_IN_EXPIRED);
+      if (order === "after") {
+        await act(async () => tokenRead.resolve(json({}, 401)));
+        text(FUND_COPY.L12); expect(container.textContent).not.toContain(SIGN_IN_EXPIRED);
+      }
+      expect(fetchStub.mock.calls.filter(([input, init]) => pathOf(input) === mintPath && init?.method === "POST")).toHaveLength(1);
+      expect(wallet.signMessageAsync).toHaveBeenCalledTimes(1);
+      expect(fetchStub.mock.calls.filter(([input, init]) => pathOf(input).endsWith("/prepare") && init?.method === "POST")).toHaveLength(0);
+    } finally {
+      await act(async () => root.unmount()); unmounted = true;
+      adoptApiKey(null);
+    }
   });
 });
 

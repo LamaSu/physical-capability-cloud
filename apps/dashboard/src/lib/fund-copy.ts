@@ -20,7 +20,7 @@ export const FUND_COPY = {
   L22: "No payment has been set up for this order yet.",
   L23: "PCC couldn't read this order's terms. Nothing was sent.",
   L24: "PCC funds this order another way. There's nothing to pay here.",
-  L25: "Don't send tokens to the escrow address yourself. A transfer won't fund this order.",
+  L26: "Don't send tokens to the escrow address yourself. A transfer won't fund this order.",
 } as const;
 
 // Both the status and code must match the gateway's closed refusal table.
