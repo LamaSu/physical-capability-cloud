@@ -319,6 +319,30 @@ describe("generation boundaries", () => {
       }
     },
   );
+  it("NIT-5: a key-only change after a key-restart read has settled restarts the page", async () => {
+    useAuthStore.setState({ sessionKeyId: "held-session-key" });
+    authorizedFetch.mockImplementation(() => Promise.resolve(json(funding([scope("cancelled")]))));
+    try {
+      await render(); text(FUND_COPY.L12);
+      const initialReads = authorizedFetch.mock.calls.length;
+      await act(async () => {
+        adoptApiKey("first-placeholder", false);
+        useAuthStore.setState({ sessionKeyId: "first-session-key" });
+      });
+      text(FUND_COPY.L12); expect(authorizedFetch).toHaveBeenCalledTimes(initialReads + 1);
+      authorizedFetch.mockResolvedValue(json(funding([scope("expired")])));
+      const readsBeforeSecondKey = authorizedFetch.mock.calls.length;
+      await act(async () => {
+        adoptApiKey("second-placeholder", false);
+        useAuthStore.setState({ sessionKeyId: "second-session-key" });
+      });
+      text(FUND_COPY.L11); expect(authorizedFetch).toHaveBeenCalledTimes(readsBeforeSecondKey + 1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await act(async () => root.unmount()); unmounted = true;
+      adoptApiKey(null);
+    }
+  });
   it("C8: generation changes cancel an existing timer", async () => {
     replyPrepare(pending, 202); await render();
     authorizedFetch.mockResolvedValue(json(funding([scope("cancelled")])));
@@ -416,6 +440,37 @@ describe("sign-in recovery uses a new session token", () => {
       adoptApiKey(null);
     }
   });
+  it("NIT-6: with an old session key id held, a key that lands during the token-change read restarts the page", async () => {
+    const mint = deferred<void>();
+    const tokenRead = deferred<Response>();
+    useAuthStore.setState({ sessionToken: "cookie", sessionKeyId: "held-session-key" });
+    authorizedFetch.mockResolvedValue(json({}, 401));
+    login.mockImplementation(async () => {
+      useAuthStore.setState({ sessionToken: "new-session" });
+      await mint.promise;
+      authorizedFetch.mockResolvedValue(json(funding([scope("cancelled")])));
+      adoptApiKey("placeholder", false);
+      useAuthStore.setState({ sessionKeyId: "minted-session-key" });
+    });
+    try {
+      await render(); text(SIGN_IN_EXPIRED);
+      authorizedFetch.mockReturnValueOnce(tokenRead.promise);
+      await click("Sign in again");
+      text("Loading order…"); expect(container.textContent).not.toContain(FUND_COPY.L4);
+      const readsBeforeKey = authorizedFetch.mock.calls.length;
+      expect(readsBeforeKey).toBe(2);
+      await act(async () => mint.resolve());
+      text(FUND_COPY.L12); expect(container.textContent).not.toContain(FUND_COPY.L4);
+      expect(authorizedFetch).toHaveBeenCalledTimes(readsBeforeKey + 1);
+      await act(async () => tokenRead.resolve(json({}, 500)));
+      text(FUND_COPY.L12); expect(container.textContent).not.toContain(FUND_COPY.L4);
+      expect(authorizedFetch).toHaveBeenCalledTimes(readsBeforeKey + 1);
+      expect(login).toHaveBeenCalledTimes(1); expect(posts()).toHaveLength(0);
+    } finally {
+      await act(async () => root.unmount()); unmounted = true;
+      adoptApiKey(null);
+    }
+  });
   it("C16: gateway stop survives re-sign and no local stop panel appears", async () => {
     replyPrepare({}, 401); await render(); text(SIGN_IN_EXPIRED);
     replyPrepare({ error: "kernel_emergency_stopped" }, 409);
@@ -484,6 +539,85 @@ describe("real auth funding recovery", () => {
       expect(mints()).toBeLessThanOrEqual(2);
       text(SIGN_IN_EXPIRED); expect(button("Sign in again")).toBeDefined();
       expect(readsAtRemedy).not.toBeNull(); expect(reads()).toBe(readsAtRemedy);
+    } finally {
+      await act(async () => root.unmount()); unmounted = true;
+      adoptApiKey(null);
+    }
+  });
+
+  it("F-D: a 401 on the prepare read a key change's generation sends ends at the remedy", async () => {
+    authModules.real = true;
+    adoptApiKey("held-placeholder", false);
+    useAuthStore.setState({ sessionKeyId: "held-session-key" });
+    const preparePath = "/api/buyer-funding/scopes/scope%2Fone/prepare";
+    const step = 10;
+    const fetchStub = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
+      const path = pathOf(input);
+      await new Promise<void>((resolve) => setTimeout(resolve, step));
+      if (path === "/api/auth/me") return json({ address: wallet.address });
+      if (path === mintPath && init.method === "POST") return mintReply(mints());
+      if (path === fundingPath && init.method === "GET") return json(funding());
+      if (path === preparePath && init.method === "GET") return json({}, 401);
+      throw new Error("Unexpected auth recovery request");
+    });
+    const mints = () => fetchStub.mock.calls.filter(([input, init]) => pathOf(input) === mintPath && init?.method === "POST").length;
+    const reads = () => fetchStub.mock.calls.filter(([input, init]) => pathOf(input) === fundingPath && init?.method === "GET").length;
+    const prepareReads = () => fetchStub.mock.calls.filter(([input, init]) => pathOf(input) === preparePath && init?.method === "GET").length;
+    vi.stubGlobal("fetch", fetchStub);
+    try {
+      await render();
+      let readsAtRemedy: { funding: number; prepare: number } | null = null;
+      for (let elapsed = 0; elapsed < 2000; elapsed += step) {
+        await advance(step);
+        if (readsAtRemedy === null && container.textContent?.includes(SIGN_IN_EXPIRED)) {
+          readsAtRemedy = { funding: reads(), prepare: prepareReads() };
+        }
+      }
+      expect(mints()).toBeLessThanOrEqual(2);
+      text(SIGN_IN_EXPIRED); expect(button("Sign in again")).toBeDefined();
+      expect(readsAtRemedy).not.toBeNull();
+      expect(reads()).toBe(readsAtRemedy?.funding); expect(prepareReads()).toBe(readsAtRemedy?.prepare);
+      expect(fetchStub.mock.calls.filter(([input, init]) => pathOf(input) === preparePath && init?.method === "POST")).toHaveLength(0);
+    } finally {
+      await act(async () => root.unmount()); unmounted = true;
+      adoptApiKey(null);
+    }
+  });
+
+  it("NIT-4: a key that lands after the F-A remedy restarts the page", async () => {
+    authModules.real = true;
+    adoptApiKey("held-placeholder", false);
+    useAuthStore.setState({ sessionKeyId: "held-session-key" });
+    const step = 10;
+    let recovered = false;
+    const fetchStub = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
+      const path = pathOf(input);
+      await new Promise<void>((resolve) => setTimeout(resolve, step));
+      if (path === "/api/auth/me") return json({ address: wallet.address });
+      if (path === "/api/auth/nonce") return json({ nonce: "nonce" });
+      if (path === "/api/auth/verify") return json({ token: "signed-in-session", address: wallet.address });
+      if (path === mintPath && init.method === "POST") return mintReply(mints());
+      if (path === fundingPath) return recovered ? json(funding([scope("cancelled")])) : json({}, 401);
+      throw new Error("Unexpected auth recovery request");
+    });
+    const mints = () => fetchStub.mock.calls.filter(([input, init]) => pathOf(input) === mintPath && init?.method === "POST").length;
+    const reads = () => fetchStub.mock.calls.filter(([input, init]) => pathOf(input) === fundingPath && init?.method === "GET").length;
+    vi.stubGlobal("fetch", fetchStub);
+    try {
+      await render();
+      for (let elapsed = 0; elapsed < 2000 && !container.textContent?.includes(SIGN_IN_EXPIRED); elapsed += step) {
+        await advance(step);
+      }
+      text(SIGN_IN_EXPIRED);
+      recovered = true;
+      const readsBeforeKey = reads();
+      await act(async () => {
+        adoptApiKey("landed-placeholder", false);
+        useAuthStore.setState({ sessionKeyId: "landed-session-key" });
+      });
+      await advance(step);
+      text(FUND_COPY.L12); expect(container.textContent).not.toContain(SIGN_IN_EXPIRED);
+      expect(reads()).toBe(readsBeforeKey + 1);
     } finally {
       await act(async () => root.unmount()); unmounted = true;
       adoptApiKey(null);

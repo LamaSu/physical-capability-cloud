@@ -117,9 +117,7 @@ export function FundPage({ jobId }: { jobId: string | null }) {
       }
       if (showLoading) setView({ kind: "loading" });
       try {
-        const scopes = await readFunding(jobId).finally(() => {
-          if (keyRestartRead.current === current && useAuthStore.getState().keyEpoch === keyEpoch) keyRestartRead.current = null;
-        });
+        const scopes = await readFunding(jobId);
         if (!active()) return;
         const newest = scopes.at(-1);
         if (!newest) message(FUND_COPY.L22);
@@ -157,7 +155,9 @@ export function FundPage({ jobId }: { jobId: string | null }) {
         }
       });
     };
-    void loadFunding();
+    void loadFunding().finally(() => {
+      if (keyRestartRead.current === current && useAuthStore.getState().keyEpoch === keyEpoch) keyRestartRead.current = null;
+    });
     stopGeneration.current = () => {
       mounted.current = false;
       generation.current++;
