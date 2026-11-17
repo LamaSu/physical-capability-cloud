@@ -869,8 +869,9 @@ const kernelAgent = new KernelAgent(bus, {
 
   // KernelAgent runs the adapters you pass (yours from Step 3). Until it
   // passes inputHash, inputData and tierLadder, a prepare-path machine's
-  // jobs are refused (see §7.1). In each job that runs, the sensor and
-  // camera read their devices. A slot you leave out runs a PCC mock device.
+  // jobs are refused (see §7.1). It runs every job at tier 1, so in each job
+  // that runs the sensor reads its device and the camera captures nothing.
+  // A slot you leave out runs a PCC mock device.
   adapters: { machine, sensors: [powerSensor], camera },
 
   // Machine profiles for the contract builder (see Step 5)
