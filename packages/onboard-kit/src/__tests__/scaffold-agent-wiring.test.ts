@@ -55,6 +55,7 @@ describe("scaffold agent wiring", () => {
       ["user:secret@10.0.0.7:502", "10.0.0.7:502", "user:secret@"],
       ["http://user:p@ss@10.0.0.8/x", "http://10.0.0.8/x", "user:p@ss@"],
       ["http://token@10.0.0.9", "http://10.0.0.9", "token@"],
+      ["Svn+SSH-2.x://user:secret@10.0.0.10", "Svn+SSH-2.x://10.0.0.10", "user:secret@"],
       ["http://10.0.0.5:8080/a@b", "http://10.0.0.5:8080/a@b", undefined],
       ["http://10.0.0.5:8080?x=a@b", "http://10.0.0.5:8080?x=a@b", undefined],
       ["http://10.0.0.5:8080#a@b", "http://10.0.0.5:8080#a@b", undefined],
