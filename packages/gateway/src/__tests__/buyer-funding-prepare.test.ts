@@ -199,6 +199,19 @@ describe("buyerFundingSelection", () => {
     expect(sessionRow(q.id).transitions.at(-1)?.reason).toBe("settlement_failed:preflight_no_escrow");
     expect(allCounts()).toEqual(before);
   });
+  it("SEL11 signer: retry-settlement preserves a selection refusal with a gateway signer set", async () => {
+    vi.stubEnv("MOCK_SETTLEMENT", undefined);
+    vi.stubEnv("PCC_GATEWAY_PRIVATE_KEY", generatePrivateKey());
+    selectUnit(); vi.stubEnv("PCC_VNEXT_RECORD_NETWORK", undefined);
+    const q = await selectionFailure("buyer_funding_unavailable");
+    const before = allCounts();
+    const response = await negotiation.inject({ method: "POST", url: `/api/negotiate/session/${q.id}/retry-settlement`, headers: asKey(BUYER) });
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toEqual({ error: "settlement_failed", message: "buyer_funding_unavailable", sessionId: q.id, jobId: sessionRow(q.id).jobId });
+    expect(sessionRow(q.id).status).toBe("settlement_failed");
+    expect(sessionRow(q.id).transitions.at(-1)?.reason).toBe("settlement_failed:preflight_no_escrow");
+    expect(allCounts()).toEqual(before); expect(transportRequests).toEqual([]);
+  });
   it("BuyerFundingSelectionError carries only its closed code", () => {
     const e = new BuyerFundingSelectionError("buyer_not_wallet"); expect(e.name).toBe("BuyerFundingSelectionError"); expect(e.message).toBe(e.code);
   });
@@ -338,6 +351,22 @@ it("WIN8b: prepareBuyerFunding returns the transaction clock at the serve margin
   expect(answer.atMs).toBe(atMs);
   expect(prepareRowAnswer(answer.row, answer.atMs!)).toEqual({ status: 202, body: pendingBody });
 });
+it("WIN8c: prepareBuyerFunding refuses one millisecond past the serve margin edge", async () => {
+  const j = seedPrepare({ scopeExp: C + 2800n }); const r = prepareReads(C);
+  const atMs = Number(C + 100n) * 1000; vi.setSystemTime(atMs);
+  const now = vi.fn(() => new Date(atMs + 1)).mockImplementationOnce(() => new Date(atMs));
+  const before = counts(), session = sessionRow(j.sessionId);
+  expect(await prepareBuyerFunding(j.scopeId, { ...r.deps, now })).toEqual({ kind: "refused", code: "window_too_short" });
+  expect(counts()).toEqual(before); expect(sessionRow(j.sessionId)).toEqual(session);
+});
+it("WIN8d: prepareBuyerFunding answers a new row with the transaction's clock read", async () => {
+  const j = seedPrepare({ scopeExp: C + 2800n }); const r = prepareReads(C);
+  const atMs = Number(C + 100n) * 1000; vi.setSystemTime(atMs);
+  const now = vi.fn(() => new Date(atMs)).mockImplementationOnce(() => new Date(atMs - 1000));
+  const answer = await prepareBuyerFunding(j.scopeId, { ...r.deps, now });
+  expect(answer.kind).toBe("answer"); if (answer.kind !== "answer") throw new Error(answer.code);
+  expect(answer.atMs).toBe(atMs); expect(now).toHaveBeenCalledTimes(2);
+});
 
 function barrier(reads: ReturnType<typeof prepareReads>[], change?: () => void) {
   let resolve!: () => void; let reached!: () => void; let count = 0;
@@ -366,6 +395,24 @@ describe("prepareBuyerFunding transaction", () => {
     await deferred.ready; deferred.resolve(); const results = await Promise.all(requests);
     expect(results.map(r => r.kind === "answer" && r.row.id)).toEqual([fundingPrepareRow(j.scopeId)!.id, fundingPrepareRow(j.scopeId)!.id]);
     expect(counts()).toEqual(before.map(n => n + 1));
+  });
+  it("WIN8e: prepareBuyerFunding gives the transaction time only to the racing call that inserts", async () => {
+    const j = seedPrepare(); const a = prepareReads(), b = prepareReads(); const deferred = barrier([a, b]);
+    const requests = [prepareBuyerFunding(j.scopeId, a.deps), prepareBuyerFunding(j.scopeId, b.deps)];
+    await deferred.ready; deferred.resolve(); const results = await Promise.all(requests);
+    expect(results.map(r => r.kind)).toEqual(["answer", "answer"]);
+    expect(results.filter(r => r.kind === "answer" && r.atMs !== undefined)).toHaveLength(1);
+  });
+  it("WIN8f: prepareBuyerFunding refuses scope_expired when the scope ends during the chain reads", async () => {
+    const j = seedPrepare({ scopeExp: C + 2800n }); const r = prepareReads(C);
+    const atMs = Number(C + 2800n) * 1000;
+    const deferred = barrier([r], () => vi.setSystemTime(atMs));
+    const now = vi.fn(() => new Date(atMs)).mockImplementationOnce(() => new Date(Number(C) * 1000));
+    const before = counts(), session = sessionRow(j.sessionId);
+    const request = prepareBuyerFunding(j.scopeId, { ...r.deps, now });
+    await deferred.ready; deferred.resolve();
+    expect(await request).toEqual({ kind: "refused", code: "scope_expired" });
+    expect(counts()).toEqual(before); expect(sessionRow(j.sessionId)).toEqual(session);
   });
   for (const kind of ["status", "stop", "selection", "marker", "expiry"]) it(`TX3: transaction rechecks ${kind} after reads`, async () => {
     const j = seedPrepare(); const r = prepareReads();
@@ -488,6 +535,13 @@ describe("servePrepareSignature", () => {
     expect(fundingPrepareRow(j.scopeId)!.state).toBe(kind === "expired" ? "expired" : "pending_signature");
     if (kind === "expired") expect(fundingPrepareRow(j.scopeId)!.endedAt).toBe(new Date().toISOString());
     if (kind === "version") expect(fundingPrepareRow(j.scopeId)).toMatchObject({ operatorSignature: null, servedPayload: null, signatureVerifiedAt: null });
+  });
+  for (const version of ["v2", "v3", null, "v4"]) it(`SIG6 version ${String(version)}: servePrepareSignature refuses a marker escrow of version ${String(version)}`, async () => {
+    const j = seedPrepare(); await prepare(j);
+    db().update(schema.escrows).set({ version }).where(eq(schema.escrows.id, marker(j).id)).run();
+    expect(await servePrepareSignature(j.scopeId, good)).toEqual({ status: 409,
+      body: { error: "escrow_not_created", message: "The marker escrow is not created." } });
+    expect(fundingPrepareRow(j.scopeId)).toMatchObject({ state: "pending_signature", operatorSignature: null, servedPayload: null, signatureVerifiedAt: null });
   });
   it("SIG7: prepareRowAnswer includes the exact serving margin edge", async () => {
     const j = seedPrepare(); const row = await prepare(j); const edge = (row.expiry - 600) * 1000;

@@ -24,6 +24,7 @@ import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { negotiationRoutes } from "../routes/negotiation.js";
 import { initStore, closeStore, getStore, getRepos } from "../db.js";
 import { schema, eq } from "@pcc/store";
+import { generatePrivateKey } from "viem/accounts";
 
 const { negotiationSessions } = schema;
 
@@ -269,6 +270,31 @@ describe("settlement_failed session — status transition + safe recovery", () =
     // Refused — no mint, session stays settlement_failed for manual resolution / cancel.
     expect(escrowCount()).toBe(base);
     expect(sessionRow(id)!.status).toBe("settlement_failed");
+  });
+
+  it("a real-settlement commit failure with the gateway key set is classed ambiguous, and its retry fails closed", async () => {
+    const id = await toReview(app, "key-set-failure");
+    const base = escrowCount();
+    vi.stubEnv("MOCK_SETTLEMENT", "false");
+    vi.stubEnv("PCC_GATEWAY_PRIVATE_KEY", generatePrivateKey());
+    vi.stubEnv("PCC_NETWORK", "no-such-network");
+
+    try {
+      const res = await commit(app, id);
+      expect(res.statusCode).toBe(502);
+      expect(res.json().error).toBe("settlement_failed");
+      expect(res.json().message).toContain("Unknown network: no-such-network");
+      const failure = (sessionRow(id)!.transitions as any[])
+        .filter((t) => t.to === "settlement_failed").at(-1);
+      expect(failure?.reason).toBe("settlement_failed:onchain_maybe_minted");
+      const retried = await retry(app, id);
+      expect(retried.statusCode).toBe(409);
+      expect(retried.json().error).toBe("settlement_unrecoverable_ambiguous");
+      expect(escrowCount()).toBe(base);
+      expect(sessionRow(id)!.status).toBe("settlement_failed");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   // ── 4. retry: no escrow + provably pre-flight failure → safe to re-mint ───
