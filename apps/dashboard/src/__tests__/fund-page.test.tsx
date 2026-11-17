@@ -285,6 +285,15 @@ describe("time-based polls", () => {
     expect(vi.getTimerCount()).toBe(0);
     await stoppedForTwoHours();
   });
+  it("I-4: a pending answer that lands less than 5 s before the deadline still ends the poll at 600 s", async () => {
+    replyPrepare(pending, 202); await render(); await advance(590_000);
+    const held = deferred<Response>(); authorizedFetch.mockReturnValueOnce(held.promise);
+    await advance(5000); text(FUND_COPY.L9); expect(vi.getTimerCount()).toBe(1);
+    await advance(2000);
+    await act(async () => held.resolve(json(pending, 202)));
+    await advance(2999); text(FUND_COPY.L9); expect(container.textContent).not.toContain(FUND_COPY.L10b);
+    await advance(1); text(FUND_COPY.L10b); await stoppedForTwoHours();
+  });
   it("C7: only one poll timer is live and unmount cancels it", async () => {
     replyPrepare(pending, 202); await render(); expect(vi.getTimerCount()).toBe(1);
     await advance(10_000); expect(vi.getTimerCount()).toBe(1);
@@ -338,6 +347,55 @@ describe("generation boundaries", () => {
       });
       text(FUND_COPY.L11); expect(authorizedFetch).toHaveBeenCalledTimes(readsBeforeSecondKey + 1);
       expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await act(async () => root.unmount()); unmounted = true;
+      adoptApiKey(null);
+    }
+  });
+  it("NIT-7: a key-only change after a key-restart first pass that ended in a poll restarts the page", async () => {
+    useAuthStore.setState({ sessionKeyId: "held-session-key" });
+    authorizedFetch.mockImplementation(() => Promise.resolve(json(funding([scope("cancelled")]))));
+    try {
+      await render(); text(FUND_COPY.L12);
+      replyPrepare(pending, 202);
+      const initialReads = authorizedFetch.mock.calls.length;
+      await act(async () => {
+        adoptApiKey("first-placeholder", false);
+        useAuthStore.setState({ sessionKeyId: "first-session-key" });
+      });
+      text(FUND_COPY.L9); expect(authorizedFetch).toHaveBeenCalledTimes(initialReads + 2);
+      authorizedFetch.mockResolvedValue(json(funding([scope("expired")])));
+      const readsBeforeSecondKey = authorizedFetch.mock.calls.length;
+      await act(async () => {
+        adoptApiKey("second-placeholder", false);
+        useAuthStore.setState({ sessionKeyId: "second-session-key" });
+      });
+      text(FUND_COPY.L11); expect(authorizedFetch).toHaveBeenCalledTimes(readsBeforeSecondKey + 1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await act(async () => root.unmount()); unmounted = true;
+      adoptApiKey(null);
+    }
+  });
+  it("NIT-8: a key-only change after a key-restart first pass that ended in a failure restarts the page", async () => {
+    useAuthStore.setState({ sessionKeyId: "held-session-key" });
+    authorizedFetch.mockImplementation(() => Promise.resolve(json(funding([scope("cancelled")]))));
+    try {
+      await render(); text(FUND_COPY.L12);
+      authorizedFetch.mockResolvedValue(json({}, 500));
+      const initialReads = authorizedFetch.mock.calls.length;
+      await act(async () => {
+        adoptApiKey("first-placeholder", false);
+        useAuthStore.setState({ sessionKeyId: "first-session-key" });
+      });
+      text(FUND_COPY.L4); expect(authorizedFetch).toHaveBeenCalledTimes(initialReads + 1);
+      authorizedFetch.mockResolvedValue(json(funding([scope("expired")])));
+      const readsBeforeSecondKey = authorizedFetch.mock.calls.length;
+      await act(async () => {
+        adoptApiKey("second-placeholder", false);
+        useAuthStore.setState({ sessionKeyId: "second-session-key" });
+      });
+      text(FUND_COPY.L11); expect(authorizedFetch).toHaveBeenCalledTimes(readsBeforeSecondKey + 1);
     } finally {
       await act(async () => root.unmount()); unmounted = true;
       adoptApiKey(null);
@@ -574,6 +632,86 @@ describe("real auth funding recovery", () => {
         }
       }
       expect(mints()).toBeLessThanOrEqual(2);
+      text(SIGN_IN_EXPIRED); expect(button("Sign in again")).toBeDefined();
+      expect(readsAtRemedy).not.toBeNull();
+      expect(reads()).toBe(readsAtRemedy?.funding); expect(prepareReads()).toBe(readsAtRemedy?.prepare);
+      expect(fetchStub.mock.calls.filter(([input, init]) => pathOf(input) === preparePath && init?.method === "POST")).toHaveLength(0);
+    } finally {
+      await act(async () => root.unmount()); unmounted = true;
+      adoptApiKey(null);
+    }
+  });
+
+  it("F-1 (a): two refused reads in a key change's first pass end at the remedy after at most 3 mints", async () => {
+    authModules.real = true;
+    adoptApiKey("held-placeholder", false);
+    useAuthStore.setState({ sessionKeyId: "held-session-key" });
+    const preparePath = "/api/buyer-funding/scopes/scope%2Fone/prepare";
+    const step = 10;
+    const fetchStub = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
+      const path = pathOf(input);
+      const fundingRead = path === fundingPath && init.method === "GET" ? reads() : null;
+      await new Promise<void>((resolve) => setTimeout(resolve, step));
+      if (path === "/api/auth/me") return json({ address: wallet.address });
+      if (path === mintPath && init.method === "POST") return mintReply(mints());
+      if (fundingRead !== null) return fundingRead === 2 ? json({}, 401) : json(funding());
+      if (path === preparePath && init.method === "GET") return json({}, 401);
+      throw new Error("Unexpected auth recovery request");
+    });
+    const mints = () => fetchStub.mock.calls.filter(([input, init]) => pathOf(input) === mintPath && init?.method === "POST").length;
+    const reads = () => fetchStub.mock.calls.filter(([input, init]) => pathOf(input) === fundingPath && init?.method === "GET").length;
+    const prepareReads = () => fetchStub.mock.calls.filter(([input, init]) => pathOf(input) === preparePath && init?.method === "GET").length;
+    vi.stubGlobal("fetch", fetchStub);
+    try {
+      await render();
+      let readsAtRemedy: { funding: number; prepare: number } | null = null;
+      for (let elapsed = 0; elapsed < 2000; elapsed += step) {
+        await advance(step);
+        if (readsAtRemedy === null && container.textContent?.includes(SIGN_IN_EXPIRED)) {
+          readsAtRemedy = { funding: reads(), prepare: prepareReads() };
+        }
+      }
+      expect(mints()).toBeLessThanOrEqual(3);
+      text(SIGN_IN_EXPIRED); expect(button("Sign in again")).toBeDefined();
+      expect(readsAtRemedy).not.toBeNull();
+      expect(reads()).toBe(readsAtRemedy?.funding); expect(prepareReads()).toBe(readsAtRemedy?.prepare);
+      expect(fetchStub.mock.calls.filter(([input, init]) => pathOf(input) === preparePath && init?.method === "POST")).toHaveLength(0);
+    } finally {
+      await act(async () => root.unmount()); unmounted = true;
+      adoptApiKey(null);
+    }
+  });
+
+  it("F-1 (b): a refusal in every generation's first pass ends at the remedy after at most 3 mints", async () => {
+    authModules.real = true;
+    adoptApiKey("held-placeholder", false);
+    useAuthStore.setState({ sessionKeyId: "held-session-key" });
+    const preparePath = "/api/buyer-funding/scopes/scope%2Fone/prepare";
+    const step = 10;
+    const fetchStub = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
+      const path = pathOf(input);
+      const fundingRead = path === fundingPath && init.method === "GET" ? reads() : null;
+      await new Promise<void>((resolve) => setTimeout(resolve, step));
+      if (path === "/api/auth/me") return json({ address: wallet.address });
+      if (path === mintPath && init.method === "POST") return mintReply(mints());
+      if (fundingRead !== null) return fundingRead % 2 === 1 ? json({}, 401) : json(funding());
+      if (path === preparePath && init.method === "GET") return json({}, 401);
+      throw new Error("Unexpected auth recovery request");
+    });
+    const mints = () => fetchStub.mock.calls.filter(([input, init]) => pathOf(input) === mintPath && init?.method === "POST").length;
+    const reads = () => fetchStub.mock.calls.filter(([input, init]) => pathOf(input) === fundingPath && init?.method === "GET").length;
+    const prepareReads = () => fetchStub.mock.calls.filter(([input, init]) => pathOf(input) === preparePath && init?.method === "GET").length;
+    vi.stubGlobal("fetch", fetchStub);
+    try {
+      await render();
+      let readsAtRemedy: { funding: number; prepare: number } | null = null;
+      for (let elapsed = 0; elapsed < 2000; elapsed += step) {
+        await advance(step);
+        if (readsAtRemedy === null && container.textContent?.includes(SIGN_IN_EXPIRED)) {
+          readsAtRemedy = { funding: reads(), prepare: prepareReads() };
+        }
+      }
+      expect(mints()).toBeLessThanOrEqual(3);
       text(SIGN_IN_EXPIRED); expect(button("Sign in again")).toBeDefined();
       expect(readsAtRemedy).not.toBeNull();
       expect(reads()).toBe(readsAtRemedy?.funding); expect(prepareReads()).toBe(readsAtRemedy?.prepare);

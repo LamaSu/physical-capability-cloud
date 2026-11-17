@@ -42,8 +42,8 @@ export function FundPage({ jobId }: { jobId: string | null }) {
     const keyRestart = previous.keyEpoch !== keyEpoch && previous.jobId === jobId &&
       previous.address === address && previous.sessionToken === sessionToken;
     if (keyRestart && keyRestartRead.current !== null && useAuthStore.getState().sessionKeyId !== null) {
-      // Let this read's renewal finish its retry, including a final 401 remedy.
-      keyRestartRead.current = null;
+      // Keep this first pass running through every key renewal and its retry,
+      // including a final 401 remedy.
       return;
     }
     stopGeneration.current();
@@ -156,7 +156,7 @@ export function FundPage({ jobId }: { jobId: string | null }) {
       });
     };
     void loadFunding().finally(() => {
-      if (keyRestartRead.current === current && useAuthStore.getState().keyEpoch === keyEpoch) keyRestartRead.current = null;
+      if (keyRestartRead.current === current) keyRestartRead.current = null;
     });
     stopGeneration.current = () => {
       mounted.current = false;
