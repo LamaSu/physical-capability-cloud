@@ -309,6 +309,9 @@ describe("settlement_failed session — status transition + safe recovery", () =
     const preflightFailure = (sessionRow(id)!.transitions as any[])
       .filter((t) => t.to === "settlement_failed").at(-1);
     expect(preflightFailure?.reason).toBe("settlement_failed:preflight_no_escrow");
+    expect((sessionRow(id)!.transitions as any[])
+      .filter((t) => t.to === "settlement_failed")).toHaveLength(2);
+    expect((sessionRow(id)!.transitions as any[]).at(-1)?.to).toBe("settlement_failed");
 
     vi.stubEnv("MOCK_SETTLEMENT", "false");
     vi.stubEnv("PCC_GATEWAY_PRIVATE_KEY", generatePrivateKey());
@@ -357,6 +360,29 @@ describe("settlement_failed session — status transition + safe recovery", () =
       expect(sessionRow(id)!.status).toBe("settlement_failed");
     });
   }
+
+  it("a real-mode retry fails closed when an unknown-class failure is newer than a pre-flight one", async () => {
+    const id = await toSettlementFailed(app, "newer-unknown-marker");
+    const base = escrowCount();
+    const row = sessionRow(id)!;
+    const transitions = [...(row.transitions as any[]), {
+      from: "committed",
+      to: "settlement_failed",
+      actor: "system",
+      timestamp: new Date().toISOString(),
+      reason: "settlement_failed:preflight_no_escrow-v2",
+    }];
+    getStore().db.update(negotiationSessions)
+      .set({ transitions: transitions as any })
+      .where(eq(negotiationSessions.id, id)).run();
+
+    process.env.MOCK_SETTLEMENT = "false";
+    const res = await retry(app, id);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("settlement_unrecoverable_ambiguous");
+    expect(escrowCount()).toBe(base);
+    expect(sessionRow(id)!.status).toBe("settlement_failed");
+  });
 
   // ── 4. retry: no escrow + provably pre-flight failure → safe to re-mint ───
   it("retry re-mints when the failure was provably pre-flight (config fixed → mock mode succeeds), exactly one escrow", async () => {

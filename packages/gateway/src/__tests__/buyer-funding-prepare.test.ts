@@ -547,6 +547,7 @@ describe("servePrepareSignature", () => {
     `${BUYER_FUNDED_ESCROW_VERSION}-v2`,
     BUYER_FUNDED_ESCROW_VERSION.toUpperCase(),
     ` ${BUYER_FUNDED_ESCROW_VERSION}`,
+    `${BUYER_FUNDED_ESCROW_VERSION} `,
   ]) it(`SIG6 near-miss version ${JSON.stringify(version)}: servePrepareSignature refuses a marker escrow whose version only resembles the buyer-funded one`, async () => {
     const j = seedPrepare(); await prepare(j);
     db().update(schema.escrows).set({ version }).where(eq(schema.escrows.id, marker(j).id)).run();
