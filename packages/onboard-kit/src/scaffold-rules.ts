@@ -52,6 +52,8 @@ const URL_STEMS = new Set(["ANTHROPIC_BASE", "EDITOR", "LIT_API", "NATS", "UNBRO
 const CLASS_NAME = /^[A-Z][A-Za-z0-9]{0,63}$/;
 const ADAPTER_ID = /^[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*$/;
 const ENV_VAR_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// Matches 64 or 128 hex digits with an optional 0x prefix.
+const PRIVATE_KEY_SHAPE = /^(0x)?([0-9a-fA-F]{64}|[0-9a-fA-F]{128})$/;
 
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" ? value as Record<string, unknown> : {};
@@ -86,6 +88,9 @@ export function scaffoldRuleProblems(config: OnboardConfig): Array<{ name: strin
     && kernel.walletPrivateKeyEnvVar !== undefined && kernel.walletPrivateKeyEnvVar !== null
     && (typeof kernel.walletPrivateKeyEnvVar !== "string" || !ENV_VAR_NAME.test(kernel.walletPrivateKeyEnvVar))) {
     add("kernel.walletPrivateKeyEnvVar", 'is not an environment variable name (a letter or "_", then letters, digits or "_"); the scaffold writes it as a key of .env.example');
+  } else if (typeof kernel.walletPrivateKeyEnvVar === "string" && PRIVATE_KEY_SHAPE.test(kernel.walletPrivateKeyEnvVar)
+    && !/[\r\n\u2028\u2029]/.test(kernel.walletPrivateKeyEnvVar)) {
+    add("kernel.walletPrivateKeyEnvVar", "looks like a private key, not an environment variable name; keep the key in your environment and put the variable's name here");
   }
   line("kernel.gatewayUrl", kernel.gatewayUrl);
   const reservedEnvNames = new Set(["GATEWAY_URL", "MOCK_MODE"]);
