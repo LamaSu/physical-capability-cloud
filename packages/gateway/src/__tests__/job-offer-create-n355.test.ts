@@ -8,7 +8,7 @@ import { getRepos, getStore } from "../db.js";
 import { __resetRateLimitState } from "../middleware/rate-limiter.js";
 import { offerCaller } from "../services/job-offer-event-rules.js";
 import {
-  _resetJobOffersStoreForTests, getJobOffersStore, initJobOffersStore,
+  _resetJobOffersStoreForTests, getJobOffersStore, IDEMPOTENCY_CONFLICT, initJobOffersStore,
   type CreateJobOfferInput, type SqliteDatabaseLike, type VerifyFn,
 } from "../services/job-offers-store.js";
 
@@ -431,6 +431,39 @@ describe("N355 real gateway create replay authorization", () => {
     expect(row(id)).toEqual(beforeRow);
     expect(store.getEvents(id).filter((entry) => entry.event === "posted")).toHaveLength(1);
     expect(await read(id)).toEqual(beforeHttp);
+  });
+
+  it("N355 X5: a courier create replay's 409 body is exactly IDEMPOTENCY_CONFLICT and echoes nothing from the request", async () => {
+    const id = await create(bearer(posterKey), "courier-jobs");
+    for (const url of ["/api/courier-jobs", "/api/courier-jobs/jobs"]) {
+      await refused(id, () => app.inject({ method: "POST", url, headers: bearer(strangerKey), payload: {
+        deliveryId: id, pickup: { name: "PCC Shop", address: "1 Shop Way, SF" }, dropoff: { name: "USPS Rincon Center", address: "180 Steuart St, SF" }, feeUSD: 99,
+        id: `n355-${randomUUID()}`, idempotencyKey: `n355-${randomUUID()}`,
+      } }), 409, IDEMPOTENCY_CONFLICT, "courier-jobs");
+    }
+  });
+
+  it("N355 X6: a posterDid that matches a proven wallet only after trimming does not make that wallet the offer's poster", async () => {
+    const store = getJobOffersStore();
+    const input = (id: string): CreateJobOfferInput => ({ id, capabilityType: "pizza.order", requirements: { shopId: "shop-x4", items: ["x4"] }, pricing: { amount: 18.5, currency: "USD", model: "fixed" } });
+    const control = { ...input(`n355-${randomUUID()}`), posterDid: W };
+    const padded = [`${W} `, ` ${W}`].map((posterDid) => ({ ...input(`n355-${randomUUID()}`), posterDid }));
+    for (const seed of [control, ...padded]) {
+      expect(await store.create(seed)).toMatchObject({ ok: true, created: true });
+    }
+    const callerW = offerCaller({ provenWallet: W, provenWalletVia: "siwe-session" });
+    expect(await store.create(input(control.id!), callerW)).toMatchObject({ ok: true, created: false, offer: { id: control.id } });
+    for (const seed of padded) {
+      expect(await store.create(input(seed.id!), callerW)).toEqual({ ok: false, reason: "idempotency_conflict" });
+    }
+    const rows = rowCount();
+    const replay = await app.inject({ method: "POST", url: "/api/job-offers", headers: bearer(sessionKeyW2), payload: input(control.id!) });
+    expect(replay.statusCode, replay.body).toBe(200);
+    expect(replay.json()).toMatchObject({ ok: true, id: control.id, note: "already posted" });
+    for (const seed of padded) {
+      await refused(seed.id!, () => app.inject({ method: "POST", url: "/api/job-offers", headers: bearer(sessionKeyW2), payload: input(seed.id!) }), 409, IDEMPOTENCY_CONFLICT);
+    }
+    expect(rowCount()).toBe(rows);
   });
 
   it("N355 K1: a claim records its claimer before the offer row is written", async () => {
