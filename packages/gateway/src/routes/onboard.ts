@@ -6,6 +6,8 @@ import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { Sentry } from "../sentry.js";
 import { getRepos } from "../db.js";
+import { countAdminKeyFields, hasSingleValidAdminKey } from "../middleware/relay-admin-gate.js";
+import { getCallerScopes } from "../middleware/scope-checker.js";
 import {
   analyzeOnboardingText,
   coalesceAnalysisText,
@@ -19,6 +21,38 @@ import {
 import { tenantOpts } from "../config/tenant-enforce.js";
 
 const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production.up.railway.app";
+
+/**
+ * Posture's admin test (routes/admin-posture.ts:9-23), without audit:
+ * duplicate admin-key fields refuse; one field requires a valid, non-"*" secret;
+ * no field requires an API key with "admin" scope and without "*" scope.
+ * Any error refuses the caller.
+ */
+export function isOnboardAdmin(req: FastifyRequest): boolean {
+  try {
+    const n = countAdminKeyFields(req);
+    if (n > 1) return false;
+    if (n === 1) return hasSingleValidAdminKey(req) && req.headers["x-admin-key"] !== "*";
+    if (!req.apiKeyId) return false;
+    const scopes = getCallerScopes(req);
+    return scopes.includes("admin") && !scopes.includes("*");
+  } catch {
+    return false;
+  }
+}
+
+export function toListedRegistration(r: { id: string; status: string; name: string; createdAt: string }) {
+  return { id: r.id, status: r.status, name: r.name, createdAt: r.createdAt };
+}
+
+function registrationReplyFor<T extends { id: string; status: string; name: string; createdAt: string }>(req: FastifyRequest, row: T) {
+  return isOnboardAdmin(req) ? row : toListedRegistration(row);
+}
+
+function inCallerTenant(req: FastifyRequest, row: { tenantId?: string | null }): boolean {
+  const tenant = tenantOpts(req);
+  return !tenant || (row.tenantId ?? null) === tenant.tenantId;
+}
 
 export async function onboardRoutes(app: FastifyInstance) {
   // Analyze an operator/machine description and return an input-derived
@@ -148,33 +182,28 @@ export async function onboardRoutes(app: FastifyInstance) {
       // the repo behaves as it does today (cross-tenant read, sanitised).
       const opts = tenantOpts(req);
       const registrations = repos.registrations.findAll(opts);
-      // Return only non-sensitive fields publicly (strip addresses, GPS, device details)
-      const sanitized = registrations.map((r: any) => ({
-        id: r.id,
-        status: r.status,
-        name: r.name,
-        capability: r.capability,
-        createdAt: r.createdAt,
-      }));
+      // The listing's four fields are the registration reply for anyone who isn't an admin.
+      const sanitized = registrations.map((r) => toListedRegistration(r));
       return { registrations: sanitized };
     } catch { return { registrations: [] }; }
   });
 
-  // Get registration detail
+  // Detail gives the listing's fields to non-admins; outside the caller's tenant is missing under TENANT_ENFORCE.
   app.get<{ Params: { id: string } }>("/api/onboard/registrations/:id", async (req) => {
     try {
       const repos = getRepos();
       const reg = repos.registrations.findById(req.params.id);
-      if (!reg) return { error: "not_found" };
-      return { registration: reg };
+      if (!reg || !inCallerTenant(req, reg)) return { error: "not_found" };
+      return { registration: registrationReplyFor(req, reg) };
     } catch { return { error: "not_found" }; }
   });
 
-  // ── Approve a registration ──
+  // Approve: admins only, 403 before any read; outside the caller's tenant is missing under TENANT_ENFORCE.
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/approve", async (req, reply) => {
+    if (!isOnboardAdmin(req)) return reply.code(403).send({ error: "forbidden" });
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
-    if (!reg) return reply.status(404).send({ error: "not_found" });
+    if (!reg || !inCallerTenant(req, reg)) return reply.status(404).send({ error: "not_found" });
     if (reg.status !== "submitted" && reg.status !== "reviewing") {
       return reply.status(400).send({ error: "invalid_status", message: `Cannot approve registration in "${reg.status}" status` });
     }
@@ -192,11 +221,12 @@ export async function onboardRoutes(app: FastifyInstance) {
     return { registration: reg, approved: true };
   });
 
-  // ── Reject a registration ──
+  // Reject: admins only, 403 before any read; outside the caller's tenant is missing under TENANT_ENFORCE.
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/reject", async (req, reply) => {
+    if (!isOnboardAdmin(req)) return reply.code(403).send({ error: "forbidden" });
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
-    if (!reg) return reply.status(404).send({ error: "not_found" });
+    if (!reg || !inCallerTenant(req, reg)) return reply.status(404).send({ error: "not_found" });
     if (reg.status === "rejected") {
       return reply.status(400).send({ error: "already_rejected" });
     }
@@ -283,7 +313,7 @@ export async function onboardRoutes(app: FastifyInstance) {
       ip: req.ip,
       userAgent: req.headers["user-agent"],
     });
-    return { registration: updated };
+    return { registration: registrationReplyFor(req, updated) };
   });
 
   // ── T2.2 — Delete (soft) registration (owner-only, GDPR-required) ──
@@ -305,7 +335,7 @@ export async function onboardRoutes(app: FastifyInstance) {
       return reply.status(403).send({ error: "forbidden", message: "You can only delete your own registration" });
     }
     if (reg.status === "deleted") {
-      return { registration: reg, alreadyDeleted: true };
+      return { registration: registrationReplyFor(req, reg), alreadyDeleted: true };
     }
 
     const deletedAt = new Date().toISOString();
@@ -323,14 +353,15 @@ export async function onboardRoutes(app: FastifyInstance) {
       ip: req.ip,
       userAgent: req.headers["user-agent"],
     });
-    return { registration: { ...reg, status: "deleted" }, deletedAt, soft: true };
+    return { registration: registrationReplyFor(req, { ...reg, status: "deleted" }), deletedAt, soft: true };
   });
 
-  // ── Activate an approved registration ──
+  // Activate: admins only, 403 before any read; outside the caller's tenant is missing under TENANT_ENFORCE.
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/activate", async (req, reply) => {
+    if (!isOnboardAdmin(req)) return reply.code(403).send({ error: "forbidden" });
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
-    if (!reg) return reply.status(404).send({ error: "not_found" });
+    if (!reg || !inCallerTenant(req, reg)) return reply.status(404).send({ error: "not_found" });
     if (reg.status !== "approved") {
       return reply.status(400).send({ error: "invalid_status", message: `Must be approved before activating (current: "${reg.status}")` });
     }
@@ -539,7 +570,7 @@ export async function onboardRoutes(app: FastifyInstance) {
           userAgent: req.headers["user-agent"],
         });
         return {
-          registration: { ...reg, status: "active", approvedAt: now },
+          registration: registrationReplyFor(req, { ...reg, status: "active", approvedAt: now }),
           autoApproved: true,
           activated: true,
           proofs,
