@@ -299,6 +299,8 @@ describe("finalizedBlock — allocation or last job-class discharge, NEVER Final
     ["number zeroing block", { allocation: { block: 120n, claimCount: 2n }, zeroingDischargeBlock: 150 }],
     ["negative allocation block", { allocation: { block: -1n, claimCount: 2n } }],
     ["number claim count", { allocation: { block: 120n, claimCount: 2 } }],
+    ["negative inline allocation block", { allocation: { block: -1n, claimCount: 0n } }],
+    ["number inline allocation block", { allocation: { block: 5, claimCount: 0n } }],
   ])("T12 rejects invalid witness boundary: %s", (_name, witness) => {
     expect(() => deriveFinalizedBlock(witness as FinalizationWitness)).toThrow(InconsistentAnchorsError);
   });
