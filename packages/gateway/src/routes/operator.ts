@@ -15,7 +15,9 @@ const { operatorPolicies, pendingApprovals, toolCallRelay, executionScopes } = s
 /*
  * Board N31: every write here checks who may act on the kernel through auth/kernel-authority.ts
  * ("decide" for approve, reject, resume and policy writes; "stop_or_submit" for the e-stop and a
- * pending approval). The reads (GET policy, GET approvals) are unchanged here.
+ * pending approval). GET policy checks "read": the admin and the kernel's proven owner read the
+ * whole policy, and any other caller reads the emergency-stop bit alone. GET approvals is
+ * unchanged here.
  */
 
 /**

@@ -376,4 +376,26 @@ describe("GET /api/kernels/:kernelId/agent-package", () => {
       spy.mockRestore();
     }
   });
+
+  it("AP7: with no stored policy, any other caller gets the emergency stop alone in the package, and the rest of the package equals the admin's", async () => {
+    noPolicy();
+    const admin = await packageGet(callers().admin);
+    expect(admin.statusCode).toBe(200);
+    const { generated_at: adminGeneratedAt, ...adminPackage } = admin.json();
+    expect(typeof adminGeneratedAt).toBe("string");
+    const prompt = adminPackage.system_prompt.replace(
+      `- Approval mode: ${DEFAULT_OPERATOR_POLICY.approvalMode}\n- Operating hours: ${DEFAULT_OPERATOR_POLICY.timezone}`,
+      "- Approval mode and operating hours: shown to this kernel's operator and to admins only.",
+    );
+    expect(prompt).toContain("- Emergency stop: inactive");
+    for (const headers of otherCallers()) {
+      const res = await packageGet(headers);
+      expect(res.statusCode).toBe(200);
+      const { generated_at: generatedAt, ...body } = res.json();
+      expect(typeof generatedAt).toBe("string");
+      expect(body.operator_policy).toStrictEqual({ emergencyStop: false });
+      expect(body.system_prompt).toBe(prompt);
+      expect(body).toStrictEqual({ ...adminPackage, operator_policy: { emergencyStop: false }, system_prompt: prompt });
+    }
+  });
 });
