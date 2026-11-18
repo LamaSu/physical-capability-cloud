@@ -257,7 +257,7 @@ describe("astra pack 186 MEDIUM: a replaced recording keeps nothing of the old o
       const sensor = new Sensor("dev-sensor-q", { readingUrl: "http://device.test/reading", sampleIntervalMs: 1_000 });
       const { summary, afterJob2 } = await replacementLeaks(sensor);
       expect.soft((summary.samples as Array<{ value: number }>).map((s) => s.value), "job 2's samples").toEqual([222]);
-      expect.soft(afterJob2.map((p) => p.jobId), "jobIds emitted after job 2 started").toEqual(["job-2"]);
+      expect.soft(afterJob2, "events emitted after job 2 started").toEqual([]);
     } finally {
       cleanup();
     }
