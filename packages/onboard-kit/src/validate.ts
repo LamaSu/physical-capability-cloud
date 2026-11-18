@@ -149,16 +149,10 @@ export function validate(options: ValidationOptions): ValidationResult {
       });
     }
 
-    if (adapter.adapterType === "machine" && !(EVIDENCE_DEVICE_TYPES as readonly string[]).includes(adapter.deviceType)) {
+    if ((adapter.adapterType === "machine" || adapter.adapterType === "sensor") && !(EVIDENCE_DEVICE_TYPES as readonly string[]).includes(adapter.deviceType)) {
       checks.push({
-        name: `${prefix}.deviceType`, passed: false, severity: "warning",
-        message: `${JSON.stringify(adapter.deviceType)} is not an evidence device type in @pcc/spec (for example controller, power_monitor, robot_arm); schema-checking verifiers refuse its events`,
-      });
-    }
-    if (adapter.adapterType === "sensor") {
-      checks.push({
-        name: `${prefix}.deviceType`, passed: false, severity: "warning",
-        message: `the generated sensor adapter writes deviceType "sensor" whatever this field says, and "sensor" is not an evidence device type in @pcc/spec; schema-checking verifiers refuse its events until you change it in the generated adapter (for example to power_monitor)`,
+        name: `${prefix}.deviceType`, passed: false, severity: "error",
+        message: `${JSON.stringify(adapter.deviceType)} is not an evidence device type in @pcc/spec (for example controller, power_monitor, robot_arm); the generated adapter does not compile with it, and schema-checking verifiers refuse its events`,
       });
     }
     if (adapter.adapterType === "machine" && adapter.protocol !== "http") {
@@ -223,6 +217,14 @@ export function validate(options: ValidationOptions): ValidationResult {
     checks.push(...typeChecks(cap.type, `${prefix}.type`));
 
     checks.push(checkRequired(`${prefix}.name`, cap.name));
+
+    const unit = cap.workEnvelope?.unit;
+    if (typeof unit === "string" && unit !== "mm" && unit !== "inch") {
+      checks.push({
+        name: `${prefix}.workEnvelope.unit`, passed: false, severity: "error",
+        message: `${JSON.stringify(unit)} is not a work envelope unit; use "mm" or "inch"`,
+      });
+    }
 
     if (cap.materials.length === 0) {
       checks.push({
