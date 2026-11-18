@@ -1,6 +1,6 @@
 {
   "name": "@pcc/spec",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
   "publishConfig": {
     "access": "public",
@@ -52,7 +52,9 @@
       "default": "./dist/recheck/replay.js"
     }
   },
-  "bin": { "pcc-settlement-recheck": "./dist/recheck/cli.js" },
+  "bin": {
+    "pcc-settlement-recheck": "./dist/recheck/cli.js"
+  },
   "files": [
     "dist",
     "README.md",
