@@ -369,6 +369,29 @@ describe("boundary normalisation — the defect sol found, and its fix", () => {
       expect(() => normalizeUnitState(bad)).toThrow();
     }
   });
+
+  it("T26c a zero-padded state string throws InvalidUnitStateError", () => {
+    for (const state of ["00", "08", "009", "0".repeat(64) + "9"]) {
+      expect(() => normalizeUnitState(state)).toThrow(InvalidUnitStateError);
+    }
+  });
+
+  it("T26d each one-digit state string maps to its state and the string 0 is unreachable", () => {
+    for (const state of [
+      UnitState.FUNDED_ACTIVE,
+      UnitState.PRIMARY_ASSERTED,
+      UnitState.CHALLENGED,
+      UnitState.BACKUP_PENDING,
+      UnitState.BACKUP_ASSERTED,
+      UnitState.RELEASE_ALLOCATED,
+      UnitState.REFUND_ALLOCATED,
+      UnitState.SETTLED_RELEASED,
+      UnitState.SETTLED_REFUNDED,
+    ]) {
+      expect(normalizeUnitState(state.toString())).toBe(state);
+    }
+    expect(() => normalizeUnitState("0")).toThrow(UnreachableUnitStateError);
+  });
 });
 
 describe("counter/state consistency — fails CLOSED both directions", () => {
