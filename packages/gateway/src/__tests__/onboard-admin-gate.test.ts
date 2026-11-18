@@ -268,7 +268,7 @@ describe("onboard admin gates and registration replies", () => {
         expect(stored(row.id)).toEqual(row);
         for (const action of actions) {
           const target = seed(action === "activate" ? "approved" : "submitted", row.tenantId);
-          if (row.tenantId === null) expect(stored(target.id).tenantId).toBeNull();
+          expect(stored(target.id).tenantId).toBe(row.tenantId);
           clearSpies();
           const refused = await app.inject({ method: "POST", url: url(target.id, action), headers });
           expect(refused.statusCode).toBe(404);
@@ -352,5 +352,59 @@ describe("onboard admin gates and registration replies", () => {
     expect(isOnboardAdmin(noHeader)).toBe(true);
     const throwing = { get raw() { throw new Error("synthetic-n344-request-error"); } } as unknown as FastifyRequest;
     expect(isOnboardAdmin(throwing)).toBe(false);
+  });
+
+  it("OA13 TENANT_ENFORCE refuses approve, reject and activate outside the caller's tenant whatever the row's status", async () => {
+    vi.stubEnv("TENANT_ENFORCE", "true");
+    for (const headers of [bearer(tbAdminKey), withAdmin(tbStrangerKey)]) {
+      for (const tenantId of [TA, null]) {
+        for (const [action, status] of [
+          ["approve", "approved"],
+          ["approve", "rejected"],
+          ["reject", "approved"],
+          ["reject", "active"],
+          ["activate", "submitted"],
+          ["activate", "active"],
+        ] as const) {
+          const target = seed(status, tenantId);
+          expect(stored(target.id).tenantId).toBe(tenantId);
+          expect(stored(target.id).status).toBe(status);
+          clearSpies();
+          const res = await app.inject({ method: "POST", url: url(target.id, action), headers });
+          expect(res.statusCode).toBe(404);
+          expect(res.body).toBe('{"error":"not_found"}');
+          expectNoOperatorAudit();
+          expect(stored(target.id)).toEqual(target);
+        }
+      }
+    }
+  });
+
+  it("OA14 TENANT_ENFORCE makes other-tenant and tenant-less rows missing on detail for a tenant-scoped caller who is not an admin", async () => {
+    const tenantless = seed("submitted", null);
+    const rows = [seed("submitted", TA), tenantless];
+    expect(stored(tenantless.id).tenantId).toBeNull();
+    vi.stubEnv("TENANT_ENFORCE", "true");
+    const headers = bearer(tbStrangerKey);
+    clearSpies();
+    const reference = await app.inject({ url: url("missing-n366"), headers });
+    expect(reference.json()).toEqual({ error: "not_found" });
+    for (const row of rows) {
+      clearSpies();
+      const res = await app.inject({ url: url(row.id), headers });
+      expect(res.statusCode).toBe(reference.statusCode);
+      expect(res.json()).toEqual({ error: "not_found" });
+      expect(stored(row.id)).toEqual(row);
+    }
+    delete process.env.TENANT_ENFORCE;
+    for (const row of rows) {
+      clearSpies();
+      expectProjection(await app.inject({ url: url(row.id), headers }), row);
+    }
+  });
+
+  it("OA15 without TENANT_ENFORCE a tenant-scoped admin rejects and activates a tenant-less row", async () => {
+    await expectStateWrite("reject", bearer(tbAdminKey), null);
+    await expectStateWrite("activate", bearer(tbAdminKey), null);
   });
 });
