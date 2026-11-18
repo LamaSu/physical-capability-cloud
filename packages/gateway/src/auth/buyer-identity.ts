@@ -11,7 +11,10 @@
 import type { KernelAuthority } from "./kernel-authority.js";
 
 const WALLET_RE = /^0x[0-9a-fA-F]{40}$/;
-export const BUYER_PROOF_SOURCES = new Set(["self-link:agent", "siwe-session"]);
+/** The proof origins that prove a caller's wallet: an agent self-link or a SIWE sign-in. Read-only: it has no add, delete or clear (N355). */
+export const BUYER_PROOF_SOURCES: Readonly<{ has(source: string): boolean }> = Object.freeze({
+  has: (source: string): boolean => source === "self-link:agent" || source === "siwe-session",
+});
 
 /** Equal strings, or the same 0x address in another letter case (a checksum is encoding, not identity). */
 export function sameIdentity(a: unknown, b: unknown): boolean {

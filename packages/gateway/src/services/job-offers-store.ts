@@ -295,6 +295,12 @@ export type VerifyResult = VerifyOk | VerifyFail;
 
 export type VerifyFn = (url: string) => Promise<VerifyResult>;
 
+/** The body of every 409 a create replay gets when its caller may not take the offer (N355). */
+export const IDEMPOTENCY_CONFLICT = {
+  error: "idempotency_conflict",
+  message: "This id or idempotencyKey belongs to another caller's offer.",
+} as const;
+
 const defaultVerifyFn: VerifyFn = async (url) => {
   try {
     const ac = new AbortController();
@@ -509,12 +515,9 @@ export class JobOffersStore {
   }
 
   /**
-   * Create a new open offer. Returns the offer, or a typed failure for
-   * verify or schema-validation problems.
-   *
-   * Idempotency: caller may supply `id` (used by courier-shim) or
-   * `idempotencyKey` (standard). Either match → return existing offer with
-   * `created:false`.
+   * Create a new open offer, or replay an existing id or idempotency key only
+   * for a caller who may edit it, or no caller when no posting identity was recorded.
+   * Other replays return an idempotency conflict without writing anything.
    */
   async create(
     input: CreateJobOfferInput,
@@ -523,16 +526,19 @@ export class JobOffersStore {
     | { ok: true; offer: JobOffer; created: boolean }
     | (VerifyFail & { ok: false })
     | { ok: false; reason: "schema_validation_failed"; error: string }
+    | { ok: false; reason: "idempotency_conflict" }
   > {
-    // Idempotency check 1: caller-supplied id
-    if (input.id && this.offers.has(input.id)) {
-      return { ok: true, offer: this.offers.get(input.id)!, created: false };
-    }
-    // Idempotency check 2: idempotency_key
-    if (input.idempotencyKey) {
-      const existing = this.getByIdempotencyKey(input.idempotencyKey);
-      if (existing) return { ok: true, offer: existing, created: false };
-    }
+    const checkReplay = () => {
+      const existing = (input.id ? this.offers.get(input.id) : undefined) ??
+        (input.idempotencyKey ? this.getByIdempotencyKey(input.idempotencyKey) : undefined);
+      if (!existing) return;
+      if (caller ? this.isPoster(existing, caller) : !this.posterDigests.has(existing.id)) {
+        return { ok: true, offer: existing, created: false } as const;
+      }
+      return { ok: false, reason: "idempotency_conflict" } as const;
+    };
+    const replay = checkReplay();
+    if (replay) return replay;
 
     // Schema validation — graceful degrade if no schema for this capability type
     const schemaResult = await this.validateSchema(input.capabilityType, input.requirements);
@@ -550,6 +556,9 @@ export class JobOffersStore {
       verified = true;
       lastVerifyAt = this.nowIso();
     }
+
+    const lateReplay = checkReplay();
+    if (lateReplay) return lateReplay;
 
     const postedAt = this.nowIso();
     const validUntilMs = computeValidUntilMs(input.requirements, postedAt, input.validUntilIso ?? null);

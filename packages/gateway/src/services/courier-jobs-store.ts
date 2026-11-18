@@ -269,7 +269,7 @@ export class CourierJobsStore {
   async create(
     input: CreateJobInput,
     caller?: OfferCaller | null,
-  ): Promise<{ ok: true; job: CourierJob; created: boolean } | (VerifyFail & { ok: false })> {
+  ): Promise<{ ok: true; job: CourierJob; created: boolean } | (VerifyFail & { ok: false }) | { ok: false; reason: "idempotency_conflict" }> {
     const store = getJobOffersStore();
     const requirements: Record<string, unknown> = {
       pickup: input.pickup,

@@ -42,6 +42,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { offerCaller } from "../services/job-offer-event-rules.js";
 import {
   getJobOffersStore,
+  IDEMPOTENCY_CONFLICT,
   type ClaimInput,
   type CreateJobOfferInput,
   type EvidenceRequirements,
@@ -156,6 +157,7 @@ export async function jobOffersRoutes(app: FastifyInstance) {
     const store = getJobOffersStore();
     const result = await store.create(buildCreateInputFromBody(b, posterDid), caller);
     if (!result.ok) {
+      if (result.reason === "idempotency_conflict") return reply.code(409).send(IDEMPOTENCY_CONFLICT);
       if (result.reason === "schema_validation_failed") {
         return reply.code(400).send({
           error: "schema_validation_failed",

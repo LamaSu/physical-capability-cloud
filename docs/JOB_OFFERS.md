@@ -33,7 +33,7 @@ work in a specific capability_type. The shape is:
 | `evidenceRequirements` | no | Per-category evidence model: `{ events_required, photos_required, raw_data_required, chain_of_custody, tier_required, ... }`. From categorization doc Part C |
 | `sourceVerifyUrl` | no | URL the gateway re-fetches periodically; non-2xx or `placed:false` body auto-cancels the offer |
 | `requireHeartbeat` | no | If true, poster must `POST /:id/heartbeat` within 5min or the offer auto-expires |
-| `idempotencyKey` | no | Standard idempotency pattern. Second post with same key returns the original offer with `note:"already posted"` |
+| `idempotencyKey` | no | Standard idempotency pattern. A second post with the same key (or the same `id`) returns the original offer with `note:"already posted"` if a caller who may edit that offer sends it (see Poster controls), or if it carries neither a proven wallet nor an API key and the offer has no recorded posting identity. Any other second post gets `409 idempotency_conflict` and changes nothing |
 | `posterKernelId` | no | Set when the poster is a kernel rebroadcasting demand (not the typical user-agent path) |
 | `id` | no | Caller-supplied id (used by the courier shim for `deliveryId` compat). Defaults to `offer-<random>-<timestamp>` |
 | `validUntil` | no | Explicit TTL override. Defaults: `requirements.pickupReadyAt + 30min`, else `requirements.deadline + 30min`, else `postedAt + 2h` |
@@ -75,7 +75,7 @@ Content-Type: application/json
   },
   "pricing": { "amount": 6.70, "currency": "USD", "model": "fixed" },
   "sourceVerifyUrl": "https://domino-pos.example.com/orders/xyz/status",
-  "idempotencyKey": "dominos-7764-2026-06-19T18:00:00Z-driver-fee"
+  "idempotencyKey": "pizza-{uuid}"
 }
 ```
 
@@ -202,6 +202,21 @@ Refusals leave the offer and its event log unchanged:
   wallet-shaped `posterDid`, may use it. `X-Posted-By` no longer counts for
   PATCH, DELETE or heartbeat. Required if `requireHeartbeat: true` on create
   (5min grace).
+
+The recorded posting identity is the credential that created the offer, and
+a claim records its claimer the same way:
+
+- A proven wallet is recorded as that wallet. The gateway proves a wallet
+  through a SIWE sign-in (its cookie, its bearer session or an API key it
+  minted), or through an agent key that sends exactly one `X-PCC-Wallet`
+  header naming a wallet the key has a confirmed agent self-link to.
+- Any other API key is recorded as that key.
+- A post with neither records no posting identity. Only the proven wallet
+  that a wallet-shaped `posterDid` names may then act as its poster.
+- A request in another form is a different identity. An agent key that
+  posted with `X-PCC-Wallet` must send it again for every poster action,
+  and one that posted without it must not. A new plain API key is a
+  different identity from the key it replaces.
 
 ### Diagnostics
 
