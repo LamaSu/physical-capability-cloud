@@ -144,7 +144,7 @@ describe("agents live routes require admins and refuse before any read", () => {
     } finally { vi.stubEnv("PCC_ADMIN_KEY", secret); }
   });
 
-  it("AL6b blank admin headers get 403 before any read", async () => {
+  it("AL6b blank admin headers get 403 before any read, with the secret blank or unset", async () => {
     try {
       for (const configured of ["", "   "]) {
         vi.stubEnv("PCC_ADMIN_KEY", configured);
@@ -156,6 +156,21 @@ describe("agents live routes require admins and refuse before any read", () => {
           const fields = handlerRequest!.raw.rawHeaders.flatMap((name, index, raw) =>
             index % 2 === 0 && name.toLowerCase() === "x-admin-key" ? [raw[index + 1]] : []);
           expect(fields).toEqual([configured]);
+        }
+      }
+      delete process.env.PCC_ADMIN_KEY;
+      expect(Object.keys(process.env)).not.toContain("PCC_ADMIN_KEY");
+      for (const path of paths) {
+        for (const header of ["", "undefined"]) {
+          await expectForbidden(path, { ...bearer(), "x-admin-key": header });
+          const captured = handlerRequest;
+          if (!captured) throw new Error("Handler request required");
+          expect(captured.routeOptions.url).toBe(path);
+          expect(countAdminKeyFields(captured)).toBe(1);
+          expect(captured.headers["x-admin-key"]).toBe(header);
+          const fields = captured.raw.rawHeaders.flatMap((name, index, raw) =>
+            index % 2 === 0 && name.toLowerCase() === "x-admin-key" ? [raw[index + 1]] : []);
+          expect(fields).toEqual([header]);
         }
       }
     } finally { vi.stubEnv("PCC_ADMIN_KEY", secret); }
@@ -186,6 +201,10 @@ describe("agents live routes require admins and refuse before any read", () => {
     }
     vi.stubEnv("TENANT_ENFORCE", "false");
     for (const path of paths) await expectAllowed(path, bearer());
+    for (const flag of ["TRUE", " true", "1"]) {
+      vi.stubEnv("TENANT_ENFORCE", flag);
+      for (const path of paths) await expectAllowed(path, bearer());
+    }
     delete process.env.TENANT_ENFORCE;
     for (const path of paths) await expectAllowed(path, bearer());
   });
@@ -205,5 +224,18 @@ describe("agents live routes require admins and refuse before any read", () => {
   it("AL11 admin helper errors refuse", () => {
     const req = { get raw() { throw new Error("synthetic-n350-request-error"); } } as unknown as FastifyRequest;
     expect(isAdminCaller(req)).toBe(false);
+    const adminKey = keys[0].record;
+    if (!adminKey) throw new Error("Admin key record required");
+    const unreadable = {
+      apiKeyId: adminKey.id,
+      headers: {},
+      get raw() { throw new Error("synthetic-n350-admin-request-error"); },
+    } as unknown as FastifyRequest;
+    expect(isAdminCaller(unreadable)).toBe(false);
+    const missingRaw = {
+      apiKeyId: adminKey.id,
+      headers: {},
+    } as unknown as FastifyRequest;
+    expect(isAdminCaller(missingRaw)).toBe(false);
   });
 });
