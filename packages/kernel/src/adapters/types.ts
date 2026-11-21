@@ -49,13 +49,17 @@ export type MachineStatus = "idle" | "busy" | "error" | "offline" | "maintenance
  * exact input bytes without text, newline or BOM normalization. gcodeHash is
  * its legacy alias. load_gcode carries { gcodeHash, jobId } and no input bytes.
  * After a matching prepare ack, JobRunner records { jobId, deviceJobId, inputHash }
- * from its own values as the kernel-signed input proof. On both JobRunner paths
- * (prepare and load_gcode), an adapter method_loaded carrying an inputHash key
- * is never recorded and fails the job closed. runPrintJob (printer-job.ts) does
- * not refuse it yet; that comes with PR-1d. Every adapter method_loaded fails a
- * prepare job. Legacy JobRunner emissions without inputHash remain recorded
- * unchanged. JobRunner rechecks after evidence settles to catch events mutated
- * after emission or recording.
+ * from its own values as the kernel-written input proof. Its source carries
+ * writer: "kernel" and uses event hash v2 (hashKernelWrittenEvent). This
+ * method_loaded is the only event the kernel marks.
+ * Adapters never set source.writer. The emitter refuses an adapter event whose
+ * source owns any writer key, and the job fails closed.
+ * On both JobRunner paths and on runPrintJob, an adapter method_loaded carrying
+ * an inputHash key is never recorded and fails the job closed; on runPrintJob
+ * this applies when the event is bound to the print's device job.
+ * Every adapter method_loaded fails a prepare job. Legacy emissions without
+ * inputHash stay recorded unchanged. JobRunner and runPrintJob recheck their
+ * recorded evidence after it settles, including late marker mutations.
  */
 export interface MachineCommand {
   type: "prepare" | "load_gcode" | "start" | "pause" | "resume" | "stop" | "status";
