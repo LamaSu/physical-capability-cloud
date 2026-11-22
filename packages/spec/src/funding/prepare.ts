@@ -24,7 +24,7 @@ import {
   type PublicClient,
   type WalletClient,
 } from "viem";
-import { AcceptedPolicyDigestInputError, computeAcceptedPolicyDigest } from "../evidence/accepted-policy.js";
+import { AcceptedPolicyDigestInputError, acceptedPolicyDigestOfRoots } from "../evidence/accepted-policy.js";
 import { computeTermsHashV21, TermsHashV21Error } from "./terms-hash-v21.js";
 import { assertChain, describeRevert, pinBlock, pinnedReader } from "./chain.js";
 import { refuse } from "./errors.js";
@@ -362,9 +362,9 @@ function checkIntent(p: PreparePayload, e: FundingExpectations, structHash: Hex)
   let checkedDigest: Hex | undefined;
   if (typeof e.acceptedPolicyDigest === "object") {
     try {
-      checkedDigest = computeAcceptedPolicyDigest({ termsHash: checkedTermsHash!.toLowerCase() as Hex,
-        subjectBlockHash: e.acceptedPolicyDigest.subjectBlockHash.toLowerCase() as Hex,
-        bindingsRoot: e.acceptedPolicyDigest.bindingsRoot.toLowerCase() as Hex });
+      checkedDigest = acceptedPolicyDigestOfRoots(checkedTermsHash!.toLowerCase(),
+        e.acceptedPolicyDigest.subjectBlockHash.toLowerCase(),
+        e.acceptedPolicyDigest.bindingsRoot.toLowerCase());
     } catch (error) {
       if (error instanceof AcceptedPolicyDigestInputError) refuse("INTENT_MISMATCH", `acceptedPolicyDigest: ${error.message}`);
       throw error;

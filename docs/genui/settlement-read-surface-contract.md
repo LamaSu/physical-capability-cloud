@@ -103,8 +103,9 @@ type SettlementReceiptDTO = {
                                                           // assertion cutoff and emits Finalized(unitId, false, 2) for both, so "backup reject" is not a distinctly witnessable path.
     | "COHORT_REVOKED" | "DEADLINE_RECLAIM"               // DEADLINE_RECLAIM is witnessed by Finalized(unitId, false, 4) from
                                                           // reclaimAfterDeadline (ESC:2224), and is never inferred by elimination.
-    | null;                                               // null — no cause to report on a release path, or before a terminal refund; RefundReason has NO
-                                                          // "NONE" member (the implemented route uses null; see matrix §B fixture 1a).
+    | null;                                               // null only off the refund path (states 1-6 and 8), where the route never reads the refund witness.
+                                                          // At state 7 or 9 it reads the witness and renders the witnessed cause, or "UNKNOWN" when the witness names none; never null.
+                                                          // RefundReason has NO "NONE" member (the implemented route uses null; see matrix §B fixture 1a).
   authorizationId: string;                                // EAS UID | dispute id | reclaim id | (buyer path:) the execution receipt id
   vcrReceiptPointer: string | null;                       // NON-null ONLY when authorizationType == "BUYER_APPROVAL": the execution receipt id to DEFER to. Never an inline signed receipt.
   evidenceBundleHash: string | null;                      // hex; null off the evidence path

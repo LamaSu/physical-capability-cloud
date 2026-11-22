@@ -193,6 +193,7 @@ describe("local config rules", () => {
   const slugWarning = (type: string) => `${JSON.stringify(type)} is not a slug (lowercase letters and digits joined by single "-" or "."); the gateway accepts any type`;
   const walletMessage = "the scaffolded agent never reads the variable named in walletPrivateKeyEnvVar; KernelAgent takes no wallet setting, so its wallet is a new random key each start";
   const walletError = 'is not an environment variable name (a letter or "_", then letters, digits or "_"); the scaffold writes it as a key of .env.example';
+  const keyMessage = "looks like a private key, not an environment variable name; keep the key in your environment and put the variable's name here";
   const withType = (type: string) => {
     const config = makeValidConfig();
     config.capabilities[0].type = type as any;
@@ -488,12 +489,35 @@ describe("local config rules", () => {
       config.kernel.walletPrivateKeyEnvVar = value;
       const result = validate({ config });
       expect(JSON.stringify(result)).not.toContain(hex);
-      expect(result.warnings).toContainEqual(warning("kernel.walletPrivateKeyEnvVar", walletMessage));
-      if (value === "0x" + hex) {
-        expect(result.errors).toContainEqual(error("kernel.walletPrivateKeyEnvVar", walletError));
-      } else {
-        expect(result.valid).toBe(true);
-      }
+      const name = "kernel.walletPrivateKeyEnvVar";
+      expect(result.valid).toBe(false);
+      expect(result.warnings).toContainEqual(warning(name, walletMessage));
+      expect(result.errors.filter(e => e.name === name)).toEqual([error(name, value === "0x" + hex ? walletError : keyMessage)]);
+    }
+  });
+
+  it("CV22: a wallet name of exactly 64 or 128 hex digits is refused, and only that", () => {
+    const name = "kernel.walletPrivateKeyEnvVar";
+    for (const value of ["f".repeat(64), "A".repeat(64), "aB".repeat(32), "c0".repeat(64), "D".repeat(128)]) {
+      const config = makeValidConfig();
+      config.kernel.walletPrivateKeyEnvVar = value;
+      const result = validate({ config });
+      expect(result.errors.filter(e => e.name === name)).toEqual([error(name, keyMessage)]);
+      expect(result.valid).toBe(false);
+      expect(JSON.stringify(result)).not.toContain(value);
+    }
+    for (const value of ["0x" + "f".repeat(64), "1" + "f".repeat(63)]) {
+      const config = makeValidConfig();
+      config.kernel.walletPrivateKeyEnvVar = value;
+      expect(validate({ config }).errors.filter(e => e.name === name)).toEqual([error(name, walletError)]);
+    }
+    for (const value of ["f".repeat(63), "f".repeat(65), "f".repeat(127), "f".repeat(129), "g".repeat(64), "KERNEL_PRIVATE_KEY"]) {
+      const config = makeValidConfig();
+      config.kernel.walletPrivateKeyEnvVar = value;
+      const result = validate({ config });
+      expect(result.errors.some(e => e.name === name)).toBe(false);
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toContainEqual(warning(name, walletMessage));
     }
   });
 

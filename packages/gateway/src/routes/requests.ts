@@ -42,6 +42,8 @@ import { computeCompositionSignature, budgetToBand, commitmentReportForRequest, 
 import { decomposeRequest, decomposeDirectMatch } from "../services/request-decomposer.js";
 import { matchListings } from "../services/request-matcher.js";
 import { produceJobOffersForRequest } from "../services/job-offer-producer.js";
+import { namesAdminOnlyRequestField, servedRequest } from "../services/request-public.js";
+import { isAdminCaller } from "../auth/admin-caller.js";
 import {
   decomposeAgentic,
   createMatcher,
@@ -525,15 +527,18 @@ export async function requestRoutes(app: FastifyInstance) {
   });
 
   // ── GET /api/requests ─────────────────────────────────────────────
-  app.get("/api/requests", async (req) => {
+  app.get("/api/requests", async (req, reply) => {
     const q = req.query as Record<string, string>;
+    if (q.requesterEmail !== undefined && !isAdminCaller(req)) {
+      return reply.status(403).send({ error: "forbidden", reason: "requester_filter_admin_only" });
+    }
     const repos = getRepos();
     const rows = repos.requests.findAll({
       status: q.status,
       urgency: q.urgency,
       requesterEmail: q.requesterEmail,
     });
-    const results = rows.map(rowToRequest);
+    const results = rows.map((row) => servedRequest(req, rowToRequest(row)));
     return { requests: results, count: results.length };
   });
 
@@ -544,7 +549,7 @@ export async function requestRoutes(app: FastifyInstance) {
     if (!row) {
       return reply.status(404).send({ error: "request_not_found" });
     }
-    return { request: rowToRequest(row) };
+    return { request: servedRequest(req, rowToRequest(row)) };
   });
 
   // ── POST /api/requests/:id/decompose ──────────────────────────────
@@ -590,7 +595,7 @@ export async function requestRoutes(app: FastifyInstance) {
       updatedAt: request.updatedAt,
     });
 
-    return { request, decomposition: result };
+    return { request: servedRequest(req, request), decomposition: result };
   });
 
   // ── POST /api/requests/:id/publish ───────────────────────────────
@@ -642,7 +647,7 @@ export async function requestRoutes(app: FastifyInstance) {
     const jobOffers = await produceJobOffersForRequest(request);
 
     return {
-      request,
+      request: servedRequest(req, request),
       publishedBounties,
       publishedCount: publishedBounties.length,
       jobOffers,
@@ -651,6 +656,9 @@ export async function requestRoutes(app: FastifyInstance) {
 
   // ── PUT /api/requests/:id ─────────────────────────────────────────
   app.put<{ Params: { id: string } }>("/api/requests/:id", async (req, reply) => {
+    if (namesAdminOnlyRequestField(req.body) && !isAdminCaller(req)) {
+      return reply.status(403).send({ error: "forbidden", reason: "requester_fields_admin_only" });
+    }
     const repos = getRepos();
     const row = repos.requests.findById(req.params.id);
     if (!row) {
@@ -680,7 +688,7 @@ export async function requestRoutes(app: FastifyInstance) {
     repos.requests.update(request.id, updates);
 
     const refreshed = repos.requests.findById(request.id);
-    return { request: refreshed ? rowToRequest(refreshed) : request };
+    return { request: servedRequest(req, refreshed ? rowToRequest(refreshed) : request) };
   });
 
   // ── DELETE /api/requests/:id ──────────────────────────────────────

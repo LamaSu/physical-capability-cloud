@@ -56,6 +56,7 @@ export const machineRegistrations = sqliteTable("machine_registrations", {
   createdAt: text("created_at").notNull(),
   submittedAt: text("submitted_at"),
   approvedAt: text("approved_at"),
+  createdByKeyId: text("created_by_key_id"),
 });
 
 /** Uploaded documentation for AI analysis */

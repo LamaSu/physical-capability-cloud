@@ -390,6 +390,86 @@ describe("v1.5 rule 23 — ABSENCE IS NOT EVIDENCE", () => {
     expect(b.refundReason.completeness).toBe("complete");
     await app.close();
   });
+
+  it("T24 a lagging index marks a witnessed refund cause and finalized block incomplete", async () => {
+    setSettlementUnitReader(makeReader({
+      pinSnapshot: async () => ({ asOfBlock: 100n, asOfBlockHash: SNAP_HASH, finality: "finalized", logCompleteness: "incomplete" }),
+      readAnchors: async () => ({ state: UnitState.SETTLED_REFUNDED, remainingClaimCount: 0n }),
+      readRefundWitness: async () => ({ finalized: { released: false, code: 2 } }),
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      const b = res.json();
+      expect(b.logCompleteness).toBe("incomplete");
+      expect(b.finalState).toBe("SETTLED_REFUNDED");
+      expect(b.refundReason).toMatchObject({ value: "BACKUP_NO_RELEASE", source: "log", completeness: "incomplete" });
+      expect(b.finalizedBlock).toMatchObject({ value: "120", source: "log", completeness: "incomplete" });
+    } finally { await app.close(); }
+  });
+
+  it("T25 a complete index marks the finalized block complete", async () => {
+    setSettlementUnitReader(makeReader());
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().finalizedBlock).toMatchObject({ value: "120", source: "log", completeness: "complete" });
+    } finally { await app.close(); }
+  });
+
+  it("T25b a lagging index marks a settled release's finalized block incomplete at the pinned block", async () => {
+    setSettlementUnitReader(makeReader({
+      pinSnapshot: async () => ({ asOfBlock: 100n, asOfBlockHash: SNAP_HASH, finality: "finalized", logCompleteness: "incomplete" }),
+      readAnchors: async () => ({ state: UnitState.SETTLED_RELEASED, remainingClaimCount: 0n }),
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      const b = res.json();
+      expect(b.logCompleteness).toBe("incomplete");
+      expect(b.finalState).toBe("SETTLED_RELEASED");
+      expect(b.refundReason).toBeNull();
+      expect(b.finalizedBlock).toEqual({
+        value: "120",
+        source: "log",
+        completeness: "incomplete",
+        chain: "eip155:84532",
+        contractOrRegistryId: "0xEsCrOw",
+        blockNumber: "100",
+        blockHash: SNAP_HASH,
+        finality: "finalized",
+      });
+    } finally { await app.close(); }
+  });
+
+  it("T24b a lagging index marks an allocated refund's witnessed cause incomplete at the pinned block", async () => {
+    setSettlementUnitReader(makeReader({
+      pinSnapshot: async () => ({ asOfBlock: 100n, asOfBlockHash: SNAP_HASH, finality: "finalized", logCompleteness: "incomplete" }),
+      readAnchors: async () => ({ state: UnitState.REFUND_ALLOCATED, remainingClaimCount: 1n }),
+      readRefundWitness: async () => ({ finalized: { released: false, code: 2 } }),
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      const b = res.json();
+      expect(b.logCompleteness).toBe("incomplete");
+      expect(b.finalizedBlock).toBeNull();
+      expect(b.refundReason).toEqual({
+        value: "BACKUP_NO_RELEASE",
+        source: "log",
+        completeness: "incomplete",
+        chain: "eip155:84532",
+        contractOrRegistryId: "0xEsCrOw",
+        blockNumber: "100",
+        blockHash: SNAP_HASH,
+        finality: "finalized",
+      });
+    } finally { await app.close(); }
+  });
 });
 
 describe("v1.5 rule 26 — assetReality attests IDENTITY, not liveness", () => {
@@ -521,6 +601,199 @@ describe("settlement witnesses and emergency cap", () => {
       } else {
         expect(b.refundReason).toBe("UNKNOWN");
       }
+    } finally { await app.close(); }
+  });
+
+  it("T22c state 6 never reads a refund witness or reports a refund reason", async () => {
+    const readRefundWitness = vi.fn(async () => ({ finalized: { released: false, code: 2 } }));
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state: UnitState.RELEASE_ALLOCATED, remainingClaimCount: 1n }),
+      readRefundWitness,
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().refundReason).toBeNull();
+      expect(readRefundWitness).not.toHaveBeenCalled();
+    } finally { await app.close(); }
+  });
+
+  it.each([
+    { state: 7n, representation: "bigint" },
+    { state: "7", representation: "string" },
+  ])("T22d state 7 as $representation without a refund witness is UNKNOWN", async ({ state }) => {
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state: state as unknown as UnitState, remainingClaimCount: 1n }),
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().refundReason).toBe("UNKNOWN");
+    } finally { await app.close(); }
+  });
+
+  it.each([
+    { state: 9n, representation: "bigint" },
+    { state: "9", representation: "string" },
+  ])("T22e state 9 as $representation keeps an UNKNOWN refund reason and log finalization", async ({ state }) => {
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state: state as unknown as UnitState, remainingClaimCount: 0n }),
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      const b = res.json();
+      expect(b.finalState).toBe("SETTLED_REFUNDED");
+      expect(b.refundReason).toBe("UNKNOWN");
+      expect(b.finalizedBlock).toMatchObject({ value: "120", source: "log" });
+    } finally { await app.close(); }
+  });
+
+  it.each([
+    { state: 6n, representation: "bigint" },
+    { state: "6", representation: "string" },
+  ])("T22f state 6 as $representation never reads a refund witness or reports a refund reason", async ({ state }) => {
+    const readRefundWitness = vi.fn(async () => ({ finalized: { released: false, code: 2 } }));
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state: state as unknown as UnitState, remainingClaimCount: 1n }),
+      readRefundWitness,
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().refundReason).toBeNull();
+      expect(readRefundWitness).not.toHaveBeenCalled();
+    } finally { await app.close(); }
+  });
+
+  it.each([
+    { state: 9n, representation: "bigint", finalState: "SETTLED_REFUNDED", refundReason: "UNKNOWN" },
+    { state: "9", representation: "string", finalState: "SETTLED_REFUNDED", refundReason: "UNKNOWN" },
+    { state: "09", representation: "zero-padded string", finalState: "SETTLED_REFUNDED", refundReason: "UNKNOWN" },
+    { state: 8n, representation: "bigint", finalState: "SETTLED_RELEASED", refundReason: null },
+    { state: "8", representation: "string", finalState: "SETTLED_RELEASED", refundReason: null },
+    { state: "08", representation: "zero-padded string", finalState: "SETTLED_RELEASED", refundReason: null },
+    { state: "009", representation: "two-zero-padded string", finalState: "SETTLED_REFUNDED", refundReason: "UNKNOWN" },
+    { state: "008", representation: "two-zero-padded string", finalState: "SETTLED_RELEASED", refundReason: null },
+    { state: "0".repeat(64) + "9", representation: "64-zero-padded 9", finalState: "SETTLED_REFUNDED", refundReason: "UNKNOWN" },
+    { state: "0".repeat(64) + "8", representation: "64-zero-padded 8", finalState: "SETTLED_RELEASED", refundReason: null },
+  ])("T22g state $state as $representation missing both settlement witnesses is UNKNOWN on a complete index", async ({ state, finalState, refundReason }) => {
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state: state as unknown as UnitState, remainingClaimCount: 0n }),
+      readRefundWitness: async () => ({}), readFinalizationWitness: async () => ({}),
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      const b = res.json();
+      expect(b.logCompleteness).toBe("complete");
+      expect(b.finalState).toBe(finalState);
+      expect(b.refundReason).toBe(refundReason);
+      expect(b.finalizedBlock).toBe("UNKNOWN");
+    } finally { await app.close(); }
+  });
+
+  it.each([
+    { state: 8n, representation: "bigint", finalState: "SETTLED_RELEASED", refundReason: null },
+    { state: "8", representation: "string", finalState: "SETTLED_RELEASED", refundReason: null },
+    { state: "08", representation: "zero-padded string", finalState: "SETTLED_RELEASED", refundReason: null },
+    { state: "09", representation: "zero-padded string", finalState: "SETTLED_REFUNDED", refundReason: "UNKNOWN" },
+    { state: "008", representation: "two-zero-padded string", finalState: "SETTLED_RELEASED", refundReason: null },
+    { state: "009", representation: "two-zero-padded string", finalState: "SETTLED_REFUNDED", refundReason: "UNKNOWN" },
+    { state: "0".repeat(64) + "8", representation: "64-zero-padded 8", finalState: "SETTLED_RELEASED", refundReason: null },
+    { state: "0".repeat(64) + "9", representation: "64-zero-padded 9", finalState: "SETTLED_REFUNDED", refundReason: "UNKNOWN" },
+  ])("T22h state $state as $representation reads the finalized block from the logs", async ({ state, finalState, refundReason }) => {
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state: state as unknown as UnitState, remainingClaimCount: 0n }),
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      const b = res.json();
+      expect(b.finalState).toBe(finalState);
+      expect(b.refundReason).toBe(refundReason);
+      expect(b.finalizedBlock).toMatchObject({ value: "120", source: "log" });
+    } finally { await app.close(); }
+  });
+
+  it.each([
+    { state: 6n, representation: "bigint", refundReason: null },
+    { state: "6", representation: "string", refundReason: null },
+    { state: "06", representation: "zero-padded string", refundReason: null },
+    { state: 7n, representation: "bigint", refundReason: "UNKNOWN" },
+    { state: "7", representation: "string", refundReason: "UNKNOWN" },
+    { state: "07", representation: "zero-padded string", refundReason: "UNKNOWN" },
+    { state: "006", representation: "two-zero-padded string", refundReason: null },
+    { state: "007", representation: "two-zero-padded string", refundReason: "UNKNOWN" },
+    { state: "0".repeat(64) + "6", representation: "64-zero-padded 6", refundReason: null },
+    { state: "0".repeat(64) + "7", representation: "64-zero-padded 7", refundReason: "UNKNOWN" },
+  ])("T19c state $state as $representation never reads finalization logs", async ({ state, refundReason }) => {
+    const readFinalizationWitness = vi.fn(async () => ({ allocation: { block: 120n, claimCount: 0n } }));
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({ state: state as unknown as UnitState, remainingClaimCount: 1n }),
+      readFinalizationWitness,
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().refundReason).toBe(refundReason);
+      expect(res.json().finalizedBlock).toBeNull();
+      expect(readFinalizationWitness).not.toHaveBeenCalled();
+    } finally { await app.close(); }
+  });
+
+  it.each([
+    { state: 1n, representation: "bigint" },
+    { state: "1", representation: "string" },
+    { state: "01", representation: "zero-padded string" },
+    { state: 2n, representation: "bigint" },
+    { state: "2", representation: "string" },
+    { state: "02", representation: "zero-padded string" },
+    { state: 3n, representation: "bigint" },
+    { state: "3", representation: "string" },
+    { state: "03", representation: "zero-padded string" },
+    { state: 4n, representation: "bigint" },
+    { state: "4", representation: "string" },
+    { state: "04", representation: "zero-padded string" },
+    { state: 5n, representation: "bigint" },
+    { state: "5", representation: "string" },
+    { state: "05", representation: "zero-padded string" },
+    { state: "001", representation: "two-zero-padded string" },
+    { state: "002", representation: "two-zero-padded string" },
+    { state: "003", representation: "two-zero-padded string" },
+    { state: "004", representation: "two-zero-padded string" },
+    { state: "005", representation: "two-zero-padded string" },
+    { state: "0".repeat(64) + "1", representation: "64-zero-padded 1" },
+    { state: "0".repeat(64) + "2", representation: "64-zero-padded 2" },
+    { state: "0".repeat(64) + "3", representation: "64-zero-padded 3" },
+    { state: "0".repeat(64) + "4", representation: "64-zero-padded 4" },
+    { state: "0".repeat(64) + "5", representation: "64-zero-padded 5" },
+  ])("T19d state $state as $representation with zero remaining claims never reads either settlement witness", async ({ state }) => {
+    const readFinalizationWitness = vi.fn(async () => ({ allocation: { block: 120n, claimCount: 0n } }));
+    const readRefundWitness = vi.fn(async () => ({}));
+    setSettlementUnitReader(makeReader({
+      readAnchors: async () => ({
+        state: state as unknown as UnitState, remainingClaimCount: 0n, assertedAt: 1000n, challengedAt: 2000n,
+        emergencyAnchor: 5000n, assertionCutoff: 6000n,
+      }),
+      readFinalizationWitness, readRefundWitness,
+    }));
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().finalState).toBeNull();
+      expect(res.json().refundReason).toBeNull();
+      expect(res.json().finalizedBlock).toBeNull();
+      expect(readFinalizationWitness).not.toHaveBeenCalled();
+      expect(readRefundWitness).not.toHaveBeenCalled();
     } finally { await app.close(); }
   });
 

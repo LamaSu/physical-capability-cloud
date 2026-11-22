@@ -101,6 +101,10 @@ export async function operatorRoutes(app: FastifyInstance) {
   app.get<{ Params: { kernelId: string } }>(
     "/api/operator/policy/:kernelId",
     async (req, reply) => {
+      const refusal = refuseKernelAction(req, authorityOf(req), req.params.kernelId, "read");
+      if (refusal?.status === 503) return reply.code(503).send(refusal.body);
+      const stop = refusal ? emergencyStopState(req.params.kernelId) : null;
+      if (stop === "unavailable") return reply.code(503).send({ error: "read_failed", message: "The operator policy could not be read. Try again shortly." });
       let row;
       try {
         const { db } = getStore();
@@ -112,6 +116,10 @@ export async function operatorRoutes(app: FastifyInstance) {
         // an operator's real guardrails as the defaults.
         req.log.warn({ kernelId: req.params.kernelId, err }, "operator policy read failed");
         return reply.code(503).send({ error: "read_failed", message: "The operator policy could not be read. Try again shortly." });
+      }
+      if (stop !== null) {
+        if (!row) return { policy: { emergencyStop: false }, source: "default" };
+        return { policy: { emergencyStop: stop === "stopped" }, updatedAt: row.updatedAt };
       }
       if (!row) {
         return { policy: DEFAULT_OPERATOR_POLICY, source: "default" };

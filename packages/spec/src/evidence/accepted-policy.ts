@@ -107,9 +107,9 @@ export type UintInput = bigint | number | string;
 // `process.getBuiltinModule("node:util")` (Node >= 20.16 / >= 22.3) rather than a static
 // `import { types } from "node:util"`, because a browser bundle (the dashboard's Vite
 // build) has no `node:util` and a static import of it fails that build (#361). Where the
-// runtime cannot give it, the module still LOADS, and every exported function throws
-// `AcceptedPolicyDigestInputError("runtime", ...)` before it reads its input: with no way
-// to tell a Proxy, an unknown is never a "no". ──────────────────────────────────────────
+// runtime cannot give it, the module still loads. Exported producers that admit objects
+// throw `AcceptedPolicyDigestInputError("runtime", ...)` before reading them. Internal
+// read-once entries instead validate descriptors and hash only their snapshots.
 
 /** What `takeHostIsProxy` looks for on `globalThis.process`, spelled out so no `@types/node` version matters. */
 type BuiltinModuleHost = { getBuiltinModule?: (id: string) => { types?: { isProxy?: unknown } } | undefined };
@@ -149,9 +149,12 @@ export class AcceptedPolicyDigestInputError extends Error {
   }
 }
 
-/** Whether `value` is a Proxy, live or revoked. Throws (never answers "no") where the runtime cannot tell. */
-function isProxy(value: unknown): boolean {
+type AdmissionMode = "refuse-unknown" | "read-once";
+
+/** Whether `value` is a Proxy, live or revoked, under the required admission mode. */
+function isProxy(value: unknown, mode: AdmissionMode): boolean {
   if (hostIsProxy === undefined) {
+    if (mode === "read-once") return false;
     throw new AcceptedPolicyDigestInputError("runtime", PROXY_DETECTION_UNAVAILABLE);
   }
   return hostIsProxy(value);
@@ -163,20 +166,20 @@ function isProxy(value: unknown): boolean {
  * instance, Date, Map, typed array, Buffer or Error is refused; so is an object whose
  * prototype is a Proxy (never asked for ITS prototype, which would run a trap).
  */
-function hasPlainPrototype(node: object): boolean {
+function hasPlainPrototype(node: object, mode: AdmissionMode): boolean {
   const proto = getPrototypeOf(node);
-  return proto === null || (!isProxy(proto) && getPrototypeOf(proto) === null);
+  return proto === null || (!isProxy(proto, mode) && getPrototypeOf(proto) === null);
 }
 
 /** Admits a plain, non-array object: refuses null/non-object, a Proxy, an array, or a non-plain prototype. */
-function admitPlainObject(value: unknown, field: string): object {
+function admitPlainObject(value: unknown, field: string, mode: AdmissionMode): object {
   if (value === null || typeof value !== "object") {
     throw new AcceptedPolicyDigestInputError(field, "expected a plain object");
   }
-  if (isProxy(value)) {
+  if (isProxy(value, mode)) {
     throw new AcceptedPolicyDigestInputError(field, "is a Proxy: its traps run code, so it is refused before it is read");
   }
-  if (isArray(value) || !hasPlainPrototype(value)) {
+  if (isArray(value) || !hasPlainPrototype(value, mode)) {
     throw new AcceptedPolicyDigestInputError(field, "expected a plain object (not an array, Proxy or class instance)");
   }
   return value;
@@ -195,11 +198,11 @@ function admitPlainObject(value: unknown, field: string): object {
  * indexed getter nor a prototype-chain fallthrough at a deleted index can ever be read, let
  * alone read twice with two different answers (E12 HIGH, astra r1 98501e35).
  */
-function admitPlainArray(value: unknown, field: string): readonly unknown[] {
+function admitPlainArray(value: unknown, field: string, mode: AdmissionMode): readonly unknown[] {
   if (value === null || typeof value !== "object") {
     throw new AcceptedPolicyDigestInputError(field, "expected an array");
   }
-  if (isProxy(value)) {
+  if (isProxy(value, mode)) {
     throw new AcceptedPolicyDigestInputError(field, "is a Proxy: its traps run code, so it is refused before it is read");
   }
   if (!isArray(value)) {
@@ -529,7 +532,7 @@ type JobTermsMissingFromKeyList = AssertNever<Exclude<keyof CanonicalJobTermsV1,
  * snapshots. Validation and hashing read only those snapshots, never caller data again.
  */
 export function computeMilestonesRoot(milestones: readonly CanonicalMilestoneTermsV1[]): Bytes32Hex {
-  const list = admitPlainArray(milestones, "milestones");
+  const list = admitPlainArray(milestones, "milestones", "refuse-unknown");
   if (list.length === 0) {
     throw new AcceptedPolicyDigestInputError("milestones", "expected at least one funded milestone");
   }
@@ -537,7 +540,7 @@ export function computeMilestonesRoot(milestones: readonly CanonicalMilestoneTer
   const seen = new Set<string>();
   for (let i = 0; i < list.length; i++) {
     const field = `milestones[${i}]`;
-    const admitted = admitPlainObject(list[i], field);
+    const admitted = admitPlainObject(list[i], field, "refuse-unknown");
     const snapshot = checkExactKeys(admitted, field, MILESTONE_TERMS_KEYS);
     const f = (key: (typeof MILESTONE_TERMS_KEYS)[number]) => requiredField(snapshot, field, key);
     const indexWord = uintWord(`${field}.milestoneIndex`, f("milestoneIndex"), 256);
@@ -572,7 +575,7 @@ export function computeMilestonesRoot(milestones: readonly CanonicalMilestoneTer
  * Pass the result as a plain input to computeAcceptedPolicyDigest.
  */
 export function computeTermsHash(terms: CanonicalJobTermsV1): Bytes32Hex {
-  const admitted = admitPlainObject(terms, "terms");
+  const admitted = admitPlainObject(terms, "terms", "refuse-unknown");
   const snapshot = checkExactKeys(admitted, "terms", JOB_TERMS_KEYS);
   const f = (key: (typeof JOB_TERMS_KEYS)[number]) => requiredField(snapshot, "terms", key);
   const tokenWord = addressWord("terms.token", f("token"));
@@ -649,8 +652,22 @@ type SubjectFieldsMissingFromKeyList = AssertNever<Exclude<keyof SubjectBlockFie
  * that snapshot, via `requiredField`, never read from `subject` a second time.
  */
 export function computeSubjectBlockHash(subject: SubjectBlockFields): Bytes32Hex {
-  const admitted = admitPlainObject(subject, "subject");
-  const snapshot = checkExactKeys(admitted, "subject", SUBJECT_BLOCK_KEYS);
+  return subjectBlockHashOfSnapshot(checkExactKeys(admitPlainObject(subject, "subject", "refuse-unknown"), "subject", SUBJECT_BLOCK_KEYS));
+}
+
+/** Internal to the funding send path; not part of the package's exports. */
+export type SubjectBlockSnapshot = Readonly<Record<string, unknown>>;
+
+/** Internal to the funding send path; not part of the package's exports. */
+export function snapshotSubjectBlock(subject: unknown): SubjectBlockSnapshot {
+  return checkExactKeys(admitPlainObject(subject, "subject", "read-once"), "subject", SUBJECT_BLOCK_KEYS);
+}
+
+/**
+ * Internal to the funding send path; not part of the package's exports.
+ * Takes only a snapshot from snapshotSubjectBlock, or a plain copy of one.
+ */
+export function subjectBlockHashOfSnapshot(snapshot: SubjectBlockSnapshot): Bytes32Hex {
   const f = (key: (typeof SUBJECT_BLOCK_KEYS)[number]) => requiredField(snapshot, "subject", key);
   return keccakWords([
     bytes32Word("SUBJECT_DOMAIN", SUBJECT_DOMAIN),
@@ -682,11 +699,11 @@ interface PinnedAuthorizedTuple {
 
 /** Validate and snapshot both the outer list and each exactly-three-word tuple. */
 function pinAuthorizedTuples(tuples: unknown): PinnedAuthorizedTuple[] {
-  const admittedArray = admitPlainArray(tuples, "tuples");
+  const admittedArray = admitPlainArray(tuples, "tuples", "refuse-unknown");
   const pinned: PinnedAuthorizedTuple[] = [];
   for (let i = 0; i < admittedArray.length; i++) {
     const field = `tuples[${i}]`;
-    const snapshot = admitPlainArray(admittedArray[i], field);
+    const snapshot = admitPlainArray(admittedArray[i], field, "refuse-unknown");
     if (snapshot.length !== 3) {
       throw new AcceptedPolicyDigestInputError(field, "expected exactly three words (operator, kernel, device)");
     }
@@ -822,11 +839,20 @@ interface PinnedBinding {
  * once into its own snapshot (`checkExactKeys`), before any of its fields is used.
  */
 export function computeBindingsRoot(bindings: readonly SubjectBinding[]): Bytes32Hex {
-  const admittedArray = admitPlainArray(bindings, "bindings");
+  return bindingsRootAndCountWithMode(bindings, "refuse-unknown").root;
+}
+
+/** Internal to the funding send path; not part of the package's exports. */
+export function bindingsRootAndCount(bindings: unknown): { root: Bytes32Hex; count: number } {
+  return bindingsRootAndCountWithMode(bindings, "read-once");
+}
+
+function bindingsRootAndCountWithMode(bindings: unknown, mode: AdmissionMode): { root: Bytes32Hex; count: number } {
+  const admittedArray = admitPlainArray(bindings, "bindings", mode);
   const pinned: PinnedBinding[] = [];
   for (let i = 0; i < admittedArray.length; i++) {
     const field = `bindings[${i}]`;
-    const admitted = admitPlainObject(admittedArray[i], field);
+    const admitted = admitPlainObject(admittedArray[i], field, mode);
     const snapshot = checkExactKeys(admitted, field, SUBJECT_BINDING_KEYS);
     const f = (key: (typeof SUBJECT_BINDING_KEYS)[number]) => requiredField(snapshot, field, key);
     const planUnitKeyValue = f("planUnitKey");
@@ -864,7 +890,7 @@ export function computeBindingsRoot(bindings: readonly SubjectBinding[]): Bytes3
   });
   const words: Uint8Array[] = [encodeUint(32n), encodeUint(toBigInt(sorted.length))];
   for (const entry of sorted) words.push(...entry.words);
-  return bytesToHex(keccak_256(concatWords(words)));
+  return { root: bytesToHex(keccak_256(concatWords(words))), count: admittedArray.length };
 }
 
 /** A bare 32-byte big-endian word for a trusted (already-range-checked) non-negative bigint. */
@@ -905,15 +931,20 @@ type DigestInputFieldsMissingFromKeyList = AssertNever<Exclude<keyof AcceptedPol
  * input reaches this: it takes exactly the three already-computed roots, nothing else.
  */
 export function computeAcceptedPolicyDigest(inputs: AcceptedPolicyDigestInputs): Bytes32Hex {
-  const admitted = admitPlainObject(inputs, "inputs");
+  const admitted = admitPlainObject(inputs, "inputs", "refuse-unknown");
   const snapshot = checkExactKeys(admitted, "inputs", ACCEPTED_POLICY_DIGEST_KEYS);
   const f = (key: (typeof ACCEPTED_POLICY_DIGEST_KEYS)[number]) => requiredField(snapshot, "inputs", key);
+  return acceptedPolicyDigestOfRoots(f("termsHash"), f("subjectBlockHash"), f("bindingsRoot"));
+}
+
+/** Internal to the funding send path; not part of the package's exports. */
+export function acceptedPolicyDigestOfRoots(termsHash: unknown, subjectBlockHash: unknown, bindingsRoot: unknown): Bytes32Hex {
   return keccakWords([
     bytes32Word("POLICY_DOMAIN", POLICY_DOMAIN),
     uintWord("POLICY_VERSION", POLICY_VERSION, 16),
-    bytes32Word("inputs.termsHash", f("termsHash")),
-    bytes32Word("inputs.subjectBlockHash", f("subjectBlockHash")),
-    bytes32Word("inputs.bindingsRoot", f("bindingsRoot")),
+    bytes32Word("inputs.termsHash", termsHash),
+    bytes32Word("inputs.subjectBlockHash", subjectBlockHash),
+    bytes32Word("inputs.bindingsRoot", bindingsRoot),
   ]);
 }
 

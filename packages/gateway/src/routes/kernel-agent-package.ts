@@ -19,6 +19,7 @@ import type { FastifyInstance } from "fastify";
 import { getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
 import { AUTHENTICATION_REQUIRED, authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
+import { emergencyStopState } from "./device-relay.js";
 import type { OperatorPolicy } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { locationVisibilityOf, publicLocation, type PublicLocation } from "../facades/populators/public-location.js";
@@ -45,6 +46,10 @@ export async function kernelAgentPackageRoutes(app: FastifyInstance) {
   app.get<{ Params: { kernelId: string }; Querystring: { role?: string } }>(
     "/api/kernels/:kernelId/agent-package",
     async (req, reply) => {
+      const refusal = refuseKernelAction(req, authorityOf(req), req.params.kernelId, "read");
+      if (refusal?.status === 503) return reply.status(503).send(refusal.body);
+      const stop = refusal ? emergencyStopState(req.params.kernelId) : null;
+      if (stop === "unavailable") return reply.status(503).send({ error: "read_failed", message: "The operator policy could not be read. Try again shortly." });
       try {
         const { db } = getStore();
         const { kernelId } = req.params;
@@ -89,7 +94,7 @@ export async function kernelAgentPackageRoutes(app: FastifyInstance) {
 
         // Build system prompt tailored to this kernel
         const baseUrl = `${req.protocol}://${req.hostname}`;
-        const systemPrompt = buildSystemPrompt(kernel, devices, caps, policy, baseUrl);
+        const systemPrompt = buildSystemPrompt(kernel, devices, caps, policy, baseUrl, stop === null);
 
         // N68: the package shows the kernel's location as every other read does.
         const place = publicLocation(kernel.location, locationVisibilityOf(kernel.location));
@@ -125,7 +130,7 @@ export async function kernelAgentPackageRoutes(app: FastifyInstance) {
             materials: c.materials,
             pricing: c.pricing,
           })),
-          operator_policy: {
+          operator_policy: stop !== null ? { emergencyStop: stop === "stopped" } : {
             approvalMode: policy.approvalMode,
             operatingHours: policy.operatingHours,
             timezone: policy.timezone,
@@ -428,6 +433,7 @@ function buildSystemPrompt(
   caps: any[],
   policy: any,
   baseUrl: string,
+  fullPolicy: boolean,
 ): string {
   const deviceList = devices.map((d) => `- ${d.model} (${d.type}, ${d.status})`).join("\n");
   const capList = caps.map((c) => `- ${c.type}: ${c.name}`).join("\n");
@@ -454,8 +460,7 @@ ${capList}
 ${materials}
 
 ## Operator Policy
-- Approval mode: ${policy.approvalMode}
-- Operating hours: ${policy.timezone}
+${fullPolicy ? `- Approval mode: ${policy.approvalMode}\n- Operating hours: ${policy.timezone}` : "- Approval mode and operating hours: shown to this kernel's operator and to admins only."}
 - Emergency stop: ${policy.emergencyStop ? "ACTIVE — all jobs suspended" : "inactive"}
 
 ## How to Submit a Job

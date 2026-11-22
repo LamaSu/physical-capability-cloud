@@ -67,6 +67,7 @@ import {
   GAS_LIMITS,
 } from "../contracts/escrow-client.js";
 import { driveSettlement, type DriveSettlementResult } from "../services/settlement-crank.js";
+import { resolveEscrowDrive } from "../services/escrow-drive-gate.js";
 import { buildJobSettlementRead, loadLegacySettlement } from "../readmodels/legacy-settlement.js";
 import { JOB_READ_REFUSAL } from "../readmodels/job-execution.js";
 import {
@@ -109,6 +110,18 @@ import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS } from "@pcc/spec";
 const { negotiationSessions, operatorPolicies, executionScopes, toolCallRelay } = schema;
 
 const resolver = new TemplateResolver();
+
+export function refusedEscrowDrive(address: string, reason: string): DriveSettlementResult {
+  return {
+    escrowAddress: address,
+    milestoneIdx: 0,
+    finalStatus: "Unfunded",
+    outcome: "blocked",
+    settled: false,
+    steps: [],
+    reason,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1436,10 +1449,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       const chainEvidenceHash = (
         bundleHash.startsWith("sha256:") ? `0x${bundleHash.slice("sha256:".length)}` : bundleHash
       ) as `0x${string}`;
-      // The escrow's DB version: V3 escrows settle their evidence and attestation
-      // through 4c's V3 branch. Falls back to V2 when the row is missing.
-      const escrowVersionOf = (address: string) =>
-        (repos.escrows.findByContractAddress(address)?.version as "v2" | "v3" | null | undefined) ?? "v2";
+      // All drive sites in this request share the first eligible site's answer.
+      let escrowDrive: ReturnType<typeof resolveEscrowDrive> | undefined;
 
       // EAS UID to bind on-chain: prefer the oracle-minted UID (orchestrated
       // path), fall back to a caller-supplied body.easUid (explicit bind).
@@ -1463,9 +1474,12 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       let legDrive: DriveSettlementResult | null = null;
       if (useEasV2() && hasRealEscrow && escrowWriteEnabled()) {
         try {
+          const gate = escrowDrive ??= resolveEscrowDrive({ cwmId: sessionRow?.cwmId, address: escrowAddress as string });
           const evidenceLeg =
-            escrowVersionOf(escrowAddress as string) === "v3" ? {} : { evidenceBundleHash: chainEvidenceHash, easUid };
-          legDrive = await driveSettlement(escrowAddress as `0x${string}`, 0, evidenceLeg);
+            gate.drive && gate.version === "v3" ? {} : { evidenceBundleHash: chainEvidenceHash, easUid };
+          legDrive = gate.drive
+            ? await driveSettlement(escrowAddress as `0x${string}`, 0, evidenceLeg)
+            : refusedEscrowDrive(escrowAddress as string, gate.reason);
           evidenceTxHash = legDrive.steps.find((s) => s.action === "submitEvidence")?.txHash ?? null;
         } catch (evErr) {
           // The milestone stays where the crank left it on-chain; a fresh read on the
@@ -1519,10 +1533,11 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           // Dispatch on the escrow's DB version: V3 escrows (created via the V3
           // factory) settle through the oracle-attested Mode-B path (submitEvidenceV3
           // → submitAttestationV3); V2 escrows route through the idempotent settlement
-          // crank (driveSettlement), which is V2-only. Falls back to V2 when the row
-          // is missing.
+          // crank (driveSettlement), which is V2-only. Refusals report a blocked
+          // drive with no escrow version and leave settlement resumable.
           if (easUid && hasRealEscrow && escrowWriteEnabled() && escrowAddress) {
-            const escrowVersion = escrowVersionOf(escrowAddress);
+            const gate = escrowDrive ??= resolveEscrowDrive({ cwmId: sessionRow?.cwmId, address: escrowAddress });
+            const escrowVersion = gate.drive ? gate.version : null;
             if (escrowVersion === "v3") {
               // V3 requires the evidence hash on-chain BEFORE the attestation binds —
               // submitAttestation reverts "Evidence not submitted" otherwise. Submit the
@@ -1556,10 +1571,10 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
               // challenge window allows, releases. Report 4a's result; only drive
               // here if that leg threw, carrying both the evidence hash and UID
               // so recovery can submit any missing evidence before binding.
-              const drive = legDrive ?? (await driveSettlement(escrowAddress as `0x${string}`, 0, {
+              const drive = legDrive ?? (gate.drive ? await driveSettlement(escrowAddress as `0x${string}`, 0, {
                 evidenceBundleHash: chainEvidenceHash,
                 easUid,
-              }));
+              }) : refusedEscrowDrive(escrowAddress, gate.reason));
               const attestStep = drive.steps.find((s) => s.action === "submitAttestation");
               // The attestation is on-chain once the milestone reached Attested or beyond.
               easBridge.submitted = drive.finalStatus === "Attested" || drive.settled;
@@ -1821,6 +1836,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       const hasRealEscrow =
         !!escrowAddress && escrowAddress.startsWith("0x") && !escrowAddress.startsWith("mock");
       const v2ChainDrive = useEasV2() && hasRealEscrow && escrowWriteEnabled();
+      let escrowDrive: ReturnType<typeof resolveEscrowDrive> | undefined;
 
       // First chain pass: read the milestone's TRUE on-chain state and advance it —
       // fund + submit evidence if they never landed, and (the core recovery) RELEASE
@@ -1831,9 +1847,10 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       let chainSettled = false;
       if (v2ChainDrive) {
         try {
-          const d1 = await driveSettlement(escrowAddress as `0x${string}`, 0, {
+          const gate = escrowDrive ??= resolveEscrowDrive({ cwmId: tierSessionRow?.cwmId, address: escrowAddress as string });
+          const d1 = gate.drive ? await driveSettlement(escrowAddress as `0x${string}`, 0, {
             evidenceBundleHash: chainEvidenceHash,
-          });
+          }) : refusedEscrowDrive(escrowAddress as string, gate.reason);
           onChainStepId = (d1.stepId as `0x${string}` | undefined) ?? undefined;
           chainOutcome = d1.outcome;
           chainSettled = d1.settled;
@@ -1931,10 +1948,11 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         const easUid = oracleResponse.easAttestation?.easUid as `0x${string}` | undefined;
         if (easUid) {
           try {
-            const d2 = await driveSettlement(escrowAddress as `0x${string}`, 0, {
+            const gate = escrowDrive ??= resolveEscrowDrive({ cwmId: tierSessionRow?.cwmId, address: escrowAddress as string });
+            const d2 = gate.drive ? await driveSettlement(escrowAddress as `0x${string}`, 0, {
               evidenceBundleHash: chainEvidenceHash,
               easUid,
-            });
+            }) : refusedEscrowDrive(escrowAddress as string, gate.reason);
             chainOutcome = d2.outcome;
             chainSettled = d2.settled;
           } catch (e2) {

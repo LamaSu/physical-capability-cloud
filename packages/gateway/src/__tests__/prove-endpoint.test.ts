@@ -79,6 +79,7 @@ async function registerMachine(app: FastifyInstance, overrides: Record<string, u
 // Fixtures
 // ---------------------------------------------------------------------------
 
+const ADMIN_SECRET = "synthetic-n345-prove-admin";
 const VALID_BUNDLE_HASH = "sha256:abc123def456abc123def456abc123def456abc123";
 const VALID_DEVICE_HEALTH = { status: "idle", model: "TestBot 9000", firmware: "1.0" };
 // Large enough base64 to exceed 1KB threshold (need >1365 chars of base64 for ~1024 bytes)
@@ -105,12 +106,14 @@ describe("Prove Endpoint", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    vi.stubEnv("PCC_ADMIN_KEY", ADMIN_SECRET);
     app = await buildApp();
   });
 
   afterEach(async () => {
     await app.close();
     closeStore();
+    vi.unstubAllEnvs();
   });
 
   // ── bundleHash validation ─────────────────────────────────────────────────
@@ -122,6 +125,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -144,6 +148,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: {
             bundleHash: "md5:abc123def456abc123def456abc123def456abc123",
@@ -162,6 +167,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: {
             bundleHash: "sha256:short",
@@ -180,6 +186,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: {
             bundleHash: "fake",
@@ -202,6 +209,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -223,6 +231,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -244,6 +253,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -265,6 +275,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -290,6 +301,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: {
             deviceHealth: VALID_DEVICE_HEALTH,
@@ -310,6 +322,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -331,6 +344,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -352,6 +366,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: {
             photoBase64: VALID_PHOTO,
@@ -374,6 +389,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: {
             photoBase64: VALID_PHOTO,
@@ -402,6 +418,7 @@ describe("Prove Endpoint", () => {
       await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: {
             deviceHealth: VALID_DEVICE_HEALTH,
@@ -426,6 +443,7 @@ describe("Prove Endpoint", () => {
       await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -465,6 +483,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: { deviceHealth: VALID_DEVICE_HEALTH },
         },
@@ -482,6 +501,7 @@ describe("Prove Endpoint", () => {
       await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: { deviceHealth: VALID_DEVICE_HEALTH },
         },
@@ -491,6 +511,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: { deviceHealth: VALID_DEVICE_HEALTH },
         },
@@ -523,6 +544,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {},
       });
 
@@ -538,6 +560,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -557,6 +580,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: { "x-admin-key": ADMIN_SECRET },
         payload: {
           evidence: {
             deviceHealth: VALID_DEVICE_HEALTH,
