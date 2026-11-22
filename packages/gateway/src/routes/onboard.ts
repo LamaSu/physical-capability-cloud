@@ -208,12 +208,12 @@ export async function onboardRoutes(app: FastifyInstance) {
     } catch { return { registrations: [] }; }
   });
 
-  // Detail gives the stored row to admins and owners, and the listing's fields to everyone else.
-  app.get<{ Params: { id: string } }>("/api/onboard/registrations/:id", async (req) => {
+  // Detail gives the stored row to admins and owners, and the listing's fields to everyone else; outside the caller's tenant is missing under TENANT_ENFORCE.
+  app.get<{ Params: { id: string } }>("/api/onboard/registrations/:id", async (req, reply) => {
     try {
       const repos = getRepos();
       const reg = repos.registrations.findById(req.params.id);
-      if (!reg || !inCallerTenant(req, reg)) return { error: "not_found" };
+      if (!reg || !inCallerTenant(req, reg)) return reply.status(404).send({ error: "not_found" });
       return { registration: registrationReplyFor(req, reg) };
     } catch { return { error: "not_found" }; }
   });
@@ -249,6 +249,9 @@ export async function onboardRoutes(app: FastifyInstance) {
     if (!reg || !inCallerTenant(req, reg)) return reply.status(404).send({ error: "not_found" });
     if (reg.status === "rejected") {
       return reply.status(400).send({ error: "already_rejected" });
+    }
+    if (reg.status === "deleted") {
+      return reply.status(410).send({ error: "deleted", message: "Registration was soft-deleted" });
     }
     const body = req.body as { reason?: string } | undefined;
     const reason = body?.reason ?? "No reason provided";
@@ -405,6 +408,9 @@ export async function onboardRoutes(app: FastifyInstance) {
         }
         if (reg.status === "rejected") {
           return reply.status(400).send({ error: "rejected", message: "Registration was rejected — submit a new one" });
+        }
+        if (reg.status === "deleted") {
+          return reply.status(410).send({ error: "deleted", message: "Registration was soft-deleted" });
         }
 
         const body = req.body as {
