@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq, schema } from "@pcc/store";
-import { createPublicClient, createTestClient, createWalletClient, http, keccak256, parseAbi, stringToHex, zeroAddress, zeroHash,
+import { createPublicClient, createTestClient, createWalletClient, erc20Abi, formatUnits, http, keccak256, parseAbi, stringToHex, zeroAddress, zeroHash,
   type Address, type Chain, type Hex, type PrivateKeyAccount, type PublicClient, type TransactionReceipt } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { buildUnitConfig, compileVNextPolicy, jobIdHashOf, VNextSettlementEscrowFactoryABI, type CompiledVNextPolicy } from "@pcc/contracts/vnext";
@@ -23,6 +23,7 @@ import { __setBuyerFundingTestUnitForTest, buyerFundingUnitEntry, DRY_RUN_UNIT_I
 import { __setVNextTransportForTest } from "../services/vnext-rpc-client.js";
 import { servedPrepareTtlMs } from "../services/funding-prepare-ttl.js";
 import { scopeExpiryMs } from "../services/scope-expiry.js";
+import { jobFundingOf } from "../readmodels/job-funding.js";
 
 const RUN = process.env.VNEXT_ANVIL_E2E === "1";
 const ROOT = fileURLToPath(new URL("../../../contracts/", import.meta.url));
@@ -259,6 +260,61 @@ describe.skipIf(!RUN)("buyer funding verifier against real anvil contracts", () 
       expect(db().select().from(schema.executionScopes).where(eq(schema.executionScopes.id, scopeId)).get()!.status).toBe("active");
       const row = fundingPrepareRow(scopeId)!;
       expect(servedPrepareTtlMs(scopeId)).toBe(row.reconcileUntil * 1000 - scopeExpiryMs(row.scopeExpiresAt));
+    } finally {
+      __setBuyerFundingTestUnitForTest(null); __setVNextTransportForTest(null);
+      vi.restoreAllMocks(); vi.useRealTimers();
+    }
+  }, 120000);
+
+  it("ANV2: the dashboard send path funds its own job and PCC records only finalized funding", async () => {
+    const c = (await pub.getBlock({ blockTag: "latest" })).timestamp;
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Number(c) * 1000);
+    try {
+      __setBuyerFundingTestUnitForTest({ ...buyerFundingUnitEntry(DRY_RUN_UNIT_ID)!, id: "anvil-test-unit-v1",
+        chainId: 31337, scheduleId: "vnext-mainnet-v1", scheduleTestnetOnly: false,
+        usdc: deployed.TOKEN.toLowerCase() as Address, reclaimDelaySeconds: 866100n });
+      vi.stubEnv("PCC_VNEXT_RPC_URL", rpc);
+      const scopeId = "scope:dashboard-anvil", jobId = "job:dashboard-anvil", cwmId = "cwm:dashboard-anvil";
+      const createdAt = new Date(Number(c) * 1000).toISOString(), expiresAt = new Date(Number(c + 3600n) * 1000).toISOString();
+      db().update(schema.shopKernels).set({ operatorAddress: operator.address }).where(eq(schema.shopKernels.id, "kernel-nyc")).run();
+      db().update(schema.operatorPolicies).set({ policy: { version: 1, emergencyStop: false, vnextBuyerFunding: "anvil-test-unit-v1" } as never })
+        .where(eq(schema.operatorPolicies.kernelId, "kernel-nyc")).run();
+      db().insert(schema.negotiationSessions).values({ id: "session:dashboard-anvil", kernelId: "kernel-nyc", userAgentId: buyer.address,
+        capabilityType: "liquid-handler", status: "committed", operatorConstraints: {}, selections: {}, transitions: [], jobId, cwmId,
+        quote: { totalPrice: "1.00", currency: "USDC" }, contractTerms: {}, createdAt, expiresAt }).run();
+      getRepos().jobs.insert({ ...getRepos().jobs.findAll()[0]!, id: jobId, kernelId: "kernel-nyc", cwmId, stepId: "dashboard-anvil", assuranceTier: 1 });
+      db().insert(schema.executionScopes).values({ id: scopeId, kernelId: "kernel-nyc", jobId, createdBy: buyer.address,
+        status: "awaiting_funding", allowedTools: [], createdAt, expiresAt }).run();
+      const result = await prepareBuyerFunding(scopeId, { record: record(), reads: createVNextChainReads(rpc), now: () => new Date(Number(c) * 1000) });
+      expect(result.kind).toBe("answer"); if (result.kind !== "answer") throw new Error(result.code);
+      const signature = await operator.sign({ hash: result.row.typedDataDigest as Hex });
+      const served = await servePrepareSignature(scopeId, signature);
+      expect(served.status).toBe(200); expect(Buffer.isBuffer(served.body)).toBe(true);
+      const payload = JSON.parse((served.body as Buffer).toString("utf8")), totalGross = BigInt(payload.totalGross);
+      await send(buyer, { address: deployed.TOKEN, abi: TOKEN_ABI, functionName: "mint", args: [buyer.address, totalGross] });
+      const { checkOrder, fundOrder } = await import("../../../../apps/dashboard/src/lib/fund-send.js");
+      const balance = (address: Address) => pub.readContract({ address: deployed.TOKEN, abi: erc20Abi, functionName: "balanceOf", args: [address] });
+      const buyerBefore = await balance(buyer.address), escrowBefore = await balance(payload.escrow);
+      const walletClient = wallet(buyer), identity = { jobId, address: buyer.address, sessionToken: "dashboard-session" };
+      const checkInput = { scopeId, identity, payload, walletClient, publicClient: pub, readOperator: async () => operator.address,
+        chainId: 31337, pins: { "31337": { factory: deployed.FACTORY, usdc: deployed.TOKEN } },
+        expect: { jobId, operator: operator.address, payees: [operator.address], maxFeeBps: 0, feeRecipients: [], tiers: [1],
+          latestReclaimAt: c + 866100n, termsHash: result.row.termsHash as Hex, acceptedPolicyDigest: result.row.acceptedPolicyDigest as Hex,
+          compositionRoots: [zeroHash] } };
+      const checked = await checkOrder(checkInput);
+      expect(checked.kind).toBe("checked"); if (checked.kind !== "checked") throw new Error("order was not checked");
+      expect(checked.display.escrow.toLowerCase()).toBe(payload.escrow.toLowerCase());
+      expect(checked.display.amount).toBe(`${formatUnits(totalGross, 6)} test USDC`);
+      expect(await fundOrder({ scopeId, identity, checked, walletClient, publicClient: pub })).toEqual({ kind: "label", label: "L18" });
+      expect(buyerBefore - await balance(buyer.address)).toBe(totalGross);
+      expect(await balance(payload.escrow) - escrowBefore).toBe(totalGross);
+      await finalized();
+      expect(await sweep()).toEqual({ passA: {}, passB: { recorded: 1 } });
+      const asOf = new Date(Number((await pub.getBlock({ blockTag: "latest" })).timestamp) * 1000).toISOString();
+      expect(jobFundingOf(jobId, "kernel-nyc", asOf)).toMatchObject({ read: "ok", scopes: [{ scopeId, state: "funded_verified" }] });
+      const nonce = await pub.getTransactionCount({ address: buyer.address });
+      expect(await checkOrder(checkInput)).toEqual({ kind: "label", label: "L18" });
+      expect(await pub.getTransactionCount({ address: buyer.address })).toBe(nonce);
     } finally {
       __setBuyerFundingTestUnitForTest(null); __setVNextTransportForTest(null);
       vi.restoreAllMocks(); vi.useRealTimers();

@@ -1,13 +1,17 @@
 // @vitest-environment jsdom
 import React, { act } from "react";
+import { readFileSync } from "node:fs";
+import { type Address, type PublicClient, type WalletClient, zeroHash } from "viem";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import golden from "../../../../packages/gateway/src/__tests__/fixtures/vnext-dry-run-prepare-v1.payload.json";
 
-const { authorizedFetch, login, sdkSpies, authMount, sharedMount, authModules, wallet } = vi.hoisted(() => ({
+const { authorizedFetch, login, sdkSpies, authMount, sharedMount, authModules, wallet, clients, sdkActual } = vi.hoisted(() => ({
   authorizedFetch: vi.fn(), login: vi.fn(), sdkSpies: [] as ReturnType<typeof vi.fn>[],
   authMount: { clearError: false }, sharedMount: { key: 0 },
   authModules: { real: false },
+  clients: { walletClient: undefined as WalletClient | undefined, publicClient: undefined as PublicClient | undefined, mutateAsync: vi.fn() },
+  sdkActual: { value: undefined as typeof import("@pcc/spec/funding") | undefined },
   wallet: {
     address: "0x1111111111111111111111111111111111111111" as `0x${string}`,
     signMessageAsync: vi.fn(async () => "signed"),
@@ -30,6 +34,9 @@ vi.mock("../hooks/use-auth.js", async (original) => {
   } };
 });
 vi.mock("wagmi", () => ({
+  useWalletClient: () => ({ data: clients.walletClient }),
+  usePublicClient: () => clients.publicClient,
+  useSwitchChain: () => ({ mutateAsync: clients.mutateAsync }),
   useAccount: () => ({ address: wallet.address, isConnected: true, chainId: 1 }),
   useSignMessage: () => ({ signMessageAsync: wallet.signMessageAsync }),
   useConnect: () => ({ connectors: [], connect: vi.fn() }),
@@ -48,8 +55,9 @@ vi.mock("../components/WalletPageSignInAgain.js", async (original) => {
 vi.mock("@pcc/spec/funding", async (original) => fundingMock(await original<typeof import("@pcc/spec/funding")>()));
 
 function fundingMock(real: typeof import("@pcc/spec/funding")) {
+  sdkActual.value = real;
   return Object.fromEntries(Object.entries(real).map(([name, value]) => {
-    if (name === "FUNDING_PREPARE_SCHEMA" || name === "DEFAULT_MARGIN_SECONDS") return [name, value];
+    if (typeof value !== "function" || name === "FundingRefusal") return [name, value];
     const spy = vi.fn((): unknown => { throw new Error("SDK calls are forbidden on the read-only page"); });
     sdkSpies.push(spy);
     return [name, spy];
@@ -57,8 +65,10 @@ function fundingMock(real: typeof import("@pcc/spec/funding")) {
 }
 
 import { DEFAULT_MARGIN_SECONDS, FUNDING_PREPARE_SCHEMA } from "@pcc/spec/funding";
+import * as fundingSdk from "@pcc/spec/funding";
+import { runningFlight } from "../lib/fund-send.js";
 import { FundPage } from "../pages/FundPage.js";
-import { readFunding, readPrepare, readServedTerms, requestPrepare } from "../lib/fund-api.js";
+import { readFunding, readOrderOperator, readPrepare, readServedTerms, requestPrepare } from "../lib/fund-api.js";
 import { FUND_COPY } from "../lib/fund-copy.js";
 import { PCC_BETA_STATUS } from "../lib/positioning.js";
 import { SIGN_IN_EXPIRED, SIGN_IN_REFUSED } from "../lib/wallet-link-api.js";
@@ -82,10 +92,28 @@ let container: HTMLDivElement;
 let root: Root;
 let originalAuth: ReturnType<typeof useAuthStore.getState>;
 let unmounted: boolean;
+let sendCell = false;
+let getChainId: ReturnType<typeof vi.fn<[], Promise<number>>>;
+let getBlock: ReturnType<typeof vi.fn<[], Promise<{ timestamp: bigint }>>>;
+let getCode: ReturnType<typeof vi.fn<[], Promise<string>>>;
+let readContract: ReturnType<typeof vi.fn<[], Promise<bigint>>>;
+function defaultRoute(path: string) {
+  if (path.endsWith("/funding")) return json(funding());
+  if (path.startsWith("/api/jobs/")) return json({ job: { kernelId: "kernel/one" } });
+  if (path.startsWith("/api/kernels/")) return json({ kernel: { operatorAddress: golden.typedData.message.operator } });
+  return json({ error: "no_prepare", message: "not ready" }, 404);
+}
 beforeEach(() => {
   vi.useFakeTimers(); vi.setSystemTime(NOW);
-  authorizedFetch.mockReset(); login.mockReset(); sdkSpies.forEach((spy) => spy.mockClear());
-  authorizedFetch.mockImplementation((path: string) => Promise.resolve(path.startsWith("/api/jobs/") ? json(funding()) : json({ error: "no_prepare", message: "not ready" }, 404)));
+  sendCell = false;
+  authorizedFetch.mockReset(); login.mockReset();
+  sdkSpies.forEach((spy) => spy.mockReset().mockImplementation(() => { throw new Error("Unexpected SDK call"); }));
+  getChainId = vi.fn(async () => 84532); getBlock = vi.fn(async () => ({ timestamp: BigInt(NOW / 1000) }));
+  getCode = vi.fn(async () => "0x1234"); readContract = vi.fn(async () => 1_000_000n);
+  clients.walletClient = { account: { address: wallet.address }, getChainId } as unknown as WalletClient;
+  clients.publicClient = { getBlock, getCode, readContract } as unknown as PublicClient;
+  clients.mutateAsync.mockReset().mockResolvedValue(undefined);
+  authorizedFetch.mockImplementation((path: string) => Promise.resolve(defaultRoute(path)));
   vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("Unexpected unmocked request"))));
   originalAuth = useAuthStore.getState();
   useAuthStore.setState({ address: "0x1111111111111111111111111111111111111111", sessionToken: "initial-session", isAuthenticated: true, error: null, authNotice: null });
@@ -94,10 +122,12 @@ beforeEach(() => {
   container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container); unmounted = false;
 });
 afterEach(async () => {
+  noFields();
   if (!unmounted) await act(async () => root.unmount());
   container.remove(); useAuthStore.setState(originalAuth);
   authModules.real = false;
-  for (const spy of sdkSpies) expect(spy, "C12: no SDK export is called").not.toHaveBeenCalled();
+  if (!sendCell) for (const spy of sdkSpies) expect(spy, "C12: no SDK export is called").not.toHaveBeenCalled();
+  expect(runningFlight("scope/one")).toBeUndefined();
   vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks();
 });
 async function render(jobId: string | null = "job/one") { await act(async () => root.render(<FundPage jobId={jobId} />)); }
@@ -449,10 +479,10 @@ describe("served terms and display boundary", () => {
   it("C9: blocks automatic capture on the root", async () => { await render(); expect(container.querySelector("main.ph-no-capture.sentry-block")).not.toBeNull(); });
   it("C10: the gateway golden displays only amount, escrow and fund-by", async () => {
     vi.setSystemTime((Number(golden.expiry) - Number(DEFAULT_MARGIN_SECONDS) - 1) * 1000);
-    replyPrepare(golden); await render(); text(FUND_COPY.L19); text(FUND_COPY.L20); text(FUND_COPY.L26); text(PCC_BETA_STATUS);
+    replyPrepare(golden); await render(); text(FUND_COPY.L19); text(FUND_COPY.L27); text(FUND_COPY.L26); text(PCC_BETA_STATUS);
     text("Don't send tokens to the escrow address yourself. A transfer won't fund this order.");
     const content = container.textContent!;
-    expect(content.indexOf(FUND_COPY.L20)).toBeLessThan(content.indexOf(FUND_COPY.L26));
+    expect(content.indexOf(FUND_COPY.L27)).toBeLessThan(content.indexOf(FUND_COPY.L26));
     expect(content.indexOf(FUND_COPY.L26)).toBeLessThan(content.indexOf(PCC_BETA_STATUS));
     const { formatUnits } = await import("viem");
     text(`${formatUnits(BigInt(golden.totalGross), 6)} test USDC`); text(golden.escrow);
@@ -872,5 +902,316 @@ describe("browser module loading", () => {
       vi.doMock("@pcc/spec/funding", async () => fundingMock(await vi.importActual<typeof import("@pcc/spec/funding")>("@pcc/spec/funding")));
       vi.doUnmock("react"); vi.doUnmock("../stores/auth-store.js");
     }
+  });
+});
+
+const checkedPrepared = () => ({
+  payer: wallet.address, operator: golden.typedData.message.operator, escrow: golden.escrow, usdc: golden.usdc,
+  totalGross: 1_000_000n, expiry: BigInt(terms().expiry), reclaimAt: { earliest: BigInt(NOW / 1000 + 7200), latest: BigInt(NOW / 1000 + 7200) },
+  verifiedAt: { blockNumber: 123n, blockHash: zeroHash, blockTimestamp: BigInt(NOW / 1000) },
+}) as unknown as fundingSdk.PreparedFunding;
+function sendRouting(fundingReply: () => Response | Promise<Response> = () => json(funding()), body: unknown = terms()) {
+  authorizedFetch.mockImplementation((path: string) => Promise.resolve(
+    path.endsWith("/funding") ? fundingReply() : path.startsWith("/api/buyer-funding/") ? json(body) : defaultRoute(path)));
+}
+function readyEscrow(create?: { kind: string }) {
+  return { outcome: "ready", ...(create ? { create } : {}) } as fundingSdk.EnsureEscrowResult;
+}
+function sendOutcome(outcome: fundingSdk.FundingOutcome = "committed") {
+  vi.mocked(fundingSdk.ensureEscrow).mockResolvedValue(readyEscrow());
+  vi.mocked(fundingSdk.approveAndFund).mockResolvedValue({ outcome } as fundingSdk.FundingResult);
+}
+function sdkCounts() { return sdkSpies.map((spy) => spy.mock.calls.length); }
+function noSdkSince(counts: number[]) { expect(sdkCounts()).toEqual(counts); }
+function noFields() { expect(container.querySelector("input, textarea, [contenteditable]")).toBeNull(); }
+const resultLabels = ["L1", "L2", "L5", "L7", "L10a", "L15", "L16", "L18", "L23", "L29", "L30", "L31", "L32", "L33", "L34", "L37"] as const;
+function resultText(label: typeof resultLabels[number]) { return label === "L29" ? FUND_COPY.L29.replace("{held}", "0.25").replace("{needed}", "1") : FUND_COPY[label]; }
+function onlyResult(label: typeof resultLabels[number]) {
+  text(resultText(label));
+  for (const other of resultLabels) if (other !== label) expect(container.textContent).not.toContain(resultText(other));
+  expect(container.textContent).not.toContain(FUND_COPY.L17); expect(container.textContent).not.toContain(FUND_COPY.L19);
+  expect(container.querySelector("dl")).toBeNull(); noFields();
+}
+async function checkFromTerms() { await render(); await click(FUND_COPY.L27); }
+async function sendFromChecked() { await checkFromTerms(); await click(FUND_COPY.L28); }
+function verifiedScope(scopeId = "scope/one") {
+  return { ...scope("funded_verified", scopeId), verification: { escrowAddress: golden.escrow, fundedAt: NOW / 1000 + 5 } };
+}
+
+describe("N293-2 browser check and buyer send", () => {
+  beforeEach(() => {
+    sendCell = true;
+    for (const name of ["dryRunUnitPrincipalWord", "dryRunUnitTestnetExpectation"] as const) {
+      vi.mocked(fundingSdk[name]).mockImplementation(sdkActual.value![name] as never);
+    }
+    vi.mocked(fundingSdk.prepareFunding).mockResolvedValue(checkedPrepared());
+    vi.mocked(fundingSdk.readFundedState).mockResolvedValue({ kind: "unfunded" } as fundingSdk.FundedState);
+    sendRouting();
+  });
+  afterEach(() => {
+    expect(fundingSdk.signJobPolicy).not.toHaveBeenCalled();
+    expect(posts()).toHaveLength(0); noFields();
+  });
+  it("C18: checked displays the SDK values in order and offers only the buyer's send", async () => {
+    await checkFromTerms();
+    expect([...container.querySelectorAll("dt")].map((node) => node.textContent)).toEqual([
+      "Amount", "Escrow", "Operator", "Fund by", "Refundable from", "Checked at block",
+    ]);
+    expect([...container.querySelectorAll("dd")].map((node) => node.textContent)).toEqual([
+      "1 test USDC", golden.escrow, golden.typedData.message.operator,
+      new Date(Number(BigInt(terms().expiry) - DEFAULT_MARGIN_SECONDS) * 1000).toISOString(), new Date(NOW + 7_200_000).toISOString(), "123",
+    ]);
+    for (const label of resultLabels) expect(container.textContent).not.toContain(resultText(label));
+    expect(container.textContent).not.toContain(FUND_COPY.L19);
+    const content = container.textContent!;
+    for (const [a, b] of [[FUND_COPY.L35, FUND_COPY.L28], [FUND_COPY.L28, FUND_COPY.L26], [FUND_COPY.L26, PCC_BETA_STATUS], [PCC_BETA_STATUS, "Check again"]]) {
+      expect(content.indexOf(a!)).toBeLessThan(content.indexOf(b!));
+    }
+    expect(fundingSdk.prepareFunding).toHaveBeenCalledTimes(1); expect(fundingSdk.readFundedState).toHaveBeenCalledTimes(1);
+    expect(fundingSdk.ensureEscrow).not.toHaveBeenCalled(); expect(fundingSdk.approveAndFund).not.toHaveBeenCalled();
+    const count = sdkCounts(); await click("Check again"); noSdkSince(count); text(FUND_COPY.L19);
+  });
+  it.each(["L16", "L18", "L2", "L5", "L10a", "L15", "L23", "L29", "L30", "L31", "L34", "L7"] as const)(
+    "C18: the check shows only %s", async (label) => {
+      const code = { L2: "INTENT_MISMATCH", L5: "PAYER_NOT_SIGNER", L10a: "EXPIRY_TOO_SOON", L15: "LIVE_CHECK_FAILED", L30: "BAD_PAYLOAD", L31: "PAYER_TX_PENDING", L34: "SIMULATION_REVERTED" } as const;
+      if (label in code) vi.mocked(fundingSdk.prepareFunding).mockRejectedValue(new fundingSdk.FundingRefusal(code[label as keyof typeof code], "PRIVATE_ERROR"));
+      if (label === "L16") getChainId.mockResolvedValue(8453);
+      if (label === "L18") vi.mocked(fundingSdk.readFundedState).mockResolvedValue({ kind: "funded_ours" } as fundingSdk.FundedState);
+      if (label === "L29") readContract.mockResolvedValue(250000n);
+      if (label === "L23" || label === "L7") authorizedFetch.mockImplementation((path: string) => Promise.resolve(
+        path.endsWith("/funding") ? json(funding()) : path.startsWith("/api/buyer-funding/") ? json(terms())
+          : label === "L7" ? json({}, 404) : json({ job: { kernelId: "kernel/one" }, kernel: { operatorAddress: "bad" } })));
+      await checkFromTerms(); onlyResult(label);
+      expect(container.textContent).not.toContain("PRIVATE_ERROR");
+      expect(fundingSdk.ensureEscrow).not.toHaveBeenCalled(); expect(fundingSdk.approveAndFund).not.toHaveBeenCalled();
+      expect([...container.querySelectorAll("button")].some((b) => b.textContent === "Check again")).toBe(!["L18", "L10a", "L23", "L7"].includes(label));
+      if (!["L16", "L23", "L7"].includes(label)) expect(fundingSdk.prepareFunding).toHaveBeenCalledTimes(1);
+      else expect(fundingSdk.prepareFunding).not.toHaveBeenCalled();
+    },
+  );
+  it.each(["L1", "L18", "L32", "L33", "L37", "L34"] as const)("C18: the send shows only %s", async (label) => {
+    sendOutcome();
+    if (label === "L1") vi.mocked(fundingSdk.approveAndFund).mockResolvedValue({ outcome: "indeterminate" } as fundingSdk.FundingResult);
+    if (label === "L32") vi.mocked(fundingSdk.ensureEscrow).mockResolvedValue({ outcome: "absent" } as fundingSdk.EnsureEscrowResult);
+    if (label === "L33") vi.mocked(fundingSdk.approveAndFund).mockResolvedValue({ outcome: "unchanged" } as fundingSdk.FundingResult);
+    if (label === "L37") vi.mocked(fundingSdk.ensureEscrow).mockResolvedValue(readyEscrow({ kind: "mined" }));
+    if (label === "L37" || label === "L34") vi.mocked(fundingSdk.approveAndFund).mockRejectedValue(new fundingSdk.FundingRefusal("SIMULATION_REVERTED", "PRIVATE_ERROR"));
+    await sendFromChecked(); onlyResult(label);
+    expect(fundingSdk.ensureEscrow).toHaveBeenCalledTimes(1); expect(fundingSdk.approveAndFund).toHaveBeenCalledTimes(label === "L32" ? 0 : 1);
+    expect([...container.querySelectorAll("button")].some((b) => b.textContent === "Check again")).toBe(label !== "L18");
+  });
+  it("C18: an indeterminate escrow setup shows L1 with Check again", async () => {
+    vi.mocked(fundingSdk.ensureEscrow).mockResolvedValue({ outcome: "indeterminate" } as fundingSdk.EnsureEscrowResult);
+    await sendFromChecked(); onlyResult("L1"); button("Check again"); expect(fundingSdk.approveAndFund).not.toHaveBeenCalled();
+  });
+  it("wallet availability controls both buyer buttons", async () => {
+    clients.walletClient = undefined; await render(); text(FUND_COPY.L25);
+    expect(container.textContent).not.toContain(FUND_COPY.L27); expect(fundingSdk.prepareFunding).not.toHaveBeenCalled();
+    clients.walletClient = { account: { address: wallet.address }, getChainId } as unknown as WalletClient;
+    await render(); await click(FUND_COPY.L27); button(FUND_COPY.L28);
+    clients.walletClient = undefined; await render(); text(FUND_COPY.L25);
+    expect(container.textContent).not.toContain(FUND_COPY.L28); expect(fundingSdk.ensureEscrow).not.toHaveBeenCalled();
+  });
+  it("C22: the signed-in payer supplies the expectation even with another wallet account", async () => {
+    clients.walletClient = { account: { address: golden.typedData.message.operator }, getChainId } as unknown as WalletClient;
+    vi.mocked(fundingSdk.prepareFunding).mockRejectedValue(new fundingSdk.FundingRefusal("PAYER_NOT_SIGNER", "hidden"));
+    await checkFromTerms(); onlyResult("L5");
+    const input = vi.mocked(fundingSdk.dryRunUnitTestnetExpectation).mock.calls[0]![0];
+    expect(input.fundingWallet).toBe(wallet.address);
+    expect(input.subject.payer).toBe(sdkActual.value!.dryRunUnitPrincipalWord(wallet.address));
+    expect(vi.mocked(fundingSdk.prepareFunding).mock.calls[0]![0].expect.payer).toBe(wallet.address);
+    expect(fundingSdk.ensureEscrow).not.toHaveBeenCalled(); expect(fundingSdk.approveAndFund).not.toHaveBeenCalled();
+  });
+  it("C28: Base mainnet served terms stop at L23 before the SDK", async () => {
+    sendRouting(undefined, { ...terms(), chainId: "8453" }); await render(); onlyResult("L23");
+    expect(sdkCounts().every((count) => count === 0)).toBe(true); expect(getChainId).not.toHaveBeenCalled();
+  });
+  it("C29: a mainnet wallet stops before the SDK and sends nothing", async () => {
+    getChainId.mockResolvedValue(8453); await checkFromTerms(); onlyResult("L16"); button(FUND_COPY.L36);
+    expect(getChainId).toHaveBeenCalledTimes(1); expect(getBlock).not.toHaveBeenCalled();
+    expect(sdkCounts().every((count) => count === 0)).toBe(true); expect(clients.mutateAsync).not.toHaveBeenCalled();
+  });
+  it("C30: a switch restarts the complete check using the latest render's client", async () => {
+    const held = deferred<void>(); clients.mutateAsync.mockReturnValueOnce(held.promise);
+    getChainId.mockResolvedValue(8453); await checkFromTerms();
+    await click(FUND_COPY.L36); expect(clients.mutateAsync).toHaveBeenCalledWith({ chainId: 84532 });
+    expect([...container.querySelectorAll("button")].every((b) => b.disabled)).toBe(true);
+    const nextChain = vi.fn(async () => 84532);
+    const nextWallet = { account: { address: wallet.address }, getChainId: nextChain } as unknown as WalletClient;
+    clients.walletClient = nextWallet; await render();
+    await act(async () => held.resolve()); button(FUND_COPY.L28);
+    expect(nextChain).toHaveBeenCalledTimes(1); expect(getChainId).toHaveBeenCalledTimes(1); expect(getBlock).toHaveBeenCalledTimes(1);
+    expect(authorizedFetch.mock.calls.filter(([path]) => path === "/api/jobs/job%2Fone")).toHaveLength(2);
+    expect(authorizedFetch.mock.calls.filter(([path]) => path === "/api/kernels/kernel%2Fone")).toHaveLength(2);
+    expect(fundingSdk.prepareFunding).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fundingSdk.prepareFunding).mock.calls[0]![0].wallet).toBe(nextWallet);
+  });
+  it("C30: a rejected switch keeps L16 and its switch button", async () => {
+    getChainId.mockResolvedValue(8453); clients.mutateAsync.mockRejectedValueOnce(new Error("PRIVATE_SWITCH"));
+    await checkFromTerms(); await click(FUND_COPY.L36); onlyResult("L16"); expect(button(FUND_COPY.L36).disabled).toBe(false);
+    expect(container.textContent).not.toContain("PRIVATE_SWITCH"); expect(getChainId).toHaveBeenCalledTimes(1);
+    expect(fundingSdk.prepareFunding).not.toHaveBeenCalled();
+  });
+  it("C31: a double Fund click creates one send using the click render's wallet", async () => {
+    sendOutcome(); const held = deferred<fundingSdk.EnsureEscrowResult>(); vi.mocked(fundingSdk.ensureEscrow).mockReturnValueOnce(held.promise);
+    await checkFromTerms();
+    const nextWallet = { account: { address: wallet.address }, getChainId } as unknown as WalletClient;
+    clients.walletClient = nextWallet; await render();
+    await act(async () => { button(FUND_COPY.L28).click(); button(FUND_COPY.L28).click(); });
+    expect(fundingSdk.ensureEscrow).toHaveBeenCalledTimes(1); expect(fundingSdk.approveAndFund).not.toHaveBeenCalled();
+    expect([...container.querySelectorAll("button")].every((b) => b.disabled)).toBe(true);
+    await act(async () => held.resolve(readyEscrow())); onlyResult("L18");
+    expect(fundingSdk.ensureEscrow).toHaveBeenCalledTimes(1); expect(fundingSdk.approveAndFund).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fundingSdk.ensureEscrow).mock.calls[0]![0].wallet).toBe(nextWallet);
+  });
+  it("C32: funded_ours starts PCC polling without offering Fund", async () => {
+    vi.mocked(fundingSdk.readFundedState).mockResolvedValue({ kind: "funded_ours" } as fundingSdk.FundedState);
+    await checkFromTerms(); onlyResult("L18"); expect(container.textContent).not.toContain(FUND_COPY.L28);
+    const count = authorizedFetch.mock.calls.length; await advance(15_000); expect(authorizedFetch).toHaveBeenCalledTimes(count + 1);
+    expect(fundingSdk.ensureEscrow).not.toHaveBeenCalled(); expect(fundingSdk.approveAndFund).not.toHaveBeenCalled();
+  });
+  it.each(["committed", "chain_mismatch"])("C33: a remount attaches to a send's display and %s result without another SDK call", async (outcome) => {
+    sendOutcome(); const held = deferred<fundingSdk.EnsureEscrowResult>(); vi.mocked(fundingSdk.ensureEscrow).mockReturnValueOnce(held.promise);
+    if (outcome === "chain_mismatch") vi.mocked(fundingSdk.approveAndFund).mockRejectedValue(new fundingSdk.FundingRefusal("CHAIN_MISMATCH", "hidden"));
+    await sendFromChecked(); const counts = sdkCounts();
+    await act(async () => root.unmount()); root = createRoot(container); await render();
+    text(FUND_COPY.L35); text(golden.escrow); expect(container.textContent).not.toContain(FUND_COPY.L19);
+    expect([...container.querySelectorAll("button")].every((b) => b.disabled)).toBe(true); noSdkSince(counts);
+    await act(async () => held.resolve(readyEscrow())); onlyResult(outcome === "committed" ? "L18" : "L16");
+    expect(container.textContent).not.toContain(FUND_COPY.L36);
+    expect(fundingSdk.ensureEscrow).toHaveBeenCalledTimes(1); expect(fundingSdk.approveAndFund).toHaveBeenCalledTimes(1);
+  });
+  it("C35: changing address closes checked and reads R1 again", async () => {
+    await checkFromTerms(); const before = authorizedFetch.mock.calls.length;
+    await act(async () => useAuthStore.setState({ address: golden.typedData.message.operator as Address }));
+    text(FUND_COPY.L19); expect(container.textContent).not.toContain(FUND_COPY.L28);
+    expect(authorizedFetch).toHaveBeenCalledTimes(before + 2);
+    expect(fundingSdk.ensureEscrow).not.toHaveBeenCalled(); expect(fundingSdk.approveAndFund).not.toHaveBeenCalled();
+  });
+  it("C36: short test USDC balance displays both amounts without Fund", async () => {
+    readContract.mockResolvedValue(250000n); await checkFromTerms(); onlyResult("L29");
+    expect(container.textContent).not.toContain(FUND_COPY.L28); expect(fundingSdk.ensureEscrow).not.toHaveBeenCalled(); expect(fundingSdk.approveAndFund).not.toHaveBeenCalled();
+  });
+  it("C19: P3 reads every 15s and only accepts this scope's PCC verification", async () => {
+    sendOutcome(); await sendFromChecked(); const calls = authorizedFetch.mock.calls.length, counts = sdkCounts();
+    sendRouting(() => json(funding([scope(), verifiedScope("scope/newer")])));
+    await advance(14_999); expect(authorizedFetch).toHaveBeenCalledTimes(calls); onlyResult("L18");
+    await advance(1); expect(authorizedFetch).toHaveBeenCalledTimes(calls + 1); onlyResult("L18");
+    await advance(15_000); expect(authorizedFetch).toHaveBeenCalledTimes(calls + 2); onlyResult("L18");
+    sendRouting(() => { throw new Error("hidden"); }); await advance(15_000); onlyResult("L18");
+    sendRouting(() => json(funding([verifiedScope(), scope("awaiting_funding", "scope/newer")])));
+    await advance(15_000); text(FUND_COPY.L17); text(golden.escrow); text(new Date(NOW + 5000).toISOString());
+    noSdkSince(counts); expect(vi.getTimerCount()).toBe(0);
+    const after = authorizedFetch.mock.calls.length; await advance(7_200_000); expect(authorizedFetch).toHaveBeenCalledTimes(after); noSdkSince(counts);
+  });
+  it.each(["committed", "indeterminate"] as const)("C19: P3 caps %s at 40 minutes, then stays stopped", async (outcome) => {
+    sendOutcome(outcome); await sendFromChecked();
+    if (outcome === "indeterminate") { onlyResult("L1"); button("Check again"); }
+    const counts = sdkCounts();
+    await advance(2_399_999); onlyResult(outcome === "committed" ? "L18" : "L1");
+    await advance(1); onlyResult("L1"); button("Check again"); expect(vi.getTimerCount()).toBe(0);
+    const calls = authorizedFetch.mock.calls.length; await advance(7_200_000); expect(authorizedFetch).toHaveBeenCalledTimes(calls); noSdkSince(counts);
+  });
+  it("C19: P3 keeps its cadence and cap while a PCC answer is held", async () => {
+    sendOutcome(); await sendFromChecked();
+    const held = deferred<Response>(), calls = authorizedFetch.mock.calls.length, counts = sdkCounts();
+    sendRouting(() => held.promise);
+    await advance(45_000); expect(authorizedFetch).toHaveBeenCalledTimes(calls + 3); onlyResult("L18");
+    expect(vi.getTimerCount()).toBe(1);
+    await advance(2_355_000); onlyResult("L1"); button("Check again"); expect(vi.getTimerCount()).toBe(0);
+    const after = authorizedFetch.mock.calls.length;
+    await act(async () => held.resolve(json(funding([verifiedScope()])))); onlyResult("L1");
+    await advance(7_200_000); expect(authorizedFetch).toHaveBeenCalledTimes(after); noSdkSince(counts);
+  });
+  it("C19: Check again stops P3, drops a held answer, and runs R1 once", async () => {
+    sendOutcome("indeterminate"); await sendFromChecked(); onlyResult("L1"); button("Check again");
+    const held = deferred<Response>(); sendRouting(() => held.promise);
+    const counts = sdkCounts(); await advance(15_000);
+    sendRouting(() => json(funding([scope("cancelled")])));
+    const before = authorizedFetch.mock.calls.length; await click("Check again");
+    text(FUND_COPY.L12); expect(authorizedFetch).toHaveBeenCalledTimes(before + 1);
+    await act(async () => held.resolve(json(funding([verifiedScope()]))));
+    text(FUND_COPY.L12); expect(container.textContent).not.toContain(FUND_COPY.L17);
+    await advance(7_200_000); expect(authorizedFetch).toHaveBeenCalledTimes(before + 1); noSdkSince(counts); expect(vi.getTimerCount()).toBe(0);
+  });
+  it.each(["check", "send", "P3"] as const)("C20: key renewal during %s is absorbed and work continues", async (step) => {
+    useAuthStore.setState({ sessionKeyId: "held-key" });
+    const heldCheck = deferred<fundingSdk.PreparedFunding>(), heldSend = deferred<fundingSdk.EnsureEscrowResult>();
+    if (step === "check") vi.mocked(fundingSdk.prepareFunding).mockReturnValueOnce(heldCheck.promise);
+    else { sendOutcome(); if (step === "send") vi.mocked(fundingSdk.ensureEscrow).mockReturnValueOnce(heldSend.promise); }
+    await checkFromTerms(); if (step !== "check") await click(FUND_COPY.L28);
+    const count = authorizedFetch.mock.calls.length;
+    if (step === "P3") await advance(5000);
+    await act(async () => useAuthStore.setState({ keyEpoch: useAuthStore.getState().keyEpoch + 1 }));
+    expect(authorizedFetch).toHaveBeenCalledTimes(count);
+    if (step === "check") { await act(async () => heldCheck.resolve(checkedPrepared())); button(FUND_COPY.L28); expect(fundingSdk.prepareFunding).toHaveBeenCalledTimes(1); }
+    if (step === "send") { await act(async () => heldSend.resolve(readyEscrow())); onlyResult("L18"); await advance(15_000); expect(authorizedFetch).toHaveBeenCalledTimes(count + 1); }
+    if (step === "P3") { onlyResult("L18"); await advance(9999); expect(authorizedFetch).toHaveBeenCalledTimes(count); await advance(1); expect(authorizedFetch).toHaveBeenCalledTimes(count + 1); }
+  });
+  it.each(["check", "send"] as const)("late %s results cannot replace a new identity's R1", async (step) => {
+    const heldCheck = deferred<fundingSdk.PreparedFunding>(), heldSend = deferred<fundingSdk.EnsureEscrowResult>();
+    if (step === "check") vi.mocked(fundingSdk.prepareFunding).mockReturnValueOnce(heldCheck.promise);
+    else { sendOutcome(); vi.mocked(fundingSdk.ensureEscrow).mockReturnValueOnce(heldSend.promise); }
+    await checkFromTerms(); if (step === "send") await click(FUND_COPY.L28);
+    sendRouting(() => json(funding([scope("cancelled")])));
+    await act(async () => useAuthStore.setState({ sessionToken: "new-session" })); text(FUND_COPY.L12);
+    await act(async () => { if (step === "check") heldCheck.resolve(checkedPrepared()); else heldSend.resolve(readyEscrow()); });
+    text(FUND_COPY.L12); expect(container.textContent).not.toContain(FUND_COPY.L28); expect(vi.getTimerCount()).toBe(0);
+  });
+  it("C34: after a module reload, the SDK's pending guard refuses a new send", async () => {
+    sendOutcome("indeterminate"); await sendFromChecked(); onlyResult("L1");
+    await act(async () => root.unmount()); vi.resetModules();
+    const { FundPage: ReloadedPage } = await import("../pages/FundPage.js");
+    const reloadedSdk = await import("@pcc/spec/funding");
+    const { useAuthStore: reloadedAuth } = await import("../stores/auth-store.js");
+    reloadedAuth.setState({ address: wallet.address, sessionToken: "reload-session", isAuthenticated: true });
+    for (const name of ["dryRunUnitPrincipalWord", "dryRunUnitTestnetExpectation"] as const) vi.mocked(reloadedSdk[name]).mockImplementation(sdkActual.value![name] as never);
+    vi.mocked(reloadedSdk.prepareFunding).mockResolvedValue(checkedPrepared());
+    vi.mocked(reloadedSdk.readFundedState).mockResolvedValue({ kind: "unfunded" } as fundingSdk.FundedState);
+    vi.mocked(reloadedSdk.ensureEscrow).mockRejectedValue(new reloadedSdk.FundingRefusal("PAYER_TX_PENDING", "hidden"));
+    root = createRoot(container);
+    await act(async () => root.render(<ReloadedPage jobId="job/one" />)); await click(FUND_COPY.L27); await click(FUND_COPY.L28); onlyResult("L31");
+    expect(reloadedSdk.readFundedState).toHaveBeenCalledTimes(1); expect(reloadedSdk.ensureEscrow).toHaveBeenCalledTimes(1); expect(reloadedSdk.approveAndFund).not.toHaveBeenCalled();
+    await act(async () => root.unmount()); unmounted = true;
+  });
+});
+
+it("C37: funding source has no credential entry or account construction", () => {
+  for (const name of ["../lib/fund-send.ts", "../lib/fund-api.ts", "../pages/FundPage.tsx"]) {
+    const source = readFileSync(new URL(name, import.meta.url), "utf8");
+    expect(source).not.toMatch(/privatekey|mnemonic|seed phrase|secret recovery|hdkey/i);
+  }
+});
+
+describe("order operator reads", () => {
+  it("reads encoded job and kernel ids, lowercases the operator and preserves the served payload", async () => {
+    const operator = `0x${"aB".repeat(20)}`;
+    authorizedFetch.mockResolvedValueOnce(json({ job: { kernelId: "kernel/one" } })).mockResolvedValueOnce(json({ kernel: { operatorAddress: operator } }));
+    expect(await readOrderOperator("job/one")).toBe(operator.toLowerCase());
+    expect(authorizedFetch.mock.calls.map(([path]) => path)).toEqual(["/api/jobs/job%2Fone", "/api/kernels/kernel%2Fone"]);
+    for (const [, init] of authorizedFetch.mock.calls) expect(init).toEqual({ method: "GET", credentials: "omit", cache: "no-store" });
+    expect(readServedTerms(JSON.stringify(terms()))).toMatchObject({ payload: terms() });
+  });
+  it.each(["job", "kernel"])("maps every status on the %s read", async (step) => {
+    for (const [status, expected] of [[401, SIGN_IN_EXPIRED], [403, SIGN_IN_REFUSED], [404, FUND_COPY.L7], [500, FUND_COPY.L4], [202, FUND_COPY.L4]] as const) {
+      if (step === "kernel") authorizedFetch.mockResolvedValueOnce(json({ job: { kernelId: "kernel/one" } }));
+      authorizedFetch.mockResolvedValueOnce(json({}, status));
+      await expect(readOrderOperator("job/one")).rejects.toThrow(expected);
+    }
+  });
+  it.each([{}, null, [], { job: {} }, { job: { kernelId: "" } }, { job: { kernelId: 1 } }])("rejects malformed job %#", async (body) => {
+    authorizedFetch.mockResolvedValueOnce(json(body)); await expect(readOrderOperator("job/one")).rejects.toThrow(FUND_COPY.L4);
+  });
+  it.each([{}, null, [], { kernel: null }, { kernel: [] }])("rejects malformed kernel %#", async (body) => {
+    authorizedFetch.mockResolvedValueOnce(json({ job: { kernelId: "kernel/one" } })).mockResolvedValueOnce(json(body));
+    await expect(readOrderOperator("job/one")).rejects.toThrow(FUND_COPY.L4);
+  });
+  it.each([undefined, "", "0x123", `0x${"g".repeat(40)}`, 1])("rejects malformed operator %#", async (operatorAddress) => {
+    authorizedFetch.mockResolvedValueOnce(json({ job: { kernelId: "kernel/one" } })).mockResolvedValueOnce(json({ kernel: { operatorAddress } }));
+    await expect(readOrderOperator("job/one")).rejects.toThrow(FUND_COPY.L23);
+  });
+  it.each(["job", "kernel"])("rejects non-JSON %s bodies", async (step) => {
+    if (step === "kernel") authorizedFetch.mockResolvedValueOnce(json({ job: { kernelId: "kernel/one" } }));
+    authorizedFetch.mockResolvedValueOnce(new Response("{")); await expect(readOrderOperator("job/one")).rejects.toThrow(FUND_COPY.L4);
   });
 });

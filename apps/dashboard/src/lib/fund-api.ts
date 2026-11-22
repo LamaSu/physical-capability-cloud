@@ -40,6 +40,28 @@ export async function readFunding(jobId: string) {
   });
 }
 
+export async function readOrderOperator(jobId: string) {
+  async function read(path: string) {
+    const response = await send(path, { method: "GET" });
+    if (response.status === 401) throw new FundingReadError(SIGN_IN_EXPIRED);
+    if (response.status === 403) throw new FundingReadError(SIGN_IN_REFUSED);
+    if (response.status === 404) throw new FundingReadError(FUND_COPY.L7);
+    if (response.status !== 200) throw new FundingReadError(FUND_COPY.L4);
+    const body: unknown = await response.json().catch(() => null);
+    if (!isRecord(body)) throw new FundingReadError(FUND_COPY.L4);
+    return body;
+  }
+  const body = await read(`/api/jobs/${encodeURIComponent(jobId)}`);
+  if (!isRecord(body.job) || typeof body.job.kernelId !== "string" || body.job.kernelId.length === 0) {
+    throw new FundingReadError(FUND_COPY.L4);
+  }
+  const snapshot = await read(`/api/kernels/${encodeURIComponent(body.job.kernelId)}`);
+  if (!isRecord(snapshot.kernel)) throw new FundingReadError(FUND_COPY.L4);
+  const operator = snapshot.kernel.operatorAddress;
+  if (typeof operator !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(operator)) throw new FundingReadError(FUND_COPY.L23);
+  return operator.toLowerCase() as `0x${string}`;
+}
+
 export function readServedTerms(text: string, now = Date.now()) {
   try {
     const body: unknown = JSON.parse(text);
@@ -56,6 +78,7 @@ export function readServedTerms(text: string, now = Date.now()) {
       amount: `${formatUnits(BigInt(body.totalGross), 6)} test USDC`,
       escrow: body.escrow,
       fundBy: new Date(Number(fundBy) * 1000).toISOString(),
+      payload: body,
     } as const;
   } catch {
     return { kind: "unreadable" } as const;
