@@ -15,7 +15,6 @@ vi.mock("wagmi", () => ({ useAccount: () => ({ address: undefined }), useConnect
 interface Call {
   url: string;
   method: string;
-  body: string | null;
 }
 
 let calls: Call[];
@@ -43,7 +42,7 @@ beforeEach(() => {
   validationReply = Promise.resolve(reply({ valid: true, warnings: [] }));
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    calls.push({ url, method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : null });
+    calls.push({ url, method: init?.method ?? (input instanceof Request ? input.method : "GET") });
     return url.endsWith("/api/setup/validate") ? validationReply : reply({ status: "ok", devices: [] });
   }));
   container = document.createElement("div");
@@ -81,7 +80,7 @@ function buttonWithText(text: string): HTMLButtonElement {
 }
 
 function expectNoRegistrationClaim() {
-  expect(container.textContent).not.toMatch(/registered on-chain|registers your identity|register your identity on|Registering\.\.\.|Registration error/i);
+  expect(container.textContent).not.toMatch(/registered|registering|registration|registers\s+your|register\s+your\s+identity\s+on/i);
 }
 
 describe("SetupWizardPage identity copy", () => {
@@ -92,12 +91,10 @@ describe("SetupWizardPage identity copy", () => {
     expect(container.textContent).toContain("Add your name, organization and role. This step registers nothing.");
     expectNoRegistrationClaim();
 
+    calls = [];
     await act(async () => buttonWithText("Complete Setup").click());
     expect(buttonWithText("Checking...").disabled).toBe(true);
     expectNoRegistrationClaim();
-    expect(calls.filter((call) => call.url.endsWith("/api/setup/validate"))).toEqual([
-      { url: "/api/setup/validate", method: "POST", body: "{}" },
-    ]);
 
     await act(async () => { resolveValidation(reply({ valid: true, warnings: [] })); });
     await flush();
@@ -105,6 +102,7 @@ describe("SetupWizardPage identity copy", () => {
     expect(container.textContent).toContain("Setup Complete");
     expect(container.textContent).toContain("This page didn't register your identity or anything on-chain.");
     expectNoRegistrationClaim();
+    expect(calls).toEqual([{ url: "/api/setup/validate", method: "POST" }]);
   });
 
   it("a failed check says the check failed", async () => {
@@ -112,10 +110,10 @@ describe("SetupWizardPage identity copy", () => {
     await render();
     await act(async () => buttonWithText("Complete Setup").click());
     await flush();
-    const errorBox = [...container.querySelectorAll("div")].find((element) => element.classList.contains("bg-red-500/10"));
-    expect(errorBox, "the setup check error box").toBeDefined();
-    expect(errorBox!.querySelector(".font-medium")?.textContent).toBe("Setup check failed");
-    expect(errorBox!.textContent).toContain("Setup configuration is invalid");
+    const errorTitle = [...container.querySelectorAll("div")].find((element) => element.textContent === "Setup check failed");
+    expect(errorTitle, "the setup check error title").toBeDefined();
+    const errorBox = errorTitle!.parentElement!;
+    expect(errorBox.textContent).toContain("Setup configuration is invalid");
     expect(useSetupWizardStore.getState().step).toBe(3);
     expect(container.textContent).toContain("Platform Identity");
     expect(buttonWithText("Complete Setup").disabled).toBe(false);

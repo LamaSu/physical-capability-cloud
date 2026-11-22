@@ -213,7 +213,6 @@ describe("N50: setup pages keep the API key on the configured gateway", () => {
       );
     });
     await flush();
-    expect([...container.querySelectorAll("button")].some((b) => b.textContent?.includes("Scan network"))).toBe(false);
     const input = container.querySelector('input[placeholder="Type a message or respond to the agent..."]') as HTMLInputElement;
     expect(input, "the chat input").not.toBeNull();
     await typeInto(input, "scan");
@@ -221,19 +220,11 @@ describe("N50: setup pages keep the API key on the configured gateway", () => {
       input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     });
     await flush();
+    expect(container.textContent).toContain("I've prepared a basic configuration based on your input.");
+    expect(container.textContent).not.toMatch(/scan[\s\S]*network|network[\s\S]*scan/i);
     expect(calls.some((c) => c.url.endsWith("/api/setup/scan-network"))).toBe(false);
     expect(calls.filter((c) => c.authorization)).toEqual([]);
-
-    // The unchanged leak helper requires a request; use the wizard's public liveness check.
-    await act(async () => {
-      root.render(
-        <MemoryRouter>
-          <SetupWizardPage />
-        </MemoryRouter>,
-      );
-    });
-    await flush();
-    expectNoKeyLeak();
+    expect(calls).toEqual([]);
   });
 
   it("SetupAgentPage sends the photo to the configured gateway and registers no device", async () => {

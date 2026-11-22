@@ -127,7 +127,8 @@ describe("T2e: SetupWizardPage's identity step claims no registration", () => {
 
 describe("T2f: SetupAgentPage offers no network scan", () => {
   it("contains none of the network scan path, UI, types or branch", () => {
-    const source = readSource("pages/SetupAgentPage.tsx");
+    const source = readFileSync(sourcePath("pages/SetupAgentPage.tsx"), "utf8");
+    expect(source).not.toMatch(/scan/i);
     for (const forbidden of [
       "scan-network",
       "Scan network",
@@ -148,5 +149,13 @@ describe("T2g: the landing hero's onboarding links reach the public chat", () =>
     expect(source.split('href="/onboard"').length - 1).toBe(0);
     expect(source.split('href="/onboard/chat"').length - 1).toBe(4);
     expect(source).toContain('<a className="alh-btn primary" href="/onboard/chat">Publish a capability →</a>');
+  });
+});
+
+describe("T2h: the static landing page's offer link reaches the public chat", () => {
+  it("contains no bare onboarding href and exactly one public chat offer link", () => {
+    const source = readFileSync(sourcePath("../public/landing.html"), "utf8");
+    expect(source.split('href="/onboard"').length - 1).toBe(0);
+    expect(source.split('<a class="btn btn--offer" href="/onboard/chat">Offer a capability <span class="arr" aria-hidden="true">&rarr;</span></a>').length - 1).toBe(1);
   });
 });
