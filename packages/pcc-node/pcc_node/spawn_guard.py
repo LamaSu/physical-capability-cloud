@@ -30,11 +30,9 @@ An allowed ``subprocess.Popen`` must: pass an argv list whose argv[0] is a pinne
 unchanged and containing no relative or empty component (which ``cwd`` could redirect); and resolve,
 right now, to the pinned realpath and inode (so a replaced, symlinked or shadowed binary is refused).
 
-Scope. The hook is installed only on POSIX. pcc-node's device executables are POSIX tools; on Windows
-the ``subprocess.Popen`` audit event carries a rendered command line, not an argv list, and a sound
-check of ``_winapi.CreateProcess``'s application-name against the pinned paths needs a Windows host to
-test -- that is tracked follow-up, so on Windows :func:`install` is a no-op and the node runs
-unguarded (as it did before this layer existed).
+Scope. The hook is installed only on POSIX. Off Linux, the entry refuses to start because Landlock is
+Linux only, unless the operator sets ``PCC_ALLOW_NO_LANDLOCK=1``. With that override, on Windows
+:func:`install` is a no-op and the node runs unguarded; on macOS the hook installs unarmed.
 
 Boundary (steward ruling 10/03, after 105j/105k/105l). This hook is the ACCIDENTAL-spawn check: it
 catches a careless or mistaken spawn in pcc-node's own code, however reached. It is NOT a sandbox
@@ -43,11 +41,11 @@ needed -- can still defeat the *allowed* path: mutate a captured function's ``__
 misreads the executable (105l HIGH 1), or pass a ``preexec_fn`` (absent from the ``subprocess.Popen``
 audit tuple, so the hook cannot see it) or race a thread to swap the binary between the audit-time
 ``stat`` and ``execvp`` -- an irreducible TOCTOU (105l HIGH 2). The HARD guarantee -- that pcc-node can
-execute only the pinned utilities -- is enforced below this hook, by two kernel layers together
-(verdict 105n): a Landlock execute restriction applied in process (:mod:`pcc_node._landlock`, which
-blocks re-executing the interpreter and every non-pinned binary, and is mandatory) and an AppArmor
-profile applied at deploy time (:mod:`deploy/apparmor/pcc-node`, which closes the ELF-loader gadget
-Landlock leaves). See ``deploy/README.md``. The hook still runs before the CLI and its dependencies import
+execute only the pinned utilities -- needs two kernel layers together: the Landlock execute restriction
+applied in process (:mod:`pcc_node._landlock`, in force and mandatory, blocking re-execution of the
+interpreter and every non-pinned binary), and an AppArmor profile at deploy time to close the
+ELF-loader gadget Landlock leaves. The AppArmor profile comes in a later change.
+See ``deploy/README.md``. The hook still runs before the CLI and its dependencies import
 (:func:`pcc_node._entry.run`), so an accidental import-time spawn is refused; the tests call
 ``main``/``run_daemon`` directly and never install it in-process.
 """

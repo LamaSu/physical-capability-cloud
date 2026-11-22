@@ -1332,7 +1332,7 @@ def support_cmd(message, config_file, pcc_base, api_key, attach_logs, check):
 
     running, _ = _is_running()
     sys_info = {
-        "platform": plat.platform(),
+        "platform": "-".join(part for part in (plat.system(), plat.release(), plat.machine()) if part),
         "nodeVersion": "0.1.0",
         "daemonRunning": running,
     }

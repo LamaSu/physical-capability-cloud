@@ -221,7 +221,7 @@ def detect_mdns(timeout=3.0):
     except SpawnRefused:
         # Its native interface enumeration (ifaddr -> ctypes.dlopen) is refused by the spawn guard.
         # mDNS is best-effort; degrade. A genuine zeroconf error is not masked (it propagates).
-        log.debug("mDNS discovery blocked by the spawn guard (native load) -- skipping")
+        log.info("mDNS discovery blocked by the spawn guard (native load) -- skipping")
         return []
 
     import time

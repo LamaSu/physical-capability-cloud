@@ -287,6 +287,19 @@ def violations(source, filename="<src>"):
     for node, why in refusals:
         bad(node, why)
 
+    platform_refused = {"platform", "processor", "architecture"}
+    # Track platform locally so other objects' platform attributes stay usable.
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for alias in n.names:
+                if alias.name == "platform":
+                    modules[alias.asname or alias.name] = "platform"
+        elif isinstance(n, ast.ImportFrom) and n.level == 0 and n.module == "platform":
+            for alias in n.names:
+                names[alias.asname or alias.name] = ("platform", alias.name)
+                if alias.name in platform_refused | {"uname"}:
+                    bad(n, f"from platform import {alias.name}")
+
     # Names bound by any import (rule 8), and the ones bound to click.
     import_bound, click_names = set(), set()
     for n in ast.walk(tree):
@@ -300,6 +313,12 @@ def violations(source, filename="<src>"):
     # Names used as the object of an attribute access (os in os.path.join), and called expressions.
     attribute_bases = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
     call_funcs = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    uname_fields = {"system", "node", "release", "version", "machine"}
+    direct_uname_reads = {
+        id(n.value) for n in ast.walk(tree)
+        if isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load) and n.attr in uname_fields
+        and isinstance(n.value, ast.Call) and _call_target(n.value.func, modules, names) == ("platform", "uname")
+    }
     # getattr/hasattr(module, "constant") names one attribute, like module.constant does, so it
     # is judged as that attribute; a computed name still counts as the module used as a value.
     # Only while the lookup is the builtin: a module that rebinds the name gets no exemption.
@@ -319,7 +338,8 @@ def violations(source, filename="<src>"):
                 module, attr = modules[node.id], constant_lookups.get(id(node))
                 if attr is None:
                     bad(node, f"module {module} used as a value")
-                elif attr in REFUSED.get(module, ()) or attr.startswith("__") or (module, attr) in ALLOWED_STARTS:
+                elif (attr in REFUSED.get(module, ()) or attr.startswith("__") or (module, attr) in ALLOWED_STARTS
+                      or (module == "platform" and attr in platform_refused | {"uname"})):
                     bad(node, f"{module}.{attr} through getattr")
             elif node.id == "__builtins__":
                 bad(node, "__builtins__")
@@ -361,6 +381,15 @@ def violations(source, filename="<src>"):
             elif _reaches(name.value):
                 bad(node, f"{node.func.id}(..., {name.value!r}): the name {_reaches(name.value)}")
         # Any reference to a refused attribute, called or not (invoke = os.system).
+        ref = _call_target(node, modules, names)
+        if ref is not None and ref[0] == "platform":
+            if ref[1] in platform_refused:
+                bad(node, f"platform.{ref[1]} can start a process")
+            elif ref[1] == "uname" and id(node) not in call_funcs:
+                bad(node, "platform.uname used as a value")
+        if (isinstance(node, ast.Call) and _call_target(node.func, modules, names) == ("platform", "uname")
+                and id(node) not in direct_uname_reads):
+            bad(node, "platform.uname() must have one of its five process-free fields read directly")
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in modules:
             module = modules[node.value.id]
             if node.attr in REFUSED.get(module, ()):
@@ -623,8 +652,9 @@ def test_the_package_imports_only_what_it_lists():
 #   python3 -c "import hashlib,pathlib; print(hashlib.sha256(pathlib.Path('pcc_node/_landlock.py').read_bytes()).hexdigest())"
 # The reviewed surface it currently pins: `import ctypes`; one `libc = ctypes.CDLL(None, use_errno=True)`
 # handle used only for `libc.syscall` / `libc.prctl`; and ctypes value types (Structure, byref,
-# c_int/c_int32/c_long/c_size_t/c_uint32/c_uint64, get_errno/set_errno) for the Landlock structs.
-LANDLOCK_SHA256 = "c7b2b94249abe9ea7a3e85f248c517845993f493bddffe20087c1f86d8090019"
+# c_int/c_int32/c_long/c_size_t/c_uint32/c_uint64, get_errno/set_errno) for the Landlock structs;
+# and the sys.platform check before uname or syscalls.
+LANDLOCK_SHA256 = "643e1acbd02d2c1f6d4718b4095859384cdf011f735a2b3bf8d85714eaef72b7"
 
 
 def test_landlock_module_is_pinned():
@@ -861,6 +891,21 @@ EVASIONS = {
     "fcntl.ioctl as a value": "import fcntl\ng = fcntl.ioctl",
     "fcntl through subprocess's attribute": "import subprocess\nf = subprocess.fcntl\nf.ioctl(0, 0)",
     "fcntl from subprocess, passed on": "from subprocess import fcntl\nrun_with(fcntl)",
+    "platform.platform()": "import platform\nplatform.platform()",
+    "aliased platform.platform": "import platform as plat\nplat.platform()",
+    "from platform import platform": "from platform import platform\nplatform()",
+    "platform.platform as a value": "import platform\nvalue = platform.platform",
+    "constant getattr of platform.platform": "import platform\ngetattr(platform, 'platform')()",
+    "platform.processor()": "import platform\nplatform.processor()",
+    "platform.architecture()": "import platform\nplatform.architecture()",
+    "tuple(platform.uname())": "import platform\ntuple(platform.uname())",
+    "unpacked platform.uname()": "import platform\nsystem, node, release, version, machine, processor = platform.uname()",
+    "for over platform.uname()": "import platform\nfor field in platform.uname():\n    print(field)",
+    "indexed platform.uname()": "import platform\nplatform.uname()[0]",
+    "platform.uname().processor": "import platform\nplatform.uname().processor",
+    "platform.uname() bound to a name": "import platform\nvalue = platform.uname()",
+    "from platform import uname": "from platform import uname",
+    "platform passed as a value": "import platform\nconsume(platform)",
 }
 # Rule 8 at the package level: modules outside ALLOWED_IMPORTS, each refused by import_violations().
 IMPORT_EVASIONS = {
@@ -912,6 +957,11 @@ SAFE = {
     # #553: devicelock's host lock (flock and the LOCK_* constants), and lockf, stay usable.
     "fcntl.flock": "import fcntl\nfcntl.flock(3, fcntl.LOCK_EX | fcntl.LOCK_NB)",
     "fcntl.lockf": "import fcntl\nfcntl.lockf(3, fcntl.LOCK_UN)",
+    "platform's field functions": "import platform\nplatform.system()\nplatform.release()\nplatform.version()\nplatform.machine()\nplatform.node()\nplatform.python_version()",
+    "uname()'s five fields": "import platform\nplatform.uname().system\nplatform.uname().node\nplatform.uname().release\nplatform.uname().version\nplatform.uname().machine",
+    "aliased platform.system": "import platform as plat\nplat.system()",
+    "sys.platform": "import sys\nsys.platform == 'win32'\nsys.platform[:5] == 'linux'",
+    "another object's platform attribute": "value = obj.platform\nobj.platform = value",
 }
 
 

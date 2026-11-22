@@ -23,17 +23,17 @@ def run() -> None:
     # It MUST succeed before the node runs: otherwise the exec floor rests on AppArmor alone, which has
     # to grant python3 execute (pcc-node IS python) and so cannot stop `python3 -c ...` (verdict 105n,
     # sol HIGH1). Where Landlock is unavailable we refuse by default, unless the operator consciously
-    # opts out with PCC_ALLOW_NO_LANDLOCK=1 -- then only AppArmor (L1) + the accidental hook (L3) apply
+    # opts out with PCC_ALLOW_NO_LANDLOCK=1 -- then only the accidental hook (L3) applies
     # and the operating runtime must stay unarmed (item 124 / #471). Landlock + AppArmor together are
     # the hard guarantee; neither alone is (AppArmor leaves the python path, Landlock the loader gadget).
     paths = [p for n in sorted(EXECUTABLES) if (p := shutil.which(n))]
     landlock_ok = restrict(paths)
     if not landlock_ok and os.getenv("PCC_ALLOW_NO_LANDLOCK") != "1":
         raise SystemExit(
-            "Refused: Landlock (Linux 5.13+) is unavailable, so pcc-node cannot confine execve in "
-            "process, and AppArmor alone cannot stop `python3 -c ...`. Run on a Landlock kernel, or "
-            "load the AppArmor profile and set PCC_ALLOW_NO_LANDLOCK=1 to run UNARMED (Layer 1 only; "
-            "device execution refused). See deploy/README.md. Fail-closed by default."
+            "Refused: Landlock is unavailable or could not be applied (see the warning above), so pcc-node "
+            "cannot confine which programs it starts. Run on Linux 5.13+ with Landlock enabled, or set "
+            "PCC_ALLOW_NO_LANDLOCK=1 to run UNARMED: the spawn guard then refuses every device command (on "
+            "Windows no guard is installed). See deploy/README.md. Fail-closed by default."
         )
     # Layer 3, the accidental-spawn check: the in-process audit hook, then the CLI under both. When
     # Landlock did not apply (the PCC_ALLOW_NO_LANDLOCK opt-out), install UNARMED -- the hook refuses

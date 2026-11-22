@@ -263,7 +263,7 @@ def test_importing_the_entry_module_does_not_install_the_hook_in_process():
 def test_the_console_script_starts_through_the_entry():
     import ast
 
-    entries = []
+    entries = {}
     in_scripts = False
     for line in (PKG / "pyproject.toml").read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -271,9 +271,8 @@ def test_the_console_script_starts_through_the_entry():
             in_scripts = line == "[project.scripts]"
         elif in_scripts and "=" in line:
             key, value = line.split("=", 1)
-            if key.strip() == "pcc-node":
-                entries.append(ast.literal_eval(value.strip()))
-    assert entries == ["pcc_node._entry:run"]
+            entries[key.strip()] = ast.literal_eval(value.strip())
+    assert entries == {"pcc-node": "pcc_node._entry:run"}
 
 
 def test_python_dash_m_pcc_node_starts_through_the_entry():
@@ -309,8 +308,31 @@ def test_entry_refuses_to_run_when_landlock_is_unavailable():
     assert last == "REFUSED|", f"entry did not fail closed on unavailable Landlock: {r.stdout!r} {r.stderr!r}"
 
 
+def test_the_entry_refusal_text():
+    r = _run_raw(
+        "import os\n"
+        "os.environ.pop('PCC_ALLOW_NO_LANDLOCK', None)\n"
+        "import pcc_node._entry as e, pcc_node._landlock as L, pcc_node.spawn_guard as g, pcc_node.cli as cli\n"
+        "L.restrict = lambda paths: False\n"
+        "reached = []\n"
+        "g.install = lambda armed=True: reached.append('install')\n"
+        "cli.main = lambda *a, **k: reached.append('main')\n"
+        "try:\n    e.run()\n"
+        "except SystemExit as ex:\n    print(ex.code)\n"
+        "print('REACHED|' + ','.join(reached))\n"
+    )
+    message = (
+        "Refused: Landlock is unavailable or could not be applied (see the warning above), so pcc-node "
+        "cannot confine which programs it starts. Run on Linux 5.13+ with Landlock enabled, or set "
+        "PCC_ALLOW_NO_LANDLOCK=1 to run UNARMED: the spawn guard then refuses every device command (on "
+        "Windows no guard is installed). See deploy/README.md. Fail-closed by default."
+    )
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert r.stdout.splitlines() == [message, "REACHED|"], (r.stdout, r.stderr)
+
+
 def test_entry_runs_without_landlock_only_with_the_explicit_override():
-    # The operator may consciously accept the weaker posture (AppArmor + hook only, runtime unarmed)
+    # The operator may consciously accept the weaker posture (the hook only, runtime unarmed)
     # with PCC_ALLOW_NO_LANDLOCK=1; then run() proceeds -- installing the hook and entering the CLI.
     r = _run_raw(
         "import os\n"
@@ -343,6 +365,41 @@ def test_unarmed_mode_refuses_even_a_pinned_device_spawn():
     )
     assert r.stdout.strip().splitlines()[-1] == "REFUSED", (
         f"unarmed guard must refuse even a pinned spawn: {r.stdout!r} {r.stderr!r}")
+
+
+def test_logs_local_only_runs_under_the_guard(tmp_path):
+    import json
+    import platform
+
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {k: v for k, v in os.environ.items() if k != "PYTEST_CURRENT_TEST" and not k.startswith("PCC_")}
+    env.update(HOME=str(home), TMPDIR=str(tmp_path), PCC_ALLOW_NO_LANDLOCK="1")
+    output = tmp_path / "diag.json"
+    r = subprocess.run(
+        [sys.executable, "-m", "pcc_node", "logs", "--local-only", "-o", str(output),
+         "--pcc-base", "http://127.0.0.1:9", "--config-file", str(tmp_path / "none.json")],
+        cwd=str(PKG), stdin=subprocess.DEVNULL, env=env, capture_output=True, text=True, timeout=90,
+    )
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "spawn guard: refused" not in r.stdout and "spawn guard: refused" not in r.stderr, (r.stdout, r.stderr)
+    expected = "-".join(part for part in (platform.system(), platform.release(), platform.machine()) if part)
+    assert json.loads(output.read_text(encoding="utf-8"))["system"]["platform"] == expected
+
+
+def test_support_without_logs_runs_under_the_guard(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {k: v for k, v in os.environ.items() if k != "PYTEST_CURRENT_TEST" and not k.startswith("PCC_")}
+    env.update(HOME=str(home), TMPDIR=str(tmp_path), PCC_ALLOW_NO_LANDLOCK="1")
+    r = subprocess.run(
+        [sys.executable, "-m", "pcc_node", "support", "guard check", "--pcc-base", "http://127.0.0.1:9",
+         "--config-file", str(tmp_path / "none.json")],
+        cwd=str(PKG), stdin=subprocess.DEVNULL, env=env, capture_output=True, text=True, timeout=90,
+    )
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "Sending message..." in r.stdout, (r.stdout, r.stderr)
+    assert "spawn guard: refused" not in r.stdout and "spawn guard: refused" not in r.stderr, (r.stdout, r.stderr)
 
 
 # ---- MEDIUM 7 (105j) + MEDIUM 4 (105k): the click public-submodule launchers, proven refused -------

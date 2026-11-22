@@ -30,8 +30,9 @@ So neither layer alone is the complete allowlist (AppArmor leaves the python pat
 loader gadget); together they are. Both pair with :mod:`pcc_node.spawn_guard` (the accidental hook).
 
 Where Landlock is unavailable :func:`restrict` returns False and :mod:`pcc_node._entry` refuses to run
-unless the operator sets ``PCC_ALLOW_NO_LANDLOCK=1`` -- then only AppArmor + the hook apply and the
+unless the operator sets ``PCC_ALLOW_NO_LANDLOCK=1`` -- then only the hook applies and the
 operating runtime must stay unarmed (steward ruling, folded into item 124 / #471).
+Off Linux, restrict() and available() return False before any uname or syscall.
 
 This module is the ONE place pcc-node uses ``ctypes`` (there is no stdlib Landlock API): it issues
 the three Landlock syscalls and nothing else. The no-shell guard (tests/test_no_shell_execution.py)
@@ -42,6 +43,7 @@ It runs from the console entry (:mod:`pcc_node._entry`) before any CLI dependenc
 import ctypes
 import logging
 import os
+import sys
 
 log = logging.getLogger("pcc-node.landlock")
 
@@ -94,6 +96,8 @@ def _elf_interpreter(path):
 
 def available():
     """Whether this kernel offers Landlock with at least the execute right (ABI >= 1)."""
+    if sys.platform[:5] != "linux":
+        return False
     nrs = _SYSCALLS.get(os.uname().machine)
     if nrs is None:
         return False
@@ -109,6 +113,9 @@ def restrict(paths):
     Returns True once the kernel ruleset is in force (irreversibly), False if Landlock is
     unavailable or the ruleset could not be applied.
     """
+    if sys.platform[:5] != "linux":
+        log.warning("Landlock: Linux only, not available on %s; execute-allowlist NOT enforced", sys.platform)
+        return False
     nrs = _SYSCALLS.get(os.uname().machine)
     if nrs is None:
         log.warning("Landlock: unknown arch %s; execute-allowlist NOT enforced", os.uname().machine)

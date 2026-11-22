@@ -36,7 +36,7 @@ LOG_FILE = os.path.join(LOG_DIR, "pcc-node.log")
 def _collect_system_info() -> dict:
     """Collect basic system information (no secrets)."""
     info = {
-        "platform": platform.platform(),
+        "platform": "-".join(part for part in (platform.system(), platform.release(), platform.machine()) if part),
         "python": platform.python_version(),
         "arch": platform.machine(),
         "hostname": platform.node(),

@@ -218,6 +218,25 @@ class TestDetectMdns:
         # path is tested by mocking the import
         assert isinstance(result, list)
 
+    def test_logs_once_at_info_when_the_guard_refuses_zeroconf(self, caplog):
+        import logging
+        from types import ModuleType
+
+        from pcc_node.spawn_guard import SpawnRefused
+
+        class BlockedZeroconf(ModuleType):
+            def __getattribute__(self, name):
+                raise SpawnRefused("guard check")
+
+        with mock.patch.dict("sys.modules", {"zeroconf": BlockedZeroconf("zeroconf")}):
+            with caplog.at_level(logging.DEBUG, logger="pcc-node.detect"):
+                assert detect_mdns() == []
+
+        records = [r for r in caplog.records if r.name == "pcc-node.detect"]
+        assert [(r.levelno, r.getMessage()) for r in records] == [
+            (logging.INFO, "mDNS discovery blocked by the spawn guard (native load) -- skipping")
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Combined detection
