@@ -817,6 +817,13 @@ describe("N303 scaffold literals and identifier rules", () => {
     expect(text.split('type: "sensor_data_summary"').length - 1).toBe(1);
     expect(text).not.toContain("sensor_reading");
   });
+  it("SL10e the envelope takes only x, y, z and unit", async () => {
+    const config = example();
+    config.capabilities[0].workEnvelope = { ...config.capabilities[0].workEnvelope!, label: "bed" } as any;
+    const cap = (await importCapabilities(config))[0];
+    expect(cap.envelope).toEqual({ x: 762, y: 406, z: 508, unit: "mm" });
+    expect(diagnostics(config)).toEqual([]);
+  }, 30000);
   it("A6 the agent builds each adapter with kernel.ts's statement", () => {
     for (const [label, fixture] of fixtures) {
       const config = fixture();

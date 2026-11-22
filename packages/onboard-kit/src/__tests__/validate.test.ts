@@ -528,7 +528,7 @@ describe("local config rules", () => {
 
   it("CV23: work envelope units are mm or inch", () => {
     const name = "capability[fdm].workEnvelope.unit";
-    for (const unit of ["mm", "inch", "in", "cm", ""]) {
+    for (const unit of ["mm", "inch", "in", "cm", "", "MM"]) {
       const config = makeValidConfig();
       config.capabilities[0].workEnvelope = { x: 100, y: 100, z: 100, unit: unit as "mm" | "inch" };
       const result = validate({ config });
@@ -564,6 +564,39 @@ describe("local config rules", () => {
     oldPricing.profiles![0].pricingOverrides = { baseCost: "30.00" } as any;
     expect(validate({ config: oldPricing }).errors).toContainEqual(error("profile[p1].pricingOverrides",
       "takes only basePrice and currency (MachineProfile in @pcc/spec); baseCost, perMinute and minimum belong in a capability's pricing"));
+
+    const name = "profile[p1].paramOverrides[0]";
+    const extraParam = structuredClone(config);
+    extraParam.profiles![0].paramOverrides![0] = { ...extraParam.profiles![0].paramOverrides![0], label: "Material" } as any;
+    expect(validate({ config: extraParam }).errors).toEqual([error(name,
+      "takes only paramKey, restrictTo, exclude, overrideMin, overrideMax and overrideDefault (ParamOverride in @pcc/spec)")]);
+
+    const infiniteMin = structuredClone(config);
+    infiniteMin.profiles![0].paramOverrides![0].overrideMin = Infinity;
+    expect(validate({ config: infiniteMin }).errors).toContainEqual(error(`${name}.overrideMin`, "must be a finite number"));
+
+    const infiniteMax = structuredClone(config);
+    infiniteMax.profiles![0].paramOverrides![0].overrideMax = -Infinity;
+    expect(validate({ config: infiniteMax }).errors).toContainEqual(error(`${name}.overrideMax`, "must be a finite number"));
+
+    const missingKey = structuredClone(config);
+    delete (missingKey.profiles![0].paramOverrides![0] as any).paramKey;
+    expect(validate({ config: missingKey }).errors).toContainEqual(error(`${name}.paramKey`, "required"));
+
+    for (const value of [true, 5]) {
+      const defaultValue = structuredClone(config);
+      defaultValue.profiles![0].paramOverrides![0].overrideDefault = value;
+      const accepted = validate({ config: defaultValue });
+      expect(accepted.valid).toBe(true);
+      expect(accepted.checks.filter(c => !c.passed && c.name.startsWith("profile[p1]"))).toEqual([]);
+    }
+
+    const stringMin = structuredClone(config);
+    stringMin.profiles![0].paramOverrides![0].overrideMin = "5" as any;
+    const failures = validate({ config: stringMin }).checks.filter(c => !c.passed);
+    expect(failures).toHaveLength(1);
+    expect(failures[0].name).toBe(`${name}.overrideMin`);
+    expect(failures[0].severity).toBe("error");
   });
 
   it("CV25: the example validates with no deviceType, envelope or profile failure", () => {
