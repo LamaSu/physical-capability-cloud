@@ -117,7 +117,7 @@ describe("T2e: SetupWizardPage's identity step claims no registration", () => {
       "This page didn't register your identity or anything on-chain.",
       'subtitle="Add your name, organization and role. This step registers nothing."',
       '"Checking..."',
-      "Setup check failed",
+      "No result from the setup check",
       "Complete Setup doesn't register your identity or anything on-chain.",
     ]) {
       expect(source.split(replacement).length - 1, replacement).toBe(1);
@@ -183,8 +183,11 @@ it("T2j: the wizard's summary names the gateway's check", () => {
     "The gateway's own setup check passed.",
     "The gateway's own setup check didn't pass.",
     "This page couldn't reach the gateway, so it has no result from the gateway's setup check.",
+    "This page has no result from the gateway's setup check.",
+    "The gateway replied without a setup check result.",
   ]) {
     expect(source.split(replacement).length - 1, replacement).toBe(1);
   }
   expect(source.split("configured and ready to go").length - 1).toBe(0);
+  expect(source.split("Setup check failed").length - 1).toBe(0);
 });

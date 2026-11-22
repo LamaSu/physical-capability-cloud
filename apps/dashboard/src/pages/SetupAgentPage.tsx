@@ -107,7 +107,7 @@ async function agentStep(
 
   // Determine current phase from history
   const lastAgentMsg = [...history].reverse().find((m) => m.role === "agent");
-  const phase = lastAgentMsg?.uiRequest?.component ?? "selection";
+  const phase = lastAgentMsg?.uiRequest?.component;
 
   if (phase === "selection" || userInput === "photo" || userInput === "manual") {
     if (userInput === "photo") {
@@ -201,7 +201,9 @@ async function agentStep(
       // Generic IP input path — show machine config preview with what we know
       const configPreview: MachineConfigPreview = {
         type: "Machine",
-        adapterType: "generic-http",
+        adapterType: lastAgentMsg?.uiRequest?.props.prompt === "Connection type" && userInput === "opcua"
+          ? "opcua"
+          : "generic-http",
       };
 
       responses.push({

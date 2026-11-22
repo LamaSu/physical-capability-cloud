@@ -54,6 +54,7 @@ afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
   useUIStore.setState(originalUI);
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   adoptApiKey(null);
 });
@@ -211,7 +212,8 @@ describe("SetupAgentPage identifies through the served route", () => {
     expectConnectionChoices();
     await clickButton("OPC-UA");
     expect(buttonWithText("Confirm Configuration")).toBeDefined();
-    expect(container.textContent).toContain("generic-http");
+    expectPreviewAdapter("opcua");
+    expect(container.textContent).not.toContain("generic-http");
     expect(calls).toHaveLength(1);
   });
 
@@ -227,4 +229,85 @@ describe("SetupAgentPage identifies through the served route", () => {
     expect(container.textContent).not.toContain("Suggested connection type");
     expectConnectionChoices();
   });
+
+  it.each([
+    { menu: "first", pick: "OPC-UA", adapterType: "opcua" },
+    { menu: "first", pick: "HTTP API", adapterType: "generic-http" },
+    { menu: "suggested", pick: "OPC-UA", adapterType: "opcua" },
+    { menu: "suggested", pick: "HTTP API", adapterType: "generic-http" },
+    { menu: "no suggestion", pick: "OPC-UA", adapterType: "opcua" },
+    { menu: "no suggestion", pick: "HTTP API", adapterType: "generic-http" },
+  ])("I6: the operator's pick sets the preview's connection type ($menu, $pick)", async ({ menu, pick, adapterType }) => {
+    if (menu === "first") {
+      await render();
+      await clickButton("Enter details manually");
+      await clickButton("Laser Cutter/Engraver");
+      expect(container.textContent).toContain("Connection type");
+    } else {
+      respond = async () => reply({ candidates: menu === "suggested" ? [candidate("opcua")] : [] });
+      await requestLaserSuggestion();
+      expect(container.textContent).toContain(menu === "suggested"
+        ? "Suggested connection type: OPC-UA. Please confirm it below, or pick another."
+        : NO_SUGGESTION);
+    }
+    await clickButton(pick);
+    expect(buttonWithText("Confirm Configuration")).toBeDefined();
+    expectPreviewAdapter(adapterType);
+    expect(container.textContent).not.toContain(adapterType === "opcua" ? "generic-http" : "opcua");
+    expect(calls).toHaveLength(menu === "first" ? 0 : 1);
+    expect(container.querySelector("dl")!.textContent).toContain("Machine");
+    expect([...container.querySelectorAll("dt")].map((label) => label.textContent)).toEqual(["type", "adapter Type"]);
+    expect(container.querySelector('input[placeholder="e.g. octoprint"]')).toBeNull();
+  });
+
+  it("I7: no widget shows while a reply is pending", async () => {
+    let release!: (response: Response) => void;
+    respond = () => new Promise((resolve) => { release = resolve; });
+    await render();
+    await uploadPhoto();
+    expect(calls).toHaveLength(1);
+    expectNoWidgetButtons();
+    expect(chatInput().disabled).toBe(true);
+    await act(async () => release(reply({ candidates: [candidate()] })));
+    await flush();
+    expect(buttonWithText("Confirm Configuration")).toBeDefined();
+    expect(chatInput().disabled).toBe(false);
+    expect(buttonWithText("Identify This Machine")).toBeUndefined();
+  });
+
+  it("I8: after a step that throws, the input is enabled again and no older widget shows", async () => {
+    await render();
+    await clickButton("Enter details manually");
+    const random = vi.spyOn(Math, "random").mockImplementationOnce(() => { throw new Error("STEP-THROW"); });
+    try {
+      await clickButton("Laser Cutter/Engraver");
+    } finally {
+      random.mockRestore();
+    }
+    expect(container.textContent).toContain("Something went wrong: STEP-THROW");
+    expect(chatInput().disabled).toBe(false);
+    for (const option of MACHINE_OPTIONS) expect(buttonWithText(option), option).toBeUndefined();
+    expectNoWidgetButtons();
+    await sendText("help");
+    expect(container.textContent).toContain("I can help you:");
+    expect(container.textContent).toContain("Suggest a connection type from a make and model, for you to confirm");
+    expect(calls).toEqual([]);
+  });
 });
+
+function expectPreviewAdapter(adapterType: string) {
+  const label = [...container.querySelectorAll("dt")].find((element) => element.textContent === "adapter Type");
+  expect(label, "the preview's adapterType").toBeDefined();
+  expect(label!.nextElementSibling?.textContent).toBe(adapterType);
+}
+
+function chatInput() {
+  const input = container.querySelector<HTMLInputElement>('input[placeholder="Type a message or respond to the agent..."]');
+  expect(input, "the chat input").not.toBeNull();
+  return input!;
+}
+
+function expectNoWidgetButtons() {
+  const buttons = [...container.querySelectorAll("button")].map((button) => button.textContent?.trim());
+  expect(buttons).toEqual(["", "Start setup", "Check status", "Help"]);
+}

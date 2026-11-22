@@ -217,6 +217,7 @@ describe("N50: setup pages keep the API key on the configured gateway", () => {
       );
     });
     await flush();
+    expect(container.textContent).not.toMatch(/scan[\s\S]*network|network[\s\S]*scan/i);
     const input = container.querySelector('input[placeholder="Type a message or respond to the agent..."]') as HTMLInputElement;
     expect(input, "the chat input").not.toBeNull();
     await typeInto(input, "scan");

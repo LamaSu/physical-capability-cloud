@@ -21,7 +21,7 @@ interface SetupWizardState {
   // Step 5: Complete
   setupComplete: boolean;
   setupCheck: {
-    outcome: "passed" | "failed" | "unreached";
+    outcome: "passed" | "failed" | "unreached" | "no-result";
     errors: string[];
     warnings: string[];
   } | null;
@@ -38,7 +38,7 @@ interface SetupWizardState {
   setOrganization: (org: string) => void;
   setRole: (role: "operator" | "customer" | "both") => void;
   completeSetup: () => void;
-  setSetupCheck: (check: NonNullable<SetupWizardState["setupCheck"]>) => void;
+  setSetupCheck: (check: SetupWizardState["setupCheck"]) => void;
   reset: () => void;
   isStepValid: (step: number) => boolean;
 }

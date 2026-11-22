@@ -321,12 +321,17 @@ function StepIdentity() {
   const [apiError, setApiError] = React.useState<string | null>(null);
 
   const handleNext = async () => {
+    setSetupCheck(null);
     setApiError(null);
     setSubmitting(true);
 
     try {
       // Validate the setup config
       const validation = await apiPost<ValidateResponse>("/setup/validate", {});
+      if (validation?.valid !== true && validation?.valid !== false) {
+        setApiError("The gateway replied without a setup check result.");
+        return;
+      }
       setSetupCheck({
         outcome: validation?.valid === true ? "passed" : "failed",
         errors: Array.isArray(validation?.errors) ? validation.errors : [],
@@ -336,10 +341,9 @@ function StepIdentity() {
       completeSetup();
       nextStep();
     } catch (err) {
-      // Gateway may not be running in demo mode — fall back gracefully
       const msg = err instanceof Error ? err.message : "Unknown error";
-      // If it's a network/fetch error, continue offline with a warning
-      if (msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("fetch")) {
+      // Show the unreached summary only when the request rejects with a TypeError.
+      if (err instanceof TypeError) {
         setSetupCheck({ outcome: "unreached", errors: [], warnings: [] });
         completeSetup();
         nextStep();
@@ -352,6 +356,7 @@ function StepIdentity() {
   };
 
   const handleSkip = () => {
+    setSetupCheck({ outcome: "no-result", errors: [], warnings: [] });
     completeSetup();
     nextStep();
   };
@@ -421,7 +426,7 @@ function StepIdentity() {
           <div className="flex items-start gap-3 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
             <div className="w-2 h-2 rounded-full bg-red-500 mt-1 shrink-0" />
             <div className="flex-1 min-w-0">
-              <div className="text-xs text-red-400 font-medium mb-1">Setup check failed</div>
+              <div className="text-xs text-red-400 font-medium mb-1">No result from the setup check</div>
               <div className="text-xs text-white/40">{apiError}</div>
             </div>
             <button
@@ -461,7 +466,9 @@ function StepComplete() {
     ? "The gateway's own setup check passed."
     : setupCheck?.outcome === "failed"
     ? "The gateway's own setup check didn't pass."
-    : "This page couldn't reach the gateway, so it has no result from the gateway's setup check.";
+    : setupCheck?.outcome === "unreached"
+    ? "This page couldn't reach the gateway, so it has no result from the gateway's setup check."
+    : "This page has no result from the gateway's setup check.";
 
   const nextActions = [
     { label: "Explore Capabilities", path: "/discover", icon: "\u2692" },
@@ -478,7 +485,7 @@ function StepComplete() {
       nextLabel="Go to Dashboard"
     >
       <div className="space-y-8 max-w-2xl">
-        {setupCheck && setupCheck.errors.length > 0 && (
+        {setupCheck && setupCheck.outcome !== "no-result" && setupCheck.errors.length > 0 && (
           <div className="space-y-1 text-sm text-white/60">
             <p>{"The check's errors:"}</p>
             <ul className="list-disc pl-5">
@@ -486,7 +493,7 @@ function StepComplete() {
             </ul>
           </div>
         )}
-        {setupCheck && setupCheck.warnings.length > 0 && (
+        {setupCheck && setupCheck.outcome !== "no-result" && setupCheck.warnings.length > 0 && (
           <div className="space-y-1 text-sm text-white/60">
             <p>{"The check's warnings:"}</p>
             <ul className="list-disc pl-5">
