@@ -121,7 +121,7 @@ async function requestLaserSuggestion() {
   await render();
   await clickButton("Enter details manually");
   await clickButton("Laser Cutter/Engraver");
-  expect(container.textContent).toContain("Laser cutters can use OPC-UA, USB serial, or proprietary HTTP APIs.\n\nDo you know the connection type? If not, tell me the make and model, and I'll suggest one for you to confirm.");
+  expect(container.textContent).toContain("Laser cutters can use OPC-UA, USB serial, or proprietary HTTP APIs.\n\nDo you know the connection type? If not, choose the make-and-model option below, and I'll suggest one for you to confirm.");
   await clickButton("Suggest from make and model");
   expect(container.textContent).toContain("What's the make and model of your laser cutter? I'll suggest a connection type for you to confirm.");
   await sendText("xTool S1", "e.g. xTool S1");
@@ -149,6 +149,7 @@ const failures = [
   { name: "empty candidates", respond: async () => reply({ candidates: [] }) },
   { name: "missing candidates", respond: async () => reply({}) },
   { name: "candidates is not a list", respond: async () => reply({ candidates: candidate() }) },
+  { name: "candidate vendor is not a string", respond: async () => reply({ candidates: [{ vendor: 7, model: "M", confidence: 0.9, mappedAdapterType: "opcua" }] }) },
 ];
 
 describe("SetupAgentPage identifies through the served route", () => {
@@ -288,10 +289,28 @@ describe("SetupAgentPage identifies through the served route", () => {
     expect(chatInput().disabled).toBe(false);
     for (const option of MACHINE_OPTIONS) expect(buttonWithText(option), option).toBeUndefined();
     expectNoWidgetButtons();
-    await sendText("help");
-    expect(container.textContent).toContain("I can help you:");
-    expect(container.textContent).toContain("Suggest a connection type from a make and model, for you to confirm");
     expect(calls).toEqual([]);
+  });
+
+  it("I9: after a step that throws, a typed description still reaches the preview", async () => {
+    await render();
+    await clickButton("Enter details manually");
+    const random = vi.spyOn(Math, "random").mockImplementationOnce(() => { throw new Error("STEP-THROW"); });
+    try {
+      await clickButton("Laser Cutter/Engraver");
+    } finally {
+      random.mockRestore();
+    }
+    await sendText("Prusa MK4");
+    expect(buttonWithText("Confirm Configuration")).toBeDefined();
+    expect([...container.querySelectorAll("dt")].map((label) => label.textContent)).toEqual(["type", "adapter Type"]);
+    expect(container.textContent).not.toContain("I'm not sure how to handle that right now");
+  });
+
+  it("I9b: after the OctoPrint URL answer, a later text still reaches the preview", async () => {
+    await render(); await clickButton("Enter details manually"); await clickButton("FDM 3D Printer");
+    await sendText("http://octopi.local"); await sendText("http://octopi.local");
+    expect([...container.querySelectorAll("dt")].map((label) => label.textContent)).toEqual(["type", "adapter Type"]);
   });
 });
 

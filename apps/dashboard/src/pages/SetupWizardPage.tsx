@@ -467,7 +467,7 @@ function StepComplete() {
     : setupCheck?.outcome === "failed"
     ? "The gateway's own setup check didn't pass."
     : setupCheck?.outcome === "unreached"
-    ? "This page couldn't reach the gateway, so it has no result from the gateway's setup check."
+    ? "This page got no reply it could read from the gateway, so it has no result from the gateway's setup check."
     : "This page has no result from the gateway's setup check.";
 
   const nextActions = [

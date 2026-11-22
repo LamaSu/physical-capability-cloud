@@ -160,7 +160,7 @@ describe("SetupWizardPage identity copy", () => {
     expect(useSetupWizardStore.getState().step).toBe(4);
     expect(useSetupWizardStore.getState().setupComplete).toBe(true);
     expect(container.textContent).toContain("Setup steps done");
-    expect(container.textContent).toContain("This page couldn't reach the gateway, so it has no result from the gateway's setup check.");
+    expect(container.textContent).toContain("This page got no reply it could read from the gateway, so it has no result from the gateway's setup check.");
     expect(container.querySelector('[aria-label="Setup check passed"]')).toBeNull();
   });
 
@@ -214,7 +214,7 @@ describe("SetupWizardPage identity copy", () => {
     expect(errorTitle!.parentElement!.textContent).toContain("Failed to fetch the chain config");
     expect(useSetupWizardStore.getState().step).toBe(3);
     expect(useSetupWizardStore.getState().setupCheck).toBeNull();
-    expect(container.textContent).not.toContain("This page couldn't reach the gateway, so it has no result from the gateway's setup check.");
+    expect(container.textContent).not.toContain("This page got no reply it could read from the gateway, so it has no result from the gateway's setup check.");
   });
 
   it("W11: a request that gets no reply is unreached, whatever its message says", async () => {
@@ -223,7 +223,7 @@ describe("SetupWizardPage identity copy", () => {
     await act(async () => buttonWithText("Complete Setup").click());
     await flush();
     expect(useSetupWizardStore.getState().step).toBe(4);
-    expect(container.textContent).toContain("This page couldn't reach the gateway, so it has no result from the gateway's setup check.");
+    expect(container.textContent).toContain("This page got no reply it could read from the gateway, so it has no result from the gateway's setup check.");
     expect(container.querySelector('[aria-label="Setup check passed"]')).toBeNull();
   });
 
@@ -233,7 +233,7 @@ describe("SetupWizardPage identity copy", () => {
     expectNoResultSummary();
   });
 
-  it.each([{}, null])("W13: an ok reply without a true or false valid shows the error box, not a failed check", async (body) => {
+  it.each([{}, null, { valid: "true" }, { valid: 0 }])("W13: an ok reply without a true or false valid shows the error box, not a failed check (%s)", async (body) => {
     validationReply = Promise.resolve(reply(body));
     await render();
     await act(async () => buttonWithText("Complete Setup").click());
@@ -255,7 +255,7 @@ function expectNoResultSummary() {
   for (const subtitle of [
     "The gateway's own setup check passed.",
     "The gateway's own setup check didn't pass.",
-    "This page couldn't reach the gateway, so it has no result from the gateway's setup check.",
+    "This page got no reply it could read from the gateway, so it has no result from the gateway's setup check.",
   ]) expect(container.textContent).not.toContain(subtitle);
   expect(container.querySelector('[aria-label="Setup check passed"]')).toBeNull();
   expect(container.textContent).not.toContain("The check's errors:");

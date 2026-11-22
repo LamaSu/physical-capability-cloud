@@ -107,7 +107,7 @@ async function agentStep(
 
   // Determine current phase from history
   const lastAgentMsg = [...history].reverse().find((m) => m.role === "agent");
-  const phase = lastAgentMsg?.uiRequest?.component;
+  const phase = lastAgentMsg?.uiRequest?.component ?? "selection";
 
   if (phase === "selection" || userInput === "photo" || userInput === "manual") {
     if (userInput === "photo") {
@@ -176,7 +176,7 @@ async function agentStep(
         id: id(),
         role: "agent",
         content:
-          "Laser cutters can use OPC-UA, USB serial, or proprietary HTTP APIs.\n\nDo you know the connection type? If not, tell me the make and model, and I'll suggest one for you to confirm.",
+          "Laser cutters can use OPC-UA, USB serial, or proprietary HTTP APIs.\n\nDo you know the connection type? If not, choose the make-and-model option below, and I'll suggest one for you to confirm.",
         timestamp: ts(),
         uiRequest: {
           component: "selection",
@@ -388,7 +388,7 @@ function PhotoCapture({ onCapture }: { onCapture: (base64: string) => void }) {
           <div className="space-y-2">
             <div className="text-4xl text-white/20">&#128247;</div>
             <p className="text-sm text-white/50">Click to upload or drag a photo here</p>
-            <p className="text-xs text-white/30">JPEG, PNG, WebP up to 5MB</p>
+            <p className="text-xs text-white/30">JPEG, PNG, WebP under 750 KB</p>
           </div>
         )}
         <input

@@ -182,7 +182,7 @@ it("T2j: the wizard's summary names the gateway's check", () => {
     "Setup steps done",
     "The gateway's own setup check passed.",
     "The gateway's own setup check didn't pass.",
-    "This page couldn't reach the gateway, so it has no result from the gateway's setup check.",
+    "This page got no reply it could read from the gateway, so it has no result from the gateway's setup check.",
     "This page has no result from the gateway's setup check.",
     "The gateway replied without a setup check result.",
   ]) {
