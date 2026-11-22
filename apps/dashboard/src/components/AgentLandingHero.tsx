@@ -58,14 +58,14 @@ export function AgentLandingHero() {
           </div>
 
           <div className="alh-cta">
-            <a className="alh-btn primary" href="/onboard">Publish a capability →</a>
+            <a className="alh-btn primary" href="/onboard/chat">Publish a capability →</a>
             <a className="alh-btn" href="/discover">Browse capabilities</a>
             <a className="alh-btn ghost" href="/agent-package.json">Agent package ↗</a>
           </div>
         </div>
 
         <div className="alh-lanes">
-          <a className="alh-lane m" href="/onboard">
+          <a className="alh-lane m" href="/onboard/chat">
             <div className="ico">▣ MACHINE</div>
             <h3>A machine</h3>
             <p>
@@ -74,7 +74,7 @@ export function AgentLandingHero() {
             </p>
             <span className="tag">Opentrons · Prusa · HPLC · CNC</span>
           </a>
-          <a className="alh-lane h" href="/onboard">
+          <a className="alh-lane h" href="/onboard/chat">
             <div className="ico">◐ HUMAN</div>
             <h3>A human skill</h3>
             <p>
@@ -83,7 +83,7 @@ export function AgentLandingHero() {
             </p>
             <span className="tag">courier · field tech · inspector</span>
           </a>
-          <a className="alh-lane a" href="/onboard">
+          <a className="alh-lane a" href="/onboard/chat">
             <div className="ico">◈ ASSET</div>
             <h3>An asset</h3>
             <p>

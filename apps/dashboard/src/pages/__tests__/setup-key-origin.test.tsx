@@ -204,7 +204,7 @@ describe("N50: setup pages keep the API key on the configured gateway", () => {
     expect(container.textContent ?? "").not.toContain("localhost:3200");
   });
 
-  it("SetupAgentPage sends its key-bearing scan request to the configured gateway", async () => {
+  it("SetupAgentPage offers no network scan and sends no scan request", async () => {
     await act(async () => {
       root.render(
         <MemoryRouter>
@@ -213,17 +213,27 @@ describe("N50: setup pages keep the API key on the configured gateway", () => {
       );
     });
     await flush();
-    const scan = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Scan network"));
-    expect(scan, "the Scan network option").toBeDefined();
+    expect([...container.querySelectorAll("button")].some((b) => b.textContent?.includes("Scan network"))).toBe(false);
+    const input = container.querySelector('input[placeholder="Type a message or respond to the agent..."]') as HTMLInputElement;
+    expect(input, "the chat input").not.toBeNull();
+    await typeInto(input, "scan");
     await act(async () => {
-      scan!.click();
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    await flush();
+    expect(calls.some((c) => c.url.endsWith("/api/setup/scan-network"))).toBe(false);
+    expect(calls.filter((c) => c.authorization)).toEqual([]);
+
+    // The unchanged leak helper requires a request; use the wizard's public liveness check.
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <SetupWizardPage />
+        </MemoryRouter>,
+      );
     });
     await flush();
     expectNoKeyLeak();
-    const call = calls.find((c) => c.url.endsWith("/api/setup/scan-network"));
-    expect(call, "scan-network request").toBeDefined();
-    expect(call!.url).toBe("/api/setup/scan-network");
-    expect(call!.authorization).toBe("Bearer pcc_test_secret_key");
   });
 
   it("SetupAgentPage sends the photo to the configured gateway and registers no device", async () => {
@@ -266,9 +276,19 @@ describe("N50: setup pages keep the API key on the configured gateway", () => {
       );
     });
     await flush();
-    await clickButton("Scan network");
+    await clickButton("Take or upload a photo");
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement | null;
+    expect(input, "the photo input").not.toBeNull();
+    const photo = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "machine.png", { type: "image/png" });
+    Object.defineProperty(input!, "files", { value: [photo] });
+    await act(async () => {
+      input!.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await flush();
+    await clickButton("Identify This Machine");
+    await clickButton("Confirm Configuration");
     const keyed = calls.filter((c) => c.authorization);
-    expect(keyed.map((c) => c.url)).toEqual(["https://gw.example.com/api/setup/scan-network"]);
+    expect(keyed.map((c) => c.url)).toEqual(["https://gw.example.com/api/ai/identify-machine"]);
   });
 
   it("EarnFromYourWorkPage sends the key it was just issued only to the gateway that issued it", async () => {

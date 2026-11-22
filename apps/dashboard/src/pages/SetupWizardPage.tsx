@@ -26,7 +26,7 @@ const wizardSteps: WizardStep[] = [
   { id: "welcome", label: "Welcome", description: "Platform overview" },
   { id: "network", label: "Network", description: "Chain configuration" },
   { id: "wallet", label: "Wallet", description: "Connect EVM wallet" },
-  { id: "identity", label: "Identity", description: "Register on PCCP" },
+  { id: "identity", label: "Identity", description: "Name, organization and role" },
   { id: "complete", label: "Complete", description: "Setup summary" },
 ];
 
@@ -35,7 +35,7 @@ const aiMessages: Record<number, { id: string; content: string; timestamp: strin
   1: { id: "ai-1", content: "PCCP needs a gateway server for API access. If you ran `pnpm dev`, it's already running on port 3200.", timestamp: "now" },
   2: { id: "ai-2", content: "Base Sepolia is recommended for testing. You can get free test USDC from the Coinbase faucet.", timestamp: "now" },
   3: { id: "ai-3", content: "Connect any EVM wallet. MetaMask and Coinbase Wallet are most popular.", timestamp: "now" },
-  4: { id: "ai-4", content: "Your identity is registered on-chain via ERC-8004. This links your wallet to your PCCP profile.", timestamp: "now" },
+  4: { id: "ai-4", content: "This page didn't register your identity or anything on-chain.", timestamp: "now" },
 };
 
 const baseInput =
@@ -358,10 +358,10 @@ function StepIdentity() {
   return (
     <WizardStepContent
       title="Platform Identity"
-      subtitle="Register your identity on the PCCP network."
+      subtitle="Add your name, organization and role. This step registers nothing."
       onNext={handleNext}
       onBack={prevStep}
-      nextLabel={submitting ? "Registering..." : "Complete Setup"}
+      nextLabel={submitting ? "Checking..." : "Complete Setup"}
       nextDisabled={!isStepValid(3) || submitting}
     >
       <div className="space-y-6 max-w-lg">
@@ -420,7 +420,7 @@ function StepIdentity() {
           <div className="flex items-start gap-3 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
             <div className="w-2 h-2 rounded-full bg-red-500 mt-1 shrink-0" />
             <div className="flex-1 min-w-0">
-              <div className="text-xs text-red-400 font-medium mb-1">Registration error</div>
+              <div className="text-xs text-red-400 font-medium mb-1">Setup check failed</div>
               <div className="text-xs text-white/40">{apiError}</div>
             </div>
             <button
@@ -451,7 +451,7 @@ function StepIdentity() {
         )}
 
         <p className="text-[10px] text-white/15 italic">
-          This validates your setup and registers your identity on the PCCP network via ERC-8004.
+          Complete Setup doesn't register your identity or anything on-chain.
         </p>
       </div>
     </WizardStepContent>
