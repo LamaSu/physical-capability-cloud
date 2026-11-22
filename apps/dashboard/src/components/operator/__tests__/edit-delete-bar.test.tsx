@@ -2,6 +2,9 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const { authorizedFetch } = vi.hoisted(() => ({ authorizedFetch: vi.fn() }));
 vi.mock("../../../lib/authorized-fetch.js", async (importOriginal) => ({
@@ -58,6 +61,12 @@ function statusLines() {
 
 async function expectRefusal(action: Action, response: Response, expected: string) {
   cleanup();
+  const jsonRead = vi.spyOn(response, "json");
+  const textRead = vi.spyOn(response, "text");
+  const arrayBufferRead = vi.spyOn(response, "arrayBuffer");
+  const blobRead = vi.spyOn(response, "blob");
+  const formDataRead = vi.spyOn(response, "formData");
+  const clone = vi.spyOn(response, "clone");
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -82,6 +91,12 @@ async function expectRefusal(action: Action, response: Response, expected: strin
   for (const copy of COPIES.filter((copy) => copy !== expected)) {
     expect(container.textContent, action).not.toContain(copy);
   }
+  expect(jsonRead, action).toHaveBeenCalledTimes(1);
+  expect(textRead, action).not.toHaveBeenCalled();
+  expect(arrayBufferRead, action).not.toHaveBeenCalled();
+  expect(blobRead, action).not.toHaveBeenCalled();
+  expect(formDataRead, action).not.toHaveBeenCalled();
+  expect(clone, action).not.toHaveBeenCalled();
 }
 
 describe("EditDeleteBar refusal notices", () => {
@@ -122,6 +137,25 @@ describe("EditDeleteBar refusal notices", () => {
       await expectRefusal(action, json({ error: CODE }, 400), CODE);
       await expectRefusal(action, json({ error: "not_found" }, 404), "not_found");
       await expectRefusal(action, new Response("not json", { status: 500 }), "HTTP 500");
+    }
+  });
+
+  it("EB5 each refusal reads the reply body once", async () => {
+    for (const action of ACTIONS) {
+      await expectRefusal(action, json(EXPLICIT_CREDENTIAL_REQUIRED, 403), OPERATOR_SIGN_IN_NOTICE);
+      await expectRefusal(action, json({ error: "forbidden" }, 403), OWNER_COPY[action]);
+      await expectRefusal(action, json(null, 403), OWNER_COPY[action]);
+      await expectRefusal(action, new Response("not json", { status: 403 }), OWNER_COPY[action]);
+      await expectRefusal(action, json({ error: "unauthorized" }, 401), SIGN_IN_COPY[action]);
+      await expectRefusal(action, json({ error: "deleted", message: "Registration was soft-deleted" }, 410), "Registration was soft-deleted");
+      await expectRefusal(action, new Response("not json", { status: 500 }), "HTTP 500");
+    }
+  });
+
+  it("EB6 each owner-only literal appears once in the edit bar", () => {
+    const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../EditDeleteBar.tsx"), "utf-8");
+    for (const copy of Object.values(OWNER_COPY)) {
+      expect(source.split(copy).length - 1, copy).toBe(1);
     }
   });
 });

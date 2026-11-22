@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
 import { provisionApiKey } from "../auth/api-key-auth.js";
-import { authorityOf, EXPLICIT_CREDENTIAL_REQUIRED } from "../auth/kernel-authority.js";
+import { EXPLICIT_CREDENTIAL_REQUIRED } from "../auth/kernel-authority.js";
 import { siweAuthPlugin } from "../auth/siwe-auth.js";
 import { closeStore, getRepos, initStore } from "../db.js";
 import { apiGate } from "../middleware/api-gate.js";
@@ -33,7 +33,7 @@ type Write = "DELETE" | "prove" | "reject";
 type Headers = Record<string, string>;
 type Key = ReturnType<typeof provisionApiKey>;
 type Row = NonNullable<ReturnType<ReturnType<typeof getRepos>["registrations"]["findById"]>>;
-type Session = { cookie: Headers; bearer: Headers; key: Headers; keyId: string };
+type Session = { cookie: Headers; bearer: Headers; key: Headers };
 let app: FastifyInstance;
 let KEY_PLAIN: Key, KEY_REG: Key, KEY_ADMIN: Key, KEY_CLAIM: Key;
 let sessionA: Session, sessionB: Session;
@@ -119,10 +119,7 @@ async function makeSession(wallet: string): Promise<Session> {
   const minted = await app.inject({ method: "POST", url: "/api/auth/session-key", headers });
   expect(minted.statusCode, minted.body).toBe(201);
   const key = bearer(minted.json().api_key);
-  const probe = await app.inject({ url: "/api/md-test/authority", headers: key });
-  const keyId = probe.json().apiKeyId;
-  expect(getRepos().apiKeys.findById(keyId)).toBeDefined();
-  return { cookie: { cookie: `pcc_session=${app.signCookie(token)}` }, bearer: headers, key, keyId };
+  return { cookie: { cookie: `pcc_session=${app.signCookie(token)}` }, bearer: headers, key };
 }
 
 beforeEach(async () => {
@@ -145,9 +142,7 @@ beforeEach(async () => {
       req.provenWallet = proven;
       req.provenWalletVia = typeof req.headers["x-test-proven-wallet-via"] === "string"
         ? req.headers["x-test-proven-wallet-via"] : "self-link:agent";
-      const carrier = req.headers["x-test-proven-wallet-carrier"];
-      if (carrier === "none") delete req.provenWalletCarrier;
-      else req.provenWalletCarrier = carrier === "key" || carrier === "bearer-session" || carrier === "cookie" ? carrier : "key";
+      req.provenWalletCarrier = "key";
     }
     if (typeof req.headers["x-test-tenant"] === "string") req.tenantId = req.headers["x-test-tenant"];
   });
@@ -155,7 +150,6 @@ beforeEach(async () => {
   await app.register(scopeChecker);
   await app.register(siweAuthPlugin);
   await app.register(onboardRoutes);
-  app.get("/api/md-test/authority", async req => authorityOf(req));
   await app.ready();
   const key = (operatorId: string, scopes = ["operator:basic"]) => provisionApiKey({ operatorId, scopes });
   KEY_PLAIN = key("operator-md-plain");
@@ -195,12 +189,24 @@ describe("missing and deleted registrations", () => {
     const tenantless = seed();
     for (const caller of [admin(), keyHeaders(KEY_PLAIN)]) {
       const headers = { ...caller, "x-test-tenant": "tenant-md-b" };
+      const replies = [];
       for (const id of [tenantRow.id, tenantless.id, "reg-md-missing"]) {
         const before = [stored(tenantRow.id), stored(tenantless.id)];
         const res = await app.inject({ url: url(id), headers });
         expect(res.statusCode, res.body).toBe(404);
         expect(res.json()).toStrictEqual({ error: "not_found" });
         expect([stored(tenantRow.id), stored(tenantless.id)]).toStrictEqual(before);
+        replies.push(res);
+      }
+      const missing = replies[2];
+      const missingHeaders = { ...missing.headers };
+      delete missingHeaders.date;
+      for (const res of replies.slice(0, 2)) {
+        expect(res.statusCode).toBe(missing.statusCode);
+        expect(res.body).toBe(missing.body);
+        const replyHeaders = { ...res.headers };
+        delete replyHeaders.date;
+        expect(replyHeaders).toStrictEqual(missingHeaders);
       }
     }
     const res = await app.inject({ url: url(tenantRow.id), headers: { ...admin(), "x-test-tenant": "tenant-md-a" } });
@@ -255,5 +261,26 @@ describe("missing and deleted registrations", () => {
     vi.stubEnv("TENANT_ENFORCE", "true");
     await refuse("reject", tenantRow, { ...admin(), "x-test-tenant": "tenant-md-b" }, 404, { error: "not_found" }, { reason: "md reason" });
     await refuse("reject", tenantRow, { ...admin(), "x-test-tenant": "tenant-md-a" }, 410, DELETED, { reason: "md reason" });
+  });
+
+  it("MD7 only a deleted registration is 410 at /prove and /reject; every other status gets that route's own reply", async () => {
+    for (const status of ["draft", "reviewing", "approved", "suspended"] as const) {
+      await pass("prove", seed(WALLET_A, null, null, { status }), admin());
+      const row = seed(WALLET_A, null, null, { status });
+      const before = stored(row.id);
+      clearEffects();
+      const res = await app.inject({ method: "POST", url: url(row.id) + "/prove", headers: admin(), payload: {} });
+      expect(res.statusCode, `prove: ${res.body}`).toBe(400);
+      expect(res.json().error).toBe("evidence_required");
+      expectNoEffects();
+      expect(stored(row.id)).toStrictEqual(before);
+    }
+    for (const status of ["draft", "reviewing", "approved", "active", "suspended"] as const) {
+      const row = seed(WALLET_A, null, null, { status });
+      const res = await writeRequest("reject", row.id, admin(), { reason: "md reason" });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json().rejected).toBe(true);
+      expect(stored(row.id).status).toBe("rejected");
+    }
   });
 });
