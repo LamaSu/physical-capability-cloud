@@ -1,1 +1,2 @@
 recursive-include pcc_node/ui_templates *.html
+recursive-include deploy *

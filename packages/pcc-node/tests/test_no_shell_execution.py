@@ -579,6 +579,12 @@ def _sources():
     return sorted(p for p in PACKAGE.rglob("*.py") if "__pycache__" not in p.parts)
 
 
+# The one module granted ctypes -- there is no stdlib Landlock API, and the hard execve allowlist is
+# applied with Landlock syscalls (steward ruling 10/03, verdict 105m). The no-shell and import-census
+# checks skip it; test_landlock_module_uses_ctypes_only_for_landlock bounds the exemption.
+LANDLOCK_SOURCE = PACKAGE / "_landlock.py"
+
+
 def test_the_package_sources_are_scanned():
     names = {p.name for p in _sources()}
     assert "job_executor.py" in names and "daemon.py" in names and "camera.py" in names
@@ -587,6 +593,8 @@ def test_the_package_sources_are_scanned():
 def test_no_module_uses_a_refused_form():
     hits = []
     for path in _sources():
+        if path == LANDLOCK_SOURCE:
+            continue  # ctypes-based Landlock bootstrap; bounded by its own test (exemption, 10/03)
         source = path.read_text(encoding="utf-8")
         for v in violations(source, str(path)) + import_violations(source):
             hits.append(f"{path.relative_to(PACKAGE)}:{v}")
@@ -598,8 +606,60 @@ def test_the_package_imports_only_what_it_lists():
     # A new import is a reviewed change to ALLOWED_IMPORTS; an unused entry is removed (verdict 105g).
     used = set()
     for path in _sources():
+        if path == LANDLOCK_SOURCE:
+            continue  # exempt: it alone may import ctypes (bounded by its own test)
         used |= imported_modules(path.read_text(encoding="utf-8"))
     assert used == ALLOWED_IMPORTS
+
+
+# _landlock.py is the ONE module that may use ctypes (there is no stdlib Landlock API). Three rounds of
+# alias bypasses against a pattern allowlist (MED2 r1-r3: CDLL().system, aliased results via
+# AnnAssign/walrus/return, then an aliased CDLL constructor) showed that enumerating safe/unsafe ctypes
+# forms is whack-a-mole, so the module is PINNED instead (steward #5535): any change to _landlock.py
+# fails the test until a reviewer updates the digest, so no reach -- ctypes or otherwise -- can be added
+# without review. The pin is a content digest (a strict superset of the AST); ast.dump is not stable
+# across Python versions, so a byte digest is used (it also forces review of comment changes, which for
+# this one trusted bootstrap module is acceptable). Regenerate after a reviewed change:
+#   python3 -c "import hashlib,pathlib; print(hashlib.sha256(pathlib.Path('pcc_node/_landlock.py').read_bytes()).hexdigest())"
+# The reviewed surface it currently pins: `import ctypes`; one `libc = ctypes.CDLL(None, use_errno=True)`
+# handle used only for `libc.syscall` / `libc.prctl`; and ctypes value types (Structure, byref,
+# c_int/c_int32/c_long/c_size_t/c_uint32/c_uint64, get_errno/set_errno) for the Landlock structs.
+LANDLOCK_SHA256 = "c7b2b94249abe9ea7a3e85f248c517845993f493bddffe20087c1f86d8090019"
+
+
+def test_landlock_module_is_pinned():
+    import hashlib
+    raw = LANDLOCK_SOURCE.read_bytes()
+    source = raw.decode("utf-8")
+    # (1) Semantic guards -- a clearer failure than a digest mismatch for the common cases, and they
+    #     hold the line on imports and the no-shell rules (only the `import ctypes` refusal is waived).
+    assert imported_modules(source) <= ALLOWED_IMPORTS | {"ctypes"}, imported_modules(source)
+    assert import_violations(source) == ["imports ctypes, which ALLOWED_IMPORTS does not list"]
+    extra = [v for v in violations(source, str(LANDLOCK_SOURCE)) if not v.endswith(": import ctypes")]
+    assert extra == [], f"_landlock.py has violations beyond the ctypes import: {extra}"
+    # (2) The airtight backstop -- the module content is pinned, so ANY edit (a new ctypes reach, an
+    #     aliased CDLL constructor, a dlopen, anything) changes the digest and fails here until reviewed.
+    #     This ends the alias whack-a-mole: there is no pattern allowlist left to bypass (verdict 105q
+    #     MED2 r3; steward #5535).
+    digest = hashlib.sha256(raw).hexdigest()
+    assert digest == LANDLOCK_SHA256, (
+        f"_landlock.py changed -- review the change, then set LANDLOCK_SHA256 = {digest!r}")
+
+
+def test_the_landlock_pin_refuses_a_changed_copy(tmp_path, monkeypatch):
+    changed = tmp_path / "_landlock.py"
+    changed.write_bytes(LANDLOCK_SOURCE.read_bytes().replace(b"# Landlock is", b"#  Landlock is", 1))
+    monkeypatch.setattr(__name__ + ".LANDLOCK_SOURCE", changed)
+    with pytest.raises(AssertionError, match=r"_landlock\.py changed"):
+        test_landlock_module_is_pinned()
+
+
+def test_the_landlock_scan_refuses_another_ctypes_use(tmp_path, monkeypatch):
+    changed = tmp_path / "_landlock.py"
+    changed.write_bytes(LANDLOCK_SOURCE.read_bytes() + b"from ctypes import CDLL\n")
+    monkeypatch.setattr(__name__ + ".LANDLOCK_SOURCE", changed)
+    with pytest.raises(AssertionError, match="violations beyond the ctypes import"):
+        test_landlock_module_is_pinned()
 
 
 def test_the_executables_allowlist_matches_the_resolved_starts():
@@ -608,6 +668,15 @@ def test_the_executables_allowlist_matches_the_resolved_starts():
     for path in _sources():
         started |= executables_started(path.read_text(encoding="utf-8"))
     assert started == EXECUTABLES
+
+
+def test_the_runtime_guard_allows_exactly_what_the_static_guard_allows():
+    # The runtime spawn guard (pcc_node.spawn_guard, verdict 105i / steward #5194) refuses every
+    # process start except a subprocess.Popen of these same bare executables, so the two guards
+    # cannot drift apart: one more name here is one more name there, reviewed in both places.
+    from pcc_node import spawn_guard
+
+    assert set(spawn_guard.EXECUTABLES) == EXECUTABLES
 
 
 def test_the_safe_chains_are_what_the_package_uses():
