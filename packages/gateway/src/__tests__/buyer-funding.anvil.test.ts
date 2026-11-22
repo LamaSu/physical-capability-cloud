@@ -308,6 +308,12 @@ describe.skipIf(!RUN)("buyer funding verifier against real anvil contracts", () 
       expect(await fundOrder({ scopeId, identity, checked, walletClient, publicClient: pub })).toEqual({ kind: "label", label: "L18" });
       expect(buyerBefore - await balance(buyer.address)).toBe(totalGross);
       expect(await balance(payload.escrow) - escrowBefore).toBe(totalGross);
+      const beforeFinality = records(), earlySweep = await sweep();
+      expect(earlySweep.passA).toEqual({}); expect(Object.keys(earlySweep.passB)).toHaveLength(1);
+      expect(Object.values(earlySweep.passB)).toEqual([1]); expect(earlySweep.passB).not.toHaveProperty("recorded");
+      expect(records()).toEqual(beforeFinality);
+      const beforeFinalityAsOf = new Date(Number((await pub.getBlock({ blockTag: "latest" })).timestamp) * 1000).toISOString();
+      expect(jobFundingOf(jobId, "kernel-nyc", beforeFinalityAsOf)).toMatchObject({ read: "ok", scopes: [{ scopeId, state: "awaiting_funding" }] });
       await finalized();
       expect(await sweep()).toEqual({ passA: {}, passB: { recorded: 1 } });
       const asOf = new Date(Number((await pub.getBlock({ blockTag: "latest" })).timestamp) * 1000).toISOString();

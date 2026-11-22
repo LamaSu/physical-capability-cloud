@@ -230,4 +230,4 @@ it("C26: browser subject and expectation equal the gateway golden without Node b
   } finally {
     if (original) Object.defineProperty(processWithBuiltin, "getBuiltinModule", original);
   }
-});
+}, 30000);

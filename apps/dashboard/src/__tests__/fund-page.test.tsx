@@ -1134,6 +1134,44 @@ describe("N293-2 browser check and buyer send", () => {
     text(FUND_COPY.L12); expect(container.textContent).not.toContain(FUND_COPY.L17);
     await advance(7_200_000); expect(authorizedFetch).toHaveBeenCalledTimes(before + 1); noSdkSince(counts); expect(vi.getTimerCount()).toBe(0);
   });
+  it("fix1 F1: P3 finds this scope when R1 lists an older scope first", async () => {
+    sendOutcome(); await sendFromChecked(); const calls = authorizedFetch.mock.calls.length, counts = sdkCounts();
+    sendRouting(() => json(funding([verifiedScope("scope/older"), scope()])));
+    await advance(15_000); expect(authorizedFetch).toHaveBeenCalledTimes(calls + 1); onlyResult("L18");
+    sendRouting(() => json(funding([scope("expired", "scope/older"), verifiedScope()])));
+    await advance(15_000); text(FUND_COPY.L17); text(golden.escrow); text(new Date(NOW + 5000).toISOString());
+    noSdkSince(counts); expect(vi.getTimerCount()).toBe(0);
+  });
+  it.each([["send", "session token"], ["send", "address"], ["check", "session token"], ["check", "address"]] as const)(
+    "fix1 F2: a held %s under the old %s is not attached for the new identity", async (step, change) => {
+      const heldCheck = deferred<fundingSdk.PreparedFunding>(), heldSend = deferred<fundingSdk.EnsureEscrowResult>();
+      if (step === "check") vi.mocked(fundingSdk.prepareFunding).mockReturnValueOnce(heldCheck.promise);
+      else { sendOutcome(); vi.mocked(fundingSdk.ensureEscrow).mockReturnValueOnce(heldSend.promise); }
+      await checkFromTerms(); if (step === "send") await click(FUND_COPY.L28);
+      await act(async () => useAuthStore.setState(change === "session token"
+        ? { sessionToken: "new-session" } : { address: golden.typedData.message.operator as Address }));
+      try {
+        text(FUND_COPY.L19); expect(container.textContent).not.toContain(FUND_COPY.L35);
+        expect([...container.querySelectorAll("button")].every((b) => b.disabled)).toBe(true);
+      } finally {
+        await act(async () => { if (step === "check") heldCheck.resolve(checkedPrepared()); else heldSend.resolve(readyEscrow()); });
+      }
+      text(FUND_COPY.L19);
+      for (const label of ["L35", "L18", "L28"] as const) expect(container.textContent).not.toContain(FUND_COPY[label]);
+      expect([...container.querySelectorAll("button")].every((b) => !b.disabled)).toBe(true);
+      expect(button(FUND_COPY.L27).disabled).toBe(false);
+      const calls = authorizedFetch.mock.calls.length, counts = sdkCounts();
+      await advance(15_000); expect(authorizedFetch).toHaveBeenCalledTimes(calls); noSdkSince(counts);
+    },
+  );
+  it("fix1 F3: after an indeterminate send, P3 reads R1 and shows this scope's verification", async () => {
+    sendOutcome("indeterminate"); await sendFromChecked(); onlyResult("L1"); button("Check again");
+    const calls = authorizedFetch.mock.calls.length, counts = sdkCounts();
+    sendRouting(() => json(funding([verifiedScope()])));
+    await advance(15_000); expect(authorizedFetch).toHaveBeenCalledTimes(calls + 1);
+    text(FUND_COPY.L17); text(golden.escrow); text(new Date(NOW + 5000).toISOString());
+    noSdkSince(counts); expect(vi.getTimerCount()).toBe(0);
+  });
   it.each(["check", "send", "P3"] as const)("C20: key renewal during %s is absorbed and work continues", async (step) => {
     useAuthStore.setState({ sessionKeyId: "held-key" });
     const heldCheck = deferred<fundingSdk.PreparedFunding>(), heldSend = deferred<fundingSdk.EnsureEscrowResult>();
