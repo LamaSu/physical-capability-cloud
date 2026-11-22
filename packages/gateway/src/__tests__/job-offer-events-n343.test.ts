@@ -262,7 +262,7 @@ describe("N343 real gateway offer authorization", () => {
     await refused(id, () => claim(id, headers), 401);
     for (const action of ["PATCH", "DELETE", "heartbeat"] as const) await refused(id, () => edit(id, action, headers), 401);
   });
-  it("N343 A14: an unproven cookie fallback cannot use its matching public posterDid", async () => {
+  it("N343 A14: an unproven cookie fallback cannot use its matching stored posterDid", async () => {
     const id = await create(cookieW);
     expect(getJobOffersStore().get(id)?.posterDid).toBe(W);
     expect(entity(await read(id))).not.toHaveProperty("posterDid");

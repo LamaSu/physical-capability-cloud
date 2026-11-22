@@ -110,6 +110,8 @@ describe("N347 served job offers, courier jobs and events", () => {
       { at: new Date(at + 4).toISOString(), event: "note", by: "poster" },
       { at: new Date(at + 5).toISOString(), event: "note", by: "claimer" },
       { at: new Date(at + 6).toISOString(), event: "note" },
+      { at: new Date(at + 7).toISOString(), event: "note", by: "constructor" },
+      { at: new Date(at + 8).toISOString(), event: "note", by: "__proto__" },
     ];
     for (const data of rows) {
       raw.prepare("INSERT INTO job_offer_events (offer_id, at, data) VALUES (?, ?, ?)").run(id, data.at, JSON.stringify(data));
@@ -190,6 +192,8 @@ describe("N347 served job offers, courier jobs and events", () => {
       { by: "poster", served: "poster" }, { by: "claimer", served: "claimer" },
       { by: "poster@example.com", served: null }, { by: W, served: null },
       { by: "kernel-driver-7", served: null }, { by: "Poster", served: null },
+      { by: "constructor", served: null }, { by: "__proto__", served: null },
+      { by: "toString", served: null }, { by: "hasOwnProperty", served: null },
       { by: "", served: null }, { by: 42, served: null }, { by: null, served: null }, { served: null },
     ];
     const inputs: JobOfferEvent[] = cases.map((value, index) => ({
@@ -286,11 +290,11 @@ describe("N347 served job offers, courier jobs and events", () => {
   it("N347 L1: all three detail reads normalize legacy event by values while preserving each other key", async () => {
     const id = await create("courier-jobs");
     const rows = plantLegacy(id);
-    const servedBy = [null, null, null, null, "poster", "claimer", null];
+    const servedBy = [null, null, null, null, "poster", "claimer", null, null, null];
     for (const url of [path(id), path(id, "courier-jobs"), `/api/courier-jobs/jobs/${id}`]) {
       const result = await read(url);
       const events = result.json<Detail>().events;
-      expect(events).toHaveLength(8);
+      expect(events).toHaveLength(10);
       expect(events[0]).toMatchObject({ event: "posted", by: null });
       expect(events.slice(1)).toEqual(rows.map((entry, index) => ({ ...entry, by: servedBy[index] })));
       for (const entry of events) expect(Object.hasOwn(entry, "by")).toBe(true);
@@ -346,6 +350,22 @@ describe("N347 served job offers, courier jobs and events", () => {
       expect(pickup.statusCode, pickup.body).toBe(200);
       expect(pickup.json()).toHaveProperty("event.by", "claimer");
       noContactIdentity(pickup.body);
+      for (const url of [path(held, "courier-jobs"), `/api/courier-jobs/jobs/${held}`]) {
+        const result = await read(url);
+        expect(result.json()).toHaveProperty("job.status", "in_transit");
+        checkCourier(result.json<Detail>().job, held);
+        noContactIdentity(result.body);
+      }
+      const delivered = await event(held, "delivered", claimerKey, "courier-jobs");
+      expect(delivered.statusCode, delivered.body).toBe(200);
+      expect(delivered.json()).toHaveProperty("event.by", "claimer");
+      noContactIdentity(delivered.body);
+      for (const url of [path(held, "courier-jobs"), `/api/courier-jobs/jobs/${held}`]) {
+        const result = await read(url);
+        expect(result.json()).toHaveProperty("job.status", "delivered");
+        checkCourier(result.json<Detail>().job, held);
+        noContactIdentity(result.body);
+      }
     };
     await exercise(await create("courier-jobs"), await create("courier-jobs"));
     const held = await create("courier-jobs");
