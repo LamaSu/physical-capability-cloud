@@ -640,6 +640,22 @@ describe("SetupAgent", () => {
       });
     });
 
+    it.each([0, 1])("passes a confidence of %s at the end of the range", async (confidence) => {
+      vi.stubGlobal("fetch", makeFetchMock({
+        identifyDevice: {
+          candidates: [{ vendor: "Prusa", model: "MK4", confidence, mappedAdapterType: "octoprint" }],
+        },
+      }));
+      const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(result).toStrictEqual({
+        identified: true,
+        make: "Prusa",
+        model: "MK4",
+        confidence,
+        suggestedAdapterType: "octoprint",
+      });
+    });
+
     it.each(["generic-http", "hamilton", "mock"])("suggests nothing for %s", async (mappedAdapterType) => {
       vi.stubGlobal("fetch", makeFetchMock({
         identifyDevice: {
@@ -685,6 +701,7 @@ describe("SetupAgent", () => {
     it("returns the failure result without a status when fetch rejects", async () => {
       vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED 127.0.0.1:3200")));
       const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(fetch).toHaveBeenCalledOnce();
       expect(result).toStrictEqual({
         identified: false,
         reason: "Couldn't get an identification from the photo.",
@@ -697,6 +714,7 @@ describe("SetupAgent", () => {
       const text = vi.fn().mockResolvedValue(JSON.stringify(body));
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status, json, text }));
       const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(fetch).toHaveBeenCalledOnce();
       expect(result).toStrictEqual({
         identified: false,
         reason: "Couldn't get an identification from the photo.",
@@ -735,6 +753,14 @@ describe("SetupAgent", () => {
         body: { candidates: [{ vendor: "Prusa", confidence: 0.9, mappedAdapterType: "octoprint" }] },
       },
       {
+        label: "an empty model",
+        body: { candidates: [{ vendor: "Prusa", model: "", confidence: 0.9, mappedAdapterType: "octoprint" }] },
+      },
+      {
+        label: "a blank model",
+        body: { candidates: [{ vendor: "Prusa", model: "  ", confidence: 0.9, mappedAdapterType: "octoprint" }] },
+      },
+      {
         label: "a first candidate without a confidence",
         body: { candidates: [{ vendor: "Prusa", model: "MK4", mappedAdapterType: "octoprint" }] },
       },
@@ -768,6 +794,7 @@ describe("SetupAgent", () => {
         json: vi.fn().mockRejectedValue(new SyntaxError("Unexpected token in JSON")),
       }));
       const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(fetch).toHaveBeenCalledOnce();
       expect(result).toStrictEqual({
         identified: false,
         reason: "Couldn't get an identification from the photo.",
