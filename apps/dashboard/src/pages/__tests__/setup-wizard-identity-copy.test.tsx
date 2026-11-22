@@ -99,7 +99,8 @@ describe("SetupWizardPage identity copy", () => {
     await act(async () => { resolveValidation(reply({ valid: true, warnings: [] })); });
     await flush();
     expect(useSetupWizardStore.getState().step).toBe(4);
-    expect(container.textContent).toContain("Setup Complete");
+    expect(container.textContent).toContain("Setup steps done");
+    expect(container.textContent).toContain("The gateway's own setup check passed.");
     expect(container.textContent).toContain("This page didn't register your identity or anything on-chain.");
     expectNoRegistrationClaim();
     expect(calls).toEqual([{ url: "/api/setup/validate", method: "POST" }]);
@@ -117,5 +118,49 @@ describe("SetupWizardPage identity copy", () => {
     expect(useSetupWizardStore.getState().step).toBe(3);
     expect(container.textContent).toContain("Platform Identity");
     expect(buttonWithText("Complete Setup").disabled).toBe(false);
+  });
+
+  it("W3: a passed check: the summary names the gateway's check and shows its warnings", async () => {
+    validationReply = Promise.resolve(reply({ valid: true, warnings: ["WARN-MARK"] }));
+    await render();
+    await act(async () => buttonWithText("Complete Setup").click());
+    await flush();
+    expect(useSetupWizardStore.getState().step).toBe(4);
+    expect(useSetupWizardStore.getState().setupComplete).toBe(true);
+    expect(container.textContent).toContain("Setup steps done");
+    expect(container.textContent).toContain("The gateway's own setup check passed.");
+    expect(container.textContent).toContain("The check's warnings:");
+    expect(container.textContent).toContain("WARN-MARK");
+    expect(container.querySelector('[aria-label="Setup check passed"]')).not.toBeNull();
+    expect(container.textContent).not.toContain("configured and ready to go");
+  });
+
+  it("W4: a failed check: the summary says it didn't pass and lists its errors and warnings", async () => {
+    validationReply = Promise.resolve(reply({ valid: false, errors: ["ERR-MARK"], warnings: ["WARN-MARK"] }));
+    await render();
+    await act(async () => buttonWithText("Complete Setup").click());
+    await flush();
+    expect(useSetupWizardStore.getState().step).toBe(4);
+    expect(useSetupWizardStore.getState().setupComplete).toBe(true);
+    expect(container.textContent).toContain("Setup steps done");
+    expect(container.textContent).toContain("The gateway's own setup check didn't pass.");
+    expect(container.textContent).toContain("The check's errors:");
+    expect(container.textContent).toContain("ERR-MARK");
+    expect(container.textContent).toContain("The check's warnings:");
+    expect(container.textContent).toContain("WARN-MARK");
+    expect(container.querySelector('[aria-label="Setup check passed"]')).toBeNull();
+    expect(container.textContent).not.toContain("configured and ready to go");
+  });
+
+  it("W6: an unreached gateway: the summary says it has no result", async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await render();
+    await act(async () => buttonWithText("Complete Setup").click());
+    await flush();
+    expect(useSetupWizardStore.getState().step).toBe(4);
+    expect(useSetupWizardStore.getState().setupComplete).toBe(true);
+    expect(container.textContent).toContain("Setup steps done");
+    expect(container.textContent).toContain("This page couldn't reach the gateway, so it has no result from the gateway's setup check.");
+    expect(container.querySelector('[aria-label="Setup check passed"]')).toBeNull();
   });
 });

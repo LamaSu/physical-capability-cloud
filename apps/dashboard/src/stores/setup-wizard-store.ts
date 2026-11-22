@@ -20,6 +20,11 @@ interface SetupWizardState {
 
   // Step 5: Complete
   setupComplete: boolean;
+  setupCheck: {
+    outcome: "passed" | "failed" | "unreached";
+    errors: string[];
+    warnings: string[];
+  } | null;
 
   // Actions
   setStep: (step: number) => void;
@@ -33,6 +38,7 @@ interface SetupWizardState {
   setOrganization: (org: string) => void;
   setRole: (role: "operator" | "customer" | "both") => void;
   completeSetup: () => void;
+  setSetupCheck: (check: NonNullable<SetupWizardState["setupCheck"]>) => void;
   reset: () => void;
   isStepValid: (step: number) => boolean;
 }
@@ -60,6 +66,7 @@ export const useSetupWizardStore = create<SetupWizardState>((set, get) => ({
   role: "customer",
 
   setupComplete: false,
+  setupCheck: null,
 
   setStep: (step) => set({ step: Math.max(0, Math.min(TOTAL_STEPS - 1, step)) }),
   nextStep: () => set((s) => ({ step: Math.min(TOTAL_STEPS - 1, s.step + 1) })),
@@ -81,6 +88,7 @@ export const useSetupWizardStore = create<SetupWizardState>((set, get) => ({
   setRole: (role) => set({ role }),
 
   completeSetup: () => set({ setupComplete: true }),
+  setSetupCheck: (check) => set({ setupCheck: check }),
 
   reset: () =>
     set({
@@ -93,6 +101,7 @@ export const useSetupWizardStore = create<SetupWizardState>((set, get) => ({
       organization: "",
       role: "customer",
       setupComplete: false,
+      setupCheck: null,
     }),
 
   isStepValid: (step) => {

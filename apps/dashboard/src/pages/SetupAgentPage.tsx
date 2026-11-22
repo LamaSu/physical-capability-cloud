@@ -34,6 +34,40 @@ interface MachineConfigPreview {
   url?: string;
 }
 
+const LASER_CONNECTION_OPTIONS: SelectionOption[] = [
+  { value: "auto", label: "Suggest from make and model", description: "I'll suggest a type for you to confirm" },
+  { value: "opcua", label: "OPC-UA", description: "Industrial protocol" },
+  { value: "http", label: "HTTP API", description: "Custom REST API" },
+];
+
+async function identifyMachine(input: { text: string } | { photoBase64: string }) {
+  try {
+    const res = await authorizedFetch("/api/onboard/identify-device", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    if (!res.ok) return null;
+
+    const data: unknown = await res.json();
+    if (!data || typeof data !== "object" || !("candidates" in data) || !Array.isArray(data.candidates)) return null;
+    const first: unknown = data.candidates[0];
+    if (!first || typeof first !== "object") return null;
+    const candidate = first as Record<string, unknown>;
+    if (typeof candidate.vendor !== "string" || typeof candidate.model !== "string"
+      || typeof candidate.confidence !== "number" || typeof candidate.mappedAdapterType !== "string") return null;
+
+    return {
+      vendor: candidate.vendor,
+      model: candidate.model,
+      confidence: candidate.confidence,
+      mappedAdapterType: candidate.mappedAdapterType,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Initial agent greeting (simulated since no live agent bus in dashboard)
 // ---------------------------------------------------------------------------
@@ -142,18 +176,25 @@ async function agentStep(
         id: id(),
         role: "agent",
         content:
-          "Laser cutters can use OPC-UA, USB serial, or proprietary HTTP APIs.\n\nDo you know the connection type, or would you like me to auto-detect it?",
+          "Laser cutters can use OPC-UA, USB serial, or proprietary HTTP APIs.\n\nDo you know the connection type? If not, tell me the make and model, and I'll suggest one for you to confirm.",
         timestamp: ts(),
         uiRequest: {
           component: "selection",
           props: {
             prompt: "Connection type",
-            options: [
-              { value: "auto", label: "Auto-detect", description: "I'll probe the device for you" },
-              { value: "opcua", label: "OPC-UA", description: "Industrial protocol" },
-              { value: "http", label: "HTTP API", description: "Custom REST API" },
-            ] satisfies SelectionOption[],
+            options: LASER_CONNECTION_OPTIONS,
           },
+        },
+      });
+    } else if (userInput === "auto" && lastAgentMsg?.uiRequest?.props.prompt === "Connection type") {
+      responses.push({
+        id: id(),
+        role: "agent",
+        content: "What's the make and model of your laser cutter? I'll suggest a connection type for you to confirm.",
+        timestamp: ts(),
+        uiRequest: {
+          component: "text_input",
+          props: { placeholder: "e.g. xTool S1", label: "Make and model" },
         },
       });
     } else {
@@ -174,32 +215,45 @@ async function agentStep(
         },
       });
     }
-  } else if (phase === "photo_capture") {
-    // User submitted a photo — show identification result
+  } else if (phase === "text_input" && lastAgentMsg?.uiRequest?.props.label === "Make and model") {
+    const candidate = await identifyMachine({ text: userInput });
+    const options = LASER_CONNECTION_OPTIONS.filter((option) => option.value !== "auto");
+    const suggested = candidate?.mappedAdapterType !== "generic-http"
+      ? options.find((option) => option.value === candidate?.mappedAdapterType)
+      : undefined;
     responses.push({
       id: id(),
       role: "agent",
-      content: "Photo received! Analyzing with AI vision...",
+      content: suggested
+        ? `Suggested connection type: ${suggested.label}. Please confirm it below, or pick another.`
+        : "I couldn't get a connection-type suggestion from that. Please pick the one your laser cutter uses.",
+      timestamp: ts(),
+      uiRequest: {
+        component: "selection",
+        props: { prompt: "Connection type", options },
+      },
+    });
+  } else if (phase === "photo_capture") {
+    const isPhoto = userInput.startsWith("data:image/");
+    responses.push({
+      id: id(),
+      role: "agent",
+      content: isPhoto
+        ? "Photo received! Analyzing with AI vision..."
+        : "Description received. Identifying the machine from it...",
       timestamp: ts(),
     });
 
-    // Attempt gateway call
-    try {
-      const res = await authorizedFetch("/api/ai/identify-machine", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageBase64: userInput.replace(/^data:image\/[^;]+;base64,/, "") }),
-      });
-      const data = res.ok ? await res.json() as { make?: string; model?: string; type?: string; confidence?: number; suggestedAdapterType?: string } : null;
-
+    const candidate = await identifyMachine(isPhoto ? { photoBase64: userInput } : { text: userInput });
+    if (candidate) {
       const config: MachineConfigPreview = {
-        make: data?.make ?? "Unknown",
-        model: data?.model ?? "Unknown",
-        type: data?.type ?? "Machine",
-        adapterType: data?.suggestedAdapterType ?? "generic-http",
+        make: candidate.vendor,
+        model: candidate.model,
+        type: "Machine",
+        adapterType: candidate.mappedAdapterType,
       };
 
-      const confidence = data?.confidence ?? 0;
+      const confidence = candidate.confidence;
       const confidenceText =
         confidence > 0.8
           ? "I'm quite confident about this identification."
@@ -210,19 +264,21 @@ async function agentStep(
       responses.push({
         id: id(),
         role: "agent",
-        content: `Identified: **${config.make} ${config.model}** (${config.type}). ${confidenceText}\n\nPlease review the detected configuration:`,
+        content: isPhoto
+          ? `Identified: **${config.make} ${config.model}** (${config.type}). ${confidenceText}\n\nPlease review the detected configuration:`
+          : `From your description: **${config.make} ${config.model}** (${config.type}). ${confidenceText}\n\nPlease review the suggested configuration:`,
         timestamp: ts(),
         uiRequest: {
           component: "machine_config_preview",
           props: { config, editable: true },
         },
       });
-    } catch {
+    } else {
       responses.push({
         id: id(),
         role: "agent",
         content:
-          "The AI identification service isn't available right now. No problem — let's enter the details manually.\n\nWhat type of machine is it?",
+          "I couldn't get an identification. Let's enter the details manually instead.\n\nWhat type of machine is it?",
         timestamp: ts(),
         uiRequest: {
           component: "selection",
@@ -254,7 +310,7 @@ async function agentStep(
       content: [
         "I can help you:",
         "  - Identify machines from photos (AI vision)",
-        "  - Auto-detect connection type (OctoPrint, Modbus, OPC-UA)",
+        "  - Suggest a connection type from a make and model, for you to confirm",
         "",
         "Just describe what you want to do, or use the options I present.",
       ].join("\n"),
@@ -559,9 +615,11 @@ function UIRenderer({
 
 function ChatBubble({
   message,
+  showUI,
   onUIResponse,
 }: {
   message: ChatMessage;
+  showUI: boolean;
   onUIResponse: (msgId: string, value: string) => void;
 }) {
   const isAgent = message.role === "agent";
@@ -592,7 +650,7 @@ function ChatBubble({
           )}
 
           {/* UI component */}
-          {message.uiRequest && (
+          {showUI && message.uiRequest && (
             <UIRenderer
               component={message.uiRequest.component}
               props={message.uiRequest.props}
@@ -672,6 +730,8 @@ export function SetupAgentPage() {
     [handleSend],
   );
 
+  const lastAgentMessage = [...messages].reverse().find((message) => message.role === "agent");
+
   return (
     <div className="flex flex-col h-full max-h-[calc(100vh-120px)]">
       {/* Header */}
@@ -693,6 +753,7 @@ export function SetupAgentPage() {
           <ChatBubble
             key={msg.id}
             message={msg}
+            showUI={msg.id === lastAgentMessage?.id && !isTyping}
             onUIResponse={handleUIResponse}
           />
         ))}

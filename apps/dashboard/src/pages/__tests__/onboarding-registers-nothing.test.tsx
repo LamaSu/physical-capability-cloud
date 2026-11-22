@@ -61,8 +61,8 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     calls.push({ url, method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : null });
-    const reply = url.endsWith("/api/ai/identify-machine")
-      ? { make: "Prusa", model: "MK4", type: "FDM Printer", confidence: 0.9, suggestedAdapterType: "octoprint" }
+    const reply = url.endsWith("/api/onboard/identify-device")
+      ? { candidates: [{ vendor: "Prusa", model: "MK4", confidence: 0.9, mappedAdapterType: "octoprint" }] }
       : {};
     return new Response(JSON.stringify(reply), {
       status: 200,
@@ -246,9 +246,9 @@ describe("onboarding registers nothing", () => {
     await clickButton("Identify This Machine");
     expect(calls).toHaveLength(1);
     const identification = { ...calls[0]! };
-    expect(new URL(identification.url, location.href).pathname).toBe("/api/ai/identify-machine");
+    expect(new URL(identification.url, location.href).pathname).toBe("/api/onboard/identify-device");
     expect(identification.method).toBe("POST");
-    expect(typeof JSON.parse(identification.body!).imageBase64).toBe("string");
+    expect(JSON.parse(identification.body!).photoBase64).toMatch(/^data:image\/png;base64,/);
 
     await clickButton("Confirm Configuration");
     expectHandoffWithoutRegistration();

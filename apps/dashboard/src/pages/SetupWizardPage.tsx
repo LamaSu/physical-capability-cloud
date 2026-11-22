@@ -314,24 +314,24 @@ function StepIdentity() {
     prevStep,
     isStepValid,
     completeSetup,
+    setSetupCheck,
   } = useSetupWizardStore();
 
   const [submitting, setSubmitting] = React.useState(false);
   const [apiError, setApiError] = React.useState<string | null>(null);
-  const [apiWarnings, setApiWarnings] = React.useState<string[]>([]);
 
   const handleNext = async () => {
     setApiError(null);
-    setApiWarnings([]);
     setSubmitting(true);
 
     try {
       // Validate the setup config
       const validation = await apiPost<ValidateResponse>("/setup/validate", {});
-      if (!validation.valid) {
-        // Non-fatal: just surface warnings and continue
-        setApiWarnings(validation.warnings);
-      }
+      setSetupCheck({
+        outcome: validation?.valid === true ? "passed" : "failed",
+        errors: Array.isArray(validation?.errors) ? validation.errors : [],
+        warnings: Array.isArray(validation?.warnings) ? validation.warnings : [],
+      });
       // Mark setup complete in store and advance
       completeSetup();
       nextStep();
@@ -340,6 +340,7 @@ function StepIdentity() {
       const msg = err instanceof Error ? err.message : "Unknown error";
       // If it's a network/fetch error, continue offline with a warning
       if (msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("fetch")) {
+        setSetupCheck({ outcome: "unreached", errors: [], warnings: [] });
         completeSetup();
         nextStep();
       } else {
@@ -432,16 +433,6 @@ function StepIdentity() {
           </div>
         )}
 
-        {/* API warnings */}
-        {apiWarnings.length > 0 && (
-          <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20 space-y-1">
-            <div className="text-xs text-yellow-400 font-medium">Setup warnings</div>
-            {apiWarnings.map((w) => (
-              <div key={w} className="text-xs text-white/40">{w}</div>
-            ))}
-          </div>
-        )}
-
         {/* Loading state */}
         {submitting && (
           <div className="flex items-center gap-2 text-xs text-white/40">
@@ -464,8 +455,13 @@ function StepIdentity() {
 
 function StepComplete() {
   const navigate = useNavigate();
-  const { selectedNetwork, displayName, role } = useSetupWizardStore();
+  const { selectedNetwork, displayName, role, setupCheck } = useSetupWizardStore();
   const { address } = useAccount();
+  const subtitle = setupCheck?.outcome === "passed"
+    ? "The gateway's own setup check passed."
+    : setupCheck?.outcome === "failed"
+    ? "The gateway's own setup check didn't pass."
+    : "This page couldn't reach the gateway, so it has no result from the gateway's setup check.";
 
   const nextActions = [
     { label: "Explore Capabilities", path: "/discover", icon: "\u2692" },
@@ -476,18 +472,37 @@ function StepComplete() {
 
   return (
     <WizardStepContent
-      title="Setup Complete"
-      subtitle="Your PCCP instance is configured and ready to go."
+      title="Setup steps done"
+      subtitle={subtitle}
       onNext={() => navigate("/")}
       nextLabel="Go to Dashboard"
     >
       <div className="space-y-8 max-w-2xl">
-        {/* Success indicator */}
-        <div className="flex justify-center">
-          <div className="w-20 h-20 rounded-full bg-green-500/15 border border-green-500/30 flex items-center justify-center animate-pulse">
-            <span className="text-3xl text-green-400">&#10003;</span>
+        {setupCheck && setupCheck.errors.length > 0 && (
+          <div className="space-y-1 text-sm text-white/60">
+            <p>{"The check's errors:"}</p>
+            <ul className="list-disc pl-5">
+              {setupCheck.errors.map((error, index) => <li key={index}>{error}</li>)}
+            </ul>
           </div>
-        </div>
+        )}
+        {setupCheck && setupCheck.warnings.length > 0 && (
+          <div className="space-y-1 text-sm text-white/60">
+            <p>{"The check's warnings:"}</p>
+            <ul className="list-disc pl-5">
+              {setupCheck.warnings.map((warning, index) => <li key={index}>{warning}</li>)}
+            </ul>
+          </div>
+        )}
+
+        {/* Success indicator */}
+        {setupCheck?.outcome === "passed" && (
+          <div className="flex justify-center" aria-label="Setup check passed">
+            <div className="w-20 h-20 rounded-full bg-green-500/15 border border-green-500/30 flex items-center justify-center animate-pulse">
+              <span className="text-3xl text-green-400">&#10003;</span>
+            </div>
+          </div>
+        )}
 
         {/* Summary */}
         <GlassPanel padding="md">
