@@ -40,8 +40,8 @@ through `ctypes`. It is **not** a sandbox against code already running in the pr
 can mutate a captured function or race a `preexec_fn` or a thread. The kernel layers are for that.
 
 **mDNS discovery is off under the guard.** With zeroconf installed (the `discovery` and `all` extras),
-its interface lookup (ifaddr) loads a native library, which the hook refuses whether it is armed or
-not, so the node logs one INFO line and finds no mDNS devices.
+its interface lookup (ifaddr) starts a helper or loads a native library, and the hook refuses both,
+armed or not, so the node logs one INFO line and finds no mDNS devices.
 
 ## Launch pcc-node correctly
 - **`python3 -I -m pcc_node`** is the only form that ignores `PYTHONPATH` and user site-packages

@@ -15,8 +15,8 @@ Python can mutate the hook's captured functions or race a ``preexec_fn``/thread.
 EACCES until the loader is granted). It blocks the *direct* ``execve`` of any non-pinned binary (a
 shell, an arbitrary ELF in ``/tmp`` or under ``/usr/lib``).
 
-Landlock and AppArmor are COMPLEMENTARY, and the hard guarantee is the two TOGETHER -- pcc-node
-refuses to run without Landlock (see :mod:`pcc_node._entry`), so neither is relied on alone:
+Landlock and AppArmor are COMPLEMENTARY, and the hard guarantee is the two TOGETHER. pcc-node
+refuses to run without Landlock (see :mod:`pcc_node._entry`); AppArmor (Layer 1) comes in a later change:
 - Landlock blocks the direct ``execve`` of ANY non-pinned binary, INCLUDING re-executing the
   interpreter: ``execve(python3, ["-c", <arbitrary>])`` is EACCES, because python3 is not a pinned
   utility. That is the path AppArmor cannot close, since it must grant python3 execute to run pcc-node

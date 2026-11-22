@@ -20,7 +20,7 @@ def run() -> None:
     # Layer 2, applied first and irreversibly: confine execve at the kernel. Landlock blocks the direct
     # execve of ANY non-pinned binary -- INCLUDING re-executing the interpreter, which is how a
     # compromised process would otherwise run `python3 -c <arbitrary>` and escape the in-process hook.
-    # It MUST succeed before the node runs: otherwise the exec floor rests on AppArmor alone, which has
+    # It MUST succeed before the node runs: AppArmor could not stand in for it, since it has
     # to grant python3 execute (pcc-node IS python) and so cannot stop `python3 -c ...` (verdict 105n,
     # sol HIGH1). Where Landlock is unavailable we refuse by default, unless the operator consciously
     # opts out with PCC_ALLOW_NO_LANDLOCK=1 -- then only the accidental hook (L3) applies

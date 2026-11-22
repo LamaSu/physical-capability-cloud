@@ -75,6 +75,18 @@ refuses:
    or not, ``import pcc_node``, ``from . import bridge``), since a module
    object carries every name its module binds at any depth (#563 r3).
    ``executables_started()`` resolves calls exactly as ``violations()`` does.
+9. A ``platform`` attribute other than ``system``, ``release``, ``version``,
+   ``machine``, ``node`` and ``python_version``, which start no process on
+   Linux and macOS, however it is reached: by attribute, through an alias, by
+   a from-import, through a constant ``getattr``/``hasattr``, or through a
+   name another package module binds to the module, refused as rule 8
+   refuses one bound to a tracked module (``from .detect import platform``).
+   That covers ``platform.platform``, ``processor``, ``architecture`` and
+   ``uname_result``, which can start ``uname -p`` or ``file``. ``uname``
+   passes only when called directly with one of its five fields (``system``,
+   ``node``, ``release``, ``version``, ``machine``) read off the call; it is
+   refused as a value, by a from-import and through ``getattr``/``hasattr``.
+   The module itself is refused as a value.
 
 It tracks names bound by imports, flow-insensitively. It is not a sandbox:
 rules 1 and 3 stay the first barriers in the code, and the audit hook (N121)
@@ -287,7 +299,7 @@ def violations(source, filename="<src>"):
     for node, why in refusals:
         bad(node, why)
 
-    platform_refused = {"platform", "processor", "architecture"}
+    platform_allowed = {"system", "release", "version", "machine", "node", "python_version"}
     # Track platform locally so other objects' platform attributes stay usable.
     for n in ast.walk(tree):
         if isinstance(n, ast.Import):
@@ -297,7 +309,7 @@ def violations(source, filename="<src>"):
         elif isinstance(n, ast.ImportFrom) and n.level == 0 and n.module == "platform":
             for alias in n.names:
                 names[alias.asname or alias.name] = ("platform", alias.name)
-                if alias.name in platform_refused | {"uname"}:
+                if alias.name not in platform_allowed:
                     bad(n, f"from platform import {alias.name}")
 
     # Names bound by any import (rule 8), and the ones bound to click.
@@ -339,7 +351,7 @@ def violations(source, filename="<src>"):
                 if attr is None:
                     bad(node, f"module {module} used as a value")
                 elif (attr in REFUSED.get(module, ()) or attr.startswith("__") or (module, attr) in ALLOWED_STARTS
-                      or (module == "platform" and attr in platform_refused | {"uname"})):
+                      or (module == "platform" and attr not in platform_allowed)):
                     bad(node, f"{module}.{attr} through getattr")
             elif node.id == "__builtins__":
                 bad(node, "__builtins__")
@@ -383,7 +395,7 @@ def violations(source, filename="<src>"):
         # Any reference to a refused attribute, called or not (invoke = os.system).
         ref = _call_target(node, modules, names)
         if ref is not None and ref[0] == "platform":
-            if ref[1] in platform_refused:
+            if ref[1] not in platform_allowed | {"uname"}:
                 bad(node, f"platform.{ref[1]} can start a process")
             elif ref[1] == "uname" and id(node) not in call_funcs:
                 bad(node, "platform.uname used as a value")
@@ -552,8 +564,13 @@ def reexport_violations(sources):
     """
     exported = {}
     for module, (source, _) in sources.items():
-        modules, names, prefixed, _refusals = _tracked(ast.parse(source))
+        tree = ast.parse(source)
+        modules, names, prefixed, _refusals = _tracked(tree)
         exported[module] = set(modules) | set(names) | set(prefixed)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                exported[module].update(alias.asname or alias.name for alias in node.names
+                                        if alias.name == "platform")
     found = []
     for module, (source, is_package) in sources.items():
         tree = ast.parse(source)
@@ -654,7 +671,7 @@ def test_the_package_imports_only_what_it_lists():
 # handle used only for `libc.syscall` / `libc.prctl`; and ctypes value types (Structure, byref,
 # c_int/c_int32/c_long/c_size_t/c_uint32/c_uint64, get_errno/set_errno) for the Landlock structs;
 # and the sys.platform check before uname or syscalls.
-LANDLOCK_SHA256 = "643e1acbd02d2c1f6d4718b4095859384cdf011f735a2b3bf8d85714eaef72b7"
+LANDLOCK_SHA256 = "e6832f57d740b434c8617f315d8266ac17e90b4a3982b2408372eb3426a08e4a"
 
 
 def test_landlock_module_is_pinned():
@@ -906,6 +923,12 @@ EVASIONS = {
     "platform.uname() bound to a name": "import platform\nvalue = platform.uname()",
     "from platform import uname": "from platform import uname",
     "platform passed as a value": "import platform\nconsume(platform)",
+    "platform.uname_result": "import platform\nplatform.uname_result('', '', '', '', '').processor",
+    "from platform import uname_result": "from platform import uname_result",
+    "constant getattr of platform.uname": "import platform\ngetattr(platform, 'uname')().processor",
+    "platform.uname as a value": "import platform\nvalue = platform.uname\nvalue().processor",
+    "from platform import *": "from platform import *",
+    "constant getattr of platform.uname_result": "import platform\ngetattr(platform, 'uname_result')('', '', '', '', '').processor",
 }
 # Rule 8 at the package level: modules outside ALLOWED_IMPORTS, each refused by import_violations().
 IMPORT_EVASIONS = {
@@ -962,6 +985,8 @@ SAFE = {
     "aliased platform.system": "import platform as plat\nplat.system()",
     "sys.platform": "import sys\nsys.platform == 'win32'\nsys.platform[:5] == 'linux'",
     "another object's platform attribute": "value = obj.platform\nobj.platform = value",
+    "a from-import of platform's field functions": "from platform import machine, python_version, system\nsystem()\nmachine()\npython_version()",
+    "constant getattr of platform.machine": "import platform\ngetattr(platform, 'machine')()",
 }
 
 
@@ -995,6 +1020,19 @@ def test_a_module_reexported_across_files_is_refused():
     # A name that is not a tracked module may be shared.
     assert reexport_violations({"pcc_node.helper": ("VERSION = '1'\n", False),
                                 "pcc_node.consumer": ("from .helper import VERSION\n", False)}) == []
+
+
+def test_the_platform_module_reexported_across_files_is_refused():
+    for exporter, consumer in (
+        ("import platform", "from .a import platform\nplatform.platform()"),
+        ("import platform as plat", "from .a import plat\nplat.processor()"),
+        ("import platform", "from pcc_node.a import platform\nplatform.platform()"),
+        ("import platform", "from .a import platform\nplatform.system()"),
+    ):
+        assert reexport_violations({"pcc_node.a": (exporter, False),
+                                    "pcc_node.b": (consumer, False)})
+    assert reexport_violations({"pcc_node.a": ("import platform\nVERSION = '1'", False),
+                                "pcc_node.b": ("from .a import VERSION", False)}) == []
 
 
 def test_binding_a_first_party_module_as_an_object_is_refused():

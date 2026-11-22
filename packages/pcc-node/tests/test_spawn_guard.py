@@ -367,36 +367,56 @@ def test_unarmed_mode_refuses_even_a_pinned_device_spawn():
         f"unarmed guard must refuse even a pinned spawn: {r.stdout!r} {r.stderr!r}")
 
 
-def test_logs_local_only_runs_under_the_guard(tmp_path):
+@pytest.mark.parametrize("mode", ["armed", "unarmed"])
+def test_logs_local_only_runs_under_the_guard(tmp_path, mode):
     import json
     import platform
 
     home = tmp_path / "home"
     home.mkdir()
     env = {k: v for k, v in os.environ.items() if k != "PYTEST_CURRENT_TEST" and not k.startswith("PCC_")}
-    env.update(HOME=str(home), TMPDIR=str(tmp_path), PCC_ALLOW_NO_LANDLOCK="1")
+    env.update(HOME=str(home), TMPDIR=str(tmp_path))
+    command = [sys.executable, "-m", "pcc_node"]
+    if mode == "unarmed":
+        env["PCC_ALLOW_NO_LANDLOCK"] = "1"
+        command = [sys.executable, "-c",
+                   "import pcc_node._landlock, pcc_node._entry\n"
+                   "pcc_node._landlock.restrict = lambda *args, **kwargs: False\n"
+                   "pcc_node._entry.run()\n"]
     output = tmp_path / "diag.json"
     r = subprocess.run(
-        [sys.executable, "-m", "pcc_node", "logs", "--local-only", "-o", str(output),
+        command + ["logs", "--local-only", "-o", str(output),
          "--pcc-base", "http://127.0.0.1:9", "--config-file", str(tmp_path / "none.json")],
         cwd=str(PKG), stdin=subprocess.DEVNULL, env=env, capture_output=True, text=True, timeout=90,
     )
+    if mode == "armed" and r.returncode != 0 and "Refused: Landlock is unavailable" in r.stderr:
+        pytest.skip("the host can't apply Landlock")
     assert r.returncode == 0, (r.stdout, r.stderr)
     assert "spawn guard: refused" not in r.stdout and "spawn guard: refused" not in r.stderr, (r.stdout, r.stderr)
     expected = "-".join(part for part in (platform.system(), platform.release(), platform.machine()) if part)
     assert json.loads(output.read_text(encoding="utf-8"))["system"]["platform"] == expected
 
 
-def test_support_without_logs_runs_under_the_guard(tmp_path):
+@pytest.mark.parametrize("mode", ["armed", "unarmed"])
+def test_support_without_logs_runs_under_the_guard(tmp_path, mode):
     home = tmp_path / "home"
     home.mkdir()
     env = {k: v for k, v in os.environ.items() if k != "PYTEST_CURRENT_TEST" and not k.startswith("PCC_")}
-    env.update(HOME=str(home), TMPDIR=str(tmp_path), PCC_ALLOW_NO_LANDLOCK="1")
+    env.update(HOME=str(home), TMPDIR=str(tmp_path))
+    command = [sys.executable, "-m", "pcc_node"]
+    if mode == "unarmed":
+        env["PCC_ALLOW_NO_LANDLOCK"] = "1"
+        command = [sys.executable, "-c",
+                   "import pcc_node._landlock, pcc_node._entry\n"
+                   "pcc_node._landlock.restrict = lambda *args, **kwargs: False\n"
+                   "pcc_node._entry.run()\n"]
     r = subprocess.run(
-        [sys.executable, "-m", "pcc_node", "support", "guard check", "--pcc-base", "http://127.0.0.1:9",
+        command + ["support", "guard check", "--pcc-base", "http://127.0.0.1:9",
          "--config-file", str(tmp_path / "none.json")],
         cwd=str(PKG), stdin=subprocess.DEVNULL, env=env, capture_output=True, text=True, timeout=90,
     )
+    if mode == "armed" and r.returncode != 0 and "Refused: Landlock is unavailable" in r.stderr:
+        pytest.skip("the host can't apply Landlock")
     assert r.returncode == 0, (r.stdout, r.stderr)
     assert "Sending message..." in r.stdout, (r.stdout, r.stderr)
     assert "spawn guard: refused" not in r.stdout and "spawn guard: refused" not in r.stderr, (r.stdout, r.stderr)
