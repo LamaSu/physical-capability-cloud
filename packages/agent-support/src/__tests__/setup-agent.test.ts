@@ -117,16 +117,20 @@ function makeFetchMock(overrides?: Record<string, unknown>) {
         json: () => Promise.resolve({ registered: true, device: { id: "dev_001" } }),
       });
     }
-    if (urlStr.includes("/api/ai/identify-machine")) {
+    if (urlStr.includes("/api/onboard/identify-device")) {
       return Promise.resolve({
         ok: true,
         status: 200,
-        json: () => Promise.resolve(overrides?.identifyMachine ?? {
-          make: "Prusa",
-          model: "MK4",
-          type: "FDM 3D Printer",
-          suggestedAdapterType: "octoprint",
-          confidence: 0.92,
+        json: () => Promise.resolve(overrides && "identifyDevice" in overrides ? overrides.identifyDevice : {
+          candidates: [{
+            vendor: "Prusa",
+            model: "MK4",
+            confidence: 0.92,
+            mappedAdapterType: "octoprint",
+            reasoning: "The label identifies a Prusa MK4 printer.",
+            apiDocsUrl: "https://example.com/docs",
+          }],
+          clarifyingQuestions: [],
         }),
       });
     }
@@ -445,13 +449,46 @@ describe("SetupAgent", () => {
       expect(String(fetchMock.mock.calls[0][0])).toContain("/api/setup/register-device");
     });
 
-    it('executes "identify_machine_from_photo" and calls gateway', async () => {
+    it('executes "identify_machine_from_photo" with the photo unchanged', async () => {
       const result = await agent.executeTool("identify_machine_from_photo", {
-        imageBase64: "data:image/jpeg;base64,/9j/4AAQ==",
-      }) as any;
-      expect(String(fetchMock.mock.calls[0][0])).toContain("/api/ai/identify-machine");
-      expect(result.make).toBe("Prusa");
-      expect(result.suggestedAdapterType).toBe("octoprint");
+        imageBase64: "data:image/png;base64,iVBORw0KGgo=",
+      });
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const [url, options] = vi.mocked(fetch).mock.calls[0];
+      expect(url).toBe("http://localhost:3200/api/onboard/identify-device");
+      expect(options?.method).toBe("POST");
+      expect(JSON.parse(options!.body as string)).toStrictEqual({
+        photoBase64: "data:image/png;base64,iVBORw0KGgo=",
+      });
+      expect(result).toStrictEqual({
+        identified: true,
+        make: "Prusa",
+        model: "MK4",
+        confidence: 0.92,
+        suggestedAdapterType: "octoprint",
+      });
+    });
+
+    it('describes "identify_machine_from_photo" and its photo parameter exactly', () => {
+      const tool = agent.getTools().find((t) => t.name === "identify_machine_from_photo")!;
+      expect(tool.description).toStrictEqual(
+        "Sends a photo of a machine to the gateway's identification route. If the gateway identifies it, returns identified: true with make, model and confidence, plus suggestedAdapterType (octoprint, modbus, opcua, sila or opentrons) when the machine maps to one of those. The suggestion is for the operator to confirm. Otherwise returns identified: false with a reason, plus the HTTP status when the gateway replied.",
+      );
+      expect(tool.parameters.imageBase64.description).toStrictEqual(
+        "The photo, base64-encoded. Send it as a data URI (data:image/png;base64,...) so the gateway can tell its image type; without the prefix the gateway treats it as JPEG.",
+      );
+    });
+
+    it('still throws the gateway\'s error for "run_test_job"', async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+        text: () => Promise.resolve("boom"),
+      }));
+      await expect(agent.executeTool("run_test_job", {})).rejects.toThrow(
+        "POST /api/setup/test-job failed: 500 boom",
+      );
     });
 
     it('executes "scan_network_for_devices" and returns devices', async () => {
@@ -570,21 +607,172 @@ describe("SetupAgent", () => {
   // ── identifyMachineFromPhoto ────────────────────────────────────
 
   describe("identifyMachineFromPhoto()", () => {
-    it("returns machine identification from gateway proxy", async () => {
+    it("posts the photo to the identification route and passes make, model and confidence", async () => {
       const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
       expect(fetchMock).toHaveBeenCalledOnce();
-      expect(String(fetchMock.mock.calls[0][0])).toContain("/api/ai/identify-machine");
-      expect(result.make).toBe("Prusa");
-      expect(result.model).toBe("MK4");
-      expect(result.suggestedAdapterType).toBe("octoprint");
-      expect(result.confidence).toBeGreaterThan(0);
+      const [url, options] = vi.mocked(fetch).mock.calls[0];
+      expect(url).toBe("http://localhost:3200/api/onboard/identify-device");
+      expect(options?.method).toBe("POST");
+      expect(options?.headers).toStrictEqual({ "Content-Type": "application/json" });
+      expect(JSON.parse(options!.body as string)).toStrictEqual({ photoBase64: "/9j/4AAQ==" });
+      expect(result).toStrictEqual({
+        identified: true,
+        make: "Prusa",
+        model: "MK4",
+        confidence: 0.92,
+        suggestedAdapterType: "octoprint",
+      });
     });
 
-    it("falls back to mock result when gateway is unreachable", async () => {
-      vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("ECONNREFUSED"))));
+    it.each(["octoprint", "modbus", "opcua", "sila", "opentrons"])("suggests %s", async (mappedAdapterType) => {
+      vi.stubGlobal("fetch", makeFetchMock({
+        identifyDevice: {
+          candidates: [{ vendor: "Prusa", model: "MK4", confidence: 0.92, mappedAdapterType }],
+        },
+      }));
       const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
-      expect(result.make).toBe("Unknown");
-      expect(result.confidence).toBeLessThanOrEqual(0.5);
+      expect(result).toStrictEqual({
+        identified: true,
+        make: "Prusa",
+        model: "MK4",
+        confidence: 0.92,
+        suggestedAdapterType: mappedAdapterType,
+      });
+    });
+
+    it.each(["generic-http", "hamilton", "mock"])("suggests nothing for %s", async (mappedAdapterType) => {
+      vi.stubGlobal("fetch", makeFetchMock({
+        identifyDevice: {
+          candidates: [{ vendor: "Prusa", model: "MK4", confidence: 0.92, mappedAdapterType }],
+        },
+      }));
+      const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(result).toStrictEqual({
+        identified: true,
+        make: "Prusa",
+        model: "MK4",
+        confidence: 0.92,
+      });
+    });
+
+    it("passes none of the reply's other fields", async () => {
+      vi.stubGlobal("fetch", makeFetchMock({
+        identifyDevice: {
+          candidates: [{
+            vendor: "Prusa",
+            model: "MK4",
+            confidence: 0.92,
+            mappedAdapterType: "octoprint",
+            type: "FDM 3D Printer",
+            reasoning: "The orange extruder cover and frame label identify this as a Prusa MK4.",
+            apiDocsUrl: "https://example.com/docs",
+          }],
+          clarifyingQuestions: ["Which model?"],
+          askForPhoto: true,
+          raw: "MODEL TEXT",
+        },
+      }));
+      const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(result).toStrictEqual({
+        identified: true,
+        make: "Prusa",
+        model: "MK4",
+        confidence: 0.92,
+        suggestedAdapterType: "octoprint",
+      });
+    });
+
+    it("returns the failure result without a status when fetch rejects", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED 127.0.0.1:3200")));
+      const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(result).toStrictEqual({
+        identified: false,
+        reason: "Couldn't get an identification from the photo.",
+      });
+    });
+
+    it.each([400, 413, 429, 502, 503])("returns the failure result with status %i and reads no body", async (status) => {
+      const body = { error: "Model returned unparseable output", raw: "MODEL TEXT" };
+      const json = vi.fn().mockResolvedValue(body);
+      const text = vi.fn().mockResolvedValue(JSON.stringify(body));
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status, json, text }));
+      const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(result).toStrictEqual({
+        identified: false,
+        reason: "Couldn't get an identification from the photo.",
+        status,
+      });
+      expect(json).not.toHaveBeenCalled();
+      expect(text).not.toHaveBeenCalled();
+    });
+
+    it("returns the failure result with status 200 when the reply has no candidates", async () => {
+      vi.stubGlobal("fetch", makeFetchMock({
+        identifyDevice: { candidates: [], clarifyingQuestions: ["Which model?"] },
+      }));
+      const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(result).toStrictEqual({
+        identified: false,
+        reason: "Couldn't get an identification from the photo.",
+        status: 200,
+      });
+    });
+
+    it.each([
+      { label: "a body that is null", body: null },
+      { label: "a body without candidates", body: { clarifyingQuestions: ["Which model?"] } },
+      { label: "a first candidate that is not an object", body: { candidates: ["Prusa MK4"] } },
+      {
+        label: "a first candidate without a vendor",
+        body: { candidates: [{ model: "MK4", confidence: 0.9, mappedAdapterType: "octoprint" }] },
+      },
+      {
+        label: "a blank vendor",
+        body: { candidates: [{ vendor: "  ", model: "MK4", confidence: 0.9, mappedAdapterType: "octoprint" }] },
+      },
+      {
+        label: "a first candidate without a model",
+        body: { candidates: [{ vendor: "Prusa", confidence: 0.9, mappedAdapterType: "octoprint" }] },
+      },
+      {
+        label: "a first candidate without a confidence",
+        body: { candidates: [{ vendor: "Prusa", model: "MK4", mappedAdapterType: "octoprint" }] },
+      },
+      {
+        label: "a confidence above 1",
+        body: { candidates: [{ vendor: "Prusa", model: "MK4", confidence: 1.5, mappedAdapterType: "octoprint" }] },
+      },
+      {
+        label: "an unusable first candidate before a usable one",
+        body: {
+          candidates: [
+            { model: "MK4", confidence: 0.9, mappedAdapterType: "octoprint" },
+            { vendor: "Prusa", model: "MK4", confidence: 0.9, mappedAdapterType: "octoprint" },
+          ],
+        },
+      },
+    ])("returns the failure result for $label", async ({ body }) => {
+      vi.stubGlobal("fetch", makeFetchMock({ identifyDevice: body }));
+      const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(result).toStrictEqual({
+        identified: false,
+        reason: "Couldn't get an identification from the photo.",
+        status: 200,
+      });
+    });
+
+    it("returns the failure result with status 200 when the body is not JSON", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: vi.fn().mockRejectedValue(new SyntaxError("Unexpected token in JSON")),
+      }));
+      const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(result).toStrictEqual({
+        identified: false,
+        reason: "Couldn't get an identification from the photo.",
+        status: 200,
+      });
     });
   });
 
