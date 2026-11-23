@@ -101,6 +101,48 @@ and the dashboard behave identically.
   written it with `--persist`.
 - `--print-snippet` makes zero network calls.
 
+## pcc-wallet
+
+Run `pcc-wallet init --role agent --label my-agent` (or `onboard wallet init`)
+to create a key on this computer, hand the printed code and URL to your PCC
+account owner for browser approval, and request Base Sepolia test funds.
+Devices default to Ed25519; agents default to secp256k1. Ed25519 keys link
+without funding, and `fund` refuses locally for them. Keys stay in
+`~/.pcc/wallets/<label>.json` (0600, directory 0700), or `PCC_WALLET_DIR`.
+Gateway resolution is the same as onboard. `--public-origin <url>` selects the
+browser approval and signed proof origin; it defaults to the gateway origin
+and follows the same HTTPS or loopback HTTP rule. Pass the same `--public-origin`
+again to `link`; without it, the proof check refuses before signing.
+`--yes` skips typed consent only
+on non-TTY stdin; browser approval still requires the human owner.
+Use `link`, `fund`, `status`, `export-address`, or owner-only `revoke`
+(`--api-key` / `PCC_API_KEY`, or Wallets → Unlink in the dashboard).
+There is no key export; encryption and Windows storage are not in v1.
+Only the API key that approved a link can list or revoke it through the API.
+For a link approved in the dashboard, use Wallets → Unlink in the dashboard;
+`revoke --api-key` refuses clearly when that credential did not approve it.
+Prefer `PCC_API_KEY`: `--api-key` is visible to other local users in argv and
+can remain in shell history. Create requests include the installed CLI version.
+Device links accept `--kernel-id <id>` on `init` or `link`.
+An already approved wallet refuses `link`; revoke it before linking again.
+Funding uses the approved request's anonymous capability for up to 60 minutes.
+Agents receive five ETH claims plus one USDC claim unless the faucet's USDC cap
+is reached (then the gateway reports the USDC claim as skipped, and the CLI
+prints it with its reason); secp256k1 devices receive five ETH claims. Funding
+takes no amount input. The CLI waits for every transaction receipt on Base
+Sepolia through `--rpc-url` / `PCC_RPC_URL`
+(default `https://sepolia.base.org`). Gateway and RPC URLs require HTTPS,
+except loopback HTTP for local use. Partial funding prints each claim and exits
+nonzero; run `pcc-wallet fund` again after 30 s to retry failed claims.
+Retrying is idempotent. Pending funding retries at most eight times
+with bounded backoff; a node still indexing transactions is retried within the
+receipt budget. A missing faucet route leaves the wallet linked and unfunded, with exit 0.
+During init, `link_inactive`, `cap_reached`, `not_fundable`, `faucet_error` and
+`faucet_unavailable` leave the approved wallet linked and unfunded, with exit 0.
+The `fund` command exits nonzero for these five errors. `faucet_error` always
+prints its safe error class. After `capability_expired`, ask the account
+owner to fund the link from the dashboard or the owner funding API.
+
 ## License
 
 Apache-2.0
