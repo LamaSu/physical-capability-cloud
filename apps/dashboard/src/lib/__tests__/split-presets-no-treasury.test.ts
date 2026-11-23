@@ -115,26 +115,19 @@ describe("split presets and published copy", () => {
     expect(violations).toEqual([]);
   });
 
-  it("whitepaper worked examples use the three-way distribution", () => {
+  it("whitepapers carry no payment-split worked example and no treasury leg", () => {
     const violations: string[] = [];
     for (const path of WHITEPAPERS) {
-      const source = read(path);
-      const start = source.indexOf("Customer pays $100 for the full workflow");
-      const end = source.indexOf("\n```", start);
-      if (start < 0 || end < start) {
-        violations.push(`${path}: missing worked-example block or closing fence`);
-        continue;
-      }
-      const block = source.slice(start, end);
-      const lines = block.split("\n");
-      for (const line of lines.filter((line) => /Network \(\d+%\)/.test(line))) {
-        violations.push(`${path}: ${line}`);
-      }
-      if (!block.includes("CNC Operator (80%):     $32.00")) {
-        violations.push(`${path}: ${lines.find((line) => line.includes("CNC Operator")) ?? "missing CNC Operator line"}`);
-      }
-      if (!block.includes("$2.50 / $20.00 / $2.50]")) {
-        violations.push(`${path}: ${lines.find((line) => line.includes("same distribution pattern")) ?? "missing Step 2 distribution line"}`);
+      for (const [index, line] of read(path).split("\n").entries()) {
+        if (
+          line.includes("Customer pays $100 for the full workflow") ||
+          /Network \(\d+%\)/.test(line) ||
+          /\(\d+%\):\s+\$\d/.test(line) ||
+          line.includes("same distribution pattern") ||
+          TREASURY.test(line)
+        ) {
+          violations.push(`${path}:${index + 1}: ${line}`);
+        }
       }
     }
     expect(violations).toEqual([]);

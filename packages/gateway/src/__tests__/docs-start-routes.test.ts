@@ -29,7 +29,7 @@ describe("docRoutes and startRoutes", () => {
   it("serves the published whitepaper at /docs/whitepaper", async () => {
     const res = await app.inject({ method: "GET", url: "/docs/whitepaper?format=md" });
     expect(res.statusCode).toBe(200);
-    expect(res.body).toContain("**Version**: 3.0");
+    expect(res.body).toContain("**Version 4.0, November 2026.**");
   });
 
   it("renders /docs/whitepaper as HTML", async () => {
