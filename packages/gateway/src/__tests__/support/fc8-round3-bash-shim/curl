@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# FC-8 round 3 (astra pack 61b census closure) test fixture: a PATH-shim
+# `curl` for smoke-digital-verifier.sh's dynamic test. Inspects args for the
+# target path and returns a canned (optionally canary-bearing) JSON body on
+# stdout — never touches the network. See fc8-round3-smoke-digital-verifier.test.ts.
+#
+# N44 merge note (fc8-split-n44-mergetree.txt): smoke-digital-verifier.sh's
+# http_request() helper (N44; FC-8's own branch never called it — no
+# http_request callsite existed there) runs every request through curl with
+# a trailing `-w '\n%{http_code}'` and splits the LAST line off as the
+# status. This shim never emitted that trailer, so on this merged branch
+# http_request()'s split landed on nothing and HTTP_STATUS became the
+# whole body. Added below: when `-w` is present, always report success
+# (200) after the body — none of this shim's tests are about HTTP-status
+# branching, only about canary leakage, and the script must reach Checks
+# 3/5/6 for those to mean anything. The OLDER, non-http_request() call
+# sites (the plain health checks) never pass `-w`, so they are unaffected.
+CANARY="${FC8_CANARY:?FC8_CANARY must be set}"
+ARGS="$*"
+WANTS_CODE=0
+for a in "$@"; do [ "$a" = "-w" ] && WANTS_CODE=1; done
+
+case "$ARGS" in
+  *"/api/health"*)
+    echo "{\"status\":\"ok\",\"note\":\"diag-$CANARY\"}" ;;
+  *"/api/setup/status"*)
+    echo "{\"overall\":\"$CANARY\"}" ;;
+  *"/verify"*)
+    echo "{\"result\":{\"verified\":\"true\",\"reason\":\"ok\"}}" ;;
+  *"/health"*)
+    echo "{\"status\":\"ok\",\"note\":\"diag-$CANARY\"}" ;;
+  *"/api/auth/provision"*)
+    # astra's own note: this site (smoke-digital-verifier.sh:328) already
+    # prints only ${#API_KEY} (a length), never the value — embed the
+    # canary IN the key itself so the dynamic test actually proves that,
+    # rather than taking the note on faith.
+    echo "{\"api_key\":\"pcc_test_$CANARY\"}" ;;
+  *"/api/capabilities/types"*)
+    echo "{\"types\":[1,2,3]}" ;;
+  *"/api/status/integrations"*)
+    echo "{\"litProtocol\":{\"configured\":\"$CANARY\"},\"starknet\":{\"configured\":\"$CANARY\"}}" ;;
+  *"/api/auth/validate"*)
+    echo "{\"valid\":\"false\"}" ;;
+  *"/api/kernels"*)
+    echo "{\"kernels\":[1,2]}" ;;
+  *)
+    echo "{}" ;;
+esac
+[ "$WANTS_CODE" = 1 ] && echo "200"
+exit 0
