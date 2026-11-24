@@ -220,12 +220,12 @@ describe("onboard admin gates and registration replies", () => {
     }
   });
 
-  it("OA5 missing detail is 200 not_found for admins and non-admins", async () => {
+  it("OA5 missing detail is 404 not_found for admins and non-admins", async () => {
     seed();
     for (const headers of [bearer(adminKey), bearer(strangerKey)]) {
       clearSpies();
       const res = await app.inject({ url: url("missing-n344"), headers });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(404);
       expect(res.json()).toEqual({ error: "not_found" });
     }
   });
@@ -263,7 +263,7 @@ describe("onboard admin gates and registration replies", () => {
       for (const row of [seed("submitted", TA), tenantless]) {
         clearSpies();
         const res = await app.inject({ url: url(row.id), headers });
-        expect(res.statusCode).toBe(200);
+        expect(res.statusCode).toBe(404);
         expect(res.json()).toEqual({ error: "not_found" });
         expect(stored(row.id)).toEqual(row);
         for (const action of actions) {
