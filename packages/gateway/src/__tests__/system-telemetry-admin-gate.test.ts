@@ -103,6 +103,7 @@ describe("system telemetry is admin only, with 403 before any read otherwise", (
     const now = Date.now();
     getRepos().sessions.insert({ id: token, token, walletAddress: "0x1111111111111111111111111111111111111111", createdAt: new Date(now).toISOString(), lastActiveAt: new Date(now).toISOString(), expiresAt: new Date(now + 86400000).toISOString() });
     await expectForbidden({ cookie: `pcc_session=${app.signCookie(token)}` });
+    expectShape(await request({ cookie: `pcc_session=${app.signCookie(token)}`, "x-admin-key": secret }));
     const head = await request(bearer(3), "HEAD");
     expectNoRead();
     expect(head.statusCode).toBe(403);
@@ -139,6 +140,10 @@ describe("system telemetry is admin only, with 403 before any read otherwise", (
     expectShape(await request(bearer()));
     vi.stubEnv("TENANT_ENFORCE", "false");
     expectShape(await request(bearer()));
+    for (const flag of ["TRUE", " true", "1"]) {
+      vi.stubEnv("TENANT_ENFORCE", flag);
+      expectShape(await request(bearer()));
+    }
   });
 
   it("SG10 duplicate admin fields are refused without falling through to admin scopes", () => {
@@ -155,11 +160,15 @@ describe("system telemetry is admin only, with 403 before any read otherwise", (
     expect(isAdminCaller(req)).toBe(true);
   });
 
-  it("SG11 an empty or all-space admin secret grants no one access, 403 before any read", async () => {
+  it("SG11 an empty, all-space or unset admin secret grants no one access, 403 before any read", async () => {
     for (const blank of ["", "   "]) {
       vi.stubEnv("PCC_ADMIN_KEY", blank);
       await expectForbidden({ ...bearer(3), "x-admin-key": blank });
     }
+    delete process.env.PCC_ADMIN_KEY;
+    expect(Object.keys(process.env)).not.toContain("PCC_ADMIN_KEY");
+    await expectForbidden({ ...bearer(3), "x-admin-key": "" });
+    await expectForbidden({ ...bearer(3), "x-admin-key": "undefined" });
   });
 
   it("SG12 the admin test refuses when it cannot read the request", () => {
@@ -167,5 +176,18 @@ describe("system telemetry is admin only, with 403 before any read otherwise", (
       get raw() { throw new Error("synthetic unreadable request"); },
     } as unknown as FastifyRequest;
     expect(isAdminCaller(req)).toBe(false);
+    const adminKey = keys[0].record;
+    if (!adminKey) throw new Error("Admin key record required");
+    const unreadable = {
+      apiKeyId: adminKey.id,
+      headers: {},
+      get raw() { throw new Error("synthetic unreadable admin request"); },
+    } as unknown as FastifyRequest;
+    expect(isAdminCaller(unreadable)).toBe(false);
+    const missingRaw = {
+      apiKeyId: adminKey.id,
+      headers: {},
+    } as unknown as FastifyRequest;
+    expect(isAdminCaller(missingRaw)).toBe(false);
   });
 });
