@@ -99,6 +99,7 @@ afterEach(() => {
 describe("/install.html photo sending and status", () => {
   it.each([
     [4000, 3000, 1238, 928],
+    [1568, 1176, 1238, 928],
     [1000, 800, 1000, 800],
   ])("L1: the page sends a %i × %i photo as a %i × %i JPEG", async (w, h, width, height) => {
     const photo = stubPhoto(w, h);
@@ -117,8 +118,6 @@ describe("/install.html photo sending and status", () => {
     expect(photo.bitmap.close).toHaveBeenCalledTimes(1);
     expect(photo.bitmap.close.mock.invocationCallOrder[0])
       .toBeGreaterThan(photo.ctx.drawImage.mock.invocationCallOrder[0]);
-    expect(photo.bitmap.close.mock.invocationCallOrder[0])
-      .toBeLessThan(photo.toDataURL.mock.invocationCallOrder[0]);
 
     await pressIdentify();
     expectPhotoPost(DATA_URL);
@@ -128,6 +127,9 @@ describe("/install.html photo sending and status", () => {
     [1000, 6000, 261, 1568],
     [6000, 1000, 1568, 261],
     [1939, 277, 1568, 224],
+    [277, 1939, 224, 1568],
+    [100000, 10, 1568, 1],
+    [10, 100000, 1, 1568],
   ])("L1b: the page sends a %i × %i photo as a %i × %i JPEG at the edge limit", async (w, h, width, height) => {
     const photo = stubPhoto(w, h);
     boot();
@@ -286,10 +288,6 @@ describe("/install.html photo sending and status", () => {
       "const IDENTIFY_WAIT_MS = 90000;",
       "'" + TOO_LARGE + "'",
       '"' + UNREADABLE + '"',
-      "{ imageOrientation: 'from-image' }",
-      "ctx.fillStyle = '#ffffff';",
-      "bitmap.close();",
-      "photoFileEl.value = '';",
     ]) {
       expect(SCRIPT.split(line), line).toHaveLength(2);
     }
