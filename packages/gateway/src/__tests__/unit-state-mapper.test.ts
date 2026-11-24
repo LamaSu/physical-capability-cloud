@@ -369,6 +369,54 @@ describe("boundary normalisation — the defect sol found, and its fix", () => {
       expect(() => normalizeUnitState(bad)).toThrow();
     }
   });
+
+  it("T26c a zero-padded state string throws InvalidUnitStateError", () => {
+    for (const state of ["00", "08", "009", "0".repeat(64) + "9"]) {
+      expect(() => normalizeUnitState(state)).toThrow(InvalidUnitStateError);
+    }
+  });
+
+  it("T26d each one-digit state string maps to its state and the string 0 is unreachable", () => {
+    for (const state of [
+      UnitState.FUNDED_ACTIVE,
+      UnitState.PRIMARY_ASSERTED,
+      UnitState.CHALLENGED,
+      UnitState.BACKUP_PENDING,
+      UnitState.BACKUP_ASSERTED,
+      UnitState.RELEASE_ALLOCATED,
+      UnitState.REFUND_ALLOCATED,
+      UnitState.SETTLED_RELEASED,
+      UnitState.SETTLED_REFUNDED,
+    ]) {
+      expect(normalizeUnitState(state.toString())).toBe(state);
+    }
+    expect(() => normalizeUnitState("0")).toThrow(UnreachableUnitStateError);
+  });
+
+  it("T26e a state string that is not one ASCII digit throws InvalidUnitStateError", () => {
+    for (const state of [
+      String.fromCodePoint(0x0020, 0x0038),
+      String.fromCodePoint(0x0038, 0x0020),
+      String.fromCodePoint(0x0009, 0x0038),
+      String.fromCodePoint(0x0038, 0x000A),
+      String.fromCodePoint(0x00A0, 0x0038),
+      String.fromCodePoint(0x002B, 0x0038),
+      String.fromCodePoint(0x0038, 0x002E, 0x0030),
+      String.fromCodePoint(0x0038, 0x0065, 0x0030),
+      String.fromCodePoint(0x0030, 0x0078, 0x0038),
+      String.fromCodePoint(0xFF18),
+      String.fromCodePoint(0x0668),
+      String.fromCodePoint(0x06F8),
+      String.fromCodePoint(0x096E),
+      String.fromCodePoint(0x0061),
+      String.fromCodePoint(0x0020),
+      String.fromCodePoint(0x0009),
+      String.fromCodePoint(0x00A0),
+      String.fromCodePoint(0xFEFF),
+    ]) {
+      expect(() => normalizeUnitState(state)).toThrow(InvalidUnitStateError);
+    }
+  });
 });
 
 describe("counter/state consistency — fails CLOSED both directions", () => {
