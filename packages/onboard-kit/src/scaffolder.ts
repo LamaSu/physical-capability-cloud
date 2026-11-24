@@ -529,7 +529,7 @@ export class ${adapter.className} {
     this.config = config;
     this.source = {
       deviceId: id,
-      deviceType: "sensor",
+      deviceType: ${lit(adapter.deviceType)},
       kernelId: ${lit(kernelId)},
       firmwareVersion: ${lit(adapter.firmwareVersion)},
     };
@@ -554,12 +554,6 @@ export class ${adapter.className} {
         : await this.readSensor();
       if (this.current !== recording) return; // replaced while this read was in flight
       recording.samples.push({ timestamp: new Date().toISOString(), value });
-      this.emit({
-        type: "sensor_reading",
-        timestamp: new Date().toISOString(),
-        source: this.source,
-        payload: { value, jobId: recording.jobId },
-      });
     } catch {}
   }
 
@@ -768,9 +762,18 @@ function generateCapabilities(config: OnboardConfig): string {
     description: ${cap.description ? lit(cap.description) : "undefined"},
     materials: ${JSON.stringify(cap.materials)},
     tolerances: ${JSON.stringify(cap.tolerances ?? {})},
-    workEnvelope: ${JSON.stringify(cap.workEnvelope ?? {})},
-    assuranceTiers: ${JSON.stringify(cap.assuranceTiers)},
+${cap.workEnvelope ? `    envelope: ${JSON.stringify({ x: cap.workEnvelope.x, y: cap.workEnvelope.y, z: cap.workEnvelope.z, unit: cap.workEnvelope.unit === "inch" ? "in" : cap.workEnvelope.unit })},\n` : ""}    assuranceTiers: ${JSON.stringify(cap.assuranceTiers)},
     pricing: ${JSON.stringify(cap.pricing)},
+    // Every day, 00:00-23:59 UTC. Change this schedule to your own hours.
+    availability: ${JSON.stringify({ timezone: "UTC", windows: {
+      0: [{ start: "00:00", end: "23:59" }],
+      1: [{ start: "00:00", end: "23:59" }],
+      2: [{ start: "00:00", end: "23:59" }],
+      3: [{ start: "00:00", end: "23:59" }],
+      4: [{ start: "00:00", end: "23:59" }],
+      5: [{ start: "00:00", end: "23:59" }],
+      6: [{ start: "00:00", end: "23:59" }],
+    } })},
     location: ${JSON.stringify(config.kernel.location)},
     queueDepth: 0,
   }`).join(",\n");
@@ -1002,14 +1005,16 @@ function generateEnvTemplate(config: OnboardConfig): string {
 function generateProfiles(config: OnboardConfig): string {
   const profileDefs = (config.profiles ?? []).map(p => `  {
     id: ${lit(p.profileId)},
-    profileName: ${lit(p.profileName)},
-    kernelId: ${lit(config.kernel.kernelId)},
     capabilityType: ${lit(p.capabilityType)},
-    paramOverrides: ${JSON.stringify(p.paramOverrides ?? {}, null, 4)},
+    machineName: ${lit(p.profileName)},
+    kernelId: ${lit(config.kernel.kernelId)},
+    paramOverrides: ${JSON.stringify(p.paramOverrides ?? [], null, 4)},
     pricingOverrides: ${JSON.stringify(p.pricingOverrides ?? {}, null, 4)},
   }`).join(",\n");
 
-  return `export const profiles = [
+  return `import type { MachineProfile } from "@pcc/spec";
+
+export const profiles: MachineProfile[] = [
 ${profileDefs}
 ];
 `;

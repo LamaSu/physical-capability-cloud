@@ -65,8 +65,20 @@ const configShape = z.object({
   })),
   profiles: z.array(z.object({
     profileId: z.string(), profileName: z.string(), capabilityType: z.string(), adapterId: z.string(),
-    paramOverrides: z.record(z.unknown()).optional(),
-    pricingOverrides: pricing.partial().optional(),
+    paramOverrides: z.array(z.object({
+      paramKey: z.string(),
+      restrictTo: z.array(z.string()).optional(),
+      exclude: z.array(z.string()).optional(),
+      overrideMin: z.number().finite("must be a finite number").optional(),
+      overrideMax: z.number().finite("must be a finite number").optional(),
+      overrideDefault: z.union([z.string(), z.number(), z.boolean()]).optional(),
+    }).strict("takes only paramKey, restrictTo, exclude, overrideMin, overrideMax and overrideDefault (ParamOverride in @pcc/spec)"), {
+      invalid_type_error: "is a list of { paramKey, restrictTo?, exclude?, overrideMin?, overrideMax?, overrideDefault? } entries (ParamOverride in @pcc/spec), not an object keyed by parameter",
+    }).optional(),
+    pricingOverrides: z.object({
+      basePrice: z.string().optional(),
+      currency: z.string().optional(),
+    }).strict("takes only basePrice and currency (MachineProfile in @pcc/spec); baseCost, perMinute and minimum belong in a capability's pricing").optional(),
   })).optional(),
 });
 
