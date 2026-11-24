@@ -262,9 +262,10 @@ describe("N343 real gateway offer authorization", () => {
     await refused(id, () => claim(id, headers), 401);
     for (const action of ["PATCH", "DELETE", "heartbeat"] as const) await refused(id, () => edit(id, action, headers), 401);
   });
-  it("N343 A14: an unproven cookie fallback cannot use its matching public posterDid", async () => {
+  it("N343 A14: an unproven cookie fallback cannot use its matching stored posterDid", async () => {
     const id = await create(cookieW);
-    expect(entity(await read(id)).posterDid).toBe(W);
+    expect(getJobOffersStore().get(id)?.posterDid).toBe(W);
+    expect(entity(await read(id))).not.toHaveProperty("posterDid");
     const headers = { ...unproven, "x-posted-by": W };
     await refused(id, () => event(id, "cancelled", headers), 401, missingIdentity);
     const other = await create();
@@ -273,7 +274,8 @@ describe("N343 real gateway offer authorization", () => {
   });
   it("N343 A15: a proven cookie wallet may cancel its own offer as poster", async () => {
     const id = await create(cookieW);
-    expect(entity(await read(id)).posterDid).toBe(W);
+    expect(getJobOffersStore().get(id)?.posterDid).toBe(W);
+    expect(entity(await read(id))).not.toHaveProperty("posterDid");
     await acceptedEvent(id, "cancelled", cookieW, "cancelled", "poster");
   });
   it("N343 A16: note by records the participant role and ignores the request body", async () => {
@@ -323,7 +325,8 @@ describe("N343 real gateway offer authorization", () => {
     for (const family of ["job-offers", "courier-jobs"] as const) {
       const id = await create(bearer(posterKey), family);
       const snapshot = await read(id, family);
-      expect(family === "job-offers" ? entity(snapshot).posterDid : entity(snapshot).postedBy).toBe("poster@example.com");
+      expect(getJobOffersStore().get(id)?.posterDid).toBe("poster@example.com");
+      expect(entity(snapshot)).not.toHaveProperty(family === "job-offers" ? "posterDid" : "postedBy");
       await refusedPosterActions(id, bearer(forgedPosterKey), family);
     }
   });
@@ -331,7 +334,8 @@ describe("N343 real gateway offer authorization", () => {
     for (const family of ["job-offers", "courier-jobs"] as const) {
       const id = await create(bearer(sessionKeyW1), family);
       const snapshot = await read(id, family);
-      expect(family === "job-offers" ? entity(snapshot).posterDid : entity(snapshot).postedBy).toBe(W);
+      expect(getJobOffersStore().get(id)?.posterDid).toBe(W);
+      expect(entity(snapshot)).not.toHaveProperty(family === "job-offers" ? "posterDid" : "postedBy");
       await refusedPosterActions(id, bearer(forgedWalletKey), family);
     }
   });

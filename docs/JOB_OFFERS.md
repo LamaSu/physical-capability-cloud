@@ -206,7 +206,13 @@ Refusals leave the offer and its event log unchanged:
 ### Diagnostics
 
 - `GET /api/job-offers/healthz` — PUBLIC. Counts per status + ISO timestamp.
-- `GET /api/job-offers/:id` — PUBLIC. Full offer + event log.
+- `GET /api/job-offers/:id` — PUBLIC. The offer and its event log.
+
+Served offers carry no `posterDid` or `driverContact`, and served courier
+jobs carry no `postedBy` or `driverContact`. This holds for both open
+feeds, every `GET /:id` and the claim and PATCH replies. Every served
+event carries `by`, which is `"poster"`, `"claimer"` or `null`; an event
+recorded with any other value serves `null`.
 
 ## Per-capability-type quick-starts
 
