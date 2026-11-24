@@ -209,24 +209,83 @@ const cmdBlock     = document.getElementById('cmd-block');
 const cmdEl        = document.getElementById('cmd');
 
 let photoDataUrl = null;
+const PHOTO_MAX_EDGE = 1568;
+const PHOTO_MAX_AREA = 1150000;
+const PHOTO_JPEG_QUALITY = 0.85;
+const PHOTO_MAX_CHARS = 1000000;
+const IDENTIFY_WAIT_MS = 90000;
+
+async function scalePhoto(file) {
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  } catch {
+    return { ok: false, reason: 'unreadable' };
+  }
+  try {
+    let canvas;
+    try {
+      const w = bitmap.width;
+      const h = bitmap.height;
+      const sEdge = PHOTO_MAX_EDGE / Math.max(w, h);
+      const sArea = Math.sqrt(PHOTO_MAX_AREA / (w * h));
+      let width = w;
+      let height = h;
+      if (sEdge < 1 || sArea < 1) {
+        if (sEdge <= sArea) {
+          if (w >= h) {
+            width = PHOTO_MAX_EDGE;
+            height = Math.floor(h * PHOTO_MAX_EDGE / w);
+          } else {
+            width = Math.floor(w * PHOTO_MAX_EDGE / h);
+            height = PHOTO_MAX_EDGE;
+          }
+        } else {
+          width = Math.floor(w * sArea);
+          height = Math.floor(h * sArea);
+        }
+      }
+      width = Math.max(1, width);
+      height = Math.max(1, height);
+      canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return { ok: false, reason: 'unreadable' };
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, width, height);
+      ctx.drawImage(bitmap, 0, 0, width, height);
+    } finally {
+      bitmap.close();
+    }
+    const dataUrl = canvas.toDataURL('image/jpeg', PHOTO_JPEG_QUALITY);
+    return dataUrl.length > PHOTO_MAX_CHARS
+      ? { ok: false, reason: 'too_large' }
+      : { ok: true, dataUrl };
+  } catch {
+    return { ok: false, reason: 'unreadable' };
+  }
+}
 
 photoBtn.addEventListener('click', () => photoFileEl.click());
 photoFileEl.addEventListener('change', async () => {
   const f = photoFileEl.files && photoFileEl.files[0];
   if (!f) return;
-  if (f.size > 6 * 1024 * 1024) {
-    photoStatus.textContent = 'Photo too large (max 6 MB)';
+  const scaled = await scalePhoto(f);
+  if (!scaled.ok) {
+    photoStatus.textContent = scaled.reason === 'too_large'
+      ? 'This photo is too large to send, even after scaling it down. Try another photo.'
+      : "This page couldn't read that file as a photo. Try a JPEG, PNG or WebP.";
     photoStatus.classList.remove('ok');
+    photoDataUrl = null;
     photoFileEl.value = '';
     return;
   }
-  photoDataUrl = await new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onload = () => res(r.result);
-    r.onerror = rej;
-    r.readAsDataURL(f);
-  });
-  photoStatus.textContent = '✓ photo attached (' + Math.round(f.size / 1024) + ' KB)';
+  photoDataUrl = scaled.dataUrl;
+  const base64 = photoDataUrl.slice(photoDataUrl.indexOf(',') + 1);
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+  const bytes = base64.length * 3 / 4 - padding;
+  photoStatus.textContent = '✓ photo attached (' + Math.round(bytes / 1024) + ' KB)';
   photoStatus.classList.add('ok');
 });
 
@@ -250,10 +309,13 @@ async function identify() {
   identifyBtn.textContent = 'Identifying…';
 
   let data;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), IDENTIFY_WAIT_MS);
   try {
     const res = await fetch('/api/onboard/identify-device', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
       body: JSON.stringify({
         text: text || undefined,
         photoBase64: photoDataUrl || undefined,
@@ -266,9 +328,12 @@ async function identify() {
     data = await res.json();
   } catch (err) {
     resultsEl.innerHTML = '';
-    showErr('Identification failed: ' + (err.message || err));
+    showErr(controller.signal.aborted
+      ? 'Identification failed: the page stopped waiting after 90 seconds. Try again.'
+      : 'Identification failed: ' + (err.message || err));
     return;
   } finally {
+    clearTimeout(timer);
     identifyBtn.disabled = false;
     identifyBtn.textContent = 'Identify →';
   }
