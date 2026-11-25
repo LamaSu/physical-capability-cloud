@@ -13,7 +13,6 @@ import logging
 import re
 import secrets
 import time
-import unicodedata
 from http.client import HTTPException
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
@@ -51,7 +50,8 @@ def usable_message(data):
     """Return a non-empty gateway message with no Unicode Cc characters."""
     message = data.get("message") if isinstance(data, dict) else None
     if (isinstance(message, str) and message
-            and not any(unicodedata.category(char) == "Cc" for char in message)):
+            and not any(0x00 <= ord(char) <= 0x1F or 0x7F <= ord(char) <= 0x9F
+                        for char in message)):
         return message
     return None
 

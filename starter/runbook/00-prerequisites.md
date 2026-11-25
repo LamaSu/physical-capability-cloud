@@ -80,7 +80,7 @@ EOF
 curl -s -X POST "$(cat .pcc/base)/api/auth/provision" -H 'Content-Type: application/json' \
   --data-binary @.pcc/provision-request.json -o .pcc/provision.json -w '%{http_code}' > .pcc/provision.status
 rm -f .pcc/provision-request.json
-python3 - <<'EOF' || exit $?
+python3 - <<'EOF' &&
 import json
 import unicodedata
 try:

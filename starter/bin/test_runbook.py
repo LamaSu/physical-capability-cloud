@@ -591,7 +591,7 @@ class TestProvisionPause(unittest.TestCase):
     PAUSED = {"error": "feature_paused", "feature": "key_minting",
               "message": "Creating API keys is paused."}
 
-    def run_provision(self, status, body, transport_exit=0):
+    def run_provision(self, status, body, transport_exit=0, *, raw_body=None, after=""):
         section = between(phase_text("00-prerequisites.md"), "## 4.", "## 5.")
         block = re.search(r"```bash\n(.*?)\n```", section, re.S)
         self.assertIsNotNone(block, "section 4 must contain its provision block")
@@ -603,7 +603,10 @@ class TestProvisionPause(unittest.TestCase):
             (state / "operator.json").write_text(
                 json.dumps({"email": "operator@example.org", "name": "Bench"}), encoding="utf-8")
             (state / "node-public-key").write_text("ab" * 32, encoding="utf-8")
-            (root / "body.json").write_text(json.dumps(body), encoding="utf-8")
+            if raw_body is None:
+                (root / "body.json").write_text(json.dumps(body), encoding="utf-8")
+            else:
+                (root / "body.json").write_bytes(raw_body)
             binaries = root / "bin"
             binaries.mkdir()
             curl = binaries / "curl"
@@ -631,9 +634,10 @@ class TestProvisionPause(unittest.TestCase):
             environment = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ.get("PATH", ""),
                                PCC_TEST_CURL_EXIT=str(transport_exit), PCC_TEST_HTTP_STATUS=str(status),
                                PCC_TEST_CHMOD_LOG=str(root / "chmod.log"))
-            result = subprocess.run(["bash"], input=block.group(1), text=True, capture_output=True,
+            result = subprocess.run(["bash"], input=block.group(1) + "\n" + after, text=True, capture_output=True,
                                     cwd=str(root), env=environment, timeout=10)
-            files = {path.name: path.read_text(encoding="utf-8") for path in state.iterdir()}
+            files = {path.name: (path.read_bytes() if raw_body is not None and path.name == "provision.json"
+                                 else path.read_text(encoding="utf-8")) for path in state.iterdir()}
             return result, files, (root / "chmod.log").exists()
 
     def assert_no_key(self, files):
@@ -648,6 +652,13 @@ class TestProvisionPause(unittest.TestCase):
         self.assertFalse(chmod_ran, "chmod must run only after the Python block succeeds")
         self.assertEqual(files["provision.status"], "409")
         self.assertEqual(json.loads(files["provision.json"]), self.PAUSED)
+
+    def test_a_stopped_block_leaves_its_shell_running(self):
+        result, files, chmod_ran = self.run_provision(409, self.PAUSED, after='echo "after $?"')
+        self.assertEqual(result.stderr, self.PAUSED["message"] + "\n")
+        self.assertEqual(result.stdout, "after 1\n")
+        self.assert_no_key(files)
+        self.assertFalse(chmod_ran, "chmod must run only after the Python block succeeds")
 
     def test_success_captures_the_key_without_printing_any_reply(self):
         key = "pcc-test-secret-sentinel"
@@ -676,6 +687,21 @@ class TestProvisionPause(unittest.TestCase):
                 output = result.stdout + result.stderr
                 for hidden in (sentinel, "\x1b", "Creating", "API keys", self.PAUSED["message"]):
                     self.assertNotIn(hidden, output)
+
+    def test_a_reply_that_is_not_json_prints_nothing_from_it(self):
+        sentinel = "sentinel-not-for-output"
+        cases = [
+            (502, b"<html>sentinel-not-for-output</html>"),
+            (409, b"\xffsentinel-not-for-output"),
+        ]
+        for status, raw_body in cases:
+            with self.subTest(status=status, raw_body=raw_body):
+                result, files, _ = self.run_provision(status, None, raw_body=raw_body)
+                self.assertNotEqual(result.returncode, 0)
+                self.assert_no_key(files)
+                output = result.stdout + result.stderr
+                self.assertNotIn(sentinel, output)
+                self.assertNotIn("\x1b", output)
 
     def test_pause_requires_a_409_object_and_the_exact_error(self):
         sentinel = "sentinel-pause-definition"
