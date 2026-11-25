@@ -3,6 +3,9 @@ import Fastify, { type FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { sql } from "@pcc/store";
 import { closeStore, getRepos, getStore, initStore } from "../db.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
@@ -152,6 +155,54 @@ describe("onboarding chat gates with a bare gateway", () => {
     expect(res.json().toolCalls[3].status).toBe(200);
     expect(injected()).toEqual(["/api/setup/detect"]);
     expect(urls.some(url => keyPath(new URL(url, "http://test.invalid").pathname))).toBe(false);
+  });
+
+  it("K1e the key-tool filter leaves out /api/auth and paths under it, and nothing that only shares the prefix", async () => {
+    const syntheticPack = {
+      system_prompt: "Exercise the key-tool path boundary.",
+      tools: [
+        { name: "auth_root", description: "Read the auth root.", input_schema: { type: "object", properties: {} }, endpoint: { method: "GET", path: "/api/auth" } },
+        { name: "authx_status", description: "Read the authx status.", input_schema: { type: "object", properties: {} }, endpoint: { method: "GET", path: "/api/authx/status" } },
+      ],
+    };
+    const directory = mkdtempSync(join(tmpdir(), "onboard-chat-key-boundary-"));
+    const boundaryApp = Fastify({ logger: false });
+    const boundaryUrls: string[] = [];
+    try {
+      const publicDirectory = join(directory, "apps/dashboard/public");
+      mkdirSync(publicDirectory, { recursive: true });
+      writeFileSync(join(publicDirectory, "agent-package.json"), JSON.stringify(syntheticPack));
+      vi.spyOn(process, "cwd").mockReturnValue(directory);
+      _resetAgentPackageCache();
+      boundaryApp.addHook("onRequest", async req => { boundaryUrls.push(req.url); });
+      for (const tool of syntheticPack.tools) {
+        boundaryApp.route({
+          method: "GET",
+          url: tool.endpoint.path,
+          handler: async req => ({ params: req.params, query: req.query, body: req.body ?? null }),
+        });
+      }
+      await boundaryApp.register(onboardChatRoutes);
+      await boundaryApp.ready();
+      sdk.create.mockResolvedValueOnce({
+        stop_reason: "tool_use",
+        content: syntheticPack.tools.map((tool, i) => ({ type: "tool_use", id: `key_boundary_${i}`, name: tool.name, input: {} })),
+      }).mockResolvedValueOnce(endTurn());
+      const res = await boundaryApp.inject({ method: "POST", url: CHAT, payload: { message: "Check both paths." } });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(sdk.create.mock.calls[0][0].tools).toStrictEqual([
+        { name: "authx_status", description: syntheticPack.tools[1].description, input_schema: syntheticPack.tools[1].input_schema },
+      ]);
+      expect(res.json().toolCalls.map((call: { name: string }) => call.name)).toEqual(["auth_root", "authx_status"]);
+      expect(res.json().toolCalls[0].status).toBe(404);
+      expect(res.json().toolCalls[0].result).toStrictEqual({ error: "unknown_tool", name: "auth_root" });
+      expect(res.json().toolCalls[1].status).toBe(200);
+      expect(boundaryUrls.filter(url => url !== CHAT)).toEqual(["/api/authx/status"]);
+      expect(boundaryUrls).not.toContain("/api/auth");
+    } finally {
+      await boundaryApp.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("K1d-1 a path parameter stays one segment", async () => {
@@ -436,6 +487,51 @@ describe("onboarding chat gates with a bare gateway", () => {
     expect(sdk.create).toHaveBeenCalledTimes(2 * L);
     expect(rowCount()).toBe(L);
     expect(injected()).toEqual([]);
+  });
+
+  it("K5h E2 admits 60 messages per hour per process", async () => {
+    expect(L).toBe(60);
+    expect(ONBOARD_CHAT_GLOBAL_WINDOW_MS).toBe(3_600_000);
+    for (let i = 0; i < 60; i++) {
+      const res = await budgetPost(i);
+      expect(res.statusCode, res.body).toBe(200);
+    }
+    expect(sdk.create).toHaveBeenCalledTimes(60);
+    const res = await nextPost();
+    expect(res.statusCode, res.body).toBe(429);
+    expect(res.json().error).toBe("chat_busy");
+    expect(res.json().retry_after_seconds).toBe(3600);
+    expect(sdk.create).toHaveBeenCalledTimes(60);
+  });
+
+  it("K6 the health reply counts every tool in the pack", async () => {
+    const res = await app.inject({ method: "GET", url: `${CHAT}/health` });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().agentPackageStatus.loaded).toBe(true);
+    expect(res.json().agentPackageStatus.toolCount).toBe(pack.tools.length);
+    expect(pack.tools.some(tool => keyPath(tool.endpoint?.path ?? ""))).toBe(true);
+  });
+
+  it("K7 every agent-pack tool path keeps a plain shape", () => {
+    const toolsWithEndpoints = pack.tools.filter(tool => tool.endpoint !== undefined);
+    expect(toolsWithEndpoints.length).toBeGreaterThan(0);
+    for (const tool of toolsWithEndpoints) {
+      const path = tool.endpoint?.path;
+      const context = `Tool ${tool.name} has endpoint path ${JSON.stringify(path)}`;
+      expect(typeof path, context).toBe("string");
+      expect(path, context).not.toContain("?");
+      expect(path, context).not.toContain("%");
+      expect(path, context).not.toContain("//");
+      const segments = path!.split("/").filter(Boolean);
+      expect(segments, context).not.toContain(".");
+      expect(segments, context).not.toContain("..");
+      for (const segment of segments.slice(0, 2)) {
+        expect(segment, context).not.toMatch(/\{[^}]*\}/);
+        expect(segment, context).not.toMatch(/^:/);
+      }
+      expect(path, context).not.toBe(CHAT);
+      expect(path!.startsWith(`${CHAT}/`), context).toBe(false);
+    }
   });
 });
 
