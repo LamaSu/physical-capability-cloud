@@ -176,6 +176,43 @@ describe("device identification model-call budget", () => {
     expect(sdk.constructed).toHaveBeenCalledTimes(LIMIT * 2);
   });
 
+  it("KD3b the model-call budget renews a whole window from its first call", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.UTC(2026, 0, 1);
+    vi.setSystemTime(t0);
+    const app = await buildApp();
+
+    expect((await send(app, newAddress())).statusCode).toBe(200);
+    expect(sdk.create).toHaveBeenCalledTimes(1);
+    expect(sdk.constructed).toHaveBeenCalledTimes(1);
+
+    vi.setSystemTime(t0 + IDENTIFY_DEVICE_GLOBAL_WINDOW_MS);
+    for (let i = 0; i < LIMIT - 1; i++) {
+      expect((await send(app, newAddress())).statusCode).toBe(200);
+    }
+    expectBusy(await send(app, newAddress()));
+    expect(sdk.create).toHaveBeenCalledTimes(LIMIT);
+    expect(sdk.constructed).toHaveBeenCalledTimes(LIMIT);
+
+    vi.setSystemTime(t0 + IDENTIFY_DEVICE_GLOBAL_WINDOW_MS + 1);
+    for (let i = 0; i < LIMIT; i++) {
+      expect((await send(app, newAddress())).statusCode).toBe(200);
+    }
+    expectBusy(await send(app, newAddress()));
+    expect(sdk.create).toHaveBeenCalledTimes(2 * LIMIT);
+    expect(sdk.constructed).toHaveBeenCalledTimes(2 * LIMIT);
+
+    vi.setSystemTime(t0 + 2 * IDENTIFY_DEVICE_GLOBAL_WINDOW_MS + 1);
+    expectBusy(await send(app, newAddress()));
+    expect(sdk.create).toHaveBeenCalledTimes(2 * LIMIT);
+    expect(sdk.constructed).toHaveBeenCalledTimes(2 * LIMIT);
+
+    vi.setSystemTime(t0 + 2 * IDENTIFY_DEVICE_GLOBAL_WINDOW_MS + 2);
+    expect((await send(app, newAddress())).statusCode).toBe(200);
+    expect(sdk.create).toHaveBeenCalledTimes(2 * LIMIT + 1);
+    expect(sdk.constructed).toHaveBeenCalledTimes(2 * LIMIT + 1);
+  });
+
   it("KD4 the model-call budget counts failed and unusable model replies", async () => {
     const app = await buildApp();
     const unparseable = "not JSON";
@@ -280,7 +317,7 @@ describe("device identification model-call budget", () => {
     try {
       await vi.waitFor(() => {
         expect(sdk.create.mock.calls.length + finished.length).toBe(LIMIT + 3);
-      });
+      }, { timeout: 4000 });
       expect(sdk.create).toHaveBeenCalledTimes(LIMIT);
       expect(sdk.constructed).toHaveBeenCalledTimes(LIMIT);
       expect(finished).toHaveLength(3);
@@ -296,5 +333,116 @@ describe("device identification model-call budget", () => {
       for (const resolve of release) resolve();
       await Promise.all(pending);
     }
+  });
+
+  it("KD9 the model-call budget counts handlers that resume together in one step", async () => {
+    const app = Fastify();
+    apps.push(app);
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    let arrivals = 0;
+    app.addHook("preHandler", async () => {
+      arrivals++;
+      if (arrivals === LIMIT + 3) open();
+      await gate;
+    });
+    app.register(identifyDeviceRoutes);
+    await app.ready();
+
+    const release: Array<() => void> = [];
+    sdk.create.mockImplementation(() => new Promise((resolve) => {
+      release.push(() => resolve(modelReply()));
+    }));
+    const finished: Response[] = [];
+    const pending = Array.from({ length: LIMIT + 3 }, () =>
+      send(app, newAddress()).then((response) => {
+        finished.push(response);
+        return response;
+      }),
+    );
+
+    try {
+      await vi.waitFor(() => {
+        expect(sdk.create.mock.calls.length + finished.length).toBe(LIMIT + 3);
+      }, { timeout: 4000 });
+      expect(sdk.create).toHaveBeenCalledTimes(LIMIT);
+      expect(sdk.constructed).toHaveBeenCalledTimes(LIMIT);
+      expect(finished).toHaveLength(3);
+      for (const response of finished) expectBusy(response);
+
+      for (const resolve of release) resolve();
+      const responses = await Promise.all(pending);
+      expect(responses.filter((response) => response.statusCode === 200)).toHaveLength(LIMIT);
+      expect(responses.filter((response) => response.statusCode === 429)).toHaveLength(3);
+      expect(sdk.create).toHaveBeenCalledTimes(LIMIT);
+      expect(sdk.constructed).toHaveBeenCalledTimes(LIMIT);
+    } finally {
+      open();
+      for (const resolve of release) resolve();
+      await Promise.all(pending);
+    }
+  });
+
+  it("KD10 the budget reset hook starts a new window at the next request", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.UTC(2026, 0, 1);
+    vi.setSystemTime(t0);
+    const app = await buildApp();
+
+    for (let i = 0; i < LIMIT; i++) {
+      expect((await send(app, newAddress())).statusCode).toBe(200);
+    }
+    expect(sdk.create).toHaveBeenCalledTimes(LIMIT);
+    expect(sdk.constructed).toHaveBeenCalledTimes(LIMIT);
+
+    vi.setSystemTime(t0 + IDENTIFY_DEVICE_GLOBAL_WINDOW_MS / 2);
+    expectBusy(await send(app, newAddress()));
+    expect(sdk.create).toHaveBeenCalledTimes(LIMIT);
+    expect(sdk.constructed).toHaveBeenCalledTimes(LIMIT);
+
+    __resetIdentifyDeviceBudgetForTest();
+    expect(sdk.create).toHaveBeenCalledTimes(LIMIT);
+    expect(sdk.constructed).toHaveBeenCalledTimes(LIMIT);
+
+    for (let i = 0; i < LIMIT; i++) {
+      expect((await send(app, newAddress())).statusCode).toBe(200);
+    }
+    expectBusy(await send(app, newAddress()));
+    expect(sdk.create).toHaveBeenCalledTimes(2 * LIMIT);
+    expect(sdk.constructed).toHaveBeenCalledTimes(2 * LIMIT);
+
+    vi.setSystemTime(t0 + IDENTIFY_DEVICE_GLOBAL_WINDOW_MS + 1);
+    expectBusy(await send(app, newAddress()));
+    expect(sdk.create).toHaveBeenCalledTimes(2 * LIMIT);
+    expect(sdk.constructed).toHaveBeenCalledTimes(2 * LIMIT);
+
+    vi.setSystemTime(t0 + IDENTIFY_DEVICE_GLOBAL_WINDOW_MS / 2 + IDENTIFY_DEVICE_GLOBAL_WINDOW_MS + 1);
+    expect((await send(app, newAddress())).statusCode).toBe(200);
+    expect(sdk.create).toHaveBeenCalledTimes(2 * LIMIT + 1);
+    expect(sdk.constructed).toHaveBeenCalledTimes(2 * LIMIT + 1);
+  });
+
+  it("KD11 the model-call budget excludes the route's own oversized-photo refusal", async () => {
+    const app = Fastify({ bodyLimit: 16 * 1024 * 1024 });
+    apps.push(app);
+    app.register(identifyDeviceRoutes);
+    await app.ready();
+
+    const response = await send(app, newAddress(), { photoBase64: "A".repeat(8_388_612) });
+    expect(response.statusCode).toBe(413);
+    expect(response.json()).toEqual({ error: "Photo too large (max 6MB)" });
+    expect(sdk.create).toHaveBeenCalledTimes(0);
+    expect(sdk.constructed).toHaveBeenCalledTimes(0);
+
+    for (let i = 0; i < LIMIT; i++) {
+      expect((await send(app, newAddress())).statusCode).toBe(200);
+    }
+    expect(sdk.create).toHaveBeenCalledTimes(LIMIT);
+    expect(sdk.constructed).toHaveBeenCalledTimes(LIMIT);
+    expectBusy(await send(app, newAddress()));
+    expect(sdk.create).toHaveBeenCalledTimes(LIMIT);
+    expect(sdk.constructed).toHaveBeenCalledTimes(LIMIT);
   });
 });
