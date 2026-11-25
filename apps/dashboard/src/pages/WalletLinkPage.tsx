@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { decideWalletLink, getWalletLinkRequest, walletLinkErrorMessage, walletLinkSignInRemedy } from "../lib/wallet-link-api.js";
 import { useAuthStore } from "../stores/auth-store.js";
-import { WalletPageSignInAgain } from "./WalletsPage.js";
+import { WalletPageSignInAgain } from "../components/WalletPageSignInAgain.js";
 
 type PageState =
   | { step: "code"; input: string }

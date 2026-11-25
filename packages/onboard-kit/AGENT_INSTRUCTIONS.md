@@ -150,7 +150,7 @@ const myCapability: Capability = {
   },
 
   // Maximum part dimensions
-  workEnvelope: {
+  envelope: {
     x: 762,    // mm
     y: 406,    // mm
     z: 508,    // mm
@@ -172,11 +172,16 @@ const myCapability: Capability = {
   // Where is your equipment?
   location: { lat: 37.7749, lng: -122.4194 },
 
-  // When are you available?
+  // When are you available? Windows per day of week (0 = Sunday)
   availability: {
-    schedule: "weekdays",       // "24/7" | "weekdays" | "custom"
     timezone: "America/Los_Angeles",
-    // custom: [{ day: "monday", start: "08:00", end: "17:00" }, ...]
+    windows: {
+      1: [{ start: "08:00", end: "17:00" }],   // Monday
+      2: [{ start: "08:00", end: "17:00" }],
+      3: [{ start: "08:00", end: "17:00" }],
+      4: [{ start: "08:00", end: "17:00" }],
+      5: [{ start: "08:00", end: "17:00" }],   // Friday
+    },
   },
 
   // Current queue depth (update dynamically)
@@ -490,7 +495,7 @@ export class YourSensorAdapter implements SensorAdapter {
   private recording = false;
   private samples: Array<{ timestamp: string; value: number }> = [];
   private pollTimer: ReturnType<typeof setInterval> | null = null;
-  /** What can still emit: the recording (until stopRecording) and each read in flight. */
+  /** What is still running: the recording (until stopRecording) and each read in flight. */
   private readonly work = new OutstandingWork();
   private endRecording: (() => void) | null = null;
 
@@ -498,7 +503,7 @@ export class YourSensorAdapter implements SensorAdapter {
     this.id = id;
     this.source = {
       deviceId: id,
-      deviceType: "sensor",
+      deviceType: "power_monitor",  // the same evidence device type as type above
       kernelId,
       firmwareVersion: "YourSensor-1.0.0",
     };
@@ -510,11 +515,11 @@ export class YourSensorAdapter implements SensorAdapter {
     this.endRecording = this.work.begin();
 
     this.pollTimer = setInterval(() => {
-      void this.work.track(this.sample(jobId)); // a read in flight can emit after stopRecording
+      void this.work.track(this.sample()); // a read in flight can end after stopRecording
     }, this.config.sampleIntervalMs ?? 1000);
   }
 
-  private async sample(jobId: string): Promise<void> {
+  private async sample(): Promise<void> {
     // Read from YOUR sensor API
     const response = await fetch(`${this.config.sensorUrl}/reading`);
     const data = await response.json();
@@ -524,19 +529,6 @@ export class YourSensorAdapter implements SensorAdapter {
       value: data.watts ?? data.temperature ?? data.value,
     };
     this.samples.push(sample);
-
-    // Emit live reading as evidence
-    this.emit({
-      type: "sensor_reading",
-      timestamp: sample.timestamp,
-      source: this.source,
-      payload: {
-        channel: this.config.channel,    // e.g., "spindle_power", "bed_temp"
-        value: sample.value,
-        unit: this.config.unit,          // e.g., "W", "degC"
-        jobId,
-      },
-    });
   }
 
   async stopRecording(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
@@ -867,8 +859,12 @@ const kernelAgent = new KernelAgent(bus, {
   location: { lat: 37.7749, lng: -122.4194 },
   capabilities: myCapabilities,
 
-  // How long mock jobs take (only for testing without real hardware)
-  mockPrintDuration: 3000,
+  // KernelAgent runs the adapters you pass (yours from Step 3). Until it
+  // passes inputHash, inputData and tierLadder, a prepare-path machine's
+  // jobs are refused (see §7.1). It runs every job at tier 1, so in each job
+  // that runs the sensor reads its device and the camera captures nothing.
+  // A slot you leave out runs a PCC mock device.
+  adapters: { machine, sensors: [powerSensor], camera },
 
   // Machine profiles for the contract builder (see Step 5)
   machineProfiles: myProfiles,
@@ -945,62 +941,31 @@ Machine profiles let the **Contract Builder** offer users a "car configurator" e
 ### 5.1 Create a machine profile
 
 ```typescript
-import type { MachineProfile, ParamDef } from "@pcc/spec";
+import type { MachineProfile } from "@pcc/spec";
 
 const haasProfile: MachineProfile = {
   id: "profile-haas-vf2",
-  profileName: "Haas VF-2 CNC Mill",
-  kernelId: "kernel_your_shop_001",
-  deviceId: "dev_haas_001",
   capabilityType: "cnc-3axis",
+  machineName: "Haas VF-2 CNC Mill",
+  kernelId: "kernel_your_shop_001",
 
-  // Override parameters from the base template
-  paramOverrides: {
-    // Restrict material options to what you actually stock
-    material: {
-      key: "material",
-      label: "Material",
-      type: "enum",
-      options: [
-        { value: "aluminum-6061", label: "Aluminum 6061", pricingImpact: { mode: "flat", value: "0.00" } },
-        { value: "aluminum-7075", label: "Aluminum 7075", pricingImpact: { mode: "flat", value: "5.00" } },
-        { value: "steel-1018", label: "Steel 1018", pricingImpact: { mode: "flat", value: "10.00" } },
-        { value: "stainless-304", label: "Stainless 304", pricingImpact: { mode: "flat", value: "20.00" } },
-      ],
-      defaultValue: "aluminum-6061",
-      required: true,
-    } as ParamDef,
-
-    // Override tolerance range to your machine's actual specs
-    tolerance: {
-      key: "tolerance",
-      label: "Tolerance",
-      type: "enum",
-      options: [
-        { value: "standard", label: "±0.005\"", pricingImpact: { mode: "flat", value: "0.00" } },
-        { value: "precision", label: "±0.001\"", pricingImpact: { mode: "percent", value: "25" } },
-        { value: "ultra", label: "±0.0005\"", pricingImpact: { mode: "percent", value: "50" } },
-      ],
-      defaultValue: "standard",
-      required: true,
-    } as ParamDef,
-  },
-
-  // Override base pricing
-  pricingOverrides: {
-    baseCost: "35.00",     // your setup cost
-    perMinute: "2.00",     // your per-minute rate
-    minimum: "75.00",      // your minimum charge
-  },
-
-  // Constraints (cross-parameter rules)
-  constraints: [
+  // Narrow the cnc-3axis template's parameters to this machine
+  paramOverrides: [
+    // Offer only the materials you actually stock
     {
-      // If material is stainless, minimum tolerance is "precision"
-      condition: { param: "material", value: "stainless-304" },
-      effect: { param: "tolerance", exclude: ["standard"] },
+      paramKey: "material",
+      restrictTo: ["aluminum-6061", "aluminum-7075", "steel-1018", "stainless-304"],
+      overrideDefault: "aluminum-6061",
     },
+    // Leave out the tolerance this machine can't hold
+    { paramKey: "tolerance", exclude: ["high-precision"] },
   ],
+
+  // Your own base price for this machine
+  pricingOverrides: {
+    basePrice: "35.00",
+    currency: "USDC",
+  },
 };
 ```
 
@@ -1198,7 +1163,6 @@ Every `execution_*` event of the device job carries `payload.deviceJobId`. Let t
 `gcode_received` and `gcode_hash_verified` apply only to the FDM legacy path. `method_loaded` is recorded by the kernel from the prepare ack; adapters never emit it.
 
 **From SensorAdapter:**
-- `sensor_reading` — each data sample during the job
 - `power_profile_summary` — summary statistics after recording stops
 - `sensor_data_summary` — aggregated sensor data
 
@@ -1476,6 +1440,8 @@ describe("Integration", () => {
 
 ### 11.3 End-to-end test with agents
 
+This test passes no `adapters`, so the kernel agent runs PCC's mock devices and checks the message flow without touching your hardware.
+
 ```typescript
 import { MessageBus } from "@pcc/a2a";
 import { UserAgent } from "@pcc/agent-user";
@@ -1577,16 +1543,17 @@ interface Capability {
     surface?: string;
     positional?: string;
   };
-  workEnvelope?: {
+  envelope?: {                          // the config's workEnvelope; "inch" is written as "in"
     x: number; y: number; z: number;
-    unit: "mm" | "inch";
+    unit: "mm" | "in";
   };
   assuranceTiers: (0 | 1 | 2 | 3)[];   // Supported tiers
   pricing: PricingModel;
   location?: { lat: number; lng: number };
-  availability?: {
-    schedule: "24/7" | "weekdays" | "custom";
-    timezone?: string;
+  availability: {                       // scaffolded as every day 00:00-23:59 UTC; change it in src/capabilities.ts
+    timezone: string;
+    windows: Record<number, { start: string; end: string }[]>;  // 0 = Sunday
+    blackouts?: string[];
   };
   queueDepth?: number;                  // Current jobs in queue
   did?: string;                         // W3C DID
@@ -1619,7 +1586,7 @@ interface EvidenceEvent {
 
 interface EvidenceSource {
   deviceId: string;
-  deviceType: "controller" | "sensor" | "camera" | "robot" | "tee";
+  deviceType: EvidenceDeviceType;       // one of EVIDENCE_DEVICE_TYPES in @pcc/spec, e.g. "controller", "power_monitor", "camera"
   kernelId: string;
   firmwareVersion: string;
 }
@@ -1701,7 +1668,7 @@ interface A2AMessage {
 
 **Batch tracking**: `batch_created`, `batch_sealed`, `sample_injection_start`, `sample_acquisition_start`, `sample_acquisition_end`, `sample_processing_complete`, `batch_completed`
 
-**Sensor generic**: `sensor_reading`, `sensor_data_summary`, `sensor_calibration`, `sensor_anomaly`
+**Sensor generic**: `sensor_data_summary`
 
 **Device lifecycle**: `device_started`, `device_stopped`, `device_calibrated`, `device_maintenance`
 

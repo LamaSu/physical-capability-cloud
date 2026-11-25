@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { GlassPanel } from "@pcc/ui";
 import { authorizedFetch } from "../../lib/authorized-fetch.js";
+import { EXPLICIT_CREDENTIAL_REQUIRED, OPERATOR_SIGN_IN_NOTICE } from "../../lib/auth-notices.js";
 
 /**
  * T2.2 — owner-only edit + delete UI for an operator registration.
@@ -52,7 +53,9 @@ export function EditDeleteBar({
         const j = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
         const msg =
           res.status === 403
-            ? "Only the registration owner can edit this."
+            ? j?.error === EXPLICIT_CREDENTIAL_REQUIRED
+              ? OPERATOR_SIGN_IN_NOTICE
+              : "Only the registration owner can edit this."
             : res.status === 401
             ? "Sign in to edit this registration."
             : j.message ?? j.error ?? `HTTP ${res.status}`;
@@ -80,7 +83,9 @@ export function EditDeleteBar({
         const j = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
         const msg =
           res.status === 403
-            ? "Only the registration owner can delete this."
+            ? j?.error === EXPLICIT_CREDENTIAL_REQUIRED
+              ? OPERATOR_SIGN_IN_NOTICE
+              : "Only the registration owner can delete this."
             : res.status === 401
             ? "Sign in to delete this registration."
             : j.message ?? j.error ?? `HTTP ${res.status}`;

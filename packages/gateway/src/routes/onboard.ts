@@ -6,6 +6,9 @@ import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { Sentry } from "../sentry.js";
 import { getRepos } from "../db.js";
+import { countAdminKeyFields, hasSingleValidAdminKey } from "../middleware/relay-admin-gate.js";
+import { getCallerScopes } from "../middleware/scope-checker.js";
+import { authorityOf, EXPLICIT_CREDENTIAL_REQUIRED, mayWriteKernelAsOwner, provenByCookieOnly } from "../auth/kernel-authority.js";
 import {
   analyzeOnboardingText,
   coalesceAnalysisText,
@@ -19,6 +22,56 @@ import {
 import { tenantOpts } from "../config/tenant-enforce.js";
 
 const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production.up.railway.app";
+
+/**
+ * Posture's admin test (routes/admin-posture.ts:9-23), without audit:
+ * duplicate admin-key fields refuse; one field requires a valid, non-"*" secret;
+ * no field requires an API key with "admin" scope and without "*" scope.
+ * Any error refuses the caller.
+ */
+export function isOnboardAdmin(req: FastifyRequest): boolean {
+  try {
+    const n = countAdminKeyFields(req);
+    if (n > 1) return false;
+    if (n === 1) return hasSingleValidAdminKey(req) && req.headers["x-admin-key"] !== "*";
+    if (!req.apiKeyId) return false;
+    const scopes = getCallerScopes(req);
+    return scopes.includes("admin") && !scopes.includes("*");
+  } catch {
+    return false;
+  }
+}
+
+export function toListedRegistration(r: { id: string; status: string; name: string; createdAt: string }) {
+  return { id: r.id, status: r.status, name: r.name, createdAt: r.createdAt };
+}
+
+export function registrationAccess(
+  req: FastifyRequest,
+  row: { operator?: { walletAddress?: string } | null; createdByKeyId?: string | null },
+  intent: "write" | "read",
+): "admin" | "owner" | "cookie_only" | "none" {
+  if (isOnboardAdmin(req)) return "admin";
+  try {
+    const authority = { ...authorityOf(req), admin: false };
+    if (intent === "write" && provenByCookieOnly(authority)) return "cookie_only";
+    if (mayWriteKernelAsOwner(authority, row.operator?.walletAddress)) return "owner";
+    if (authority.apiKeyId != null && row.createdByKeyId != null && authority.apiKeyId === row.createdByKeyId) return "owner";
+    return "none";
+  } catch {
+    return "none";
+  }
+}
+
+function registrationReplyFor<T extends { id: string; status: string; name: string; createdAt: string; operator?: { walletAddress?: string } | null; createdByKeyId?: string | null }>(req: FastifyRequest, row: T) {
+  const access = registrationAccess(req, row, "read");
+  return access === "admin" || access === "owner" ? row : toListedRegistration(row);
+}
+
+export function inCallerTenant(req: FastifyRequest, row: { tenantId?: string | null }): boolean {
+  const tenant = tenantOpts(req);
+  return !tenant || (row.tenantId ?? null) === tenant.tenantId;
+}
 
 export async function onboardRoutes(app: FastifyInstance) {
   // Analyze an operator/machine description and return an input-derived
@@ -118,6 +171,7 @@ export async function onboardRoutes(app: FastifyInstance) {
         operator: registration.operator as any,
         complianceRegulations: registration.complianceRegulations,
         tenantId: tenantIdAtWrite,
+        createdByKeyId: authorityOf(req).apiKeyId ?? null,
         status: registration.status,
         createdAt: registration.createdAt,
         submittedAt: registration.submittedAt,
@@ -148,33 +202,28 @@ export async function onboardRoutes(app: FastifyInstance) {
       // the repo behaves as it does today (cross-tenant read, sanitised).
       const opts = tenantOpts(req);
       const registrations = repos.registrations.findAll(opts);
-      // Return only non-sensitive fields publicly (strip addresses, GPS, device details)
-      const sanitized = registrations.map((r: any) => ({
-        id: r.id,
-        status: r.status,
-        name: r.name,
-        capability: r.capability,
-        createdAt: r.createdAt,
-      }));
+      // The listing's four fields are the registration reply for anyone who isn't an admin.
+      const sanitized = registrations.map((r) => toListedRegistration(r));
       return { registrations: sanitized };
     } catch { return { registrations: [] }; }
   });
 
-  // Get registration detail
-  app.get<{ Params: { id: string } }>("/api/onboard/registrations/:id", async (req) => {
+  // Detail gives the stored row to admins and owners, and the listing's fields to everyone else; outside the caller's tenant is missing under TENANT_ENFORCE.
+  app.get<{ Params: { id: string } }>("/api/onboard/registrations/:id", async (req, reply) => {
     try {
       const repos = getRepos();
       const reg = repos.registrations.findById(req.params.id);
-      if (!reg) return { error: "not_found" };
-      return { registration: reg };
+      if (!reg || !inCallerTenant(req, reg)) return reply.status(404).send({ error: "not_found" });
+      return { registration: registrationReplyFor(req, reg) };
     } catch { return { error: "not_found" }; }
   });
 
-  // ── Approve a registration ──
+  // Approve: admins only, 403 before any read; outside the caller's tenant is missing under TENANT_ENFORCE.
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/approve", async (req, reply) => {
+    if (!isOnboardAdmin(req)) return reply.code(403).send({ error: "forbidden" });
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
-    if (!reg) return reply.status(404).send({ error: "not_found" });
+    if (!reg || !inCallerTenant(req, reg)) return reply.status(404).send({ error: "not_found" });
     if (reg.status !== "submitted" && reg.status !== "reviewing") {
       return reply.status(400).send({ error: "invalid_status", message: `Cannot approve registration in "${reg.status}" status` });
     }
@@ -192,13 +241,17 @@ export async function onboardRoutes(app: FastifyInstance) {
     return { registration: reg, approved: true };
   });
 
-  // ── Reject a registration ──
+  // Reject: admins only, 403 before any read; outside the caller's tenant is missing under TENANT_ENFORCE.
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/reject", async (req, reply) => {
+    if (!isOnboardAdmin(req)) return reply.code(403).send({ error: "forbidden" });
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
-    if (!reg) return reply.status(404).send({ error: "not_found" });
+    if (!reg || !inCallerTenant(req, reg)) return reply.status(404).send({ error: "not_found" });
     if (reg.status === "rejected") {
       return reply.status(400).send({ error: "already_rejected" });
+    }
+    if (reg.status === "deleted") {
+      return reply.status(410).send({ error: "deleted", message: "Registration was soft-deleted" });
     }
     const body = req.body as { reason?: string } | undefined;
     const reason = body?.reason ?? "No reason provided";
@@ -231,21 +284,17 @@ export async function onboardRoutes(app: FastifyInstance) {
   }>("/api/onboard/registrations/:id", async (req, reply) => {
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
-    if (!reg) return reply.status(404).send({ error: "not_found" });
+    if (!reg || !inCallerTenant(req, reg)) return reply.status(404).send({ error: "not_found" });
 
-    // Caller must own the registration. Mirror the /prove ownership check.
+    const access = registrationAccess(req, reg, "write");
+    if (access === "cookie_only") return reply.status(403).send(EXPLICIT_CREDENTIAL_REQUIRED);
+    if (access === "none") {
+      return reply.status(403).send({ error: "forbidden", message: "You can only edit your own registration" });
+    }
     const callerId = (req as any).operatorId
       ?? (req as any).userId
       ?? (req as any).apiKeyId
       ?? (req as any).walletAddress;
-    const regOperator = (reg as any).operator?.walletAddress
-      ?? (reg as any).operator?.email
-      ?? (reg as any).walletAddress
-      ?? (reg as any).email
-      ?? (reg as any).operatorId;
-    if (callerId && regOperator && callerId !== regOperator) {
-      return reply.status(403).send({ error: "forbidden", message: "You can only edit your own registration" });
-    }
     if (reg.status === "deleted") {
       return reply.status(410).send({ error: "deleted", message: "Registration was soft-deleted" });
     }
@@ -283,34 +332,31 @@ export async function onboardRoutes(app: FastifyInstance) {
       ip: req.ip,
       userAgent: req.headers["user-agent"],
     });
-    return { registration: updated };
+    return { registration: registrationReplyFor(req, updated) };
   });
 
   // ── T2.2 — Delete (soft) registration (owner-only, GDPR-required) ──
   app.delete<{ Params: { id: string } }>("/api/onboard/registrations/:id", async (req, reply) => {
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
-    if (!reg) return reply.status(404).send({ error: "not_found" });
+    if (!reg || !inCallerTenant(req, reg)) return reply.status(404).send({ error: "not_found" });
 
+    const access = registrationAccess(req, reg, "write");
+    if (access === "cookie_only") return reply.status(403).send(EXPLICIT_CREDENTIAL_REQUIRED);
+    if (access === "none") {
+      return reply.status(403).send({ error: "forbidden", message: "You can only delete your own registration" });
+    }
     const callerId = (req as any).operatorId
       ?? (req as any).userId
       ?? (req as any).apiKeyId
       ?? (req as any).walletAddress;
-    const regOperator = (reg as any).operator?.walletAddress
-      ?? (reg as any).operator?.email
-      ?? (reg as any).walletAddress
-      ?? (reg as any).email
-      ?? (reg as any).operatorId;
-    if (callerId && regOperator && callerId !== regOperator) {
-      return reply.status(403).send({ error: "forbidden", message: "You can only delete your own registration" });
-    }
     if (reg.status === "deleted") {
-      return { registration: reg, alreadyDeleted: true };
+      return { registration: registrationReplyFor(req, reg), alreadyDeleted: true };
     }
 
     const deletedAt = new Date().toISOString();
     repos.registrations.updateStatus(req.params.id, "deleted", {
-      description: `DELETED at ${deletedAt} by ${callerId ?? "anonymous"} — original: ${reg.description ?? "(no description)"}`,
+      description: `DELETED at ${deletedAt} by ${access} — original: ${reg.description ?? "(no description)"}`,
     });
 
     auditService.log({
@@ -323,14 +369,15 @@ export async function onboardRoutes(app: FastifyInstance) {
       ip: req.ip,
       userAgent: req.headers["user-agent"],
     });
-    return { registration: { ...reg, status: "deleted" }, deletedAt, soft: true };
+    return { registration: registrationReplyFor(req, { ...reg, status: "deleted" }), deletedAt, soft: true };
   });
 
-  // ── Activate an approved registration ──
+  // Activate: admins only, 403 before any read; outside the caller's tenant is missing under TENANT_ENFORCE.
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/activate", async (req, reply) => {
+    if (!isOnboardAdmin(req)) return reply.code(403).send({ error: "forbidden" });
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
-    if (!reg) return reply.status(404).send({ error: "not_found" });
+    if (!reg || !inCallerTenant(req, reg)) return reply.status(404).send({ error: "not_found" });
     if (reg.status !== "approved") {
       return reply.status(400).send({ error: "invalid_status", message: `Must be approved before activating (current: "${reg.status}")` });
     }
@@ -348,16 +395,11 @@ export async function onboardRoutes(app: FastifyInstance) {
       async () => {
         const repos = getRepos();
         const reg = repos.registrations.findById(req.params.id);
-        if (!reg) return reply.status(404).send({ error: "not_found" });
+        if (!reg || !inCallerTenant(req, reg)) return reply.status(404).send({ error: "not_found" });
 
-        // Verify the caller owns this registration (prevents self-approval by other operators)
-        const callerId = (req as any).operatorId ?? (req as any).userId;
-        const regOperator = (reg as any).operator?.walletAddress
-          ?? (reg as any).operator?.email
-          ?? (reg as any).walletAddress
-          ?? (reg as any).email
-          ?? (reg as any).operatorId;
-        if (callerId && regOperator && callerId !== regOperator) {
+        const access = registrationAccess(req, reg, "write");
+        if (access === "cookie_only") return reply.status(403).send(EXPLICIT_CREDENTIAL_REQUIRED);
+        if (access === "none") {
           return reply.status(403).send({ error: "forbidden", message: "You can only prove your own registration" });
         }
 
@@ -366,6 +408,9 @@ export async function onboardRoutes(app: FastifyInstance) {
         }
         if (reg.status === "rejected") {
           return reply.status(400).send({ error: "rejected", message: "Registration was rejected — submit a new one" });
+        }
+        if (reg.status === "deleted") {
+          return reply.status(410).send({ error: "deleted", message: "Registration was soft-deleted" });
         }
 
         const body = req.body as {
@@ -539,7 +584,7 @@ export async function onboardRoutes(app: FastifyInstance) {
           userAgent: req.headers["user-agent"],
         });
         return {
-          registration: { ...reg, status: "active", approvedAt: now },
+          registration: registrationReplyFor(req, { ...reg, status: "active", approvedAt: now }),
           autoApproved: true,
           activated: true,
           proofs,

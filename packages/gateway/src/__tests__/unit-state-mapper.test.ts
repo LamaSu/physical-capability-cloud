@@ -299,6 +299,8 @@ describe("finalizedBlock — allocation or last job-class discharge, NEVER Final
     ["number zeroing block", { allocation: { block: 120n, claimCount: 2n }, zeroingDischargeBlock: 150 }],
     ["negative allocation block", { allocation: { block: -1n, claimCount: 2n } }],
     ["number claim count", { allocation: { block: 120n, claimCount: 2 } }],
+    ["negative inline allocation block", { allocation: { block: -1n, claimCount: 0n } }],
+    ["number inline allocation block", { allocation: { block: 5, claimCount: 0n } }],
   ])("T12 rejects invalid witness boundary: %s", (_name, witness) => {
     expect(() => deriveFinalizedBlock(witness as FinalizationWitness)).toThrow(InconsistentAnchorsError);
   });
@@ -365,6 +367,54 @@ describe("boundary normalisation — the defect sol found, and its fix", () => {
   it("REJECTS non-integer, out-of-range and non-numeric input", () => {
     for (const bad of [1.5, -1, 10, 99, "", "8x", null, undefined, {}, []]) {
       expect(() => normalizeUnitState(bad)).toThrow();
+    }
+  });
+
+  it("T26c a zero-padded state string throws InvalidUnitStateError", () => {
+    for (const state of ["00", "08", "009", "0".repeat(64) + "9"]) {
+      expect(() => normalizeUnitState(state)).toThrow(InvalidUnitStateError);
+    }
+  });
+
+  it("T26d each one-digit state string maps to its state and the string 0 is unreachable", () => {
+    for (const state of [
+      UnitState.FUNDED_ACTIVE,
+      UnitState.PRIMARY_ASSERTED,
+      UnitState.CHALLENGED,
+      UnitState.BACKUP_PENDING,
+      UnitState.BACKUP_ASSERTED,
+      UnitState.RELEASE_ALLOCATED,
+      UnitState.REFUND_ALLOCATED,
+      UnitState.SETTLED_RELEASED,
+      UnitState.SETTLED_REFUNDED,
+    ]) {
+      expect(normalizeUnitState(state.toString())).toBe(state);
+    }
+    expect(() => normalizeUnitState("0")).toThrow(UnreachableUnitStateError);
+  });
+
+  it("T26e a state string that is not one ASCII digit throws InvalidUnitStateError", () => {
+    for (const state of [
+      String.fromCodePoint(0x0020, 0x0038),
+      String.fromCodePoint(0x0038, 0x0020),
+      String.fromCodePoint(0x0009, 0x0038),
+      String.fromCodePoint(0x0038, 0x000A),
+      String.fromCodePoint(0x00A0, 0x0038),
+      String.fromCodePoint(0x002B, 0x0038),
+      String.fromCodePoint(0x0038, 0x002E, 0x0030),
+      String.fromCodePoint(0x0038, 0x0065, 0x0030),
+      String.fromCodePoint(0x0030, 0x0078, 0x0038),
+      String.fromCodePoint(0xFF18),
+      String.fromCodePoint(0x0668),
+      String.fromCodePoint(0x06F8),
+      String.fromCodePoint(0x096E),
+      String.fromCodePoint(0x0061),
+      String.fromCodePoint(0x0020),
+      String.fromCodePoint(0x0009),
+      String.fromCodePoint(0x00A0),
+      String.fromCodePoint(0xFEFF),
+    ]) {
+      expect(() => normalizeUnitState(state)).toThrow(InvalidUnitStateError);
     }
   });
 });

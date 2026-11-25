@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Smoke-test the agent auto-feedback pipeline end-to-end against a running gateway.
- * Runnable against LOCAL now, and PROD (capability.network) AFTER this branch deploys.
+ * PCC_URL is required and has no default: unset or empty, the script exits 2 before any request.
  *
  *   PCC_URL=http://localhost:3200 WAITLIST_ADMIN_TOKEN=... node scripts/verify-agent-feedback.mjs
  *   PCC_URL=https://capability.network WAITLIST_ADMIN_TOKEN=... node scripts/verify-agent-feedback.mjs
@@ -11,7 +11,12 @@
  * makes exactly one write; there is no delete endpoint, so the marked report remains —
  * filter it by the "[VERIFY]" prefix / the printed id.
  */
-const BASE = (process.env.PCC_URL ?? "https://capability.network").replace(/\/$/, "");
+const pccUrl = process.env.PCC_URL;
+if (pccUrl === undefined || pccUrl === "") {
+  console.error("verify-agent-feedback: PCC_URL is required (no default). Set it to the gateway to check, for example PCC_URL=http://localhost:3200");
+  process.exit(2);
+}
+const BASE = pccUrl.replace(/\/$/, "");
 const ADMIN = process.env.WAITLIST_ADMIN_TOKEN ?? "";
 const stamp = new Date().toISOString();
 const marker = `[VERIFY] auto-feedback smoke ${stamp}`;

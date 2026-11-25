@@ -89,7 +89,8 @@ const capabilityOf = async (kernelId: string) =>
   )!;
 
 beforeAll(async () => {
-  for (const k of ["PCC_DB_PATH", "PCC_ADMIN_KEY", "PCC_A2A_AUTH_DISABLED", "PCC_COMPOSE_USE_FACADE"]) savedEnv[k] = process.env[k];
+  for (const k of ["PCC_DB_PATH", "PCC_ADMIN_KEY", "PCC_A2A_AUTH_DISABLED", "PCC_COMPOSE_USE_FACADE", "TENANT_ENFORCE"]) savedEnv[k] = process.env[k];
+  delete process.env.TENANT_ENFORCE;
   process.env.PCC_DB_PATH = ":memory:";
   process.env.PCC_ADMIN_KEY = ADMIN;
   delete process.env.PCC_A2A_AUTH_DISABLED;
@@ -162,7 +163,6 @@ describe("coarse by default: nobody reads the exact site or the street address",
       "/api/kernels/kernel-n68-a",
       "/api/capabilities/by-kernel/kernel-n68-a",
       `/api/capabilities/${capId}`,
-      "/api/telemetry/system",
       `/api/operators/${encodeURIComponent(ownerId)}/status`,
       "/api/kernels/kernel-n68-a/agent-package",
     ]) {
@@ -173,10 +173,11 @@ describe("coarse by default: nobody reads the exact site or the street address",
   });
 
   it("the raw dumps carry the projection, not the stored point", async () => {
-    const tele = (await app.inject({ method: "GET", url: "/api/telemetry/system", headers: bearer(strangerKey) })).json();
+    const tele = (await app.inject({ method: "GET", url: "/api/telemetry/system", headers: { ...bearer(strangerKey), "x-admin-key": ADMIN } })).json();
     const rows = JSON.stringify(tele);
     expect(rows).toContain("N68 canary FDM");
     expect(rows).toContain(`"locationCell":"${CELL}"`);
+    for (const s of EXACT_STRINGS) expect(rows).not.toContain(s);
     const status = (
       await app.inject({ method: "GET", url: `/api/operators/${encodeURIComponent(ownerId)}/status`, headers: bearer(strangerKey) })
     ).json();

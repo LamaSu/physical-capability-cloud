@@ -24,6 +24,9 @@
 import type { MessageBus, A2AMessage } from "@pcc/a2a";
 import type { AdapterType } from "@pcc/spec";
 
+const SUGGESTED_ADAPTERS: readonly AdapterType[] = ["octoprint", "modbus", "opcua", "sila", "opentrons"];
+const IDENTIFY_FAILED = "Couldn't get an identification from the photo.";
+
 // ── Config ───────────────────────────────────────────────────────
 
 export interface SetupAgentConfig {
@@ -53,13 +56,19 @@ export interface SetupConversationState {
 
 // ── Machine identification result ───────────────────────────────
 
-export interface MachineIdentificationResult {
-  make: string;
-  model: string;
-  type: string;
-  suggestedAdapterType: AdapterType;
-  confidence: number;
-}
+export type MachineIdentificationResult =
+  | {
+      identified: true;
+      make: string;
+      model: string;
+      confidence: number;
+      suggestedAdapterType?: AdapterType;
+    }
+  | {
+      identified: false;
+      reason: string;
+      status?: number;
+    };
 
 // ── Discovered device ───────────────────────────────────────────
 
@@ -282,64 +291,66 @@ export class SetupAgent {
   // ── Machine identification ─────────────────────────────────────
 
   /**
-   * Uses Gemini (or a compatible vision LLM) to identify a machine from a photo.
-   * In the absence of a real Gemini client, falls back to structured mock analysis
-   * based on image size/encoding hints.
+   * Posts the unchanged photo once to the gateway's identification route.
+   * Copies only a usable first candidate's vendor, model and finite confidence
+   * in [0, 1], plus an allowed adapter suggestion. Names must be nonblank strings.
+   * Failures return a fixed reason and the HTTP status when a reply arrived;
+   * unsuccessful replies are never read, and errors are never included.
    */
   async identifyMachineFromPhoto(imageBase64: string): Promise<MachineIdentificationResult> {
-    // Attempt to call Gemini via the gateway proxy if available
+    let res: Response;
     try {
-      const result = await this.gatewayPost("/api/ai/identify-machine", {
-        imageBase64,
-        prompt:
-          "Identify this machine. What is the make, model, and type? " +
-          "Is it a 3D printer, CNC machine, laser cutter, industrial printer, etc.? " +
-          "Respond in JSON: {make, model, type, confidence}",
-      }) as any;
-
-      const adapterMap: Record<string, AdapterType> = {
-        "3d printer": "octoprint",
-        "fdm printer": "octoprint",
-        "resin printer": "octoprint",
-        "cnc machine": "modbus",
-        "cnc router": "modbus",
-        "laser cutter": "opcua",
-        "laser engraver": "opcua",
-        "industrial printer": "sila",
-        "inkjet printer": "sila",
-        "plotter": "generic-http",
-      };
-
-      const typeLower = (result.type ?? "").toLowerCase();
-      let suggestedAdapterType: AdapterType = "generic-http";
-      for (const [keyword, adapter] of Object.entries(adapterMap)) {
-        if (typeLower.includes(keyword)) {
-          suggestedAdapterType = adapter;
-          break;
-        }
-      }
-
-      return {
-        make: result.make ?? "Unknown",
-        model: result.model ?? "Unknown",
-        type: result.type ?? "Unknown",
-        suggestedAdapterType,
-        confidence: typeof result.confidence === "number" ? result.confidence : 0.5,
-      };
+      res = await fetch(`${this.config.gatewayUrl}/api/onboard/identify-device`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ photoBase64: imageBase64 }),
+      });
     } catch {
-      // Gateway proxy unavailable — return a structured mock response
-      // In production, this would call the Gemini Vision API directly.
-      const imageSize = imageBase64.length;
-      const isLargeImage = imageSize > 50_000;
-
-      return {
-        make: "Unknown",
-        model: "Unknown",
-        type: isLargeImage ? "3D Printer" : "Machine",
-        suggestedAdapterType: isLargeImage ? "octoprint" : "generic-http",
-        confidence: 0.4,
-      };
+      return { identified: false, reason: IDENTIFY_FAILED };
     }
+
+    if (!res.ok) {
+      return { identified: false, reason: IDENTIFY_FAILED, status: res.status };
+    }
+
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      return { identified: false, reason: IDENTIFY_FAILED, status: res.status };
+    }
+
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return { identified: false, reason: IDENTIFY_FAILED, status: res.status };
+    }
+    const candidates = (body as Record<string, unknown>).candidates;
+    if (!Array.isArray(candidates) || candidates.length === 0) {
+      return { identified: false, reason: IDENTIFY_FAILED, status: res.status };
+    }
+    const first: unknown = candidates[0];
+    if (first === null || typeof first !== "object" || Array.isArray(first)) {
+      return { identified: false, reason: IDENTIFY_FAILED, status: res.status };
+    }
+    const c = first as Record<string, unknown>;
+    if (
+      typeof c.vendor !== "string" || c.vendor.trim() === "" ||
+      typeof c.model !== "string" || c.model.trim() === "" ||
+      typeof c.confidence !== "number" || !Number.isFinite(c.confidence) ||
+      c.confidence < 0 || c.confidence > 1
+    ) {
+      return { identified: false, reason: IDENTIFY_FAILED, status: res.status };
+    }
+
+    const result: MachineIdentificationResult = {
+      identified: true,
+      make: c.vendor,
+      model: c.model,
+      confidence: c.confidence,
+    };
+    if (SUGGESTED_ADAPTERS.includes(c.mappedAdapterType as AdapterType)) {
+      result.suggestedAdapterType = c.mappedAdapterType as AdapterType;
+    }
+    return result;
   }
 
   // ── Network scanning ───────────────────────────────────────────
@@ -447,20 +458,18 @@ export class SetupAgent {
       {
         name: "identify_machine_from_photo",
         description:
-          "Takes a base64-encoded photo of a machine and calls Gemini Vision to identify it. " +
-          "Returns the machine make, model, type, suggested adapter type, and confidence score.",
+          "Sends a photo of a machine to the gateway's identification route. " +
+          "If the gateway identifies it, returns identified: true with make, model and confidence, " +
+          "plus suggestedAdapterType (octoprint, modbus, opcua, sila or opentrons) when the machine maps to one of those. " +
+          "The suggestion is for the operator to confirm. " +
+          "Otherwise returns identified: false with a reason, plus the HTTP status when the gateway replied.",
         parameters: {
           imageBase64: {
             type: "string",
-            description: "Base64-encoded image data (JPEG or PNG). Can include data URI prefix.",
+            description: "The photo, base64-encoded. Send it as a data URI (data:image/png;base64,...) so the gateway can tell its image type; without the prefix the gateway treats it as JPEG.",
           },
         },
-        execute: async (params) => {
-          const imageBase64 = String(params.imageBase64 ?? "");
-          // Strip data URI prefix if present
-          const base64Data = imageBase64.replace(/^data:image\/[^;]+;base64,/, "");
-          return this.identifyMachineFromPhoto(base64Data);
-        },
+        execute: async (params) => this.identifyMachineFromPhoto(String(params.imageBase64 ?? "")),
       },
 
       {

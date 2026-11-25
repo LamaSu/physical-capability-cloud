@@ -72,7 +72,7 @@
       "adapterType": "sensor",
       "protocol": "modbus",
       "connectionString": "http://192.168.1.101:502",
-      "deviceType": "sensor",
+      "deviceType": "power_monitor",
       "firmwareVersion": "Schneider-PM5xxx-1.0.0",
       "pollIntervalMs": 1000,
       "generateMockMode": true,
@@ -135,27 +135,16 @@
       "profileName": "Haas VF-2 CNC Mill",
       "capabilityType": "cnc-3axis",
       "adapterId": "dev-haas-vf2",
-      "paramOverrides": {
-        "material": {
-          "key": "material",
-          "label": "Material",
-          "type": "enum",
-          "options": [
-            { "value": "aluminum-6061", "label": "Aluminum 6061" },
-            { "value": "aluminum-7075", "label": "Aluminum 7075" },
-            { "value": "steel-1018", "label": "Steel 1018" },
-            { "value": "stainless-304", "label": "Stainless 304" },
-            { "value": "brass", "label": "Brass" },
-            { "value": "delrin", "label": "Delrin" }
-          ],
-          "defaultValue": "aluminum-6061",
-          "required": true
+      "paramOverrides": [
+        {
+          "paramKey": "material",
+          "restrictTo": ["aluminum-6061", "aluminum-7075", "steel-1018", "stainless-304", "brass", "delrin"],
+          "overrideDefault": "aluminum-6061"
         }
-      },
+      ],
       "pricingOverrides": {
-        "baseCost": "30.00",
-        "perMinute": "1.75",
-        "minimum": "60.00"
+        "basePrice": "30.00",
+        "currency": "USDC"
       }
     }
   ]

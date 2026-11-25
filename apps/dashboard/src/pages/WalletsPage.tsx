@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { ConnectWallet, SignInAgainButton } from "../components/ConnectWallet.js";
-import { useAuth } from "../hooks/use-auth.js";
+import { WalletPageSignInAgain } from "../components/WalletPageSignInAgain.js";
+export { WalletPageSignInAgain } from "../components/WalletPageSignInAgain.js";
 import { listWallets, unlinkWallet, walletLinkSignInRemedy, walletsErrorMessage } from "../lib/wallet-link-api.js";
 import { onIdentityChange, useAuthStore } from "../stores/auth-store.js";
 
@@ -14,28 +14,6 @@ type ReadState =
 const BUTTON = "rounded-lg border border-white/20 px-5 py-3 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-40";
 const SIGN_IN_CHANGED = "Your sign-in changed, so nothing was unlinked. The list now shows this sign-in's wallets.";
 const UNKNOWN_UNLINK = "PCC did not confirm the unlink. Reload this page to see whether it is still linked.";
-
-export function WalletPageSignInAgain({ attempted, pagePending, failedBeforeMint, signIn }: {
-  attempted: boolean;
-  pagePending: boolean;
-  failedBeforeMint: boolean;
-  signIn: (login: () => Promise<void>) => Promise<void>;
-}) {
-  const { address, isConnected, error, authNotice, isVerifying, login } = useAuth();
-  const guardedLogin = () => signIn(login);
-  return (
-    <div className="space-y-3">
-      {!isConnected || !address ? (
-        <>
-          <p>Connect your wallet to sign in again.</p>
-          <ConnectWallet showNotice={false} />
-        </>
-      ) : <SignInAgainButton login={guardedLogin} isVerifying={pagePending || isVerifying} />}
-      {attempted && error !== null && <p role="alert">{error}</p>}
-      {attempted && !pagePending && !failedBeforeMint && authNotice !== null && !useAuthStore.getState().isAuthenticated && <p role="status">{authNotice}</p>}
-    </div>
-  );
-}
 
 export function WalletsPage() {
   const sessionToken = useAuthStore((s) => s.sessionToken);

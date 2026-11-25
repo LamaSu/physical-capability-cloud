@@ -26,7 +26,7 @@ export function toEnvVar(str: string): string {
 
 const RESERVED_CLASS_NAMES = new Set([
   "Array", "Buffer", "Date", "Error", "EvidenceEmitter", "EvidenceEvent", "EvidenceSource", "JSON", "JobRunner",
-  "MachineCommand", "MachineCommandResult", "MachineStatus", "Math", "Number", "Omit", "Promise", "Record",
+  "KernelAgent", "MachineCommand", "MachineCommandResult", "MachineStatus", "Math", "MessageBus", "Number", "Omit", "Promise", "Record",
   "Response", "ReturnType", "String", "TextEncoder", "Uint8Array",
 ]);
 const RESERVED_VARIABLE_NAMES = new Set([
@@ -36,6 +36,7 @@ const RESERVED_VARIABLE_NAMES = new Set([
   "implements", "interface", "let", "package", "private", "protected", "public", "static", "arguments", "eval",
   "EvidenceEmitter", "JobRunner", "capabilities", "console", "evidenceEmitter", "jobRunner", "process",
 ]);
+const AGENT_VARIABLE_NAMES = new Set(["KernelAgent", "MessageBus", "bus", "kernelAgent", "profiles"]);
 const WINDOWS_DEVICE_NAMES = new Set([
   "con", "prn", "aux", "nul", "com0", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
   "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
@@ -46,9 +47,13 @@ const API_KEY_STEMS = new Set([
   "GOOGLE", "GROQ", "INSFORGE", "LIT", "LOB", "MISTRAL", "OPENAI", "OPENROUTER", "PCC", "PCC_DECOMPOSE", "PCC_REVOKE", "PCC_SMITHERY",
   "POSTHOG", "POSTHOG_PERSONAL", "RESEND", "XAI", "YELLOWCARD",
 ]);
+// Stems of _URL variables that packages the generated agent depends on already read.
+const URL_STEMS = new Set(["ANTHROPIC_BASE", "EDITOR", "LIT_API", "NATS", "UNBROWSE"]);
 const CLASS_NAME = /^[A-Z][A-Za-z0-9]{0,63}$/;
 const ADAPTER_ID = /^[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*$/;
 const ENV_VAR_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// Matches 64 or 128 hex digits with an optional 0x prefix.
+const PRIVATE_KEY_SHAPE = /^(0x)?([0-9a-fA-F]{64}|[0-9a-fA-F]{128})$/;
 
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" ? value as Record<string, unknown> : {};
@@ -83,6 +88,9 @@ export function scaffoldRuleProblems(config: OnboardConfig): Array<{ name: strin
     && kernel.walletPrivateKeyEnvVar !== undefined && kernel.walletPrivateKeyEnvVar !== null
     && (typeof kernel.walletPrivateKeyEnvVar !== "string" || !ENV_VAR_NAME.test(kernel.walletPrivateKeyEnvVar))) {
     add("kernel.walletPrivateKeyEnvVar", 'is not an environment variable name (a letter or "_", then letters, digits or "_"); the scaffold writes it as a key of .env.example');
+  } else if (typeof kernel.walletPrivateKeyEnvVar === "string" && PRIVATE_KEY_SHAPE.test(kernel.walletPrivateKeyEnvVar)
+    && !/[\r\n\u2028\u2029]/.test(kernel.walletPrivateKeyEnvVar)) {
+    add("kernel.walletPrivateKeyEnvVar", "looks like a private key, not an environment variable name; keep the key in your environment and put the variable's name here");
   }
   line("kernel.gatewayUrl", kernel.gatewayUrl);
   const reservedEnvNames = new Set(["GATEWAY_URL", "MOCK_MODE"]);
@@ -101,12 +109,16 @@ export function scaffoldRuleProblems(config: OnboardConfig): Array<{ name: strin
       const envClash = [`${env}_URL`, `${env}_API_KEY`].find(name => reservedEnvNames.has(name));
       if (RESERVED_VARIABLE_NAMES.has(variable)) {
         add(`${prefix}.adapterId`, `${display(id)} makes the variable ${variable}, a name the generated kernel.ts already uses or JavaScript reserves`);
+      } else if (AGENT_VARIABLE_NAMES.has(variable)) {
+        add(`${prefix}.adapterId`, `${display(id)} makes the variable ${variable}, a name the generated agent.ts already uses`);
       } else if (otherClass) {
         add(`${prefix}.adapterId`, `${display(id)} makes the variable ${variable}, which is the class name of adapter[${text(otherClass.adapterId)}]`);
       } else if (envClash) {
         add(`${prefix}.adapterId`, `${display(id)} makes the environment variable ${envClash}, which .env.example already defines`);
       } else if (API_KEY_STEMS.has(env)) {
         add(`${prefix}.adapterId`, `${display(id)} makes the environment variable ${env}_API_KEY, which other software already reads as its API key; choose another adapter id`);
+      } else if (URL_STEMS.has(env)) {
+        add(`${prefix}.adapterId`, `${display(id)} makes the environment variable ${env}_URL, which a package the generated agent depends on already reads; choose another adapter id`);
       } else if (variables.has(variable)) {
         add(`${prefix}.adapterId`, `${display(id)} makes the variable ${variable}, which adapter[${variables.get(variable)}] also makes`);
       } else if (envNames.has(env)) {

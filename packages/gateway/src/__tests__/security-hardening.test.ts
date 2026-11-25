@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance } from "fastify";
 import { JSDOM } from "jsdom";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { base, baseSepolia } from "viem/chains";
 import { INLINE_SCRIPT_HTML_PATHS, securityHeaders } from "../middleware/security-hardening.js";
 
 let app: FastifyInstance;
@@ -37,6 +38,15 @@ describe("security headers on isolated routes", () => {
   afterEach(async () => {
     await app.close();
     vi.unstubAllEnvs();
+  });
+
+  it.each(["/fund/job-1", "/index.html", "/api/health"])("C21: permits only the funding RPC on %s", async (url) => {
+    const response = await app.inject({ method: "GET", url });
+    const csp = String(response.headers["content-security-policy"]);
+    const connect = csp.split(/;\s*/).filter((directive) => directive.startsWith("connect-src "));
+    expect(connect).toEqual(["connect-src 'self' https://capability.network https://*.posthog.com https://*.sentry.io wss://capability.network "
+      + new URL(baseSepolia.rpcUrls.default.http[0]).origin]);
+    expect(csp).not.toContain(new URL(base.rpcUrls.default.http[0]).origin);
   });
 
   async function scriptSource(url: string): Promise<string> {

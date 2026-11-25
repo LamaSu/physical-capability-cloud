@@ -19,6 +19,7 @@ import type { RegistrationRow } from "@pcc/store";
 // Default OFF: today's behavior (cross-tenant read of public-discovery rows).
 // When ON: buyer-alpha's request scopes to alpha-tenant rows + null-tenant
 // (public discovery). See packages/gateway/src/config/tenant-enforce.ts.
+import { inCallerTenant, registrationAccess } from "./onboard.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 
 // ── Public sanitisation ─────────────────────────────────────────────────
@@ -35,7 +36,8 @@ function toPublicOperator(r: RegistrationRow) {
     category: r.category,
     manufacturer: r.manufacturer,
     model: r.model,
-    description: r.description ?? null,
+    description: ["PROVED: ", "REJECTED: ", "DELETED at "].some((prefix) => r.description?.startsWith(prefix))
+      ? null : r.description ?? null,
     photos: Array.isArray(r.photos) ? r.photos : [],
     capabilities: Array.isArray(r.capabilities)
       ? r.capabilities.map((c: any) => ({
@@ -86,7 +88,10 @@ export async function operatorsPublicRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const repos = getRepos();
       const reg = repos.registrations.findById(req.params.id);
-      if (!reg) return reply.status(404).send({ error: "not_found" });
+      if (!reg || !inCallerTenant(req, reg)) return reply.status(404).send({ error: "not_found" });
+      if (registrationAccess(req, reg, "read") === "none") {
+        return reply.status(403).send({ error: "forbidden", message: "You can only read your own registration's discoverability" });
+      }
 
       const matchLog = listMatchQueriesForOperator(reg.id);
 

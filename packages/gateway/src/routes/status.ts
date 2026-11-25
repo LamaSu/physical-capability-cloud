@@ -4,7 +4,7 @@
  * GET /api/status/live       → JSON map of every verification/storage/crypto service
  *                              with its current operating mode and configuration.
  * GET /api/status/integrations → Integration telemetry for all connected services
- * GET /api/telemetry/system  → Comprehensive system telemetry aggregator (all subsystems)
+ * GET /api/telemetry/system  → Admins only; 403 before any read, everyone 403 under TENANT_ENFORCE.
  */
 
 import type { FastifyInstance } from "fastify";
@@ -15,6 +15,8 @@ import { locationVisibilityOf, publicLocation } from "../facades/populators/publ
 import { isAgentBridgeReady, getConversations, getRecentMessages } from "../agent-bridge.js";
 import { litEncryptionService } from "../services.js";
 import { auditService } from "../services/audit-service.js";
+import { isTenantEnforceOn } from "../config/tenant-enforce.js";
+import { isAdminCaller } from "../auth/admin-caller.js";
 
 export async function statusRoutes(app: FastifyInstance) {
   const kernelFacade = getKernelFacade();
@@ -63,10 +65,12 @@ export async function statusRoutes(app: FastifyInstance) {
   });
 
   // ---------------------------------------------------------------------------
-  // GET /api/telemetry/system — raw DB state dump, no fake numbers, no summaries
+  // GET /api/telemetry/system — admins only; 403 before any read.
+  // Under TENANT_ENFORCE every caller receives 403, admins included.
   // ---------------------------------------------------------------------------
 
-  app.get("/api/telemetry/system", async () => {
+  app.get("/api/telemetry/system", async (req, reply) => {
+    if (isTenantEnforceOn() || !isAdminCaller(req)) return reply.code(403).send({ error: "forbidden" });
     const startedAt = process.hrtime.bigint();
 
     let kernels: unknown[] = [];

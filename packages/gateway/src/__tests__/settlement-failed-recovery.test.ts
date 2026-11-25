@@ -24,6 +24,7 @@ import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { negotiationRoutes } from "../routes/negotiation.js";
 import { initStore, closeStore, getStore, getRepos } from "../db.js";
 import { schema, eq } from "@pcc/store";
+import { generatePrivateKey } from "viem/accounts";
 
 const { negotiationSessions } = schema;
 
@@ -267,6 +268,118 @@ describe("settlement_failed session — status transition + safe recovery", () =
     expect(res.statusCode).toBe(409);
     expect(res.json().error).toBe("settlement_unrecoverable_ambiguous");
     // Refused — no mint, session stays settlement_failed for manual resolution / cancel.
+    expect(escrowCount()).toBe(base);
+    expect(sessionRow(id)!.status).toBe("settlement_failed");
+  });
+
+  it("a real-settlement commit failure with the gateway key set is classed ambiguous, and its retry fails closed", async () => {
+    const id = await toReview(app, "key-set-failure");
+    const base = escrowCount();
+    vi.stubEnv("MOCK_SETTLEMENT", "false");
+    vi.stubEnv("PCC_GATEWAY_PRIVATE_KEY", generatePrivateKey());
+    vi.stubEnv("PCC_NETWORK", "no-such-network");
+
+    try {
+      const res = await commit(app, id);
+      expect(res.statusCode).toBe(502);
+      expect(res.json().error).toBe("settlement_failed");
+      expect(res.json().message).toContain("Unknown network: no-such-network");
+      const failure = (sessionRow(id)!.transitions as any[])
+        .filter((t) => t.to === "settlement_failed").at(-1);
+      expect(failure?.reason).toBe("settlement_failed:onchain_maybe_minted");
+      const retried = await retry(app, id);
+      expect(retried.statusCode).toBe(409);
+      expect(retried.json().error).toBe("settlement_unrecoverable_ambiguous");
+      expect(escrowCount()).toBe(base);
+      expect(sessionRow(id)!.status).toBe("settlement_failed");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("a retry that fails with the gateway key set is classed ambiguous, and the next retry fails closed", async () => {
+    const id = await toSettlementFailed(app, "key-set-retry-failure");
+    const initialFailure = (sessionRow(id)!.transitions as any[])
+      .filter((t) => t.to === "settlement_failed").at(-1);
+    expect(initialFailure?.reason).toBe("settlement_failed:preflight_no_escrow");
+    const base = escrowCount();
+
+    const stillBroken = await retry(app, id);
+    expect(stillBroken.statusCode).toBe(502);
+    const preflightFailure = (sessionRow(id)!.transitions as any[])
+      .filter((t) => t.to === "settlement_failed").at(-1);
+    expect(preflightFailure?.reason).toBe("settlement_failed:preflight_no_escrow");
+    expect((sessionRow(id)!.transitions as any[])
+      .filter((t) => t.to === "settlement_failed")).toHaveLength(2);
+    expect((sessionRow(id)!.transitions as any[]).at(-1)?.to).toBe("settlement_failed");
+
+    vi.stubEnv("MOCK_SETTLEMENT", "false");
+    vi.stubEnv("PCC_GATEWAY_PRIVATE_KEY", generatePrivateKey());
+    vi.stubEnv("PCC_NETWORK", "no-such-network");
+
+    try {
+      const res = await retry(app, id);
+      expect(res.statusCode).toBe(502);
+      expect(res.json().error).toBe("settlement_failed");
+      expect(res.json().message).toContain("Unknown network: no-such-network");
+      const failure = (sessionRow(id)!.transitions as any[])
+        .filter((t) => t.to === "settlement_failed").at(-1);
+      expect(failure?.reason).toBe("settlement_failed:onchain_maybe_minted");
+      const retried = await retry(app, id);
+      expect(retried.statusCode).toBe(409);
+      expect(retried.json().error).toBe("settlement_unrecoverable_ambiguous");
+      expect(escrowCount()).toBe(base);
+      expect(sessionRow(id)!.status).toBe("settlement_failed");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  for (const [label, userAgentId, removeMarkers] of [
+    ["a reason no writer stores", "unknown-failure-reason", false],
+    ["no settlement_failed marker", "no-failure-marker", true],
+  ] as const) {
+    it(`a real-mode retry fails closed when the latest failure has ${label}`, async () => {
+      const id = await toSettlementFailed(app, userAgentId);
+      const base = escrowCount();
+      const row = sessionRow(id)!;
+      const transitions = removeMarkers
+        ? (row.transitions as any[]).filter((t) => t.to !== "settlement_failed")
+        : (row.transitions as any[]).map((t) => t.to === "settlement_failed"
+          ? { ...t, reason: "settlement_failed:unclassified" }
+          : t);
+      getStore().db.update(negotiationSessions)
+        .set({ transitions: transitions as any })
+        .where(eq(negotiationSessions.id, id)).run();
+
+      process.env.MOCK_SETTLEMENT = "false";
+      const res = await retry(app, id);
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toBe("settlement_unrecoverable_ambiguous");
+      expect(escrowCount()).toBe(base);
+      expect(sessionRow(id)!.status).toBe("settlement_failed");
+    });
+  }
+
+  it("a real-mode retry fails closed when an unknown-class failure is newer than a pre-flight one", async () => {
+    const id = await toSettlementFailed(app, "newer-unknown-marker");
+    const base = escrowCount();
+    const row = sessionRow(id)!;
+    const transitions = [...(row.transitions as any[]), {
+      from: "committed",
+      to: "settlement_failed",
+      actor: "system",
+      timestamp: new Date().toISOString(),
+      reason: "settlement_failed:preflight_no_escrow-v2",
+    }];
+    getStore().db.update(negotiationSessions)
+      .set({ transitions: transitions as any })
+      .where(eq(negotiationSessions.id, id)).run();
+
+    process.env.MOCK_SETTLEMENT = "false";
+    const res = await retry(app, id);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("settlement_unrecoverable_ambiguous");
     expect(escrowCount()).toBe(base);
     expect(sessionRow(id)!.status).toBe("settlement_failed");
   });

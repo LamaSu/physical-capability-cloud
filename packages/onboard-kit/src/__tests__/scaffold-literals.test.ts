@@ -21,7 +21,7 @@ const CRAFTED2 = 'x\\", extra: (globalThis.__N303 = 2), y: \\"';
 const POLL = "1); (globalThis.__N303 = 1); (0";
 const CLASS_NAMES = [
   "Array", "Buffer", "Date", "Error", "EvidenceEmitter", "EvidenceEvent", "EvidenceSource", "JSON", "JobRunner",
-  "MachineCommand", "MachineCommandResult", "MachineStatus", "Math", "Number", "Omit", "Promise", "Record",
+  "KernelAgent", "MachineCommand", "MachineCommandResult", "MachineStatus", "Math", "MessageBus", "Number", "Omit", "Promise", "Record",
   "Response", "ReturnType", "String", "TextEncoder", "Uint8Array",
 ];
 const VARIABLE_NAMES = [
@@ -31,6 +31,7 @@ const VARIABLE_NAMES = [
   "implements", "interface", "let", "package", "private", "protected", "public", "static", "arguments", "eval",
   "EvidenceEmitter", "JobRunner", "capabilities", "console", "evidenceEmitter", "jobRunner", "process",
 ];
+const AGENT_VARIABLE_NAMES = ["KernelAgent", "MessageBus", "bus", "kernelAgent", "profiles"];
 const WINDOWS_DEVICE_NAMES = [
   "con", "prn", "aux", "nul", "com0", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
   "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
@@ -49,6 +50,7 @@ const r1 = (v: unknown) => `${shown(v)} is not a PascalCase identifier (A-Z, the
 const r2 = (v: unknown) => `${shown(v)} is a name the generated code already uses; choose another class name`;
 const r4 = (v: unknown) => `${shown(v)} is not an adapter id the scaffold can use (a letter, then letters or digits with single "-" or "_" between them, at most 64 characters); the scaffold makes a variable and environment variables from it`;
 const r5variable = (v: string) => `${shown(v)} makes the variable ${camel(v)}, a name the generated kernel.ts already uses or JavaScript reserves`;
+const r5agent = (v: string) => `${shown(v)} makes the variable ${camel(v)}, a name the generated agent.ts already uses`;
 const r5env = (v: string, name: string) => `${shown(v)} makes the environment variable ${name}, which .env.example already defines`;
 const r5api = (v: string) => `${shown(v)} makes the environment variable ${envName(v)}_API_KEY, which other software already reads as its API key; choose another adapter id`;
 const r7 = "contains a line break; the scaffold writes it as one line of .env.example";
@@ -225,7 +227,7 @@ function makeValidConfig(): OnboardConfig {
         adapterType: "sensor",
         protocol: "http",
         connectionString: "http://localhost:9090",
-        deviceType: "sensor",
+        deviceType: "power_monitor",
         firmwareVersion: "Sensor-1.0.0",
       },
     ],
@@ -296,7 +298,7 @@ const PINS = [
       ],
       [
         "src/adapters/shop-power-meter.ts",
-        "c7735c93ac12741c4c9cd618aaecf1d0493e60dbe27660c3fdd0963ad22b08f0"
+        "dc0fcf3de016814d15f01fecb4c9acba1ae022be5f384e117929985c306a169c"
       ],
       [
         "src/adapters/qc-camera.ts",
@@ -304,7 +306,7 @@ const PINS = [
       ],
       [
         "src/capabilities.ts",
-        "d0fd68a08af61805cc75c37a81f3ceb0629b3c914147272c27738c301472a97f"
+        "1f19c7b953e30879da02bb7cd8fdc3612d2a6edc82eca205e0fe160b3c60d409"
       ],
       [
         "src/kernel.ts",
@@ -312,7 +314,7 @@ const PINS = [
       ],
       [
         "src/agent.ts",
-        "82cac4a8f3d4be9db774523c9acfaffd8c9cd6d3a6625e9d4e18a0fa5a725662"
+        "8c67932723abfa0a1d009ebed86a53b34686227002a53d1fd12b49a72c9d9dcf"
       ],
       [
         ".env.example",
@@ -320,15 +322,15 @@ const PINS = [
       ],
       [
         "src/profiles.ts",
-        "e3d662a87e52a2a97663cfb8ba3480ff287fb736fbc27e420ae87119ad0a8f3d"
+        "dae60f751302cfca0ceef921e2f403a64492b7be7ff1728f09384d2d762f1248"
       ],
       [
         "src/__tests__/adapters.test.ts",
         "b9559e1f12b7c79aaafb27a074672404e7426660c6ab9b9dd84250a46e42f9ba"
       ]
     ],
-    "scaffold": "1873cb270f3c5b5ade8092c0b848c7067fd1b8a5b949545f6797262ce5dddd2c",
-    "validate": "a753f02e3272427ccd7734b6c75d296948d64c016fe62681f0a28d11d997ed4d"
+    "scaffold": "5244e9e64e12fe1e7d03f8045283d091b6cdb7d1c1fe54b943cd85a2f5398256",
+    "validate": "84b21aa239db38bd7c1a5d2b13a917f7450400dcdf81aa44b13dacae3b1d6eac"
   },
   {
     "files": [
@@ -346,11 +348,11 @@ const PINS = [
       ],
       [
         "src/adapters/test-sensor.ts",
-        "e009eae7087bf0cf9e3bdb1d81185948bd3b6b191ea168653dcb3570fd572e96"
+        "50ab587382d041ae5572fef24ce3473939d6993db4e2c46ebfdc9cbe65384a21"
       ],
       [
         "src/capabilities.ts",
-        "276ba6b6f3ac3b2579856ba8ad53242978f8574f6d11f04b60e18441f0295c5c"
+        "4b6c4051d9e6eb089b76ff2d8c82ef2a2f86e8141fade718f36b7e772102d6f0"
       ],
       [
         "src/kernel.ts",
@@ -358,7 +360,7 @@ const PINS = [
       ],
       [
         "src/agent.ts",
-        "0e3a45ddace1406799c97458d3bba51287df50ed38ddf1fc5b0687920cde17b9"
+        "d6ed02af0e7517d8ab3af376b748e32bd38dbe1acf62221b25c471b5314df8eb"
       ],
       [
         ".env.example",
@@ -369,8 +371,8 @@ const PINS = [
         "94c55fb9f6fbf0b8f2c2d66f583c66bc26ec5bd74e3cce4c7687f8f36518aec1"
       ]
     ],
-    "scaffold": "2d57bdf03f11b285be04fa1e3478c2d0c29e76bfc8ae0f3fe4901048ffdd1bf0",
-    "validate": "28e6ab06ee92daafbef35b8727d7b0284059f9c5f8bd1ad52801d3a8007aeb73"
+    "scaffold": "8b11ccc4f1ba9c7ef838b738f84d158aaf6315a6efbc726b64598370e413877f",
+    "validate": "3d4ff39c6470efdd1f840bc0531bb48f92f4f924330acfa4085b123381024595"
   },
   {
     "files": [
@@ -388,7 +390,7 @@ const PINS = [
       ],
       [
         "src/capabilities.ts",
-        "4705b4f84f17daab8f0a68ed31207426e3bffbc07180aad8deef20b2dc8bad00"
+        "50f6a64aaa1bf7a77606c6f61d2c9f95fbba23731db6b2b75fa616fc0e1caa4a"
       ],
       [
         "src/kernel.ts",
@@ -396,7 +398,7 @@ const PINS = [
       ],
       [
         "src/agent.ts",
-        "f664612e2ee0e37636fd83244aea9a2b1c211c7f9f23bba60db84da194608c66"
+        "a346a3d9b43d76eecbce62bf4dc1a08acf5298c6bb10a7216ff36d21b5c1c5c8"
       ],
       [
         ".env.example",
@@ -407,7 +409,7 @@ const PINS = [
         "678d506a5aad6fd913bf4ee0a68d296f239583699f54a46041e1f47bd5a7d7ed"
       ]
     ],
-    "scaffold": "3d7a6f1b0f57253127bfb1d43021ea9f9d78def061c007a196dadc081c20f0c6",
+    "scaffold": "42f4c3cc60615c5e19c1ddccfbe3e4ba6827d67ac59d187b228dc3f25efea54b",
     "validate": "9ec827ddd8d466e3249c0be24fe783c7d0f68461822210f11c4bbddbcc72ada2"
   },
   {
@@ -426,7 +428,7 @@ const PINS = [
       ],
       [
         "src/capabilities.ts",
-        "f17ba04b0e81275dcfe9664fbfd1a1ba551cadc56d286272e956bb9df5e5b07a"
+        "54336c5fa6847045b0f8118e7ec23d068d5c195d09f5febd46d279bf980ffec3"
       ],
       [
         "src/kernel.ts",
@@ -434,7 +436,7 @@ const PINS = [
       ],
       [
         "src/agent.ts",
-        "f664612e2ee0e37636fd83244aea9a2b1c211c7f9f23bba60db84da194608c66"
+        "fd6081eb71d52697cf08ff44875cbf9b8f5b975dee7455c2492c52f89ccd7968"
       ],
       [
         ".env.example",
@@ -445,7 +447,7 @@ const PINS = [
         "07b3f348e9fce0352c4bca1774f22e7a3a8c8cf65b2baf59d487597556fe73c9"
       ]
     ],
-    "scaffold": "654e4c8237ec7179d58cb49be3ae2ab56e7d62a4deed1f6f03cf8273381af8f4",
+    "scaffold": "6cad02e91b1e2d20661919413c9265acedcdc8e3d5b66d45d6ffbd3556f16f77",
     "validate": "0fcc2b524c3fccd4b255cfc448c548294ed9ec0340d6b3393940b6acf18f7c3a"
   },
   {
@@ -460,7 +462,7 @@ const PINS = [
       ],
       [
         "src/adapters/q-sensor.ts",
-        "dfbfc5146f34b282d2584a1af4718f58d766b0283d5224de582852cb9bc2861d"
+        "1fd630b274397ef52a74a83b4fd919957ba6533467a79eb0c4e5496a87b05f39"
       ],
       [
         "src/capabilities.ts",
@@ -472,7 +474,7 @@ const PINS = [
       ],
       [
         "src/agent.ts",
-        "ad153a91663f9ca8353036ba99d32f96b9a5edd79328f76a11023500c553e7a5"
+        "88ce6ab4d4834241f514fbe08d86d4921e9a8fee9c77ca5f71c25f9fa6a18afd"
       ],
       [
         ".env.example",
@@ -483,8 +485,8 @@ const PINS = [
         "42794155a59877959c140673303cf0beb159af4c4c7de4537f57369d841b8a7f"
       ]
     ],
-    "scaffold": "7cf0777f0b27fb54fd4b03c145a607af8c8c5c5e8a191bd452b24ca44821e73f",
-    "validate": "27982cc03d8ccf42262bcdeb67a4ea446e8b04aa243006c37ec111daa4a515b5"
+    "scaffold": "40bd492948b21c561ab32d787b893080df987f7a4a6b6acad7895e2bb7fd0d63",
+    "validate": "1446df05a682a2ef5467fb35861ab16dfd9fcd555897316358020b2757e033b7"
   }
 ];
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -496,7 +498,13 @@ describe("N303 scaffold literals and identifier rules", () => {
     for (const f of scaffold({ config }).files.filter(f => f.path.endsWith(".ts"))) parse(f.content, f.path);
     inspect(content(config, "src/capabilities.ts"), QUOTED);
     expect((await importCapabilities(config))[0].name).toBe(QUOTED);
-    expect(diagnostics(config)).toEqual(diagnostics(example()));
+    expect(diagnostics(config)).toEqual([]);
+  }, 30000);
+  it("A2 the example's generated project type-checks with no errors", () => {
+    expect(diagnostics(example())).toEqual([]);
+  }, 30000);
+  it("A2b a capability with no work envelope type-checks with no errors", () => {
+    expect(diagnostics(machineConfig())).toEqual([]);
   }, 30000);
   it("SL1b control characters stay one literal", () => {
     const config = example(); config.capabilities[0].name = CONTROL;
@@ -504,7 +512,9 @@ describe("N303 scaffold literals and identifier rules", () => {
   });
   it("SL2 capability name preserves text and object keys on import", async () => {
     const keys = Object.keys((await importCapabilities(example()))[0]).sort();
-    expect(keys).toHaveLength(12);
+    expect(keys).toHaveLength(13);
+    expect(keys).toContain("envelope");
+    expect(keys).toContain("availability");
     for (const name of [CRAFTED, CRAFTED2]) {
       const config = example(); config.capabilities[0].name = name;
       const caps = await importCapabilities(config);
@@ -527,6 +537,7 @@ describe("N303 scaffold literals and identifier rules", () => {
     ["A9", "stop path", machinePath, c => { c.adapters[0].endpoints!.find(e => e.purpose === "stop")!.path = H; }],
     ["S1", "sensor kernel id", "src/adapters/shop-power-meter.ts", c => { c.kernel.kernelId = H; }],
     ["S2", "sensor firmware", "src/adapters/shop-power-meter.ts", c => { c.adapters[1].firmwareVersion = H; }],
+    ["S3", "sensor device type", "src/adapters/shop-power-meter.ts", c => { c.adapters[1].deviceType = H; }],
     ["C1", "camera kernel id", "src/adapters/qc-camera.ts", c => { c.kernel.kernelId = H; }],
     ["C2", "camera firmware", "src/adapters/qc-camera.ts", c => { c.adapters[2].firmwareVersion = H; }],
     ["P1", "capabilities kernel id", "src/capabilities.ts", c => { c.kernel.kernelId = H; }],
@@ -643,7 +654,7 @@ describe("N303 scaffold literals and identifier rules", () => {
   it("SL6d class name list covers the generated declarations and globals", () => {
     for (const config of [example(), fdmExample()]) {
       const own = new Set(config.adapters.flatMap(a => [a.className, `${a.className}Config`]));
-      for (const f of scaffold({ config }).files.filter(f => f.path.startsWith("src/adapters/") || f.path === "src/kernel.ts" || f.path === "src/__tests__/adapters.test.ts")) {
+      for (const f of scaffold({ config }).files.filter(f => f.path.startsWith("src/adapters/") || f.path === "src/kernel.ts" || f.path === "src/agent.ts" || f.path === "src/__tests__/adapters.test.ts")) {
         for (const name of moduleOrFreeNames(f.content)) {
           if (/^[A-Z][A-Za-z0-9]*$/.test(name) && !own.has(name)) expect(CLASS_NAMES, `${f.path}: ${name}`).toContain(name);
         }
@@ -703,8 +714,11 @@ describe("N303 scaffold literals and identifier rules", () => {
   it("SL7f variable name list covers the generated kernel declarations and globals", () => {
     for (const config of [example(), fdmExample()]) {
       const own = new Set(config.adapters.flatMap(a => [a.className, camel(a.adapterId)]));
-      for (const name of moduleOrFreeNames(content(config, "src/kernel.ts"))) {
-        if (/^[A-Za-z][A-Za-z0-9]*$/.test(name) && !own.has(name)) expect(VARIABLE_NAMES, name).toContain(name);
+      for (const path of ["src/kernel.ts", "src/agent.ts"]) {
+        const names = path === "src/agent.ts" ? [...VARIABLE_NAMES, ...AGENT_VARIABLE_NAMES] : VARIABLE_NAMES;
+        for (const name of moduleOrFreeNames(content(config, path))) {
+          if (/^[A-Za-z][A-Za-z0-9]*$/.test(name) && !own.has(name)) expect(names, `${path}: ${name}`).toContain(name);
+        }
       }
     }
   });
@@ -718,6 +732,12 @@ describe("N303 scaffold literals and identifier rules", () => {
     for (const id of ["openai-sim", "pcc-node", "ot2", "trilobio", "clip", "lit-sensor"]) {
       const config = sensorConfig(); config.adapters[0].adapterId = id;
       expect(fieldErrors(config, "adapterId"), id).toEqual([]);
+    }
+  });
+  it("SL7h adapter variables differ from names the generated agent.ts uses", () => {
+    for (const id of AGENT_VARIABLE_NAMES) {
+      const config = sensorConfig(); config.adapters[0].adapterId = id;
+      refusal(config, `adapter[${id}].adapterId`, r5agent(id));
     }
   });
   it("SL8a CLI reports the class name rule before writing files", () => {
@@ -750,4 +770,86 @@ describe("N303 scaffold literals and identifier rules", () => {
       expect(hash(validate({ config }).summary)).toBe(PINS[index].validate);
     });
   }
+  it("SL10a envelope", async () => {
+    const cap = (await importCapabilities(example()))[0];
+    expect(cap.envelope).toEqual({ x: 762, y: 406, z: 508, unit: "mm" });
+    expect(Object.hasOwn(cap, "workEnvelope")).toBe(false);
+    const inch = example(); inch.capabilities[0].workEnvelope!.unit = "inch";
+    expect(((await importCapabilities(inch))[0].envelope as { unit: string }).unit).toBe("in");
+    const without = (await importCapabilities(machineConfig()))[0];
+    expect(Object.hasOwn(without, "envelope")).toBe(false);
+    expect(Object.hasOwn(without, "workEnvelope")).toBe(false);
+  });
+  it("SL10b availability", async () => {
+    const config = example();
+    const availability = { timezone: "UTC", windows: {
+      0: [{ start: "00:00", end: "23:59" }],
+      1: [{ start: "00:00", end: "23:59" }],
+      2: [{ start: "00:00", end: "23:59" }],
+      3: [{ start: "00:00", end: "23:59" }],
+      4: [{ start: "00:00", end: "23:59" }],
+      5: [{ start: "00:00", end: "23:59" }],
+      6: [{ start: "00:00", end: "23:59" }],
+    } };
+    for (const cap of await importCapabilities(config)) expect(cap.availability).toEqual(availability);
+    expect(content(config, "src/capabilities.ts").split("    // Every day, 00:00-23:59 UTC. Change this schedule to your own hours.").length - 1).toBe(config.capabilities.length);
+  });
+  it("SL10c profiles", async () => {
+    const config = example();
+    expect(content(config, "src/profiles.ts").startsWith('import type { MachineProfile } from "@pcc/spec";\n\nexport const profiles: MachineProfile[] = [\n')).toBe(true);
+    const dir = writeProject(config);
+    expect((await import(join(dir, "src/profiles.ts"))).profiles).toEqual([{
+      id: "profile-haas-vf2",
+      capabilityType: "cnc-3axis",
+      machineName: "Haas VF-2 CNC Mill",
+      kernelId: config.kernel.kernelId,
+      paramOverrides: [{
+        paramKey: "material",
+        restrictTo: ["aluminum-6061", "aluminum-7075", "steel-1018", "stainless-304", "brass", "delrin"],
+        overrideDefault: "aluminum-6061",
+      }],
+      pricingOverrides: { basePrice: "30.00", currency: "USDC" },
+    }]);
+  });
+  it("SL10d the sensor", () => {
+    const text = content(example(), "src/adapters/shop-power-meter.ts");
+    expect(text.split('      deviceType: "power_monitor",').length - 1).toBe(1);
+    expect(text.split('type: "sensor_data_summary"').length - 1).toBe(1);
+    expect(text).not.toContain("sensor_reading");
+  });
+  it("SL10e the envelope takes only x, y, z and unit", async () => {
+    const config = example();
+    config.capabilities[0].workEnvelope = { ...config.capabilities[0].workEnvelope!, label: "bed" } as any;
+    const cap = (await importCapabilities(config))[0];
+    expect(cap.envelope).toEqual({ x: 762, y: 406, z: 508, unit: "mm" });
+    expect(diagnostics(config)).toEqual([]);
+  }, 30000);
+  it("A6 the agent builds each adapter with kernel.ts's statement", () => {
+    for (const [label, fixture] of fixtures) {
+      const config = fixture();
+      const classes = new Set(config.adapters.map(a => a.className));
+      const statements = (path: string) => parse(content(config, path), path).statements.filter(statement => {
+        if (!ts.isVariableStatement(statement) || statement.declarationList.declarations.length !== 1) return false;
+        const init = statement.declarationList.declarations[0].initializer;
+        return init !== undefined && ts.isNewExpression(init) && ts.isIdentifier(init.expression) && classes.has(init.expression.text);
+      }).map(statement => statement.getText());
+      const agent = statements("src/agent.ts"), kernel = statements("src/kernel.ts");
+      expect(agent, label).toEqual(kernel);
+      expect(agent, label).toHaveLength(config.adapters.length);
+    }
+  });
+  it("A8 the agent's code has no type casts", () => {
+    for (const [label, fixture] of fixtures) {
+      const text = content(fixture(), "src/agent.ts");
+      const sf = parse(text, "src/agent.ts");
+      const casts: ts.Node[] = [];
+      function visit(node: ts.Node): void {
+        if (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) casts.push(node);
+        ts.forEachChild(node, visit);
+      }
+      visit(sf);
+      expect(casts, label).toEqual([]);
+      for (const directive of ["@ts-ignore", "@ts-expect-error", "@ts-nocheck"]) expect(text, label).not.toContain(directive);
+    }
+  });
 });

@@ -204,7 +204,7 @@ export class InconsistentAnchorsError extends Error {
  * Normalise a decoded state to a real enum member, or throw.
  *
  * Accepts `number` and `bigint` (both are legitimate ABI decodings of a uint8)
- * and a purely-numeric `string`. Rejects everything else — notably prototype
+ * and a one-digit `string`. Rejects everything else — notably prototype
  * keys like "toString", which previously slipped through `in` and yielded a
  * DTO with no `phase` at all.
  */
@@ -216,7 +216,7 @@ export function normalizeUnitState(raw: unknown): UnitState {
   } else if (typeof raw === "bigint") {
     if (raw < 0n || raw > 9n) throw new InvalidUnitStateError(raw);
     n = Number(raw);
-  } else if (typeof raw === "string" && /^[0-9]+$/.test(raw)) {
+  } else if (typeof raw === "string" && raw.length === 1 && /^[0-9]$/.test(raw)) {
     n = Number(raw);
   } else {
     throw new InvalidUnitStateError(raw);
