@@ -46,8 +46,8 @@ function stubPhoto(width = 4000, height = 3000, dataUrl = DATA_URL) {
   return { bitmap, decode, ctx, fillStyles, getContext, toDataURL, encodedSizes };
 }
 
-async function pickPhoto() {
-  const file = new File([new Uint8Array(3_000_000)], "photo.jpg", { type: "image/jpeg" });
+async function pickPhoto(size = 3_000_000) {
+  const file = new File([new Uint8Array(size)], "photo.jpg", { type: "image/jpeg" });
   const input = document.getElementById("device-photo") as HTMLInputElement;
   Object.defineProperty(input, "files", { configurable: true, value: [file] });
   input.dispatchEvent(new Event("change", { bubbles: true }));
@@ -128,6 +128,8 @@ describe("/install.html photo sending and status", () => {
     [6000, 1000, 1568, 261],
     [1939, 277, 1568, 224],
     [277, 1939, 224, 1568],
+    [3000, 1000, 1568, 522],
+    [1000, 3000, 522, 1568],
     [100000, 10, 1568, 1],
     [10, 100000, 1, 1568],
   ])("L1b: the page sends a %i × %i photo as a %i × %i JPEG at the edge limit", async (w, h, width, height) => {
@@ -180,13 +182,25 @@ describe("/install.html photo sending and status", () => {
     await expectRefusal(TOO_LARGE);
   });
 
-  it.each(["decode rejection", "null context", "encode throw"] as const)(
+  it("L2: the page scales and sends a photo file over 6 MB instead of refusing it", async () => {
+    stubPhoto(4000, 3000);
+    boot();
+    await pickPhoto(7 * 1024 * 1024);
+
+    const status = document.getElementById("photo-status")!;
+    expect(status.textContent).toMatch(/^✓ photo attached \(/);
+    expect(status.classList.contains("ok")).toBe(true);
+    await pressIdentify();
+    expectPhotoPost(DATA_URL);
+  });
+
+  it.each(["decode rejection", "null context", "thrown encode"] as const)(
     "L3: the page sends nothing and shows an unreadable photo after a %s",
     async (cause) => {
       const photo = stubPhoto();
       if (cause === "decode rejection") photo.decode.mockRejectedValue(new Error("decode failed"));
       if (cause === "null context") photo.getContext.mockReturnValue(null);
-      if (cause === "encode throw") photo.toDataURL.mockImplementation(() => { throw new Error("encode failed"); });
+      if (cause === "thrown encode") photo.toDataURL.mockImplementation(() => { throw new Error("encode failed"); });
       boot();
       await pickPhoto();
 
@@ -194,6 +208,21 @@ describe("/install.html photo sending and status", () => {
       await expectRefusal(UNREADABLE);
     },
   );
+
+  it("L3: the page drops an earlier attached photo, clears the input and sends nothing when the next photo is unreadable", async () => {
+    const photo = stubPhoto();
+    boot();
+    await pickPhoto();
+    expect(document.getElementById("photo-status")!.classList.contains("ok")).toBe(true);
+
+    photo.decode.mockRejectedValue(new Error("decode failed"));
+    const input = document.getElementById("device-photo") as HTMLInputElement;
+    const valueSetter = vi.spyOn(input, "value", "set");
+    await pickPhoto();
+    await expectRefusal(UNREADABLE);
+    expect(valueSetter).toHaveBeenCalledTimes(1);
+    expect(valueSetter).toHaveBeenCalledWith("");
+  });
 
   it.each([
     ["A".repeat(409_600), 300],
@@ -240,6 +269,62 @@ describe("/install.html photo sending and status", () => {
     expect(error.style.display).toBe("");
     expect(error.textContent).toBe("Identification failed: the page stopped waiting after 90 seconds. Try again.");
     expect(document.getElementById("results")!.innerHTML).toBe("");
+    expect(button.textContent).toBe("Identify →");
+    expect(button.disabled).toBe(false);
+  });
+
+  it("L5: after the page stops waiting, it sends the next identify request with a fresh signal and shows that reply", async () => {
+    fetchMock.mockImplementationOnce((_url, options) => new Promise((_resolve, reject) => {
+      options?.signal?.addEventListener("abort", () => {
+        reject(new DOMException("The operation was aborted.", "AbortError"));
+      });
+    }));
+    boot();
+    await pressIdentify("Prusa MK4");
+    const firstSignal = fetchMock.mock.calls[0][1]?.signal;
+    expect(firstSignal).toBeInstanceOf(AbortSignal);
+
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(firstSignal!.aborted).toBe(true);
+    expect(document.getElementById("resolver-err")!.textContent)
+      .toBe("Identification failed: the page stopped waiting after 90 seconds. Try again.");
+
+    fetchMock.mockImplementationOnce((_url, options) => {
+      if (options?.signal?.aborted) {
+        return Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ candidates: [] }) });
+    });
+    await pressIdentify("Prusa MK4");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const secondSignal = fetchMock.mock.calls[1][1]?.signal;
+    expect(secondSignal).toBeInstanceOf(AbortSignal);
+    expect(secondSignal).not.toBe(firstSignal);
+    expect(secondSignal!.aborted).toBe(false);
+    expect(document.getElementById("resolver-err")!.style.display).toBe("none");
+    const button = document.getElementById("identify-btn") as HTMLButtonElement;
+    expect(button.textContent).toBe("Identify →");
+    expect(button.disabled).toBe(false);
+  });
+
+  it("L5: the page shows that it stopped waiting when 90 seconds run out during a 502 reply's body", async () => {
+    fetchMock.mockImplementation(async (_url, options) => ({
+      ok: false,
+      status: 502,
+      json: () => new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener("abort", () => {
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        });
+      }),
+    }));
+    boot();
+    await pressIdentify("Prusa MK4");
+
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(document.getElementById("resolver-err")!.textContent)
+      .toBe("Identification failed: the page stopped waiting after 90 seconds. Try again.");
+    const button = document.getElementById("identify-btn") as HTMLButtonElement;
     expect(button.textContent).toBe("Identify →");
     expect(button.disabled).toBe(false);
   });
