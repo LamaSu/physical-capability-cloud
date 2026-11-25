@@ -237,6 +237,57 @@ export function __resetAnonA2aDiscoverForTest(): void {
   anonA2aDiscoverAttempts.clear();
 }
 
+// Bounds onboarding-chat model calls on PCC's key, per address. Every POST
+// counts, including refused messages. The operator sets the limit and window.
+const onboardChatAttempts = new Map<string, { count: number; windowStart: number }>();
+const ONBOARD_CHAT_LIMIT = 20;
+const ONBOARD_CHAT_WINDOW_MS = 600_000;
+
+export function canOnboardChat(ip: string): boolean {
+  const now = Date.now();
+  const entry = onboardChatAttempts.get(ip);
+  if (!entry || now - entry.windowStart > ONBOARD_CHAT_WINDOW_MS) {
+    onboardChatAttempts.set(ip, { count: 1, windowStart: now });
+    return true;
+  }
+  if (entry.count >= ONBOARD_CHAT_LIMIT) return false;
+  entry.count++;
+  return true;
+}
+
+// Bounds onboarding-chat model calls on PCC's key across all addresses, per
+// process: each gateway process keeps its own count. The operator sets the numbers.
+export const ONBOARD_CHAT_GLOBAL_LIMIT = 60;
+export const ONBOARD_CHAT_GLOBAL_WINDOW_MS = 3_600_000;
+let onboardChatGlobal: { count: number; windowStart: number } | null = null;
+
+export function canOnboardChatGlobally(): boolean {
+  const now = Date.now();
+  if (!onboardChatGlobal || now - onboardChatGlobal.windowStart > ONBOARD_CHAT_GLOBAL_WINDOW_MS) {
+    onboardChatGlobal = { count: 1, windowStart: now };
+    return true;
+  }
+  if (onboardChatGlobal.count >= ONBOARD_CHAT_GLOBAL_LIMIT) return false;
+  onboardChatGlobal.count++;
+  return true;
+}
+
+/** Test hook — clears both chat windows so suites don't bleed into each other. */
+export function __resetOnboardChatForTest(): void {
+  onboardChatAttempts.clear();
+  onboardChatGlobal = null;
+}
+
+// Cleanup stale onboarding-chat entries periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of onboardChatAttempts) {
+    if (now - entry.windowStart > ONBOARD_CHAT_WINDOW_MS) {
+      onboardChatAttempts.delete(ip);
+    }
+  }
+}, 120_000);
+
 // Cleanup stale SIWE entries periodically
 setInterval(() => {
   const now = Date.now();

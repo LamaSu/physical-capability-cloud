@@ -89,7 +89,7 @@ const PUBLIC_READ_PREFIXES: PublicRead[] = [
   // must bypass apiGate here. Mirrors the waitlist admin-token pattern.
   { methods: GET, match: "prefix", path: "/api/admin/feedback", why: "admin feedback export, authenticated by X-Admin-Token in the route" },
   { methods: GET, match: "prefix", path: "/api/onboard/check/", why: "invite-code validation" },
-  { methods: GET, match: "prefix", path: "/api/onboard/chat", why: "onboarding chat health and conversation reads" },
+  { methods: GET, match: "exact", path: "/api/onboard/chat/health", why: "onboarding chat health" },
   { methods: GET, match: "prefix", path: "/api/dht/", why: "DHT discovery (distributed capability queries)" },
   { methods: GET, match: "prefix", path: "/api/marketplace/", why: "marketplace browsing (see what's available)" },
   // apiGate never judges a path outside /api/ (its hook returns first); these

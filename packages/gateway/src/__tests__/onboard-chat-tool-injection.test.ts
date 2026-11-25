@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { initStore, closeStore } from "../db.js";
+import { __resetOnboardChatForTest } from "../middleware/security-hardening.js";
 import { onboardChatRoutes, _resetAgentPackageCache, _resetAnthropicCache } from "../routes/onboard-chat.js";
 import { calleeName, enclosingName, isRuntimeFile, listRepoFiles, parseSource, printNode, resolveBinding, unwrap } from "./helpers/negative-proof-scan.js";
 
@@ -121,6 +122,7 @@ function scanLoopbackTrust(root: string, files: readonly string[]): Finding[] {
 describe("E4a onboard-chat injection carries no credentials", () => {
   let app: FastifyInstance | undefined;
   beforeEach(() => {
+    __resetOnboardChatForTest();
     vi.stubEnv("PCC_DB_PATH", ":memory:");
     vi.stubEnv("DATABASE_URL", ":memory:");
     vi.stubEnv("ANTHROPIC_API_KEY", "fake-sdk-key-no-network");
