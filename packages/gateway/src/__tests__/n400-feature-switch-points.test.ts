@@ -311,3 +311,69 @@ it.each(names)("R3: %s rejects real and text lookalikes of the integer 1", (name
   getStore().db.run(sql`UPDATE feature_switches SET enabled = 1`);
   expect(isFeatureEnabled(name)).toBe(true);
 });
+
+it.each(["true", "false"])("R4: compose execute meets the switch before its body check", async (realCompose) => {
+  vi.stubEnv("PCC_COMPOSE_EXECUTE_REAL", realCompose);
+  setRaw("job_submission", 0);
+  const response = await app.inject({ method: "POST", url: "/api/compose/missing/execute", payload: { idempotencyKey: 7 } });
+  expect(response.statusCode).toBe(409);
+  expect(response.json()).toEqual(refusal("job_submission"));
+});
+
+it("R4: identify-device meets the switch before its rate limit", async () => {
+  const request = () => app.inject({ method: "POST", url: "/api/onboard/identify-device", remoteAddress: "198.51.100.30", payload: {} });
+  setRaw("device_identify", 0);
+  for (let count = 0; count < 31; count++) {
+    const response = await request();
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual(refusal("device_identify"));
+  }
+  getStore().db.run(sql`UPDATE feature_switches SET enabled = 1 WHERE name = 'device_identify'`);
+  const response = await request();
+  expect(response.statusCode).toBe(400);
+  expect(response.json()).toEqual({ error: "Provide text, photoBase64, or both" });
+});
+
+it.each(["off", "missing", "dropped", "two", "text"])("R5: an open stream ends at the off tick while a narration is in flight", async (state) => {
+  vi.stubEnv("ANTHROPIC_API_KEY", "synthetic-n400-anthropic");
+  narrator._resetAnthropicCache();
+  const chunks: narrator.CommentaryChunk[] = [];
+  let resolveNarration!: () => void;
+  let narrationReleased = false;
+  const heldNarration = new Promise<void>((resolve) => { resolveNarration = resolve; });
+  models.stream.mockImplementationOnce(async function* () {
+    await heldNarration;
+    yield { type: "content_block_delta", delta: { text: "Synthetic delayed narration." } };
+  });
+  vi.useFakeTimers();
+  const session = narrator.startCommentarySession({ windowMs: 250 }, (chunk) => { chunks.push(chunk); });
+  let done = false;
+  void session.done.then(() => { done = true; });
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(vi.getTimerCount()).toBeGreaterThanOrEqual(2));
+    const timerCount = vi.getTimerCount();
+    expect(timerCount).toBeGreaterThanOrEqual(2);
+    streamHub.publish([{ type: "global", id: "*" }], { id: "n400-inflight-event", type: "job.started", timestamp: new Date().toISOString(), topic: { type: "global", id: "*" }, payload: { jobId: "synthetic-inflight-job" } });
+    await vi.advanceTimersByTimeAsync(250);
+    expect(models.stream).toHaveBeenCalledTimes(1);
+    if (state === "dropped") getStore().db.run(sql`DROP TABLE feature_switches`);
+    else if (state === "missing") getStore().db.run(sql`DELETE FROM feature_switches WHERE name = 'commentary'`);
+    else setRaw("commentary", state === "two" ? 2 : state === "text" ? "yes" : 0);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(chunks.at(-1)).toEqual({ type: "error", ts: expect.any(String), message: "Live commentary is paused.", error: "feature_paused", feature: "commentary" });
+    expect(new Date(chunks.at(-1)!.ts).toISOString()).toBe(chunks.at(-1)!.ts);
+    expect(chunks.filter((c) => c.error === "feature_paused")).toHaveLength(1);
+    expect(done).toBe(true);
+    expect(vi.getTimerCount()).toBe(timerCount - 2);
+    const count = chunks.length;
+    resolveNarration();
+    narrationReleased = true;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(chunks).toHaveLength(count);
+    expect(models.stream).toHaveBeenCalledTimes(1);
+  } finally {
+    if (!narrationReleased) resolveNarration();
+    session.stop();
+  }
+});

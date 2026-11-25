@@ -202,6 +202,28 @@ describe("N400 admin features", () => {
     expect(response.json()).toEqual({ features: names.map((name) => ({ name, enabled: name !== "key_minting" && name !== "signups", updatedAt: name === "signups" ? null : "2026-11-24T00:00:00.000Z", updatedBy: null })) });
   });
 
+  it("T10: GET lists every stored value other than the integer 1 as off", async () => {
+    getStore().db.run(sql`DROP TABLE feature_switches`);
+    try {
+      getStore().db.run(sql`CREATE TABLE feature_switches (name TEXT PRIMARY KEY, enabled, updated_at TEXT NOT NULL, updated_by TEXT)`);
+      getStore().db.run(sql`INSERT INTO feature_switches VALUES
+        ('signups', ${"1"}, '2026-11-24T00:00:00.000Z', NULL),
+        ('sign_in', CAST(1 AS REAL), '2026-11-24T00:00:00.000Z', NULL),
+        ('onboard_chat', 2, '2026-11-24T00:00:00.000Z', NULL),
+        ('key_minting', 0, '2026-11-24T00:00:00.000Z', NULL),
+        ('device_identify', 1, '2026-11-24T00:00:00.000Z', NULL),
+        ('onboard_analysis', 1, '2026-11-24T00:00:00.000Z', NULL),
+        ('commentary', 1, '2026-11-24T00:00:00.000Z', NULL),
+        ('request_planner', 1, '2026-11-24T00:00:00.000Z', NULL),
+        ('job_submission', 1, '2026-11-24T00:00:00.000Z', NULL)`);
+      const response = await app.inject({ url: "/api/admin/features", headers: headers() });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ features: names.map((name) => ({ name, enabled: !["signups", "sign_in", "onboard_chat", "key_minting"].includes(name), updatedAt: "2026-11-24T00:00:00.000Z", updatedBy: null })) });
+    } finally {
+      getStore().db.run(sql`DROP TABLE feature_switches`);
+    }
+  });
+
   it("T10: unreadable table gives 503 for GET and PUT", async () => {
     getStore().db.run(sql`DROP TABLE feature_switches`);
     for (const response of [await app.inject({ url: "/api/admin/features", headers: headers() }), await set("key_minting", true)]) {
