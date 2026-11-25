@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 /**
  * SIWE (Sign-In with Ethereum) authentication plugin for Fastify.
  *
@@ -273,6 +274,7 @@ export async function siweAuthPlugin(app: FastifyInstance) {
 
   // ----- POST /api/auth/verify -----
   app.post("/api/auth/verify", async (req, reply) => {
+    if (!isFeatureEnabled("sign_in")) return reply.code(409).send(featurePaused("sign_in"));
     // Rate limit SIWE verify to prevent signature replay flooding (red team #27)
     if (!canSiweVerify(req.ip)) {
       return reply.status(429).send({
@@ -400,6 +402,7 @@ export async function siweAuthPlugin(app: FastifyInstance) {
 
   // Session keys hold self-service scopes, expire within twelve hours or at session expiry, and are revoked on logout.
   app.post("/api/auth/session-key", async (req, reply) => {
+    if (!isFeatureEnabled("key_minting")) return reply.code(409).send(featurePaused("key_minting"));
     if (req.apiKeyId != null) {
       return reply.status(403).send({
         error: "session_required", message: "A SIWE session is required to mint a session key",

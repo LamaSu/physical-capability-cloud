@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 /**
  * Job submission routes — refactored to use JobFacade.
  *
@@ -138,6 +139,9 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
   app.post<{ Body: SubmitJobInput & { captureVerdictId?: string } }>(
     "/api/jobs/submit",
     {
+      onRequest: async (_req, reply) => {
+        if (!isFeatureEnabled("job_submission")) return reply.code(409).send(featurePaused("job_submission"));
+      },
       schema: {
         tags: ["jobs"],
         summary: "Submit a job for execution on a kernel",
@@ -265,6 +269,7 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
    * Register a device for a kernel. Returns 409 on duplicate, 400 on missing fields.
    */
   app.post<{ Body: RegisterDeviceInput }>("/api/devices/register", async (req, reply) => {
+    if (!isFeatureEnabled("signups")) return reply.code(409).send(featurePaused("signups"));
     const result = await facade.registerDevice(req.body);
     if (!result.success) {
       // Map duplicate error to 409

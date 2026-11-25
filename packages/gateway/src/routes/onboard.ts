@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { MachineRegistration } from "@pcc/spec";
 import { UnifiedKeychain } from "@pcc/agent-runtime";
@@ -84,6 +85,7 @@ export async function onboardRoutes(app: FastifyInstance) {
   // every input — a rideshare description now yields a rideshare analysis,
   // not build-volume + nozzle temps + PLA.
   app.post("/api/onboard/analyze", async (req, reply) => {
+    if (!isFeatureEnabled("onboard_analysis")) return reply.code(409).send(featurePaused("onboard_analysis"));
     const text = coalesceAnalysisText(req.body);
     if (!text) {
       return reply.status(400).send({
@@ -112,7 +114,8 @@ export async function onboardRoutes(app: FastifyInstance) {
   });
 
   // Submit machine registration
-  app.post("/api/onboard/register", async (req) => {
+  app.post("/api/onboard/register", async (req, reply) => {
+    if (!isFeatureEnabled("signups")) return reply.code(409).send(featurePaused("signups"));
     const body = req.body as Partial<MachineRegistration>;
     const registration: MachineRegistration = {
       id: `reg-${Date.now()}`,
@@ -612,6 +615,8 @@ export async function onboardRoutes(app: FastifyInstance) {
    * No manual key management, no provider selection, no wallet setup.
    */
   app.post("/api/onboard/redeem", async (req, reply) => {
+    if (!isFeatureEnabled("signups")) return reply.code(409).send(featurePaused("signups"));
+    if (!isFeatureEnabled("key_minting")) return reply.code(409).send(featurePaused("key_minting"));
     const body = req.body as {
       inviteCode: string;
       email: string;

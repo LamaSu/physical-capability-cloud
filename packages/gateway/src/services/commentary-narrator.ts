@@ -13,6 +13,7 @@
 
 import { streamHub, type StreamEvent } from "../sse/stream-hub.js";
 import type { StreamTopic } from "@pcc/spec";
+import { isFeatureEnabled, featurePaused } from "./feature-switches.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -50,6 +51,8 @@ export interface CommentaryChunk {
   window_id?: string;
   /** Error message for `error` chunks; explanatory text for `needs_api_key`. */
   message?: string;
+  error?: "feature_paused";
+  feature?: "commentary";
 }
 
 export type ChunkHandler = (chunk: CommentaryChunk) => void | Promise<void>;
@@ -354,8 +357,15 @@ export function startCommentarySession(
       });
     }
 
+    if (stopped) return;
     timer = setInterval(async () => {
-      if (stopped || inFlight) return;
+      if (stopped) return;
+      if (!isFeatureEnabled("commentary")) {
+        await safeEmit({ type: "error", ts: new Date().toISOString(), ...featurePaused("commentary") });
+        stop();
+        return;
+      }
+      if (inFlight) return;
       if (window.size() === 0) return;
       inFlight = true;
       try {
@@ -374,7 +384,7 @@ export function startCommentarySession(
           raw_events: flushed.events,
         });
 
-        if (!client) {
+        if (stopped || !client) {
           // Without a client, raw windows are still emitted but no narration
           return;
         }

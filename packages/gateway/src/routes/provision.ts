@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 /**
  * API Key provisioning routes.
  *
@@ -43,6 +44,8 @@ export async function provisionRoutes(app: FastifyInstance) {
   // Public endpoint — this is how new operators get their API key.
   // They provide email + capability description, we issue a key.
   app.post("/api/auth/provision", async (req, reply) => {
+    if (!isFeatureEnabled("signups")) return reply.code(409).send(featurePaused("signups"));
+    if (!isFeatureEnabled("key_minting")) return reply.code(409).send(featurePaused("key_minting"));
     // Rate limit: max 5 provisions per IP per hour (CRIT-02 fix)
     if (!canProvision(req.ip)) {
       return reply.status(429).send({

@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 import type { FastifyInstance } from "fastify";
 import Anthropic from "@anthropic-ai/sdk";
 
@@ -72,6 +73,7 @@ export async function identifyDeviceRoutes(app: FastifyInstance) {
   }, 600_000);
 
   app.post("/api/onboard/identify-device", async (request, reply) => {
+    if (!isFeatureEnabled("device_identify")) return reply.code(409).send(featurePaused("device_identify"));
     const now = Date.now();
     const entry = rateMap.get(request.ip);
     if (entry && now - entry.windowStart < 3600_000 && entry.count >= RATE_PER_HOUR) {

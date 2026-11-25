@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 /**
  * Third-party digital kernel marketplace routes.
  *
@@ -275,6 +276,7 @@ function manifestToEntry(m: DigitalKernelManifest): KernelMarketplaceEntry {
 export async function kernelMarketplaceRoutes(app: FastifyInstance) {
   // ── POST /api/kernels/register ──────────────────────────────────────
   app.post("/api/kernels/register", async (req, reply) => {
+    if (!isFeatureEnabled("signups")) return reply.code(409).send(featurePaused("signups"));
     // Accept both { manifest: {...} } and raw manifest body for convenience.
     const body = req.body as Record<string, unknown> | undefined;
     const manifestInput =

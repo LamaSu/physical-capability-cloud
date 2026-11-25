@@ -9,6 +9,23 @@ export function migrateDatabase(sqlite: Database.Database): void {
   // This prevents insert failures when tables reference kernels that haven't been seeded yet.
   sqlite.pragma("foreign_keys = OFF");
 
+  sqlite.exec(`CREATE TABLE IF NOT EXISTS feature_switches (
+    name TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    updated_at TEXT NOT NULL,
+    updated_by TEXT
+  )`);
+  const seedFeature = sqlite.prepare(
+    "INSERT OR IGNORE INTO feature_switches (name, enabled, updated_at, updated_by) VALUES (?, ?, ?, NULL)",
+  );
+  const featureSeedTime = new Date().toISOString();
+  for (const name of [
+    "key_minting", "signups", "sign_in", "onboard_chat", "device_identify",
+    "onboard_analysis", "commentary", "request_planner", "job_submission",
+  ]) {
+    seedFeature.run(name, name === "key_minting" ? 0 : 1, featureSeedTime);
+  }
+
   sqlite.exec(`
     -- ── Kernels ──────────────────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS shop_kernels (

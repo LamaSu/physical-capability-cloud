@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 /**
  * Contributor-economics REST routes.
  *
@@ -520,6 +521,8 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post("/api/contributors/quickstart", async (req, reply) => {
+    if (!isFeatureEnabled("signups")) return reply.code(409).send(featurePaused("signups"));
+    if (!isFeatureEnabled("key_minting")) return reply.code(409).send(featurePaused("key_minting"));
     const refusal = refuseCookieCredentialWrite(req);
     if (refusal) return reply.code(401).send(refusal);
     const parse = QuickstartBodySchema.safeParse(req.body);

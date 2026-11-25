@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 /**
  * Ephemeral Session Key Routes -- Issue, verify, and revoke session keys.
  *
@@ -62,6 +63,7 @@ export async function identitySessionRoutes(app: FastifyInstance) {
    * The private key is returned exactly ONCE and never stored by the gateway.
    */
   app.post("/api/identity/session", async (req, reply) => {
+    if (!isFeatureEnabled("key_minting")) return reply.code(409).send(featurePaused("key_minting"));
     const refusal = refuseCookieCredentialWrite(req);
     if (refusal) return reply.code(401).send(refusal);
     const body = req.body as {

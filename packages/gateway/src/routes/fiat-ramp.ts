@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 /**
  * Fiat ramp routes — on-ramp (fiat→crypto) and off-ramp (crypto→fiat).
  *
@@ -209,7 +210,8 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     };
   });
 
-  app.post("/api/fiat-ramp/cdp/provision", async (req) => {
+  app.post("/api/fiat-ramp/cdp/provision", async (req, reply) => {
+    if (!isFeatureEnabled("key_minting")) return reply.code(409).send(featurePaused("key_minting"));
     const body = (req.body ?? {}) as { presetAmountUSD?: number };
     const { wallet, onramp } = getCdp();
     const w = await wallet.createWallet();

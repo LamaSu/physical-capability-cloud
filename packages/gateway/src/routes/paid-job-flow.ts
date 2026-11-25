@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 /**
  * Paid Job Flow — end-to-end wiring from DHT discovery through settlement.
  *
@@ -787,6 +788,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       userAgentId: string;
     };
   }>("/api/jobs/submit-from-discovery", async (req, reply) => {
+    if (!isFeatureEnabled("job_submission")) return reply.code(409).send(featurePaused("job_submission"));
     const body = req.body as Record<string, unknown> | undefined;
     if (!body) {
       return reply.status(400).send({ error: "Request body is required" });

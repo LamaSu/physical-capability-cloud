@@ -1,3 +1,4 @@
+import { isFeatureEnabled } from "../services/feature-switches.js";
 /**
  * Capability Request Routes — SQLite-backed
  *
@@ -151,6 +152,7 @@ function loadCapabilityCandidates(): CapabilityLite[] {
 async function tryAgenticDecompose(
   request: CapabilityRequest,
 ): Promise<DecompositionResult | null> {
+  if (!isFeatureEnabled("request_planner")) return null;
   if (!agenticEnabled()) return null;
   const matcher = createMatcher(loadCapabilityCandidates);
   const llm = await resolveLLMClient();

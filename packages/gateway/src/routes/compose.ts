@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 /**
  * Composition engine routes.
  *
@@ -858,6 +859,7 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Params: { id: string } }>(
     "/api/compose/:id/execute",
     async (req, reply) => {
+      if (!isFeatureEnabled("job_submission")) return reply.code(409).send(featurePaused("job_submission"));
       const parsed = ExecuteCompositionRequestSchema.safeParse({
         ...(req.body as object),
         compositionId: req.params.id,
