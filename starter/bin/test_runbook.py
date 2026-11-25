@@ -591,7 +591,7 @@ class TestProvisionPause(unittest.TestCase):
     PAUSED = {"error": "feature_paused", "feature": "key_minting",
               "message": "Creating API keys is paused."}
 
-    def run_provision(self, status, body, transport_exit=0, *, raw_body=None, after=""):
+    def run_provision(self, status, body, transport_exit=0, *, raw_body=None, after="", leftover_body=None):
         section = between(phase_text("00-prerequisites.md"), "## 4.", "## 5.")
         block = re.search(r"```bash\n(.*?)\n```", section, re.S)
         self.assertIsNotNone(block, "section 4 must contain its provision block")
@@ -603,6 +603,8 @@ class TestProvisionPause(unittest.TestCase):
             (state / "operator.json").write_text(
                 json.dumps({"email": "operator@example.org", "name": "Bench"}), encoding="utf-8")
             (state / "node-public-key").write_text("ab" * 32, encoding="utf-8")
+            if leftover_body is not None:
+                (state / "provision.json").write_text(json.dumps(leftover_body), encoding="utf-8")
             if raw_body is None:
                 (root / "body.json").write_text(json.dumps(body), encoding="utf-8")
             else:
@@ -753,6 +755,35 @@ class TestProvisionPause(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assert_no_key(files)
                 self.assertNotIn("sentinel", result.stdout + result.stderr)
+
+    def test_other_stops_exit_1_skip_the_chmod_and_print_nothing(self):
+        sentinel = "sentinel-not-for-output"
+        cases = [
+            (409, {"error": "conflict", "message": sentinel}, 0, None),
+            (500, {"error": "x", "detail": sentinel}, 0, None),
+            (200, {}, 0, None),
+            (409, dict(self.PAUSED, message="Creating\x1bAPI keys"), 0, None),
+            (200, self.PAUSED, 0, None),
+            ("000", None, 7, None),
+            (409, ["feature_paused", sentinel], 0, None),
+            (201, {"api_key": ""}, 0, None),
+            (502, None, 0, b"<html>sentinel-not-for-output</html>"),
+            (409, None, 0, b"\xffsentinel-not-for-output"),
+        ]
+        for status, body, transport_exit, raw_body in cases:
+            with self.subTest(status=status, body=body, transport_exit=transport_exit, raw_body=raw_body):
+                result, files, chmod_ran = self.run_provision(status, body, transport_exit, raw_body=raw_body)
+                self.assertEqual(result.returncode, 1)
+                self.assertFalse(chmod_ran)
+                self.assertEqual(result.stdout + result.stderr, "")
+
+    def test_no_new_body_never_reuses_a_leftover_reply(self):
+        result, files, chmod_ran = self.run_provision(
+            "000", None, 7, leftover_body={"api_key": "sentinel-leftover-api-key"})
+        self.assertEqual(result.returncode, 1)
+        self.assert_no_key(files)
+        self.assertFalse(chmod_ran)
+        self.assertEqual(result.stdout + result.stderr, "")
 
     def test_pause_guidance_is_verbatim_and_in_its_phase(self):
         texts = [

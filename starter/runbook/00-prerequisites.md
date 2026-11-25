@@ -77,6 +77,7 @@ operator = json.load(open(".pcc/operator.json"))
 print(json.dumps({"publicKey": open(".pcc/node-public-key").read().strip(),
                   "email": operator["email"], "name": operator["name"]}))
 EOF
+rm -f .pcc/provision.json .pcc/provision.status
 curl -s -X POST "$(cat .pcc/base)/api/auth/provision" -H 'Content-Type: application/json' \
   --data-binary @.pcc/provision-request.json -o .pcc/provision.json -w '%{http_code}' > .pcc/provision.status
 rm -f .pcc/provision-request.json
