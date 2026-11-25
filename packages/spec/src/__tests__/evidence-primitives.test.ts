@@ -35,10 +35,11 @@ const LIVE_FIRST_CLASS = [
 // The locked golden manifest hash of the shipped vocabulary (v1 16 + the
 // v1.5-industrial #52-#55 + input.hash_bound #56 = 21 active defs). Any contract
 // change (adding/removing a primitive, changing tierSupport, auth, params, deps,
-// gates, status) moves this — the golden test then fails on purpose. Recomputed for the additive
-// input.hash_bound cut (was 0x9e034dd9… for the 20-primitive contract).
+// gates, status) moves this — the golden test then fails on purpose. Recomputed for v3, which
+// drops receipt.kernel_signed's ident.registered_key dependency (N395; was 0x069ff08c… for v2,
+// and 0x9e034dd9… for the 20-primitive contract).
 const GOLDEN_VOCAB_MANIFEST_HASH =
-  "0x069ff08c4b39cc2b0ce808d0e8dcb3ba6eb57349c709e73b454bda2994c59582";
+  "0x05e0054f99219f628bcf80c7d785f78383e5840db1460cda88b6d44e20e1180d";
 
 // ── 1. The registry validates ───────────────────────────────────────
 
@@ -108,8 +109,8 @@ describe("evidence vocabulary — registry validates", () => {
 // ── 2. Manifest hash (golden + deterministic + order-independent) ────
 
 describe("evidence vocabulary — VOCAB_MANIFEST_HASH", () => {
-  it("VOCAB_VERSION is 2 (additive v1.5-industrial bump)", () => {
-    expect(VOCAB_VERSION).toBe(2);
+  it("VOCAB_VERSION is 3 (v3 drops receipt.kernel_signed's ident.registered_key dependency, N395)", () => {
+    expect(VOCAB_VERSION).toBe(3);
   });
 
   it("is a 0x-prefixed sha256 hex", () => {

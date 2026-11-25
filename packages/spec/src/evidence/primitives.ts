@@ -352,7 +352,8 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     verifierStatus: "stub",
   },
 
-  // #47 — Family K (meta). Dependency of everything signed; replaces the HTTP-ok
+  // #47 — Family K (meta). A dependency of machine.execution_log; since vocabulary
+  // v3 (N395) receipt.kernel_signed no longer depends on it. Replaces the HTTP-ok
   // kernel-identity check (step 0).
   {
     id: "ident.registered_key",
@@ -386,7 +387,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     family: "receipt",
     status: "active",
     proves:
-      "A registered kernel executed a capability and commits to its inputs/outputs (Ed25519-signed toKernelOutput).",
+      "The bundle hash carries a session key's Ed25519 signature, and that session key carries a delegation signed by the funded principal's key.",
     paramsSchema: {
       type: "object",
       properties: { capability: { type: "string" } },
@@ -403,7 +404,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     ],
     objectivityBand: "B1",
     verifierStatus: "live",
-    dependsOn: ["ident.registered_key"],
+    dependsOn: [],
   },
 
   // #8 — Family C (telemetry). Delivery/on-site instantly. LIVE kernel-side (courier).
@@ -808,8 +809,10 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
 /** Vocabulary version. Bumps when the contract (§5.1 fields) changes.
  *  An additive entry keeps the version; VOCAB_MANIFEST_HASH names the exact vocabulary.
  *  v2 = the additive v1.5-industrial cut (#52-#55 + Family L `record`); no v1
- *  primitive changed, so the bump is purely additive. */
-export const VOCAB_VERSION = 2 as const;
+ *  primitive changed, so the bump is purely additive.
+ *  v3 = receipt.kernel_signed drops its dependsOn ident.registered_key (N395). That
+ *  changes a v1 primitive's contract, so this bump is not additive. */
+export const VOCAB_VERSION = 3 as const;
 
 /**
  * Contract projection of a primitive def — the fields that constitute the

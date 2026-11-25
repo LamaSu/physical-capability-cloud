@@ -16,7 +16,7 @@ import {
   buildAdapterEvidence,
 } from "../evidence/adapter-manifests.js";
 import { computeCsdEligibility } from "../evidence/eligibility.js";
-import { VOCAB_VERSION, getPrimitive } from "../evidence/primitives.js";
+import { EVIDENCE_PRIMITIVES, VOCAB_VERSION, getPrimitive } from "../evidence/primitives.js";
 
 // ── 1. Schema — reuses the CSD ref grammar + via/demonstrated ────────
 
@@ -81,16 +81,23 @@ describe("buildEvidenceTiersFromEmits — the digital-receipt core is tier-1 eli
   });
 
   it("auto-includes transitive vocabulary dependencies", () => {
-    // confirm.execution_mode alone → the builder pulls in receipt.kernel_signed
-    // and ident.registered_key so the tier is dependency-closed and eligible.
+    // confirm.execution_mode alone → the builder pulls in receipt.kernel_signed so the
+    // tier is dependency-closed and eligible. Since vocabulary v3 (N395) the receipt has
+    // no dependency, so ident.registered_key is not pulled in.
     const evidence = buildEvidenceTiersFromEmits([
       { id: "decl.self_attested" },
       { id: "confirm.execution_mode", params: { expected: "real" } },
     ]);
     const ids = evidence.tier1?.primitives?.map((p) => p.id) ?? [];
     expect(ids).toContain("receipt.kernel_signed");
-    expect(ids).toContain("ident.registered_key");
+    expect(ids).not.toContain("ident.registered_key");
     expect(computeCsdEligibility({ url: "pcc://t", evidence }).eligibleTier).toBe(1);
+    // Two hops, on a copy of the vocabulary that restores the receipt's pre-v3 ident.registered_key dependency.
+    const restored = new Map(EVIDENCE_PRIMITIVES.map((p) => [p.id, p.id === "receipt.kernel_signed" ? { ...p, dependsOn: ["ident.registered_key"] } : p]));
+    const twoHop = buildEvidenceTiersFromEmits([{ id: "decl.self_attested" }, { id: "confirm.execution_mode", params: { expected: "real" } }], { index: restored });
+    const twoHopIds = twoHop.tier1?.primitives?.map((p) => p.id) ?? [];
+    expect(twoHopIds).toContain("receipt.kernel_signed");
+    expect(twoHopIds).toContain("ident.registered_key");
   });
 
   it("drops unknown / not-yet-shipped primitive ids gracefully (rising tide)", () => {

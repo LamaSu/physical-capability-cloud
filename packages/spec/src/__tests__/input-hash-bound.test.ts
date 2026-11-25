@@ -162,18 +162,17 @@ describe("input.hash_bound — the non-printer input commitment contract", () =>
     expect(result.detail.join(" ")).toContain('primitive "input.hash_bound" verifier not implemented');
   });
 
-  it("reports the stub advisory and missing receipt dependency, and refuses the stub under oracle enforcement", () => {
+  it("reports the stub advisory, and refuses the stub under oracle enforcement", () => {
     const csd = liquidHandlerCsd();
-    const missingRegisteredKey = 'tier1: primitive "receipt.kernel_signed" depends on "ident.registered_key" absent from tier ≤ 1';
     const reportOnly = computeCsdEligibility(csd);
 
-    // The exact two-primitive fixture lacks receipt.kernel_signed's own dependency.
-    expect(reportOnly.verdict).toBe("CAPPED");
-    expect(reportOnly.eligibleTier).toBe(0);
+    // Since vocabulary v3 (N395) receipt.kernel_signed has no dependency, so only the stub advisory remains.
+    expect(reportOnly.verdict).toBe("ELIGIBLE");
+    expect(reportOnly.eligibleTier).toBe(1);
     expect(reportOnly.perTier.find((tier) => tier.tier === 1)).toEqual({
       tier: 1,
-      eligible: false,
-      reasons: [missingRegisteredKey],
+      eligible: true,
+      reasons: [],
       stubVerifierPrimitives: ["input.hash_bound"],
     });
 
@@ -183,10 +182,7 @@ describe("input.hash_bound — the non-printer input commitment contract", () =>
     expect(enforcing.perTier.find((tier) => tier.tier === 1)).toEqual({
       tier: 1,
       eligible: false,
-      reasons: [
-        missingRegisteredKey,
-        'tier1: primitive "input.hash_bound" verifier not implemented (stub)',
-      ],
+      reasons: ['tier1: primitive "input.hash_bound" verifier not implemented (stub)'],
       stubVerifierPrimitives: ["input.hash_bound"],
     });
   });
