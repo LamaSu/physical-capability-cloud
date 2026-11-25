@@ -60,26 +60,36 @@ describe("N347 served job offers, courier jobs and events", () => {
     const expected: Served = { ...stored };
     delete expected.posterDid;
     delete expected.driverContact;
+    delete expected.idempotencyKey;
+    if (stored.capabilityType === "courier.dispatch") {
+      expected.requirements = { ...stored.requirements, pickup: {}, dropoff: {} };
+    }
     return json(expected);
   };
-  const withoutCourierIdentity = (stored: CourierJob) => {
+  const withoutCourierIdentity = (stored: CourierJob, view: "public" | "party") => {
     const expected: Served = { ...stored };
     delete expected.postedBy;
     delete expected.driverContact;
+    if (view === "public") {
+      delete expected.raw;
+      expected.pickup = {};
+      expected.dropoff = {};
+    }
     return json(expected);
   };
   const checkOffer = (served: Served | undefined, id: string) => {
     expect(served).toBeDefined();
     expect(served).not.toHaveProperty("posterDid");
     expect(served).not.toHaveProperty("driverContact");
+    expect(served).not.toHaveProperty("idempotencyKey");
     expect(served).toEqual(withoutOfferIdentity(getJobOffersStore().get(id)!));
   };
-  const checkCourier = (served: Served | undefined, id: string) => {
+  const checkCourier = (served: Served | undefined, id: string, view: "public" | "party" = "public") => {
     expect(served).toBeDefined();
     expect(served).not.toHaveProperty("postedBy");
     expect(served).not.toHaveProperty("driverContact");
     expect(served).not.toHaveProperty("posterDid");
-    expect(served).toEqual(withoutCourierIdentity(getCourierJobsStore().get(id)!));
+    expect(served).toEqual(withoutCourierIdentity(getCourierJobsStore().get(id)!, view));
   };
   const noContactIdentity = (body: string) => {
     expect(body).not.toContain("poster@example.com");
@@ -160,13 +170,14 @@ describe("N347 served job offers, courier jobs and events", () => {
     expect(result).toEqual({
       id, status: "claimed", claimedByKernelId: "k-1",
       pricing: { amount: 18.5, currency: "USD", model: "fixed" },
-      requirements: { items: ["margherita"] }, posterKernelId: "poster-kernel", idempotencyKey: "unit-replay",
+      requirements: { items: ["margherita"] }, posterKernelId: "poster-kernel",
       capabilityType: "pizza.order", requirementsValidated: false, serviceAreaGeofence: null,
       deadlineIso: null, assuranceTier: 0, evidenceRequirements: { events_required: ["delivered"] },
       sourceVerifyUrl: null, requireHeartbeat: false, postedAt: "2026-11-16T00:00:00.000Z",
       validUntil: "2026-11-17T00:00:00.000Z", claimedAt: null, claimSignature: null,
       verified: false, lastVerifyAt: null, lastHeartbeatAt: null, deliveredAt: null, cancelledAt: null, expiredAt: null,
     });
+    expect(result).not.toHaveProperty("idempotencyKey");
     expect(result).not.toBe(input);
     expect(input).toEqual(before);
   });
@@ -340,11 +351,11 @@ describe("N347 served job offers, courier jobs and events", () => {
     const exercise = async (held: string, editable: string) => {
       const claimed = await claim(held, "courier-jobs");
       expect(claimed.statusCode, claimed.body).toBe(200);
-      checkCourier(claimed.json<{ job: Served }>().job, held);
+      checkCourier(claimed.json<{ job: Served }>().job, held, "party");
       noContactIdentity(claimed.body);
       const patched = await edit(editable, "courier-jobs");
       expect(patched.statusCode, patched.body).toBe(200);
-      checkCourier(patched.json<{ job: Served }>().job, editable);
+      checkCourier(patched.json<{ job: Served }>().job, editable, "party");
       noContactIdentity(patched.body);
       const pickup = await event(held, "pickup", claimerKey, "courier-jobs");
       expect(pickup.statusCode, pickup.body).toBe(200);

@@ -34,6 +34,7 @@
  */
 
 import { sameIdentity } from "../auth/buyer-identity.js";
+import { coarseCoordinate } from "./job-offer-public.js";
 import {
   CLAIMER_DIGEST_KEY,
   CLAIMER_EVENT_KINDS,
@@ -399,6 +400,12 @@ export class JobOffersStore {
     return this.claimerDigests.get(offer.id) === identityDigest(caller.identity);
   }
 
+  isParty(id: string, caller: OfferCaller | null): boolean {
+    if (caller === null) return false;
+    const offer = this.offers.get(id);
+    return offer !== undefined && (this.isPoster(offer, caller) || this.isClaimer(offer, caller));
+  }
+
   // ── Hydration (boot recovery) ────────────────────────────────────────────
 
   private hydrateFromSqlite(): void {
@@ -627,7 +634,7 @@ export class JobOffersStore {
       open = open.filter((o) => {
         const coords = extractRequirementsCoords(o.requirements);
         if (!coords) return false;
-        return haversineMiles(lat, lng, coords.lat, coords.lng) <= miles;
+        return haversineMiles(lat, lng, coarseCoordinate(coords.lat), coarseCoordinate(coords.lng)) <= miles;
       });
     }
     open.sort((a, b) => (b.postedAt || "").localeCompare(a.postedAt || ""));

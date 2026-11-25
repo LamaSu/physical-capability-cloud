@@ -39,8 +39,9 @@
  */
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { isAdminCaller } from "../auth/admin-caller.js";
 import { offerCaller } from "../services/job-offer-event-rules.js";
-import { publicEvent, publicEvents, publicOffer } from "../services/job-offer-public.js";
+import { publicEvent, publicEvents, publicOffer, publicViewEvents, publicViewOffer } from "../services/job-offer-public.js";
 import {
   getJobOffersStore,
   type ClaimInput,
@@ -237,7 +238,7 @@ export async function jobOffersRoutes(app: FastifyInstance) {
       tier: tier != null && (tier === 0 || tier === 1 || tier === 2 || tier === 3) ? tier as 0|1|2|3 : null,
       within,
     });
-    const offers = all.slice(offset, offset + limit).map(publicOffer);
+    const offers = all.slice(offset, offset + limit).map(publicViewOffer);
     return {
       offers,
       count: offers.length,
@@ -250,10 +251,14 @@ export async function jobOffersRoutes(app: FastifyInstance) {
 
   // ── GET /api/job-offers/:id ────────────────────────────────────────────
   app.get<{ Params: { id: string } }>("/api/job-offers/:id", async (req, reply) => {
+    reply.header("cache-control", "no-store");
     const store = getJobOffersStore();
     const o = store.get(req.params.id);
     if (!o) return reply.code(404).send({ error: "not_found" });
-    return { offer: publicOffer(o), events: publicEvents(store.getEvents(o.id)) };
+    const party = isAdminCaller(req) || store.isParty(o.id, offerCaller(req));
+    return party
+      ? { offer: publicOffer(o), events: publicEvents(store.getEvents(o.id)) }
+      : { offer: publicViewOffer(o), events: publicViewEvents(store.getEvents(o.id)) };
   });
 
   // ── POST /api/job-offers/:id/claim ─────────────────────────────────────

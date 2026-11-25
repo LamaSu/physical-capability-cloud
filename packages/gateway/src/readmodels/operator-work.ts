@@ -38,6 +38,7 @@ import { createHash } from "node:crypto";
 import { schema, eq, and } from "@pcc/store";
 import type { JobOffer, JobOfferEvent } from "../services/job-offers-store.js";
 import { extractRequirementsCoords } from "../services/job-offers-store.js";
+import { coarseCoordinate } from "../services/job-offer-public.js";
 import {
   MILESTONE_WORDS,
   buildSettlementAxis,
@@ -390,16 +391,13 @@ export function offerPay(offer: JobOffer): OperatorWorkPay {
   };
 }
 
-/** Round to 2 decimals (about 1 km) when the work is not the caller's yet. */
-const coarse = (v: number) => Math.round(v * 100) / 100;
-
 export function offerLocation(offer: JobOffer, mine: boolean): OperatorWorkLocation {
   const req = (offer.requirements ?? {}) as Record<string, unknown>;
   const coords = extractRequirementsCoords(req);
   if (coords && Number.isFinite(coords.lat) && Number.isFinite(coords.lng)) {
     return mine
       ? { kind: "point", approximate: false, lat: coords.lat, lng: coords.lng, kernelId: null }
-      : { kind: "point", approximate: true, lat: coarse(coords.lat), lng: coarse(coords.lng), kernelId: null };
+      : { kind: "point", approximate: true, lat: coarseCoordinate(coords.lat), lng: coarseCoordinate(coords.lng), kernelId: null };
   }
   if (offer.serviceAreaGeofence) return { kind: "area", approximate: false, lat: null, lng: null, kernelId: null };
   if (req.remote === true) return { kind: "remote", approximate: false, lat: null, lng: null, kernelId: null };

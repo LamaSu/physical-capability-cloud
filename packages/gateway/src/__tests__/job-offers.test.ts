@@ -915,7 +915,7 @@ describe("courier-shim writes show up in the generic feed", () => {
       expect(body.offers[0].id).toBe("shim-test-1");
       expect(body.offers[0].pricing.amount).toBe(5.5);
       expect(body.offers[0].pricing.currency).toBe("USD");
-      expect(body.offers[0].requirements.pickup.name).toBe("Store");
+      expect(body.offers[0].requirements.pickup).toStrictEqual({ lat: 37.77, lng: -122.42 });
     } finally {
       await app.close();
     }

@@ -33,8 +33,9 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { isAdminCaller } from "../auth/admin-caller.js";
 import { offerCaller } from "../services/job-offer-event-rules.js";
-import { publicCourierJob, publicEvent, publicEvents } from "../services/job-offer-public.js";
+import { publicCourierJob, publicEvent, publicEvents, publicViewCourierJob, publicViewEvents } from "../services/job-offer-public.js";
 import { getCourierJobsStore, type CourierJob } from "../services/courier-jobs-store.js";
 
 // Posting identity helper — prefers API key operatorId, falls back to
@@ -151,14 +152,18 @@ async function handleListOpen(req: FastifyRequest<{ Querystring: CourierOpenQuer
     maxFeeUSD: maxFee != null && Number.isFinite(maxFee) ? maxFee : null,
     within,
   });
-  return { jobs: open.map(publicCourierJob), count: open.length, ts: new Date().toISOString() };
+  return { jobs: open.map(publicViewCourierJob), count: open.length, ts: new Date().toISOString() };
 }
 
 async function handleGetById(req: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) {
+  reply.header("cache-control", "no-store");
   const store = getCourierJobsStore();
   const j = store.get(req.params.id);
   if (!j) return reply.code(404).send({ error: "not_found" });
-  return { job: publicCourierJob(j), events: publicEvents(store.getEvents(j.id)) };
+  const party = isAdminCaller(req) || store.isParty(j.id, offerCaller(req));
+  return party
+    ? { job: publicCourierJob(j), events: publicEvents(store.getEvents(j.id)) }
+    : { job: publicViewCourierJob(j), events: publicViewEvents(store.getEvents(j.id)) };
 }
 
 export async function courierJobsRoutes(app: FastifyInstance) {
