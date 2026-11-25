@@ -1,10 +1,11 @@
 # Running pcc-node under the spawn allowlist
 
 Three layers are meant to keep pcc-node from being coerced into running anything other than its pinned
-device utilities (`arp`, `dd`, `ffmpeg`, `journalctl`, `sysctl`, `v4l2-ctl`). This package ships two of
-them: Landlock (Layer 2) and the Python spawn guard (Layer 3). Layer 1, an AppArmor profile applied at
-deploy time, comes in a later change together with a systemd unit, after a run on a real host has
-proved both. Each section below says what its layer does and does not guarantee.
+device utilities (`arp`, `dd`, `ffmpeg`, `journalctl`, `sysctl`, `v4l2-ctl`). This package ships all
+three: an AppArmor profile (Layer 1), applied at deploy time with the systemd unit; Landlock (Layer 2);
+and the Python spawn guard (Layer 3). The profile and the unit have not yet been run on a host: each
+line under "Install targets" says what is expected there. Each section below says what its layer does
+and does not guarantee.
 
 ## The full guarantee needs both Landlock and AppArmor
 Neither kernel layer alone gives "only the pinned utilities execute":
@@ -16,8 +17,61 @@ Neither kernel layer alone gives "only the pinned utilities execute":
   and Landlock does not mediate `mmap(PROT_EXEC)`, so `execve(ld.so, [ld, <any ELF>])` runs that ELF.
 
 Together they close both paths: Landlock refuses to execute `python3` (and every other non-pinned
-binary) directly, and an AppArmor profile can refuse to execute the loader as a program. Until Layer 1
-lands, the loader path stays open.
+binary) directly, and the AppArmor profile denies executing the loader as a program. Where Layer 1 is
+not in force, the loader path is open.
+
+## Layer 1 -- AppArmor, at deploy time
+[`apparmor/pcc-node`](apparmor/pcc-node) grants the interpreter and the six utilities execute (`ix`),
+grants their shared libraries and the ELF loader map-only (`mr`), and **denies executing the loader as
+a program**. Everything else is denied by default; shells are denied explicitly. Beyond execution, it
+grants what the node itself needs: its key directory `/var/lib/pcc-node`, its configuration under
+`/etc/pcc-node`, the camera paths the pinned utilities use (`/dev/video*` and the frame scratch file),
+name lookups and the system's CA certificates, and the reads the key store makes to check where the
+key is (this process's mount table and descriptor info, and each directory above the key directory).
+
+Its file grants cover that key directory only, and Python files only under `/usr/lib/python3*`,
+`/usr/lib64/python3*` and `/usr/local/lib/python3*`. So run pcc-node through the unit, installed for
+the system interpreter: the files of a virtual environment are not covered.
+
+Enable AppArmor first (see "Install targets"), then, as root:
+
+```sh
+deploy/install.sh                        # the user, the key directory, the profile and the unit
+systemctl enable --now pcc-node
+aa-status | grep pcc-node                # the profile is loaded, in enforce mode
+aa-exec -p pcc-node -- /bin/sh -c true   # must fail with: Permission denied
+```
+
+The unit does not start where Layer 1 cannot be applied, and systemd logs why:
+`AssertSecurity=apparmor` fails the start where AppArmor is not enabled, and `AppArmorProfile=pcc-node`,
+which has no `-` prefix, fails it where the profile is not loaded. No SELinux policy ships with this
+package. On a SELinux host, write the equivalent policy and remove the two lines as described under
+"Running without AppArmor". `apparmor_parser -Q -K deploy/apparmor/pcc-node` compiles the profile
+without loading it.
+
+**Runtime efficacy needs a per-distro host matrix** that exercises real operations: the profile
+enforced; the node starts under the unit and loads its key; Python and its extensions load; each
+utility runs its actual capture or probe, not just `--version`; and a shell, a `/tmp` ELF,
+`ld.so <non-pinned>` and `python3 -c` of a non-pinned exec are all refused.
+
+### Running without AppArmor
+Remove both `AssertSecurity=apparmor` and `AppArmorProfile=pcc-node` from the installed unit
+(`/etc/systemd/system/pcc-node.service`), then run `systemctl daemon-reload`. Without AppArmor or an
+equivalent policy, the loader path is open: only Landlock and the spawn guard remain.
+
+## Install targets
+None of these has run the unit yet. Each line says what is expected there.
+- **Raspberry Pi OS:** AppArmor is expected to be off by default. To enable it, add
+  `apparmor=1 security=apparmor` to the kernel command line in `/boot/firmware/cmdline.txt`, install
+  the `apparmor` package, and reboot. Not yet checked on a Pi.
+- **Debian:** AppArmor is expected to be on by default. If `apparmor_parser` is missing, install the
+  `apparmor` package. Not yet checked on a host.
+- **Ubuntu:** AppArmor is expected to be on by default, with the `apparmor` package installed. Not yet
+  checked on a host.
+- **WSL2:** systemd is opt-in (`systemd=true` under `[boot]` in `/etc/wsl.conf`). AppArmor is expected
+  to be off in the WSL kernel; where that kernel has it built in, enabling it is expected to mean adding
+  `apparmor=1 security=apparmor` to `kernelCommandLine` in `.wslconfig`. That kernel needs Landlock
+  too. Not yet checked.
 
 ## Layer 2 -- Landlock, in process and mandatory
 pcc-node applies a Landlock ruleset itself (`pcc_node/_landlock.py`, through the guarded entry) before
@@ -52,6 +106,27 @@ armed or not, so the node logs one INFO line and finds no mDNS devices.
   that starts `pcc_node.cli:main`, unguarded, because pip writes console scripts at install time.
   Reinstall it so that the script starts through the entry.
 - Do **not** run `python -m pcc_node.cli`: it is refused, since it would run unguarded.
+
+## The systemd unit is hygiene only
+[`pcc-node.service`](pcc-node.service) is not the exec allowlist: the retired `NoExecPaths=/` and
+`ExecPaths=` could not split `mmap` from `execve`. It runs the node as `pcc-node`, a static system
+user with no login shell, and keeps key and state in `/var/lib/pcc-node`, a plain directory owned by
+that user with mode 0700. `install.sh` creates both. The unit also gives config under `/etc/pcc-node`
+(`ConfigurationDirectory=`), a non-interactive bootstrap, `NoNewPrivileges=yes`, an empty capability
+set and `ProtectSystem=full`.
+- **No `DynamicUser=`, no `StateDirectory=` and not `ProtectSystem=strict`.** Each can put the key
+  directory behind a bind mount of a subtree inside the unit, and the key store refuses a key reached
+  that way. A `StateDirectory=` can be bind-mounted onto itself, `ProtectSystem=strict` would need a
+  writable bind for the key directory, and `DynamicUser=` implies `ProtectSystem=strict`.
+- **Exit status 78 is not restarted** (`RestartPreventExitStatus=78`). It means the gateway refused
+  the registration in a way a restart cannot fix.
+- **The config file.** The service user cannot write the working directory (`/`), so `ExecStart`
+  passes an absolute `--config-file /var/lib/pcc-node/pcc-node.json`; the CLI default
+  `./pcc-node.json` would fail to write.
+- **Secrets.** Put `PCC_API_KEY` in `/etc/pcc-node/pcc-node.env` (root only, `chmod 600`), never in
+  the unit.
+- **systemd 244 or later**, going by the version notes in systemd's man pages: 242 for
+  `RestrictSUIDSGID=`, and 244 for the check behind `AssertSecurity=`.
 
 ## Windows and macOS
 Landlock is Linux only. On Windows and macOS, `restrict()` returns False before any Linux call, so
