@@ -117,7 +117,7 @@ describe("T2e: SetupWizardPage's identity step claims no registration", () => {
       "This page didn't register your identity or anything on-chain.",
       'subtitle="Add your name, organization and role. This step registers nothing."',
       '"Checking..."',
-      "Setup check failed",
+      "No result from the setup check",
       "Complete Setup doesn't register your identity or anything on-chain.",
     ]) {
       expect(source.split(replacement).length - 1, replacement).toBe(1);
@@ -158,4 +158,36 @@ describe("T2h: the static landing page's offer link reaches the public chat", ()
     expect(source.split('href="/onboard"').length - 1).toBe(0);
     expect(source.split('<a class="btn btn--offer" href="/onboard/chat">Offer a capability <span class="arr" aria-hidden="true">&rarr;</span></a>').length - 1).toBe(1);
   });
+});
+
+it("T2i: SetupAgentPage claims no detection and calls only the served identify route", () => {
+  const source = readFileSync(sourcePath("pages/SetupAgentPage.tsx"), "utf8");
+  expect(source.match(/auto-detect/gi) ?? []).toHaveLength(0);
+  expect(source.match(/probe/gi) ?? []).toHaveLength(0);
+  for (const forbidden of ["/api/ai/identify-machine", "isn't available right now"]) {
+    expect(source.split(forbidden).length - 1, forbidden).toBe(0);
+  }
+  for (const replacement of [
+    "/api/onboard/identify-device",
+    "I couldn't get an identification.",
+    "Suggest from make and model",
+  ]) {
+    expect(source.split(replacement).length - 1, replacement).toBe(1);
+  }
+});
+
+it("T2j: the wizard's summary names the gateway's check", () => {
+  const source = readFileSync(sourcePath("pages/SetupWizardPage.tsx"), "utf8");
+  for (const replacement of [
+    "Setup steps done",
+    "The gateway's own setup check passed.",
+    "The gateway's own setup check didn't pass.",
+    "This page got no reply it could read from the gateway, so it has no result from the gateway's setup check.",
+    "This page has no result from the gateway's setup check.",
+    "The gateway replied without a setup check result.",
+  ]) {
+    expect(source.split(replacement).length - 1, replacement).toBe(1);
+  }
+  expect(source.split("configured and ready to go").length - 1).toBe(0);
+  expect(source.split("Setup check failed").length - 1).toBe(0);
 });

@@ -4,7 +4,7 @@
  *
  * SetupWizardPage fetched http://localhost:3200/api/capabilities with the
  * Authorization header on every /setup load. SetupAgentPage defaulted every
- * key-bearing request (scan-network, identify-machine, register-device) to
+ * key-bearing request (scan-network, identification, register-device) to
  * http://localhost:3200. In production both handed a signed-in user's key to
  * whatever listens on port 3200 of their own machine.
  *
@@ -57,7 +57,11 @@ function headerOf(init: RequestInit | undefined, name: string): string | undefin
 
 beforeEach(() => {
   calls = [];
-  replies = {};
+  replies = {
+    "/api/onboard/identify-device": {
+      candidates: [{ vendor: "Prusa", model: "MK4", confidence: 0.9, mappedAdapterType: "octoprint" }],
+    },
+  };
   // jsdom does not implement scrolling; the chat page scrolls to its last message.
   Element.prototype.scrollIntoView = () => {};
   adoptApiKey("pcc_test_secret_key");
@@ -213,6 +217,7 @@ describe("N50: setup pages keep the API key on the configured gateway", () => {
       );
     });
     await flush();
+    expect(container.textContent).not.toMatch(/scan[\s\S]*network|network[\s\S]*scan/i);
     const input = container.querySelector('input[placeholder="Type a message or respond to the agent..."]') as HTMLInputElement;
     expect(input, "the chat input").not.toBeNull();
     await typeInto(input, "scan");
@@ -248,7 +253,7 @@ describe("N50: setup pages keep the API key on the configured gateway", () => {
     await clickButton("Identify This Machine");
     await clickButton("Confirm Configuration");
     expectNoKeyLeak();
-    for (const path of ["/api/ai/identify-machine"]) {
+    for (const path of ["/api/onboard/identify-device"]) {
       const call = calls.find((c) => c.url.endsWith(path));
       expect(call, path).toBeDefined();
       expect(call!.url).toBe(path);
@@ -279,7 +284,7 @@ describe("N50: setup pages keep the API key on the configured gateway", () => {
     await clickButton("Identify This Machine");
     await clickButton("Confirm Configuration");
     const keyed = calls.filter((c) => c.authorization);
-    expect(keyed.map((c) => c.url)).toEqual(["https://gw.example.com/api/ai/identify-machine"]);
+    expect(keyed.map((c) => c.url)).toEqual(["https://gw.example.com/api/onboard/identify-device"]);
   });
 
   it("EarnFromYourWorkPage sends the key it was just issued only to the gateway that issued it", async () => {
