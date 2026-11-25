@@ -3,7 +3,7 @@ import { useUIStore } from "../stores/ui-store.js";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
 import { OnboardChatHandoff } from "../components/onboard/OnboardChatHandoff.js";
 
-type UIRenderComponent = "photo_capture" | "network_scan_results" | "machine_config_preview" | "chat_handoff" | "text_input" | "selection";
+type UIRenderComponent = "photo_capture" | "machine_config_preview" | "chat_handoff" | "text_input" | "selection";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -24,12 +24,6 @@ interface SelectionOption {
   value: string;
   label: string;
   description?: string;
-}
-
-interface NetworkDevice {
-  address: string;
-  hostname?: string;
-  service?: string;
 }
 
 interface MachineConfigPreview {
@@ -58,7 +52,6 @@ const INITIAL_MESSAGES: ChatMessage[] = [
         options: [
           { value: "photo", label: "Take or upload a photo", description: "AI identifies the machine automatically" },
           { value: "manual", label: "Enter details manually", description: "Type the make, model, and type" },
-          { value: "scan", label: "Scan network", description: "Discover devices on your local network" },
         ] satisfies SelectionOption[],
       },
     },
@@ -82,7 +75,7 @@ async function agentStep(
   const lastAgentMsg = [...history].reverse().find((m) => m.role === "agent");
   const phase = lastAgentMsg?.uiRequest?.component ?? "selection";
 
-  if (phase === "selection" || userInput === "photo" || userInput === "manual" || userInput === "scan") {
+  if (phase === "selection" || userInput === "photo" || userInput === "manual") {
     if (userInput === "photo") {
       responses.push({
         id: id(),
@@ -114,67 +107,6 @@ async function agentStep(
           },
         },
       });
-    } else if (userInput === "scan") {
-      responses.push({
-        id: id(),
-        role: "agent",
-        content: "Scanning your local network for connected devices...",
-        timestamp: ts(),
-      });
-
-      // Attempt real network scan
-      try {
-        const res = await authorizedFetch("/api/setup/scan-network", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
-        });
-        const data = res.ok ? await res.json() as { devices?: NetworkDevice[] } : { devices: [] };
-        const devices: NetworkDevice[] = data.devices ?? [];
-
-        if (devices.length === 0) {
-          responses.push({
-            id: id(),
-            role: "agent",
-            content:
-              "No devices were automatically discovered. This can happen if your machine is on a different subnet or if the scan endpoint isn't reachable.\n\nLet's try connecting directly — do you know the IP address of your machine?",
-            timestamp: ts(),
-            uiRequest: {
-              component: "text_input",
-              props: {
-                placeholder: "e.g. 192.168.1.50 or printer.local",
-                label: "Enter device IP address or hostname",
-              },
-            },
-          });
-        } else {
-          responses.push({
-            id: id(),
-            role: "agent",
-            content: `Found ${devices.length} device(s) on your network. Select the one you want to configure:`,
-            timestamp: ts(),
-            uiRequest: {
-              component: "network_scan_results",
-              props: { devices },
-            },
-          });
-        }
-      } catch {
-        responses.push({
-          id: id(),
-          role: "agent",
-          content:
-            "I wasn't able to reach the gateway to scan your network. Make sure the PCC gateway is running on port 3200.\n\nYou can still add the device manually — do you know its IP address?",
-          timestamp: ts(),
-          uiRequest: {
-            component: "text_input",
-            props: {
-              placeholder: "e.g. 192.168.1.50",
-              label: "Enter device IP address or hostname",
-            },
-          },
-        });
-      }
     } else if (["fdm_printer", "resin_printer"].includes(userInput)) {
       responses.push({
         id: id(),
@@ -322,7 +254,6 @@ async function agentStep(
       content: [
         "I can help you:",
         "  - Identify machines from photos (AI vision)",
-        "  - Scan your network for connected devices",
         "  - Auto-detect connection type (OctoPrint, Modbus, OPC-UA)",
         "",
         "Just describe what you want to do, or use the options I present.",
@@ -422,47 +353,6 @@ function PhotoCapture({ onCapture }: { onCapture: (base64: string) => void }) {
           Identify This Machine
         </button>
       )}
-    </div>
-  );
-}
-
-function NetworkScanResults({
-  devices,
-  onSelect,
-}: {
-  devices: NetworkDevice[];
-  onSelect: (address: string) => void;
-}) {
-  if (devices.length === 0) {
-    return (
-      <p className="text-sm text-white/40 italic">No devices found on your network.</p>
-    );
-  }
-
-  return (
-    <div className="space-y-2">
-      {devices.map((device, i) => (
-        <button
-          key={i}
-          onClick={() => onSelect(device.address)}
-          className="w-full flex items-center justify-between px-4 py-3 rounded-xl border border-white/[0.08] bg-white/[0.03] hover:bg-white/[0.06] hover:border-emerald-500/30 transition-colors text-left"
-        >
-          <div>
-            <div className="text-sm font-medium text-white/80">{device.hostname ?? device.address}</div>
-            {device.hostname && (
-              <div className="text-xs text-white/40 font-mono">{device.address}</div>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            {device.service && (
-              <span className="text-xs px-2 py-0.5 rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/25">
-                {device.service}
-              </span>
-            )}
-            <span className="text-white/30 text-lg">&rsaquo;</span>
-          </div>
-        </button>
-      ))}
     </div>
   );
 }
@@ -609,14 +499,6 @@ function UIRenderer({
   switch (component) {
     case "photo_capture":
       return <PhotoCapture onCapture={onResponse} />;
-
-    case "network_scan_results":
-      return (
-        <NetworkScanResults
-          devices={(props.devices as NetworkDevice[]) ?? []}
-          onSelect={onResponse}
-        />
-      );
 
     case "machine_config_preview":
       return (
@@ -866,7 +748,7 @@ export function SetupAgentPage() {
 
         {/* Quick actions */}
         <div className="flex gap-2 mt-2 flex-wrap">
-          {["Start setup", "Scan network", "Check status", "Help"].map((label) => (
+          {["Start setup", "Check status", "Help"].map((label) => (
             <button
               key={label}
               onClick={() => handleSend(label.toLowerCase())}

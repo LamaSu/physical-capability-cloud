@@ -98,3 +98,64 @@ describe("T2d: inbound onboarding copy", () => {
     expect(source).not.toContain("Register a {ec.name}");
   });
 });
+
+describe("T2e: SetupWizardPage's identity step claims no registration", () => {
+  it("removes the registration claims and contains each replacement exactly once", () => {
+    const source = readSource("pages/SetupWizardPage.tsx");
+    for (const forbidden of [
+      "Register on PCCP",
+      "registered on-chain via ERC-8004",
+      "Register your identity on the PCCP network.",
+      '"Registering..."',
+      "Registration error",
+      "registers your identity on the PCCP network",
+    ]) {
+      expect(source).not.toContain(forbidden);
+    }
+    for (const replacement of [
+      'description: "Name, organization and role"',
+      "This page didn't register your identity or anything on-chain.",
+      'subtitle="Add your name, organization and role. This step registers nothing."',
+      '"Checking..."',
+      "Setup check failed",
+      "Complete Setup doesn't register your identity or anything on-chain.",
+    ]) {
+      expect(source.split(replacement).length - 1, replacement).toBe(1);
+    }
+  });
+});
+
+describe("T2f: SetupAgentPage offers no network scan", () => {
+  it("contains none of the network scan path, UI, types or branch", () => {
+    const source = readFileSync(sourcePath("pages/SetupAgentPage.tsx"), "utf8");
+    expect(source).not.toMatch(/scan/i);
+    for (const forbidden of [
+      "scan-network",
+      "Scan network",
+      "network_scan_results",
+      "NetworkScanResults",
+      "NetworkDevice",
+      "Scan your network",
+      'userInput === "scan"',
+    ]) {
+      expect(source).not.toContain(forbidden);
+    }
+  });
+});
+
+describe("T2g: the landing hero's onboarding links reach the public chat", () => {
+  it("points all four onboarding links, including the primary action, at the chat", () => {
+    const source = readSource("components/AgentLandingHero.tsx");
+    expect(source.split('href="/onboard"').length - 1).toBe(0);
+    expect(source.split('href="/onboard/chat"').length - 1).toBe(4);
+    expect(source).toContain('<a className="alh-btn primary" href="/onboard/chat">Publish a capability →</a>');
+  });
+});
+
+describe("T2h: the static landing page's offer link reaches the public chat", () => {
+  it("contains no bare onboarding href and exactly one public chat offer link", () => {
+    const source = readFileSync(sourcePath("../public/landing.html"), "utf8");
+    expect(source.split('href="/onboard"').length - 1).toBe(0);
+    expect(source.split('<a class="btn btn--offer" href="/onboard/chat">Offer a capability <span class="arr" aria-hidden="true">&rarr;</span></a>').length - 1).toBe(1);
+  });
+});
