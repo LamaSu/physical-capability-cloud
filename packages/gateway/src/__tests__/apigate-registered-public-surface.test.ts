@@ -518,7 +518,7 @@ const EXPECTED_ADMIN_KEY_DECLARATIONS = [
   [["POST"], "exact", "/api/admin/settlement-challenges", null, null, "N149 one-use settlement challenge issuance: also accepts the gateway admin secret itself"],
   [["GET"], "exact", "/api/admin/posture", null, null, "N237 posture read: also accepts the gateway admin secret itself"],
   [["GET"], "exact", "/api/admin/features", null, null, "N400 feature switches read: also accepts the gateway admin secret itself"],
-  [["PUT"], "regex", null, "^\\/api\\/admin\\/features\\/[a-z_]+$", "", "N400 feature switch set: also accepts the gateway admin secret itself"],
+  [["PUT"], "regex", null, "^\\/api\\/admin\\/features\\/[^/]+$", "", "N400 feature switch set: also accepts the gateway admin secret itself"],
 ];
 
 const EXPECTED_ADMIN_KEY_SURFACE = [
