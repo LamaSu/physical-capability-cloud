@@ -39,6 +39,7 @@ fi
 # (AppArmor closes the loader residual); the unit's AppArmorProfile=pcc-node makes the service FAIL if
 # it is not loaded, so do this before enabling the unit.
 if command -v apparmor_parser >/dev/null 2>&1; then
+    install -m 0644 "$HERE/apparmor/pcc-node" /etc/apparmor.d/pcc-node
     apparmor_parser -r -W "$HERE/apparmor/pcc-node"
     echo "install.sh: loaded AppArmor profile 'pcc-node' (L1 exec allowlist)"
 else

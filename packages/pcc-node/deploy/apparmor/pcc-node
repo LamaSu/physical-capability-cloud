@@ -10,11 +10,12 @@
 # via abstractions/base) and is explicitly denied execute-as-program, so that gadget is refused while
 # the utilities still load their libraries. AppArmor denies by default, so only the lines below execute.
 #
-# Load it, then run pcc-node under it (the shipped unit sets AppArmorProfile=pcc-node):
+# Install and load it, then run pcc-node under it (the shipped unit sets AppArmorProfile=pcc-node):
+#   install -m 0644 deploy/apparmor/pcc-node /etc/apparmor.d/pcc-node   # AppArmor loads it at boot
 #   apparmor_parser -r -W deploy/apparmor/pcc-node
 #   systemctl start pcc-node     # through the shipped unit: the grants below cover its key directory only
 # VERIFY on the host before relying on it: aa-status shows it enforced; a shell is refused
-#   (aa-exec -p pcc-node -- /bin/sh -c true  ->  Permission denied); each pinned utility runs.
+#   (aa-exec -i -p pcc-node -- /bin/sh -c true  ->  Permission denied); each pinned utility runs.
 #include <tunables/global>
 
 profile pcc-node flags=(attach_disconnected) {
@@ -54,6 +55,8 @@ profile pcc-node flags=(attach_disconnected) {
   # creates, where the unit's HOME and keys.json point.
   /etc/pcc-node/** r,
   /var/lib/pcc-node/** rwk,
+  # The key store installs a new key by a hard link from a temporary name in the key directory.
+  /var/lib/pcc-node/** l,
 
   # The key store's checks when it loads the key: it reads this process's mount table and descriptor
   # info, and opens the key directory and each directory above it, up to /. The /** rule above matches

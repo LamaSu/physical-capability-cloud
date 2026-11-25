@@ -36,11 +36,14 @@ the system interpreter: the files of a virtual environment are not covered.
 Enable AppArmor first (see "Install targets"), then, as root:
 
 ```sh
-deploy/install.sh                        # the user, the key directory, the profile and the unit
+deploy/install.sh                           # the user, the key directory, the profile and the unit
 systemctl enable --now pcc-node
-aa-status | grep pcc-node                # the profile is loaded, in enforce mode
-aa-exec -p pcc-node -- /bin/sh -c true   # must fail with: Permission denied
+aa-status | grep pcc-node                   # the profile is loaded, in enforce mode
+aa-exec -i -p pcc-node -- /bin/sh -c true   # must fail with: Permission denied
 ```
+
+`install.sh` installs the profile as `/etc/apparmor.d/pcc-node`, which AppArmor loads at each boot,
+and loads it now.
 
 The unit does not start where Layer 1 cannot be applied, and systemd logs why:
 `AssertSecurity=apparmor` fails the start where AppArmor is not enabled, and `AppArmorProfile=pcc-node`,
@@ -50,9 +53,11 @@ package. On a SELinux host, write the equivalent policy and remove the two lines
 without loading it.
 
 **Runtime efficacy needs a per-distro host matrix** that exercises real operations: the profile
-enforced; the node starts under the unit and loads its key; Python and its extensions load; each
-utility runs its actual capture or probe, not just `--version`; and a shell, a `/tmp` ELF,
-`ld.so <non-pinned>` and `python3 -c` of a non-pinned exec are all refused.
+enforced; the first start, with the profile in enforce mode and an empty key directory, creates the
+key; the node starts under the unit and loads its key; after a reboot, aa-status lists pcc-node in
+enforce mode and the node starts; Python and its extensions load; each utility runs its actual
+capture or probe, not just `--version`; and a shell, a `/tmp` ELF, `ld.so <non-pinned>` and
+`python3 -c` of a non-pinned exec are all refused.
 
 ### Running without AppArmor
 Remove both `AssertSecurity=apparmor` and `AppArmorProfile=pcc-node` from the installed unit

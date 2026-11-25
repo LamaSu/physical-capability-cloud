@@ -145,7 +145,7 @@ def test_installer_creates_the_system_user_and_group():
 
 def test_installer_creates_the_key_directory_after_the_user():
     commands = _active_lines(DEPLOY / "install.sh")
-    installs = [line for line in commands if line.startswith("install ")]
+    installs = [line for line in commands if line.startswith("install ") and "-d" in line.split()]
     assert len(installs) == 1
     words = installs[0].split()
     assert "-d" in words
@@ -203,3 +203,79 @@ def test_apparmor_profile_includes_name_service_and_certificates():
     for include in ("#include <abstractions/nameservice>", "#include <abstractions/ssl_certs>"):
         assert includes.count(include) == 1
         assert includes.index(include) > base
+
+
+def test_apparmor_profile_grants_the_key_store_link():
+    rules = _active_lines(DEPLOY / "apparmor" / "pcc-node")
+    assert rules.count("/var/lib/pcc-node/** l,") == 1
+
+
+def test_installer_installs_the_profile_where_it_loads_at_boot():
+    commands = _active_lines(DEPLOY / "install.sh")
+    install = 'install -m 0644 "$HERE/apparmor/pcc-node" /etc/apparmor.d/pcc-node'
+    load = 'apparmor_parser -r -W "$HERE/apparmor/pcc-node"'
+    assert [line for line in commands if "/etc/apparmor.d" in line] == [install]
+    assert commands.count(load) == 1
+    assert commands.index(install) < commands.index(load)
+
+
+def test_installer_loads_the_profile_or_warns_in_one_block():
+    lines = (DEPLOY / "install.sh").read_text(encoding="utf-8").splitlines()
+    block = [
+        'if command -v apparmor_parser >/dev/null 2>&1; then',
+        '    install -m 0644 "$HERE/apparmor/pcc-node" /etc/apparmor.d/pcc-node',
+        '    apparmor_parser -r -W "$HERE/apparmor/pcc-node"',
+        "    echo \"install.sh: loaded AppArmor profile 'pcc-node' (L1 exec allowlist)\"",
+        'else',
+        '    echo "install.sh: WARNING -- apparmor_parser not found, so the AppArmor profile (Layer 1) is not" >&2',
+        '    echo "            loaded and the unit will not start: AssertSecurity=apparmor fails the start where" >&2',
+        '    echo "            AppArmor is not enabled, and AppArmorProfile=pcc-node fails it where the profile" >&2',
+        '    echo "            is not loaded. deploy/README.md says how to enable AppArmor on each install" >&2',
+        '    echo "            target, and how to run without Layer 1. Without it the loader path is open, and" >&2',
+        '    echo "            only mandatory Landlock and the spawn hook remain." >&2',
+        'fi',
+    ]
+    assert lines.count(block[0]) == 1
+    start = lines.index(block[0])
+    assert lines[start:start + len(block)] == block
+
+
+def test_unit_sets_the_apparmor_profile_once():
+    _assert_unit_directive(_unit_directives(), "AppArmorProfile=", "AppArmorProfile=pcc-node")
+
+
+def test_unit_directives_hold_with_spaces_around_equals():
+    directives = []
+    for section, line in _unit_directives():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            directives.append((section, key.strip() + "=" + value.strip()))
+    for directive in (
+        "User=pcc-node",
+        "Group=pcc-node",
+        "ProtectSystem=full",
+        "AppArmorProfile=pcc-node",
+        "NoNewPrivileges=yes",
+        "RestartPreventExitStatus=78",
+    ):
+        _assert_unit_directive(directives, directive.split("=", 1)[0] + "=", directive)
+    _assert_unit_directive(directives, "AssertSecurity=", "AssertSecurity=apparmor", "[Unit]")
+    assert not any(line.startswith(("DynamicUser=", "StateDirectory=", "ReadWritePaths="))
+                   for _, line in directives)
+
+
+def test_installer_runs_no_service_command_in_any_spelling():
+    import re
+
+    command = re.compile(
+        r"(?:^|[;&|({]) *(?:(?:exec|sudo) +)?"
+        r"(?:[^\s;&|({]+/)?(?:systemctl|service|systemd-run)\b"
+    )
+    found = []
+    for line in _active_lines(DEPLOY / "install.sh"):
+        if line.startswith("echo "):
+            continue
+        match = command.search(line)
+        if match:
+            found.append(line[match.start():].strip(" ;&|({"))
+    assert found == ["systemctl daemon-reload"]
