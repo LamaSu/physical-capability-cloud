@@ -944,6 +944,14 @@ def test_n400_every_unicode_cc_character_makes_a_message_unusable(codepoint):
     assert usable_message({"message": "Sign-up" + chr(codepoint) + " is paused."}) is None
 
 
+@pytest.mark.parametrize("codepoint", list(range(0x20, 0x7f)) + list(range(0xa0, 0x100)),
+                         ids=lambda value: "U+%04X" % value)
+def test_n400_every_character_outside_cc_keeps_a_message_usable(codepoint):
+    from pcc_node.register import usable_message
+    message = "Sign-up" + chr(codepoint) + " is paused."
+    assert usable_message({"message": message}) == message
+
+
 @pytest.mark.parametrize("body", [{}, {"message": ""}, {"message": 7}, {"message": ["x"]},
                                   {"message": None}, [], "message", None])
 def test_n400_an_unusable_message_is_not_used(body):
