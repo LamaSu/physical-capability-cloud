@@ -1090,8 +1090,8 @@ describe("astra pack 112b", () => {
     expect(evidenceIsExecutable(0, [])).toBe(true);
     expect(evidenceIsExecutable(0, [{ id: "decl.self_attested" }])).toBe(true);
     withLiveVerifiers(["ident.registered_key"], () => {
-      // receipt.kernel_signed without ident.registered_key is dropped, and confirm.execution_mode with it.
-      expect(evidenceIsExecutable(1, [{ id: "receipt.kernel_signed" }, gate])).toBe(false);
+      // Since vocabulary v3 (N395) receipt.kernel_signed has no dependency: the receipt and the gate are executable.
+      expect(evidenceIsExecutable(1, [{ id: "receipt.kernel_signed" }, gate])).toBe(true);
       // A complete chain plus the gate at tier 0 and 1: everything named sits in some tier.
       expect(evidenceIsExecutable(1, [{ id: "ident.registered_key" }, { id: "receipt.kernel_signed" }, gate])).toBe(true);
     });

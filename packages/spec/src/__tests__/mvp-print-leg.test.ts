@@ -33,6 +33,7 @@ import {
   computeTierLadderDigest,
   type TierLadderV1,
 } from "../evidence/tier-ladder.js";
+import { PRINT_UNIT_THURSDAY_V1 } from "../funding/print-unit.js";
 import { canonicalize } from "../util/canonical.js";
 
 const PRINT_LEG_URL = "pcc://capabilities/document-print-leg/v1";
@@ -167,6 +168,10 @@ const gateInput = (csd = freshCsd()): AcceptedProgramGateInput => ({
 });
 const KNOWN_GAP = 'tier1: primitive "receipt.kernel_signed" depends on "ident.registered_key" absent from tier ≤ 1';
 
+/** A copy of the vocabulary with receipt.kernel_signed's pre-v3 ident.registered_key dependency restored. */
+const restoredDependencyIndex = () =>
+  new Map(EVIDENCE_PRIMITIVES.map((p) => [p.id, p.id === "receipt.kernel_signed" ? { ...p, dependsOn: ["ident.registered_key"] } : p]));
+
 describe("MVP PRINT unit — A: fresh inputs reproduce the cross-lane goldens", () => {
   it("A1: parses and resolves the built-in print-leg base without inheritance", () => {
     const csd = freshCsd();
@@ -206,6 +211,7 @@ describe("MVP PRINT unit — A: fresh inputs reproduce the cross-lane goldens", 
     expect(computeCommittedProgramHash(DOCUMENT_PRINT_LEG_PROGRAM)).toBe(DOCUMENT_PRINT_LEG_PROGRAM_HASH);
     expect(computeCommittedProgramHash(freshProgram())).toBe(goldens.programHash);
     expect(DOCUMENT_PRINT_LEG_PROGRAM_HASH).toBe(goldens.programHash);
+    expect(DOCUMENT_PRINT_LEG_PROGRAM_HASH).toBe(PRINT_UNIT_THURSDAY_V1.committedProgramHash);
     expect(DOCUMENT_PRINT_LEG_PROGRAM).toEqual(goldens.program);
     expect(COMMITTED_PROGRAM_REGISTRY).toEqual([
       { csd: "document-print-and-mail", tier: "tier2", program: PRINT_AND_MAIL_INDEPENDENCE_PROGRAM, programHash: PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH },
@@ -296,16 +302,15 @@ describe("MVP PRINT unit — B: the print-leg properties", () => {
 });
 
 describe("MVP PRINT unit — C: the #349 production gate", () => {
-  it("C1: the production gate refuses exactly the receipt.kernel_signed registered-key dependency gap until S3", () => {
-    expect(assertAcceptedProgramForTier(gateInput())).toEqual({ ok: false, code: "tier-not-eligible", reasons: [KNOWN_GAP] });
+  it("C1: the production gate admits print-leg tier 1 at the built-in registry and vocabulary", () => {
+    expect(assertAcceptedProgramForTier(gateInput())).toEqual({ ok: true, registryPins: [] });
   });
 
-  it("C2: re-anchoring only the receipt dependency removes the sole blocker without mutating the vocabulary", () => {
+  it("C2: a copied index that restores the receipt's ident.registered_key dependency is refused with exactly KNOWN_GAP, and the vocabulary is untouched", () => {
     const original = structuredClone(EVIDENCE_PRIMITIVES);
-    const primitiveIndex = new Map(EVIDENCE_PRIMITIVES.map((p) => [p.id, p.id === "receipt.kernel_signed" ? { ...p, dependsOn: [] } : p]));
-    expect(assertAcceptedProgramForTierWith(gateInput(), COMMITTED_PROGRAM_REGISTRY, { primitiveIndex })).toEqual({ ok: true, registryPins: [] });
+    expect(assertAcceptedProgramForTierWith(gateInput(), COMMITTED_PROGRAM_REGISTRY, { primitiveIndex: restoredDependencyIndex() })).toEqual({ ok: false, code: "tier-not-eligible", reasons: [KNOWN_GAP] });
     expect(EVIDENCE_PRIMITIVES).toEqual(original);
-    expect(EVIDENCE_PRIMITIVES.find((p) => p.id === "receipt.kernel_signed")!.dependsOn).toEqual(["ident.registered_key"]);
+    expect(EVIDENCE_PRIMITIVES.find((p) => p.id === "receipt.kernel_signed")!.dependsOn).toEqual([]);
   });
 
   it("C3: tier0 accepts no program and refuses any committed program", () => {
@@ -318,6 +323,14 @@ describe("MVP PRINT unit — C: the #349 production gate", () => {
     for (const hash of [PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH, DOCUMENT_PRINT_LEG_PROGRAM_HASH.replace(/^0x/, "0X")]) {
       expect(assertAcceptedProgramForTier({ ...gateInput(), committedProgramHash: hash })).toEqual({ ok: false, code: "program-hash-mismatch" });
     }
+  });
+
+  it("C5: the production gate ignores a smuggled primitive index: as a 2nd argument, a 3rd argument or an input field", () => {
+    const smuggle = assertAcceptedProgramForTier as unknown as (input: unknown, second?: unknown, third?: unknown) => unknown;
+    const primitiveIndex = restoredDependencyIndex();
+    expect(smuggle(gateInput(), { primitiveIndex })).toEqual({ ok: true, registryPins: [] });
+    expect(smuggle(gateInput(), COMMITTED_PROGRAM_REGISTRY, { primitiveIndex })).toEqual({ ok: true, registryPins: [] });
+    expect(smuggle({ ...gateInput(), primitiveIndex })).toEqual({ ok: true, registryPins: [] });
   });
 });
 
@@ -373,7 +386,7 @@ describe("MVP PRINT unit — D: negative controls", () => {
     expect(eventPinsHold(ladder)).toBe(false);
     expect(achievedTierPinsHold(ladder)).toBe(false);
     expect(assertAcceptedProgramForTier(gateInput(csd))).toEqual({
-      ok: false, code: "tier-not-eligible", reasons: [KNOWN_GAP, 'tier1: primitive "confirm.target_system" verifier not implemented (stub)'],
+      ok: false, code: "tier-not-eligible", reasons: ['tier1: primitive "confirm.target_system" verifier not implemented (stub)'],
     });
   });
 

@@ -50,9 +50,9 @@
  * evidence above would silently weaken the promise. As authored,
  * the registry has two entries: document-print-and-mail tier2 stays pinned but
  * is eligible only at tier 0 until the CSD and its verifiers are fixed;
- * document-print-leg tier1 is pinned for the oracle and the host, but the
- * production gate refuses it until S3 re-anchors receipt.kernel_signed away
- * from its absent ident.registered_key dependency.
+ * document-print-leg tier1 is pinned for the oracle and the host, and since
+ * vocabulary v3 (S3, N395) the production gate admits it: receipt.kernel_signed
+ * no longer depends on ident.registered_key.
  *
  * The production gate takes no overrides. `assertAcceptedProgramForTier(input)`
  * always resolves against `COMMITTED_PROGRAM_REGISTRY` and the built-in
@@ -173,8 +173,8 @@ export interface CommittedProgramEntry {
  * document-print-and-mail tier2 (independent carrier acceptance scan), and
  * document-print-leg tier1, pinned for the oracle and the host. DPM tier1 and
  * tier3 still have none. An entry is necessary, not sufficient: DPM tier2 is
- * not eligible, and the production gate refuses print-leg tier1 until S3
- * re-anchors receipt.kernel_signed (see the module header).
+ * not eligible. Print-leg tier1 is admitted since S3 (N395) dropped
+ * receipt.kernel_signed's ident.registered_key dependency (see the module header).
  */
 export const COMMITTED_PROGRAM_REGISTRY: readonly CommittedProgramEntry[] = [
   {
