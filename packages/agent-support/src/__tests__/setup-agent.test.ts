@@ -708,7 +708,7 @@ describe("SetupAgent", () => {
       });
     });
 
-    it.each([400, 413, 429, 502, 503])("returns the failure result with status %i and reads no body", async (status) => {
+    it.each([400, 429, 502, 503])("returns the failure result with status %i and reads no body", async (status) => {
       const body = { error: "Model returned unparseable output", raw: "MODEL TEXT" };
       const json = vi.fn().mockResolvedValue(body);
       const text = vi.fn().mockResolvedValue(JSON.stringify(body));
@@ -777,6 +777,18 @@ describe("SetupAgent", () => {
           ],
         },
       },
+      {
+        label: "a vendor of only a line feed, a zero-width space and a tab",
+        body: { candidates: [{ vendor: "\n\u200B\t", model: "MK4", confidence: 0.9, mappedAdapterType: "octoprint" }] },
+      },
+      {
+        label: "a model of only a line separator, a soft hyphen and a carriage return",
+        body: { candidates: [{ vendor: "Prusa", model: "\u2028\u00AD\r", confidence: 0.9, mappedAdapterType: "octoprint" }] },
+      },
+      {
+        label: "a model of only a lone surrogate",
+        body: { candidates: [{ vendor: "Prusa", model: "\uD800", confidence: 0.9, mappedAdapterType: "octoprint" }] },
+      },
     ])("returns the failure result for $label", async ({ body }) => {
       vi.stubGlobal("fetch", makeFetchMock({ identifyDevice: body }));
       const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
@@ -800,6 +812,140 @@ describe("SetupAgent", () => {
         reason: "Couldn't get an identification from the photo.",
         status: 200,
       });
+    });
+
+    it.each([
+      { label: "a line feed between words", vendor: "Prusa\nResearch", make: "Prusa Research" },
+      { label: "a trailing carriage return and line feed", vendor: "Prusa\r\n", make: "Prusa" },
+    ])("cleans a vendor with $label", async ({ vendor, make }) => {
+      vi.stubGlobal("fetch", makeFetchMock({
+        identifyDevice: {
+          candidates: [{ vendor, model: "MK4", confidence: 0.92, mappedAdapterType: "octoprint" }],
+        },
+      }));
+      const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(result).toStrictEqual({
+        identified: true,
+        make,
+        model: "MK4",
+        confidence: 0.92,
+        suggestedAdapterType: "octoprint",
+      });
+    });
+
+    it.each([
+      { label: "a carriage return and line feed", model: "MK\r\n4", expectedModel: "MK 4" },
+      { label: "a tab", model: "MK\t4", expectedModel: "MK 4" },
+      { label: "a NUL", model: "MK\u00004", expectedModel: "MK 4" },
+      { label: "an escape", model: "MK\u001B4", expectedModel: "MK 4" },
+      { label: "a delete", model: "MK\u007F4", expectedModel: "MK 4" },
+      { label: "a next line", model: "MK\u00854", expectedModel: "MK 4" },
+      { label: "a C1 control", model: "MK\u009B4", expectedModel: "MK 4" },
+      { label: "a line separator", model: "MK\u20284", expectedModel: "MK 4" },
+      { label: "a paragraph separator", model: "MK\u20294", expectedModel: "MK 4" },
+      { label: "a mixed run", model: "MK\r\n\u2028\t\u001B4", expectedModel: "MK 4" },
+      { label: "a run with a format character inside", model: "MK\n\u200B\n4", expectedModel: "MK 4" },
+      { label: "a leading tab and a trailing line feed", model: "\tMK4\n", expectedModel: "MK4" },
+    ])("cleans a model with $label", async ({ model, expectedModel }) => {
+      vi.stubGlobal("fetch", makeFetchMock({
+        identifyDevice: {
+          candidates: [{ vendor: "Prusa", model, confidence: 0.92, mappedAdapterType: "octoprint" }],
+        },
+      }));
+      const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(result).toStrictEqual({
+        identified: true,
+        make: "Prusa",
+        model: expectedModel,
+        confidence: 0.92,
+        suggestedAdapterType: "octoprint",
+      });
+    });
+
+    it.each([
+      { label: "a zero-width space", vendor: "Pr\u200Busa" },
+      { label: "a right-to-left override and its pop", vendor: "Pr\u202Eus\u202Ca" },
+      { label: "a left-to-right isolate and its pop", vendor: "Pr\u2066us\u2069a" },
+      { label: "a byte order mark", vendor: "Pru\uFEFFsa" },
+      { label: "a soft hyphen", vendor: "Pru\u00ADsa" },
+      { label: "a lone high surrogate", vendor: "Prusa\uD83D" },
+      { label: "a lone low surrogate", vendor: "Pru\uDE00sa" },
+    ])("removes $label from the vendor", async ({ vendor }) => {
+      vi.stubGlobal("fetch", makeFetchMock({
+        identifyDevice: {
+          candidates: [{ vendor, model: "MK4", confidence: 0.92, mappedAdapterType: "octoprint" }],
+        },
+      }));
+      const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(result).toStrictEqual({
+        identified: true,
+        make: "Prusa",
+        model: "MK4",
+        confidence: 0.92,
+        suggestedAdapterType: "octoprint",
+      });
+    });
+
+    it.each([
+      { label: "accented Latin", vendor: "Cr\u00E9ation M\u00E9canique", model: "Fraiseuse \u00D812" },
+      { label: "Cyrillic", vendor: "\u0421\u0442\u0430\u043D\u043E\u043A", model: "16\u041A20" },
+      { label: "CJK with a character outside the BMP", vendor: "\u{20BB7}\u91CE", model: "\u65CB\u76E4 NC-7" },
+      { label: "an inner no-break space, digits and punctuation", vendor: "Prusa\u00A0Research", model: "MK3.9/S+ (#2, 2024)" },
+    ])("keeps $label unchanged", async ({ vendor, model }) => {
+      vi.stubGlobal("fetch", makeFetchMock({
+        identifyDevice: {
+          candidates: [{ vendor, model, confidence: 0.92, mappedAdapterType: "octoprint" }],
+        },
+      }));
+      const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(result).toStrictEqual({
+        identified: true,
+        make: vendor,
+        model,
+        confidence: 0.92,
+        suggestedAdapterType: "octoprint",
+      });
+    });
+
+    it.each([
+      { label: "a vendor of 81 units to 80", vendor: "A".repeat(81), make: "A".repeat(80) },
+      { label: "a model of 121 units to 120", model: "B".repeat(121), expectedModel: "B".repeat(120) },
+      { label: "a vendor of exactly 80 units, keeping it whole", vendor: "A".repeat(80), make: "A".repeat(80) },
+      { label: "a model of exactly 120 units, keeping it whole", model: "B".repeat(120), expectedModel: "B".repeat(120) },
+      { label: "a vendor whose cut falls inside a surrogate pair", vendor: "A".repeat(79) + "\u{20BB7}", make: "A".repeat(79) },
+      { label: "a model whose cut falls inside a surrogate pair", model: "B".repeat(119) + "\u{20BB7}", expectedModel: "B".repeat(119) },
+      { label: "a vendor before its format characters are removed", vendor: "\u200B".repeat(10) + "A".repeat(80), make: "A".repeat(70) },
+      { label: "a model before its format characters are removed", model: "\u200B".repeat(10) + "B".repeat(120), expectedModel: "B".repeat(110) },
+    ])("caps $label", async ({ vendor = "Prusa", model = "MK4", make = "Prusa", expectedModel = "MK4" }) => {
+      vi.stubGlobal("fetch", makeFetchMock({
+        identifyDevice: {
+          candidates: [{ vendor, model, confidence: 0.92, mappedAdapterType: "octoprint" }],
+        },
+      }));
+      const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(result).toStrictEqual({
+        identified: true,
+        make,
+        model: expectedModel,
+        confidence: 0.92,
+        suggestedAdapterType: "octoprint",
+      });
+    });
+
+    it("returns the photo-size reason with status 413 and reads no body", async () => {
+      const body = { error: "Model returned unparseable output", raw: "MODEL TEXT" };
+      const json = vi.fn().mockResolvedValue(body);
+      const text = vi.fn().mockResolvedValue(JSON.stringify(body));
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 413, json, text }));
+      const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(result).toStrictEqual({
+        identified: false,
+        reason: "The gateway refused the photo as too large. Try a smaller photo.",
+        status: 413,
+      });
+      expect(json).not.toHaveBeenCalled();
+      expect(text).not.toHaveBeenCalled();
     });
   });
 
