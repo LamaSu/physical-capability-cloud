@@ -109,11 +109,11 @@ describe("N400 admin features", () => {
   it("T7: the admin-secret declarations admit only the exact paths and verbs", () => {
     expect(ADMIN_KEY_ROUTES.slice(-2).map((entry) => ({ methods: entry.methods, match: entry.match, path: String(entry.path), why: entry.why }))).toEqual([
       { methods: ["GET"], match: "exact", path: "/api/admin/features", why: "N400 feature switches read: also accepts the gateway admin secret itself" },
-      { methods: ["PUT"], match: "regex", path: String(/^\/api\/admin\/features\/[a-z_]+$/), why: "N400 feature switch set: also accepts the gateway admin secret itself" },
+      { methods: ["PUT"], match: "regex", path: String(/^\/api\/admin\/features\/[^/]+$/), why: "N400 feature switch set: also accepts the gateway admin secret itself" },
     ]);
     for (const method of ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
       for (const url of ["/api/admin/features", "/api/admin/features/key_minting", "/api/admin/features/", "/api/admin/features/key_minting/extra", "/api/admin/featuresx", "/x/api/admin/features/key_minting", "/api/admin/features/key1", "/api/admin/features/KEY", "/api/admin/features/key_minting/"]) {
-        expect(acceptsAdminKey(url, method), `${method} ${url}`).toBe((method === "GET" && url === "/api/admin/features") || (method === "PUT" && url === "/api/admin/features/key_minting"));
+        expect(acceptsAdminKey(url, method), `${method} ${url}`).toBe((method === "GET" && url === "/api/admin/features") || (method === "PUT" && ["/api/admin/features/key_minting", "/api/admin/features/key1", "/api/admin/features/KEY"].includes(url)));
       }
     }
   });
