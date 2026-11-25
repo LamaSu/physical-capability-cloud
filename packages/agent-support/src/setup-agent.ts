@@ -27,6 +27,13 @@ import type { AdapterType } from "@pcc/spec";
 const SUGGESTED_ADAPTERS: readonly AdapterType[] = ["octoprint", "modbus", "opcua", "sila", "opentrons"];
 const IDENTIFY_FAILED = "Couldn't get an identification from the photo.";
 
+function cleanMachineName(name: string, maxUnits: number): string {
+  return name.slice(0, maxUnits)
+    .replace(/[\p{Cf}\p{Cs}]/gu, "")
+    .replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ")
+    .trim();
+}
+
 // ── Config ───────────────────────────────────────────────────────
 
 export interface SetupAgentConfig {
@@ -293,9 +300,13 @@ export class SetupAgent {
   /**
    * Posts the unchanged photo once to the gateway's identification route.
    * Copies only a usable first candidate's vendor, model and finite confidence
-   * in [0, 1], plus an allowed adapter suggestion. Names must be nonblank strings.
-   * Failures return a fixed reason and the HTTP status when a reply arrived;
-   * unsuccessful replies are never read, and errors are never included.
+   * in [0, 1], plus an allowed adapter suggestion. The vendor is cut to 80
+   * UTF-16 units and the model to 120, as the route cuts them. Each name then
+   * loses its format characters and lone surrogates, gets one space for each
+   * run of control characters or line and paragraph separators, and is
+   * trimmed; the result must be nonblank. Failures return a fixed reason and
+   * the HTTP status when a reply arrived; a 413 has its own reason.
+   * Unsuccessful replies are never read, and errors are never included.
    */
   async identifyMachineFromPhoto(imageBase64: string): Promise<MachineIdentificationResult> {
     let res: Response;
@@ -310,6 +321,13 @@ export class SetupAgent {
     }
 
     if (!res.ok) {
+      if (res.status === 413) {
+        return {
+          identified: false,
+          reason: "The gateway refused the photo as too large. Try a smaller photo.",
+          status: 413,
+        };
+      }
       return { identified: false, reason: IDENTIFY_FAILED, status: res.status };
     }
 
@@ -333,18 +351,24 @@ export class SetupAgent {
     }
     const c = first as Record<string, unknown>;
     if (
-      typeof c.vendor !== "string" || c.vendor.trim() === "" ||
-      typeof c.model !== "string" || c.model.trim() === "" ||
+      typeof c.vendor !== "string" ||
+      typeof c.model !== "string" ||
       typeof c.confidence !== "number" || !Number.isFinite(c.confidence) ||
       c.confidence < 0 || c.confidence > 1
     ) {
       return { identified: false, reason: IDENTIFY_FAILED, status: res.status };
     }
 
+    const make = cleanMachineName(c.vendor, 80);
+    const model = cleanMachineName(c.model, 120);
+    if (make === "" || model === "") {
+      return { identified: false, reason: IDENTIFY_FAILED, status: res.status };
+    }
+
     const result: MachineIdentificationResult = {
       identified: true,
-      make: c.vendor,
-      model: c.model,
+      make,
+      model,
       confidence: c.confidence,
     };
     if (SUGGESTED_ADAPTERS.includes(c.mappedAdapterType as AdapterType)) {
