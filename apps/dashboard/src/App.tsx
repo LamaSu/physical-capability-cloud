@@ -17,6 +17,7 @@ import { Sentry } from "./lib/telemetry.js";
 import { usePageTracking } from "./hooks/use-page-tracking.js";
 import { SpatialApp } from "./SpatialApp.js";
 import { AgentLandingHero } from "./components/AgentLandingHero.js";
+import { fundJobIdOf } from "./lib/fund-route.js";
 
 // ---------------------------------------------------------------------------
 // Lazy-loaded pages (code-split per route)
@@ -78,6 +79,7 @@ const EconomicAgreementsPage = lazy(() => import("./pages/EconomicAgreementsPage
 const WalletPage = lazy(() => import("./pages/WalletPage.js").then(m => ({ default: m.WalletPage })));
 const WalletLinkPage = lazy(() => import("./pages/WalletLinkPage.js").then(m => ({ default: m.WalletLinkPage })));
 const WalletsPage = lazy(() => import("./pages/WalletsPage.js").then(m => ({ default: m.WalletsPage })));
+const FundPage = lazy(() => import("./pages/FundPage.js").then(m => ({ default: m.FundPage })));
 const WhitepaperPage = lazy(() => import("./pages/WhitepaperPage.js").then(m => ({ default: m.WhitepaperPage })));
 const BatchBoardPage = lazy(() => import("./pages/BatchBoardPage.js").then(m => ({ default: m.BatchBoardPage })));
 const NegotiationSessionPage = lazy(() => import("./pages/NegotiationSessionPage.js").then(m => ({ default: m.NegotiationSessionPage })));
@@ -332,6 +334,8 @@ function Shell() {
       </Suspense>
     );
   }
+  const fundJobId = fundJobIdOf(location.pathname);
+  if (fundJobId !== undefined) return <Suspense fallback={<PageLoader />}><FundPage jobId={fundJobId} /></Suspense>;
   if (location.pathname === "/jobs/flow") {
     return <Suspense fallback={<PageLoader />}><JobFlowPage /></Suspense>;
   }

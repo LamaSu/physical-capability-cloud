@@ -28,12 +28,22 @@
  * Persistence: SQLite (raw SQL via better-sqlite3), wired into the gateway
  * store at boot. In-memory mode (no sqlite handle) is the default for tests.
  *
- * Auth boundary: routes are auth-gated by apiGate; the *poster identity* is
- * the API key's operatorId (NOT the X-Posted-By header from v0.2 — the
- * standalone service had no auth, so it trusted the header).
- *   - PATCH/DELETE/heartbeat require poster === current operatorId.
- *   - claim/events/get are open to any authenticated caller (operator agents).
+ * Auth boundary: apiGate proves a caller's wallet or API-key identity. The
+ * store privately binds posting and claiming identities and enforces the
+ * shared event roles and lifecycle before any mutation.
  */
+
+import { sameIdentity } from "../auth/buyer-identity.js";
+import {
+  CLAIMER_DIGEST_KEY,
+  CLAIMER_EVENT_KINDS,
+  EVENT_TRANSITIONS,
+  POSTER_DIGEST_KEY,
+  POSTER_EVENT_KINDS,
+  SERVER_EVENT_KINDS,
+  identityDigest,
+  type OfferCaller,
+} from "./job-offer-event-rules.js";
 
 // Structural type for the raw better-sqlite3 handle we get from
 // drizzle's `db.$client`. Avoiding a direct better-sqlite3 import keeps
@@ -353,6 +363,8 @@ export interface JobOffersStoreOptions {
 export class JobOffersStore {
   private readonly offers = new Map<string, JobOffer>();
   private readonly events = new Map<string, JobOfferEvent[]>();
+  private readonly posterDigests = new Map<string, string>();
+  private readonly claimerDigests = new Map<string, string>();
   private readonly claimLocks = new Map<string, Promise<void>>();
   private readonly idempotencyIndex = new Map<string, string>(); // key -> id
   private readonly verify: VerifyFn;
@@ -376,6 +388,17 @@ export class JobOffersStore {
     return this.nowFn().getTime();
   }
 
+  private isPoster(offer: JobOffer, caller: OfferCaller): boolean {
+    return this.posterDigests.get(offer.id) === identityDigest(caller.identity) || (
+      caller.wallet !== null && typeof offer.posterDid === "string" &&
+      /^0x[0-9a-fA-F]{40}$/.test(offer.posterDid) && sameIdentity(caller.wallet, offer.posterDid)
+    );
+  }
+
+  private isClaimer(offer: JobOffer, caller: OfferCaller): boolean {
+    return this.claimerDigests.get(offer.id) === identityDigest(caller.identity);
+  }
+
   // ── Hydration (boot recovery) ────────────────────────────────────────────
 
   private hydrateFromSqlite(): void {
@@ -386,7 +409,17 @@ export class JobOffersStore {
         .all() as Array<{ id: string; data: string }>;
       for (const r of rows) {
         try {
-          const offer = JSON.parse(r.data) as JobOffer;
+          const offer = JSON.parse(r.data) as JobOffer & Record<string, unknown>;
+          const posterDigest = offer[POSTER_DIGEST_KEY];
+          if (typeof posterDigest === "string" && /^[0-9a-f]{64}$/.test(posterDigest)) {
+            this.posterDigests.set(offer.id, posterDigest);
+          }
+          delete offer[POSTER_DIGEST_KEY];
+          const claimerDigest = offer[CLAIMER_DIGEST_KEY];
+          if (typeof claimerDigest === "string" && /^[0-9a-f]{64}$/.test(claimerDigest)) {
+            this.claimerDigests.set(offer.id, claimerDigest);
+          }
+          delete offer[CLAIMER_DIGEST_KEY];
           this.offers.set(offer.id, offer);
           if (offer.idempotencyKey) {
             this.idempotencyIndex.set(offer.idempotencyKey, offer.id);
@@ -411,6 +444,11 @@ export class JobOffersStore {
   private persistOffer(offer: JobOffer): void {
     if (!this.sqlite) return;
     try {
+      const data: Record<string, unknown> = { ...offer };
+      const posterDigest = this.posterDigests.get(offer.id);
+      if (posterDigest !== undefined) data[POSTER_DIGEST_KEY] = posterDigest;
+      const claimerDigest = this.claimerDigests.get(offer.id);
+      if (claimerDigest !== undefined) data[CLAIMER_DIGEST_KEY] = claimerDigest;
       this.sqlite
         .prepare(`INSERT INTO job_offers
                     (id, capability_type, status, data, posted_at, poster_did, valid_until, idempotency_key)
@@ -423,7 +461,7 @@ export class JobOffersStore {
           offer.id,
           offer.capabilityType,
           offer.status,
-          JSON.stringify(offer),
+          JSON.stringify(data),
           offer.postedAt,
           offer.posterDid,
           offer.validUntil,
@@ -480,6 +518,7 @@ export class JobOffersStore {
    */
   async create(
     input: CreateJobOfferInput,
+    caller?: OfferCaller | null,
   ): Promise<
     | { ok: true; offer: JobOffer; created: boolean }
     | (VerifyFail & { ok: false })
@@ -549,6 +588,7 @@ export class JobOffersStore {
 
     this.offers.set(offer.id, offer);
     if (offer.idempotencyKey) this.idempotencyIndex.set(offer.idempotencyKey, offer.id);
+    if (caller) this.posterDigests.set(offer.id, identityDigest(caller.identity));
     this.persistOffer(offer);
     this.appendEvent(offer.id, { at: postedAt, event: "posted", verified, capabilityType: offer.capabilityType });
     return { ok: true, offer, created: true };
@@ -614,11 +654,14 @@ export class JobOffersStore {
   async claim(
     id: string,
     claim: ClaimInput,
+    caller: OfferCaller | null,
   ): Promise<
     | { ok: true; offer: JobOffer }
+    | { ok: false; reason: "missing_identity" }
     | { ok: false; reason: "not_found" }
     | { ok: false; reason: "not_open"; currentStatus: JobOfferStatus; claimedBy: string | null }
   > {
+    if (caller === null) return { ok: false, reason: "missing_identity" };
     const prev = this.claimLocks.get(id) ?? Promise.resolve();
     let release!: () => void;
     const next = new Promise<void>((r) => { release = r; });
@@ -641,6 +684,7 @@ export class JobOffersStore {
       o.claimSignature = claim.claimSignature ?? null;
       o.driverEtaMin = claim.etaMin ?? null;
       o.driverContact = claim.contact ?? null;
+      this.claimerDigests.set(o.id, identityDigest(caller.identity));
       this.persistOffer(o);
       this.appendEvent(o.id, {
         at: o.claimedAt,
@@ -661,7 +705,7 @@ export class JobOffersStore {
    *   - progress_update (intermediate; carries payload)
    *   - delivered       (work complete; status → delivered)
    *   - error           (operator reports failure)
-   *   - cancelled       (operator-side cancel; status → cancelled)
+   *   - cancelled       (poster-side cancel; status → cancelled)
    *   - note            (free-form annotation, no status change)
    *
    * Courier-shim aliases pickup → in_progress and stays the convention
@@ -671,32 +715,43 @@ export class JobOffersStore {
   recordEvent(
     id: string,
     event: string,
-    by: string | null,
+    caller: OfferCaller | null,
     payload: unknown,
     note: string | null,
-  ): { ok: true; status: JobOfferStatus; event: JobOfferEvent } | { ok: false; reason: "not_found" } {
+  ):
+    | { ok: true; status: JobOfferStatus; event: JobOfferEvent }
+    | { ok: false; reason: "reserved_event" | "missing_identity" | "not_found" }
+    | { ok: false; reason: "not_participant"; need: "claimer" | "poster" | "poster_or_claimer" }
+    | { ok: false; reason: "invalid_transition"; currentStatus: JobOfferStatus } {
+    if (SERVER_EVENT_KINDS.has(event)) return { ok: false, reason: "reserved_event" };
+    if (caller === null) return { ok: false, reason: "missing_identity" };
     const o = this.offers.get(id);
     if (!o) return { ok: false, reason: "not_found" };
+    const isClaimer = this.isClaimer(o, caller);
+    const isPoster = this.isPoster(o, caller);
+    const claimerKind = CLAIMER_EVENT_KINDS.has(event);
+    const posterKind = POSTER_EVENT_KINDS.has(event);
+    if (claimerKind && !isClaimer) return { ok: false, reason: "not_participant", need: "claimer" };
+    if (posterKind && !isPoster) return { ok: false, reason: "not_participant", need: "poster" };
+    if (!claimerKind && !posterKind && !isClaimer && !isPoster) {
+      return { ok: false, reason: "not_participant", need: "poster_or_claimer" };
+    }
+    const transition = EVENT_TRANSITIONS.get(event);
+    if (transition && !transition.from.has(o.status)) {
+      return { ok: false, reason: "invalid_transition", currentStatus: o.status };
+    }
     const evt: JobOfferEvent = {
       at: this.nowIso(),
       event,
-      by,
+      by: claimerKind ? "claimer" : posterKind ? "poster" : isClaimer ? "claimer" : "poster",
       payload: payload ?? null,
       note: note ?? null,
     };
     this.appendEvent(o.id, evt);
-    // Status transitions — opt-in by event kind. Unknown event kinds leave
-    // status alone (caller can post "progress_update" repeatedly).
-    if (event === "in_progress" || event === "pickup") {
-      if (o.status === "claimed" || o.status === "open") o.status = "in_progress";
-    }
-    if (event === "delivered") {
-      o.status = "delivered";
-      o.deliveredAt = evt.at;
-    }
-    if (event === "cancelled") {
-      o.status = "cancelled";
-      o.cancelledAt = evt.at;
+    if (transition) {
+      o.status = transition.to;
+      if (transition.to === "delivered") o.deliveredAt = evt.at;
+      if (transition.to === "cancelled") o.cancelledAt = evt.at;
     }
     this.persistOffer(o);
     return { ok: true, status: o.status, event: evt };
@@ -704,16 +759,18 @@ export class JobOffersStore {
 
   patch(
     id: string,
-    poster: string,
+    caller: OfferCaller | null,
     patch: Partial<Pick<JobOffer, "pricing" | "deadlineIso" | "validUntil"> & { requirements?: Record<string, unknown> }>,
   ):
     | { ok: true; offer: JobOffer }
+    | { ok: false; reason: "missing_identity" }
     | { ok: false; reason: "not_found" }
     | { ok: false; reason: "forbidden" }
     | { ok: false; reason: "not_editable"; currentStatus: JobOfferStatus } {
+    if (caller === null) return { ok: false, reason: "missing_identity" };
     const o = this.offers.get(id);
     if (!o) return { ok: false, reason: "not_found" };
-    if (o.posterDid && o.posterDid !== poster) return { ok: false, reason: "forbidden" };
+    if (!this.isPoster(o, caller)) return { ok: false, reason: "forbidden" };
     if (o.status !== "open") {
       return { ok: false, reason: "not_editable", currentStatus: o.status };
     }
@@ -741,44 +798,48 @@ export class JobOffersStore {
     this.appendEvent(o.id, {
       at: this.nowIso(),
       event: "patched",
-      by: poster,
+      by: "poster",
       before,
       after: changed,
     });
     return { ok: true, offer: o };
   }
 
-  cancel(id: string, poster: string):
+  cancel(id: string, caller: OfferCaller | null):
     | { ok: true; status: JobOfferStatus }
+    | { ok: false; reason: "missing_identity" }
     | { ok: false; reason: "not_found" }
     | { ok: false; reason: "forbidden" } {
+    if (caller === null) return { ok: false, reason: "missing_identity" };
     const o = this.offers.get(id);
     if (!o) return { ok: false, reason: "not_found" };
-    if (o.posterDid && o.posterDid !== poster) return { ok: false, reason: "forbidden" };
+    if (!this.isPoster(o, caller)) return { ok: false, reason: "forbidden" };
     o.status = "cancelled";
     o.cancelledAt = this.nowIso();
     this.persistOffer(o);
     this.appendEvent(o.id, {
       at: o.cancelledAt,
       event: "deleted_by_poster",
-      by: poster,
+      by: "poster",
     });
     return { ok: true, status: o.status };
   }
 
-  heartbeat(id: string, poster: string):
+  heartbeat(id: string, caller: OfferCaller | null):
     | { ok: true; lastHeartbeatAt: string }
+    | { ok: false; reason: "missing_identity" }
     | { ok: false; reason: "not_found" }
     | { ok: false; reason: "forbidden" } {
+    if (caller === null) return { ok: false, reason: "missing_identity" };
     const o = this.offers.get(id);
     if (!o) return { ok: false, reason: "not_found" };
-    if (o.posterDid && o.posterDid !== poster) return { ok: false, reason: "forbidden" };
+    if (!this.isPoster(o, caller)) return { ok: false, reason: "forbidden" };
     o.lastHeartbeatAt = this.nowIso();
     this.persistOffer(o);
     this.appendEvent(o.id, {
       at: o.lastHeartbeatAt,
       event: "heartbeat",
-      by: poster,
+      by: "poster",
     });
     return { ok: true, lastHeartbeatAt: o.lastHeartbeatAt };
   }

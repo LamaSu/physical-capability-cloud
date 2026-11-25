@@ -2,7 +2,7 @@
  * Configuration types for the onboard-kit.
  */
 
-import type { BuiltinCapabilityType, PricingModel, AssuranceTier } from "@pcc/spec";
+import type { BuiltinCapabilityType, PricingModel, AssuranceTier, ParamOverride, MachineProfile, EvidenceDeviceType } from "@pcc/spec";
 
 /** Describes one API endpoint on the device */
 export interface DeviceEndpoint {
@@ -38,8 +38,8 @@ export interface AdapterManifest {
   protocol: "http" | "opcua" | "modbus" | "sila" | "mqtt" | "serial" | "websocket" | "custom";
   /** Base URL or connection string for the device */
   connectionString: string;
-  /** PCC device type for EvidenceSource */
-  deviceType: "controller" | "sensor" | "camera" | "robot" | "tee";
+  /** PCC device type for EvidenceSource; machine and sensor adapters need one of EVIDENCE_DEVICE_TYPES in @pcc/spec */
+  deviceType: EvidenceDeviceType | (string & {});
   /** Firmware/adapter version string */
   firmwareVersion: string;
   /** Endpoints (for HTTP protocol) */
@@ -130,7 +130,7 @@ export interface OnboardConfig {
     profileName: string;
     capabilityType: BuiltinCapabilityType;
     adapterId: string;
-    paramOverrides?: Record<string, unknown>;
-    pricingOverrides?: Partial<PricingModel>;
+    paramOverrides?: ParamOverride[];
+    pricingOverrides?: MachineProfile["pricingOverrides"];
   }>;
 }

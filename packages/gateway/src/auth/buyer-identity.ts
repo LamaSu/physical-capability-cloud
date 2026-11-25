@@ -11,7 +11,7 @@
 import type { KernelAuthority } from "./kernel-authority.js";
 
 const WALLET_RE = /^0x[0-9a-fA-F]{40}$/;
-const BUYER_PROOF_SOURCES = new Set(["self-link:agent", "siwe-session"]);
+export const BUYER_PROOF_SOURCES = new Set(["self-link:agent", "siwe-session"]);
 
 /** Equal strings, or the same 0x address in another letter case (a checksum is encoding, not identity). */
 export function sameIdentity(a: unknown, b: unknown): boolean {

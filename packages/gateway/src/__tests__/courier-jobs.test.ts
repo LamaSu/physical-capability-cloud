@@ -41,10 +41,19 @@ const stubVerify: VerifyFn = async (url) => {
   };
 };
 
-// ── Test app — courier routes only, no apiGate (we trust X-Posted-By) ──────
+// ── Test app — courier routes only, with apiGate identity fields ──────
 
 async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
+  app.addHook("onRequest", async (req) => {
+    const key = req.headers["x-test-key"];
+    if (typeof key === "string") req.apiKeyId = key;
+    const wallet = req.headers["x-test-wallet"];
+    if (typeof wallet === "string") {
+      req.provenWallet = wallet.toLowerCase();
+      req.provenWalletVia = "siwe-session";
+    }
+  });
   await app.register(courierJobsRoutes);
   await app.ready();
   return app;
@@ -359,11 +368,11 @@ describe("POST /api/courier-jobs/:id/claim", () => {
     const app = await buildApp();
     try {
       await app.inject({
-        method: "POST", url: "/api/courier-jobs",
+        method: "POST", url: "/api/courier-jobs", headers: { "x-test-key": "poster" },
         payload: { deliveryId: "j-claim", pickup: { name: "A" }, dropoff: { name: "B" } },
       });
       const res = await app.inject({
-        method: "POST", url: "/api/courier-jobs/j-claim/claim",
+        method: "POST", url: "/api/courier-jobs/j-claim/claim", headers: { "x-test-key": "claimer" },
         payload: { driverAgent: "driver-7" },
       });
       expect(res.statusCode).toBe(200);
@@ -380,11 +389,11 @@ describe("POST /api/courier-jobs/:id/claim", () => {
     const app = await buildApp();
     try {
       await app.inject({
-        method: "POST", url: "/api/courier-jobs",
+        method: "POST", url: "/api/courier-jobs", headers: { "x-test-key": "poster" },
         payload: { deliveryId: "j-mc", pickup: { name: "A" }, dropoff: { name: "B" } },
       });
       const res = await app.inject({
-        method: "POST", url: "/api/courier-jobs/j-mc/claim", payload: {},
+        method: "POST", url: "/api/courier-jobs/j-mc/claim", headers: { "x-test-key": "claimer" }, payload: {},
       });
       expect(res.statusCode).toBe(400);
       expect(res.json().error).toBe("missing_field");
@@ -397,7 +406,7 @@ describe("POST /api/courier-jobs/:id/claim", () => {
     const app = await buildApp();
     try {
       const res = await app.inject({
-        method: "POST", url: "/api/courier-jobs/missing/claim",
+        method: "POST", url: "/api/courier-jobs/missing/claim", headers: { "x-test-key": "claimer" },
         payload: { driverAgent: "d1" },
       });
       expect(res.statusCode).toBe(404);
@@ -410,11 +419,11 @@ describe("POST /api/courier-jobs/:id/claim", () => {
     const app = await buildApp();
     try {
       await app.inject({
-        method: "POST", url: "/api/courier-jobs",
+        method: "POST", url: "/api/courier-jobs", headers: { "x-test-key": "poster" },
         payload: { deliveryId: "race", pickup: { name: "A" }, dropoff: { name: "B" } },
       });
       const claims = Array.from({ length: 10 }, (_, i) => app.inject({
-        method: "POST", url: "/api/courier-jobs/race/claim",
+        method: "POST", url: "/api/courier-jobs/race/claim", headers: { "x-test-key": "claimer" },
         payload: { driverAgent: `driver-${i}` },
       }));
       const results = await Promise.all(claims);
@@ -442,17 +451,21 @@ describe("POST /api/courier-jobs/:id/events", () => {
     const app = await buildApp();
     try {
       await app.inject({
-        method: "POST", url: "/api/courier-jobs",
+        method: "POST", url: "/api/courier-jobs", headers: { "x-test-key": "poster" },
         payload: { deliveryId: "j-ev", pickup: { name: "A" }, dropoff: { name: "B" } },
       });
+      await app.inject({
+        method: "POST", url: "/api/courier-jobs/j-ev/claim", headers: { "x-test-key": "claimer" },
+        payload: { driverAgent: "d1" },
+      });
       const r1 = await app.inject({
-        method: "POST", url: "/api/courier-jobs/j-ev/events",
+        method: "POST", url: "/api/courier-jobs/j-ev/events", headers: { "x-test-key": "claimer" },
         payload: { event: "pickup", driverAgent: "d1" },
       });
       expect(r1.statusCode).toBe(200);
       expect(r1.json().status).toBe("in_transit");
       const r2 = await app.inject({
-        method: "POST", url: "/api/courier-jobs/j-ev/events",
+        method: "POST", url: "/api/courier-jobs/j-ev/events", headers: { "x-test-key": "claimer" },
         payload: { event: "delivered", driverAgent: "d1" },
       });
       expect(r2.statusCode).toBe(200);
@@ -466,11 +479,11 @@ describe("POST /api/courier-jobs/:id/events", () => {
     const app = await buildApp();
     try {
       await app.inject({
-        method: "POST", url: "/api/courier-jobs",
+        method: "POST", url: "/api/courier-jobs", headers: { "x-test-key": "poster" },
         payload: { deliveryId: "j-ev2", pickup: { name: "A" }, dropoff: { name: "B" } },
       });
       const res = await app.inject({
-        method: "POST", url: "/api/courier-jobs/j-ev2/events",
+        method: "POST", url: "/api/courier-jobs/j-ev2/events", headers: { "x-test-key": "poster" },
         payload: { event: "lasered" },
       });
       expect(res.statusCode).toBe(400);
@@ -484,17 +497,17 @@ describe("POST /api/courier-jobs/:id/events", () => {
 // ── PATCH /api/courier-jobs/:id — ownership ────────────────────────────────
 
 describe("PATCH /api/courier-jobs/:id", () => {
-  it("patches fee + description with matching X-Posted-By", async () => {
+  it("patches fee + description with the posting key", async () => {
     const app = await buildApp();
     try {
       await app.inject({
         method: "POST", url: "/api/courier-jobs",
-        headers: { "x-posted-by": "alice" },
+        headers: { "x-posted-by": "alice", "x-test-key": "alice" },
         payload: { deliveryId: "p1", pickup: { name: "A" }, dropoff: { name: "B" }, feeUSD: 5 },
       });
       const res = await app.inject({
         method: "PATCH", url: "/api/courier-jobs/p1",
-        headers: { "x-posted-by": "alice" },
+        headers: { "x-posted-by": "alice", "x-test-key": "alice" },
         payload: { feeUSD: 8.5, description: "patched" },
       });
       expect(res.statusCode).toBe(200);
@@ -511,12 +524,12 @@ describe("PATCH /api/courier-jobs/:id", () => {
     try {
       await app.inject({
         method: "POST", url: "/api/courier-jobs",
-        headers: { "x-posted-by": "alice" },
+        headers: { "x-posted-by": "alice", "x-test-key": "alice" },
         payload: { deliveryId: "p2", pickup: { name: "A" }, dropoff: { name: "B" } },
       });
       const res = await app.inject({
         method: "PATCH", url: "/api/courier-jobs/p2",
-        headers: { "x-posted-by": "mallory" },
+        headers: { "x-posted-by": "mallory", "x-test-key": "mallory" },
         payload: { feeUSD: 999 },
       });
       expect(res.statusCode).toBe(403);
@@ -531,14 +544,17 @@ describe("PATCH /api/courier-jobs/:id", () => {
     try {
       await app.inject({
         method: "POST", url: "/api/courier-jobs",
-        headers: { "x-posted-by": "alice" },
+        headers: { "x-posted-by": "alice", "x-test-key": "alice" },
         payload: { deliveryId: "p3", pickup: { name: "A" }, dropoff: { name: "B" } },
       });
       const res = await app.inject({
         method: "PATCH", url: "/api/courier-jobs/p3", payload: { feeUSD: 99 },
       });
       expect(res.statusCode).toBe(401);
-      expect(res.json().error).toBe("missing_identity");
+      expect(res.json()).toEqual({
+        error: "missing_identity",
+        message: "This action needs your API key or a wallet sign-in.",
+      });
     } finally {
       await app.close();
     }
@@ -553,12 +569,12 @@ describe("DELETE /api/courier-jobs/:id", () => {
     try {
       await app.inject({
         method: "POST", url: "/api/courier-jobs",
-        headers: { "x-posted-by": "alice" },
+        headers: { "x-posted-by": "alice", "x-test-key": "alice" },
         payload: { deliveryId: "d1", pickup: { name: "A" }, dropoff: { name: "B" } },
       });
       const res = await app.inject({
         method: "DELETE", url: "/api/courier-jobs/d1",
-        headers: { "x-posted-by": "alice" },
+        headers: { "x-posted-by": "alice", "x-test-key": "alice" },
       });
       expect(res.statusCode).toBe(200);
       expect(res.json().status).toBe("cancelled");
@@ -575,12 +591,12 @@ describe("DELETE /api/courier-jobs/:id", () => {
     try {
       await app.inject({
         method: "POST", url: "/api/courier-jobs",
-        headers: { "x-posted-by": "alice" },
+        headers: { "x-posted-by": "alice", "x-test-key": "alice" },
         payload: { deliveryId: "d2", pickup: { name: "A" }, dropoff: { name: "B" } },
       });
       const res = await app.inject({
         method: "DELETE", url: "/api/courier-jobs/d2",
-        headers: { "x-posted-by": "mallory" },
+        headers: { "x-posted-by": "mallory", "x-test-key": "mallory" },
       });
       expect(res.statusCode).toBe(403);
     } finally {
@@ -597,7 +613,7 @@ describe("POST /api/courier-jobs/:id/heartbeat", () => {
     try {
       await app.inject({
         method: "POST", url: "/api/courier-jobs",
-        headers: { "x-posted-by": "alice" },
+        headers: { "x-posted-by": "alice", "x-test-key": "alice" },
         payload: {
           deliveryId: "hb1",
           pickup: { name: "A" },
@@ -608,7 +624,7 @@ describe("POST /api/courier-jobs/:id/heartbeat", () => {
       advance(1000);
       const res = await app.inject({
         method: "POST", url: "/api/courier-jobs/hb1/heartbeat",
-        headers: { "x-posted-by": "alice" }, payload: {},
+        headers: { "x-posted-by": "alice", "x-test-key": "alice" }, payload: {},
       });
       expect(res.statusCode).toBe(200);
       expect(res.json().lastHeartbeatAt).toBeDefined();

@@ -37,7 +37,7 @@ function makeValidConfig(): OnboardConfig {
         adapterType: "sensor",
         protocol: "http",
         connectionString: "http://localhost:9090",
-        deviceType: "sensor",
+        deviceType: "power_monitor",
         firmwareVersion: "Sensor-1.0.0",
       },
     ],
@@ -193,6 +193,7 @@ describe("local config rules", () => {
   const slugWarning = (type: string) => `${JSON.stringify(type)} is not a slug (lowercase letters and digits joined by single "-" or "."); the gateway accepts any type`;
   const walletMessage = "the scaffolded agent never reads the variable named in walletPrivateKeyEnvVar; KernelAgent takes no wallet setting, so its wallet is a new random key each start";
   const walletError = 'is not an environment variable name (a letter or "_", then letters, digits or "_"); the scaffold writes it as a key of .env.example';
+  const keyMessage = "looks like a private key, not an environment variable name; keep the key in your environment and put the variable's name here";
   const withType = (type: string) => {
     const config = makeValidConfig();
     config.capabilities[0].type = type as any;
@@ -364,28 +365,33 @@ describe("local config rules", () => {
     expect(validate({ config: makeValidConfig() }).warnings).toContainEqual(warning("kernel.walletPrivateKeyEnvVar", walletMessage));
   });
 
-  it("CV13: deviceType warnings follow what each generated adapter writes", () => {
-    const sensorMessage = 'the generated sensor adapter writes deviceType "sensor" whatever this field says, and "sensor" is not an evidence device type in @pcc/spec; schema-checking verifiers refuse its events until you change it in the generated adapter (for example to power_monitor)';
+  it("CV13: machine and sensor deviceTypes outside the evidence list are errors; cameras stay unchecked", () => {
+    const message = (deviceType: string) => `${JSON.stringify(deviceType)} is not an evidence device type in @pcc/spec (for example controller, power_monitor, robot_arm); the generated adapter does not compile with it, and schema-checking verifiers refuse its events`;
     const result = validate({ config: makeValidConfig() });
-    expect(result.warnings).toContainEqual(warning("adapter[dev-sensor-01].deviceType", sensorMessage));
-    expect(result.warnings.some(w => w.name === "adapter[dev-machine-01].deviceType")).toBe(false);
+    expect(result.valid).toBe(true);
+    for (const name of ["adapter[dev-sensor-01].deviceType", "adapter[dev-machine-01].deviceType"]) {
+      expect(result.errors.some(e => e.name === name)).toBe(false);
+      expect(result.warnings.some(w => w.name === name)).toBe(false);
+    }
 
     const sensor = makeValidConfig();
-    sensor.adapters[1].deviceType = "power_monitor";
+    sensor.adapters[1].deviceType = "sensor";
     const sensorResult = validate({ config: sensor });
-    expect(sensorResult.warnings).toContainEqual(warning("adapter[dev-sensor-01].deviceType", sensorMessage));
-    expect(sensorResult.warnings.filter(w => w.name === "adapter[dev-sensor-01].deviceType")).toHaveLength(1);
+    expect(sensorResult.errors).toContainEqual(error("adapter[dev-sensor-01].deviceType", message("sensor")));
+    expect(sensorResult.checks.filter(c => c.name === "adapter[dev-sensor-01].deviceType")).toHaveLength(1);
+    expect(sensorResult.warnings.some(w => w.name === "adapter[dev-sensor-01].deviceType")).toBe(false);
+    expect(sensorResult.valid).toBe(false);
 
     const machine = makeValidConfig();
     machine.adapters[0].deviceType = "robot";
-    expect(validate({ config: machine }).warnings).toContainEqual(warning("adapter[dev-machine-01].deviceType",
-      '"robot" is not an evidence device type in @pcc/spec (for example controller, power_monitor, robot_arm); schema-checking verifiers refuse its events'));
+    expect(validate({ config: machine }).errors).toContainEqual(error("adapter[dev-machine-01].deviceType", message("robot")));
 
     const camera: OnboardConfig = JSON.parse(readFileSync(fileURLToPath(new URL("../examples/cnc-shop-config.json", import.meta.url)), "utf8"));
     camera.adapters.find(adapter => adapter.adapterId === "dev-qc-camera")!.deviceType = "robot";
     const cameraResult = validate({ config: camera });
     expect(cameraResult.checks.some(c => c.name === "adapter[dev-qc-camera].connectionString")).toBe(true);
     expect(cameraResult.warnings.some(w => w.name === "adapter[dev-qc-camera].deviceType")).toBe(false);
+    expect(cameraResult.errors.some(e => e.name === "adapter[dev-qc-camera].deviceType")).toBe(false);
   });
 
   it("CV14: only machine adapters warn about the generated HTTP transport", () => {
@@ -416,12 +422,12 @@ describe("local config rules", () => {
     }
   });
 
-  it("CV16: the original valid fixture gains precisely the five advisory warnings", () => {
+  it("CV16: the original valid fixture gains precisely the four advisory warnings", () => {
     const result = validate({ config: makeValidConfig() });
     expect(result.valid).toBe(true);
     expect(result.errors).toEqual([]);
     expect(result.warnings.map(w => w.name)).toEqual([
-      "kernel.walletPrivateKeyEnvVar", "adapter[dev-sensor-01].deviceType",
+      "kernel.walletPrivateKeyEnvVar",
       "capability[fdm].pricing", "capability[fdm].pricing", "capability[fdm].fundableTiers",
     ]);
     expect(result.warnings.filter(w => w.name === "capability[fdm].pricing")).toEqual([
@@ -488,13 +494,119 @@ describe("local config rules", () => {
       config.kernel.walletPrivateKeyEnvVar = value;
       const result = validate({ config });
       expect(JSON.stringify(result)).not.toContain(hex);
-      expect(result.warnings).toContainEqual(warning("kernel.walletPrivateKeyEnvVar", walletMessage));
-      if (value === "0x" + hex) {
-        expect(result.errors).toContainEqual(error("kernel.walletPrivateKeyEnvVar", walletError));
-      } else {
+      const name = "kernel.walletPrivateKeyEnvVar";
+      expect(result.valid).toBe(false);
+      expect(result.warnings).toContainEqual(warning(name, walletMessage));
+      expect(result.errors.filter(e => e.name === name)).toEqual([error(name, value === "0x" + hex ? walletError : keyMessage)]);
+    }
+  });
+
+  it("CV22: a wallet name of exactly 64 or 128 hex digits is refused, and only that", () => {
+    const name = "kernel.walletPrivateKeyEnvVar";
+    for (const value of ["f".repeat(64), "A".repeat(64), "aB".repeat(32), "c0".repeat(64), "D".repeat(128)]) {
+      const config = makeValidConfig();
+      config.kernel.walletPrivateKeyEnvVar = value;
+      const result = validate({ config });
+      expect(result.errors.filter(e => e.name === name)).toEqual([error(name, keyMessage)]);
+      expect(result.valid).toBe(false);
+      expect(JSON.stringify(result)).not.toContain(value);
+    }
+    for (const value of ["0x" + "f".repeat(64), "1" + "f".repeat(63)]) {
+      const config = makeValidConfig();
+      config.kernel.walletPrivateKeyEnvVar = value;
+      expect(validate({ config }).errors.filter(e => e.name === name)).toEqual([error(name, walletError)]);
+    }
+    for (const value of ["f".repeat(63), "f".repeat(65), "f".repeat(127), "f".repeat(129), "g".repeat(64), "KERNEL_PRIVATE_KEY"]) {
+      const config = makeValidConfig();
+      config.kernel.walletPrivateKeyEnvVar = value;
+      const result = validate({ config });
+      expect(result.errors.some(e => e.name === name)).toBe(false);
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toContainEqual(warning(name, walletMessage));
+    }
+  });
+
+  it("CV23: work envelope units are mm or inch", () => {
+    const name = "capability[fdm].workEnvelope.unit";
+    for (const unit of ["mm", "inch", "in", "cm", "", "MM"]) {
+      const config = makeValidConfig();
+      config.capabilities[0].workEnvelope = { x: 100, y: 100, z: 100, unit: unit as "mm" | "inch" };
+      const result = validate({ config });
+      if (unit === "mm" || unit === "inch") {
         expect(result.valid).toBe(true);
+        expect(result.checks.filter(c => !c.passed && c.name === name)).toEqual([]);
+      } else {
+        expect(result.checks.filter(c => c.name === name)).toEqual([
+          error(name, `${JSON.stringify(unit)} is not a work envelope unit; use "mm" or "inch"`),
+        ]);
+        expect(result.valid).toBe(false);
       }
     }
+  });
+
+  it("CV24: profile overrides take the @pcc/spec MachineProfile forms", () => {
+    const config = makeValidConfig();
+    config.profiles = [{
+      profileId: "p1", profileName: "P1", capabilityType: "fdm", adapterId: "dev-machine-01",
+      paramOverrides: [{ paramKey: "material", restrictTo: ["pla"], overrideDefault: "pla" }],
+      pricingOverrides: { basePrice: "30.00", currency: "USDC" },
+    }];
+    const result = validate({ config });
+    expect(result.valid).toBe(true);
+    expect(result.checks.filter(c => !c.passed && c.name.startsWith("profile[p1]"))).toEqual([]);
+
+    const oldParams = structuredClone(config);
+    oldParams.profiles![0].paramOverrides = { material: { key: "material", label: "Material", type: "enum" } } as any;
+    expect(validate({ config: oldParams }).errors).toContainEqual(error("profile[p1].paramOverrides",
+      "is a list of { paramKey, restrictTo?, exclude?, overrideMin?, overrideMax?, overrideDefault? } entries (ParamOverride in @pcc/spec), not an object keyed by parameter"));
+
+    const oldPricing = structuredClone(config);
+    oldPricing.profiles![0].pricingOverrides = { baseCost: "30.00" } as any;
+    expect(validate({ config: oldPricing }).errors).toContainEqual(error("profile[p1].pricingOverrides",
+      "takes only basePrice and currency (MachineProfile in @pcc/spec); baseCost, perMinute and minimum belong in a capability's pricing"));
+
+    const name = "profile[p1].paramOverrides[0]";
+    const extraParam = structuredClone(config);
+    extraParam.profiles![0].paramOverrides![0] = { ...extraParam.profiles![0].paramOverrides![0], label: "Material" } as any;
+    expect(validate({ config: extraParam }).errors).toEqual([error(name,
+      "takes only paramKey, restrictTo, exclude, overrideMin, overrideMax and overrideDefault (ParamOverride in @pcc/spec)")]);
+
+    const infiniteMin = structuredClone(config);
+    infiniteMin.profiles![0].paramOverrides![0].overrideMin = Infinity;
+    expect(validate({ config: infiniteMin }).errors).toContainEqual(error(`${name}.overrideMin`, "must be a finite number"));
+
+    const infiniteMax = structuredClone(config);
+    infiniteMax.profiles![0].paramOverrides![0].overrideMax = -Infinity;
+    expect(validate({ config: infiniteMax }).errors).toContainEqual(error(`${name}.overrideMax`, "must be a finite number"));
+
+    const missingKey = structuredClone(config);
+    delete (missingKey.profiles![0].paramOverrides![0] as any).paramKey;
+    expect(validate({ config: missingKey }).errors).toContainEqual(error(`${name}.paramKey`, "required"));
+
+    for (const value of [true, 5]) {
+      const defaultValue = structuredClone(config);
+      defaultValue.profiles![0].paramOverrides![0].overrideDefault = value;
+      const accepted = validate({ config: defaultValue });
+      expect(accepted.valid).toBe(true);
+      expect(accepted.checks.filter(c => !c.passed && c.name.startsWith("profile[p1]"))).toEqual([]);
+    }
+
+    const stringMin = structuredClone(config);
+    stringMin.profiles![0].paramOverrides![0].overrideMin = "5" as any;
+    const failures = validate({ config: stringMin }).checks.filter(c => !c.passed);
+    expect(failures).toHaveLength(1);
+    expect(failures[0].name).toBe(`${name}.overrideMin`);
+    expect(failures[0].severity).toBe("error");
+  });
+
+  it("CV25: the example validates with no deviceType, envelope or profile failure", () => {
+    const config: OnboardConfig = JSON.parse(readFileSync(fileURLToPath(new URL("../examples/cnc-shop-config.json", import.meta.url)), "utf8"));
+    const result = validate({ config });
+    expect(result.valid).toBe(true);
+    expect(result.checks.filter(c => !c.passed && (c.name.endsWith(".deviceType") || c.name.endsWith(".workEnvelope.unit") || c.name.startsWith("profile[")))).toEqual([]);
+    expect(result.warnings.map(w => w.name)).toEqual([
+      "kernel.walletPrivateKeyEnvVar", "capability[cnc-3axis].pricing", "capability[cnc-3axis].pricing", "capability[cnc-3axis].fundableTiers",
+    ]);
   });
 
   it("KT1: known types equal the template and built-in CSD union in both directions", () => {

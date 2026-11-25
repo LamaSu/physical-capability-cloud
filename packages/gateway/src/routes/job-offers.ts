@@ -24,10 +24,10 @@
  *   GET    /api/job-offers/healthz               — liveness (PUBLIC)
  *
  * Auth:
- *   - POST/PATCH/DELETE/heartbeat require an authenticated poster identity
- *     (API key operatorId, SIWE userId, or X-Posted-By header fallback).
- *   - PATCH/DELETE/heartbeat check the original poster matches the current
- *     identity (or are permitted if posterDid was null at creation).
+ *   - Claims, events and poster controls require an API key identity or proven wallet.
+ *   - PATCH/DELETE/heartbeat require the privately recorded posting identity,
+ *     or a proven wallet matching a wallet-shaped posterDid.
+ *   - Event permissions and lifecycle rules are enforced by JobOffersStore.
  *   - GET /open + GET /:id + healthz are PUBLIC so operator agents can poll
  *     without holding a gateway API key. Public allowlist additions live in
  *     middleware/api-gate.ts.
@@ -38,13 +38,16 @@
  * are expected to switch to /api/job-offers/* over the next 30 days.
  */
 
-import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
+import { offerCaller } from "../services/job-offer-event-rules.js";
+import { publicEvent, publicEvents, publicOffer } from "../services/job-offer-public.js";
 import {
   getJobOffersStore,
   type ClaimInput,
   type CreateJobOfferInput,
   type EvidenceRequirements,
   type GeoFence,
+  type JobOffer,
   type PricingSpec,
 } from "../services/job-offers-store.js";
 
@@ -62,18 +65,10 @@ function resolvePoster(req: FastifyRequest): string | null {
   return null;
 }
 
-function requirePoster(req: FastifyRequest, reply: FastifyReply): string | null {
-  const p = resolvePoster(req);
-  if (!p) {
-    void reply.code(401).send({
-      error: "missing_identity",
-      message:
-        "Operator identity required. Authenticate with an API key (preferred) or set X-Posted-By.",
-    });
-    return null;
-  }
-  return p;
-}
+const MISSING_IDENTITY = {
+  error: "missing_identity",
+  message: "This action needs your API key or a wallet sign-in.",
+};
 
 interface CreateBody {
   id?: string;                              // optional caller-supplied id
@@ -158,9 +153,10 @@ export async function jobOffersRoutes(app: FastifyInstance) {
         message: "pricing must be { amount:number, currency:string, model: 'fixed'|'quote-required'|'per-unit' }",
       });
     }
+    const caller = offerCaller(req);
     const posterDid = resolvePoster(req);
     const store = getJobOffersStore();
-    const result = await store.create(buildCreateInputFromBody(b, posterDid));
+    const result = await store.create(buildCreateInputFromBody(b, posterDid), caller);
     if (!result.ok) {
       if (result.reason === "schema_validation_failed") {
         return reply.code(400).send({
@@ -241,7 +237,7 @@ export async function jobOffersRoutes(app: FastifyInstance) {
       tier: tier != null && (tier === 0 || tier === 1 || tier === 2 || tier === 3) ? tier as 0|1|2|3 : null,
       within,
     });
-    const offers = all.slice(offset, offset + limit);
+    const offers = all.slice(offset, offset + limit).map(publicOffer);
     return {
       offers,
       count: offers.length,
@@ -257,7 +253,7 @@ export async function jobOffersRoutes(app: FastifyInstance) {
     const store = getJobOffersStore();
     const o = store.get(req.params.id);
     if (!o) return reply.code(404).send({ error: "not_found" });
-    return { offer: o, events: store.getEvents(o.id) };
+    return { offer: publicOffer(o), events: publicEvents(store.getEvents(o.id)) };
   });
 
   // ── POST /api/job-offers/:id/claim ─────────────────────────────────────
@@ -269,6 +265,8 @@ export async function jobOffersRoutes(app: FastifyInstance) {
     if (!b.kernelId) {
       return reply.code(400).send({ error: "missing_field", required: ["kernelId"] });
     }
+    const caller = offerCaller(req);
+    if (caller === null) return reply.code(401).send(MISSING_IDENTITY);
     const store = getJobOffersStore();
     const claim: ClaimInput = {
       kernelId: b.kernelId,
@@ -276,8 +274,9 @@ export async function jobOffersRoutes(app: FastifyInstance) {
       etaMin: b.etaMin,
       contact: b.contact,
     };
-    const result = await store.claim(req.params.id, claim);
+    const result = await store.claim(req.params.id, claim, caller);
     if (!result.ok) {
+      if (result.reason === "missing_identity") return reply.code(401).send(MISSING_IDENTITY);
       if (result.reason === "not_found") return reply.code(404).send({ error: "not_found" });
       if (result.reason === "not_open") {
         return reply.code(409).send({
@@ -287,7 +286,7 @@ export async function jobOffersRoutes(app: FastifyInstance) {
         });
       }
     }
-    return { ok: true, offer: (result as { ok: true; offer: unknown }).offer };
+    return { ok: true, offer: publicOffer((result as { ok: true; offer: JobOffer }).offer) };
   });
 
   // ── POST /api/job-offers/:id/events ────────────────────────────────────
@@ -304,16 +303,42 @@ export async function jobOffersRoutes(app: FastifyInstance) {
         message: "event (or kind) is required. Common values: acknowledged, in_progress, progress_update, delivered, error, cancelled, note.",
       });
     }
+    const caller = offerCaller(req);
     const store = getJobOffersStore();
     const result = store.recordEvent(
       req.params.id,
       eventKind,
-      b.by ?? null,
+      caller,
       b.payload ?? null,
       b.note ?? null,
     );
-    if (!result.ok) return reply.code(404).send({ error: "not_found" });
-    return { ok: true, status: result.status, event: result.event };
+    if (!result.ok) {
+      switch (result.reason) {
+        case "reserved_event":
+          return reply.code(400).send({ error: "reserved_event", event: eventKind });
+        case "missing_identity":
+          return reply.code(401).send(MISSING_IDENTITY);
+        case "not_found":
+          return reply.code(404).send({ error: "not_found" });
+        case "not_participant":
+          return reply.code(403).send({
+            error: "not_participant",
+            need: result.need,
+            message: result.need === "claimer"
+              ? "Only the offer's claimer may send this event."
+              : result.need === "poster"
+                ? "Only the offer's poster may send this event."
+                : "Only the offer's poster or its claimer may send events.",
+          });
+        case "invalid_transition":
+          return reply.code(409).send({
+            error: "invalid_transition",
+            event: eventKind,
+            currentStatus: result.currentStatus,
+          });
+      }
+    }
+    return { ok: true, status: result.status, event: publicEvent(result.event) };
   });
 
   // ── PATCH /api/job-offers/:id ──────────────────────────────────────────
@@ -326,20 +351,21 @@ export async function jobOffersRoutes(app: FastifyInstance) {
       requirements?: Record<string, unknown>;
     };
   }>("/api/job-offers/:id", async (req, reply) => {
-    const poster = requirePoster(req, reply);
-    if (poster === null) return;
+    const caller = offerCaller(req);
+    if (caller === null) return reply.code(401).send(MISSING_IDENTITY);
     const b = req.body || {};
     if (b.pricing && !validatePricing(b.pricing)) {
       return reply.code(400).send({ error: "invalid_pricing" });
     }
     const store = getJobOffersStore();
-    const result = store.patch(req.params.id, poster, {
+    const result = store.patch(req.params.id, caller, {
       pricing: b.pricing,
       deadlineIso: b.deadline,
       validUntil: b.validUntil,
       requirements: b.requirements,
     });
     if (!result.ok) {
+      if (result.reason === "missing_identity") return reply.code(401).send(MISSING_IDENTITY);
       if (result.reason === "not_found") return reply.code(404).send({ error: "not_found" });
       if (result.reason === "forbidden") {
         return reply.code(403).send({
@@ -354,16 +380,17 @@ export async function jobOffersRoutes(app: FastifyInstance) {
         });
       }
     }
-    return { ok: true, offer: (result as { ok: true; offer: unknown }).offer };
+    return { ok: true, offer: publicOffer((result as { ok: true; offer: JobOffer }).offer) };
   });
 
   // ── DELETE /api/job-offers/:id ─────────────────────────────────────────
   app.delete<{ Params: { id: string } }>("/api/job-offers/:id", async (req, reply) => {
-    const poster = requirePoster(req, reply);
-    if (poster === null) return;
+    const caller = offerCaller(req);
+    if (caller === null) return reply.code(401).send(MISSING_IDENTITY);
     const store = getJobOffersStore();
-    const result = store.cancel(req.params.id, poster);
+    const result = store.cancel(req.params.id, caller);
     if (!result.ok) {
+      if (result.reason === "missing_identity") return reply.code(401).send(MISSING_IDENTITY);
       if (result.reason === "not_found") return reply.code(404).send({ error: "not_found" });
       if (result.reason === "forbidden") {
         return reply.code(403).send({
@@ -379,11 +406,12 @@ export async function jobOffersRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>(
     "/api/job-offers/:id/heartbeat",
     async (req, reply) => {
-      const poster = requirePoster(req, reply);
-      if (poster === null) return;
+      const caller = offerCaller(req);
+      if (caller === null) return reply.code(401).send(MISSING_IDENTITY);
       const store = getJobOffersStore();
-      const result = store.heartbeat(req.params.id, poster);
+      const result = store.heartbeat(req.params.id, caller);
       if (!result.ok) {
+        if (result.reason === "missing_identity") return reply.code(401).send(MISSING_IDENTITY);
         if (result.reason === "not_found") return reply.code(404).send({ error: "not_found" });
         if (result.reason === "forbidden") {
           return reply.code(403).send({

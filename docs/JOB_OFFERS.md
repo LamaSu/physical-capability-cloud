@@ -146,6 +146,9 @@ Authorization: Bearer pcc_live_…
 }
 ```
 
+A claim needs an API key or a wallet sign-in. That caller becomes the
+claimer, regardless of the `kernelId` label it supplies.
+
 Returns 200 with `{ ok: true, offer }`. If already claimed/in_progress/
 delivered/cancelled/expired, returns 409 with `{ error: "not_open",
 currentStatus, claimedBy }`. The store serializes claims per-offer via a
@@ -160,34 +163,56 @@ POST /api/job-offers/:id/events
 { "event": "in_progress", "by": "kernel-driver-7", "payload": {…}, "note": "…" }
 ```
 
-Event vocabulary (extensible — unknown events are recorded but don't
-change status):
+Event permissions and lifecycle:
 
-| Event | Status transition |
-|---|---|
-| `acknowledged` | (no change — operator accepts after claim) |
-| `in_progress` (alias: `pickup`) | claimed/open → in_progress |
-| `progress_update` | (no change — carries `payload` for streaming progress) |
-| `delivered` | → delivered |
-| `error` | (no change — payload describes the error) |
-| `cancelled` | → cancelled |
-| `note` | (no change — free-form annotation) |
+| Event | Who may send it | Allowed current status | Resulting status |
+|---|---|---|---|
+| `in_progress` | Claimer | `claimed`, `in_progress` | `in_progress` |
+| `pickup` | Claimer | `claimed`, `in_progress` | `in_progress` |
+| `delivered` | Claimer | `claimed`, `in_progress` | `delivered` (sets `deliveredAt`) |
+| `cancelled` | Poster | `open`, `claimed`, `in_progress` | `cancelled` (sets `cancelledAt`) |
+| `posted`, `claimed`, `patched`, `heartbeat`, `expired`, `deleted_by_poster`, `settled`, `disputed`, `open` | Server only; no caller may send them | — | — |
+| Any other kind, including `note`, `acknowledged`, `progress_update`, `error` and unknown kinds | Poster or claimer | Any | No change |
 
-The shim translates v0.2's `pickup` event to `in_progress` so courier
-callers continue to work.
+`by` records the sender's role (`"poster"` or `"claimer"`); the body's
+`by` is ignored. For a neutral kind, a caller holding both roles is
+recorded as `"claimer"`. The courier shim uses these same rules and
+projects `in_progress` as `in_transit`.
+
+Refusals leave the offer and its event log unchanged:
+
+| HTTP | Error | Meaning |
+|---|---|---|
+| 400 | `reserved_event` | The kind is reserved for the server; includes `event` |
+| 401 | `missing_identity` | An API key or wallet sign-in is required |
+| 404 | `not_found` | The offer does not exist |
+| 403 | `not_participant` | The caller lacks the required role; `need` is `claimer`, `poster`, or `poster_or_claimer` |
+| 409 | `invalid_transition` | The kind cannot move the current status; includes `event` and `currentStatus` |
 
 ### Poster controls
 
 - `PATCH /api/job-offers/:id` — update `pricing`, `deadline`, `validUntil`,
-  or shallow-merge `requirements`. Ownership check via `posterDid`.
-- `DELETE /api/job-offers/:id` — set status to `cancelled`.
-- `POST /api/job-offers/:id/heartbeat` — refresh `lastHeartbeatAt`.
-  Required if `requireHeartbeat: true` on create (5min grace).
+  or shallow-merge `requirements`. Only the offer's recorded posting identity,
+  or the proven wallet named by a wallet-shaped `posterDid`, may use it.
+- `DELETE /api/job-offers/:id` — set status to `cancelled`. Only the offer's
+  recorded posting identity, or the proven wallet named by a wallet-shaped
+  `posterDid`, may use it.
+- `POST /api/job-offers/:id/heartbeat` — refresh `lastHeartbeatAt`. Only the
+  offer's recorded posting identity, or the proven wallet named by a
+  wallet-shaped `posterDid`, may use it. `X-Posted-By` no longer counts for
+  PATCH, DELETE or heartbeat. Required if `requireHeartbeat: true` on create
+  (5min grace).
 
 ### Diagnostics
 
 - `GET /api/job-offers/healthz` — PUBLIC. Counts per status + ISO timestamp.
-- `GET /api/job-offers/:id` — PUBLIC. Full offer + event log.
+- `GET /api/job-offers/:id` — PUBLIC. The offer and its event log.
+
+Served offers carry no `posterDid` or `driverContact`, and served courier
+jobs carry no `postedBy` or `driverContact`. This holds for both open
+feeds, every `GET /:id` and the claim and PATCH replies. Every served
+event carries `by`, which is `"poster"`, `"claimer"` or `null`; an event
+recorded with any other value serves `null`.
 
 ## Per-capability-type quick-starts
 

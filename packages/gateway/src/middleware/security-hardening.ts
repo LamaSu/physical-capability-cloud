@@ -376,7 +376,8 @@ export async function securityHeaders(app: FastifyInstance) {
         "style-src 'self' 'unsafe-inline'",   // inline styles used by dashboard
         "img-src 'self' data: https:",
         "font-src 'self' https://fonts.gstatic.com",
-        "connect-src 'self' https://capability.network https://*.posthog.com https://*.sentry.io wss://capability.network",
+        // The dashboard may read Base Sepolia's public RPC (the /fund page's chain reads), and no other chain's.
+        "connect-src 'self' https://capability.network https://*.posthog.com https://*.sentry.io wss://capability.network https://sepolia.base.org",
         "frame-ancestors 'none'",
         "base-uri 'self'",
         "form-action 'self'",

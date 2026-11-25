@@ -227,7 +227,7 @@ function makeValidConfig(): OnboardConfig {
         adapterType: "sensor",
         protocol: "http",
         connectionString: "http://localhost:9090",
-        deviceType: "sensor",
+        deviceType: "power_monitor",
         firmwareVersion: "Sensor-1.0.0",
       },
     ],
@@ -298,7 +298,7 @@ const PINS = [
       ],
       [
         "src/adapters/shop-power-meter.ts",
-        "c7735c93ac12741c4c9cd618aaecf1d0493e60dbe27660c3fdd0963ad22b08f0"
+        "dc0fcf3de016814d15f01fecb4c9acba1ae022be5f384e117929985c306a169c"
       ],
       [
         "src/adapters/qc-camera.ts",
@@ -306,7 +306,7 @@ const PINS = [
       ],
       [
         "src/capabilities.ts",
-        "d0fd68a08af61805cc75c37a81f3ceb0629b3c914147272c27738c301472a97f"
+        "1f19c7b953e30879da02bb7cd8fdc3612d2a6edc82eca205e0fe160b3c60d409"
       ],
       [
         "src/kernel.ts",
@@ -322,7 +322,7 @@ const PINS = [
       ],
       [
         "src/profiles.ts",
-        "e3d662a87e52a2a97663cfb8ba3480ff287fb736fbc27e420ae87119ad0a8f3d"
+        "dae60f751302cfca0ceef921e2f403a64492b7be7ff1728f09384d2d762f1248"
       ],
       [
         "src/__tests__/adapters.test.ts",
@@ -330,7 +330,7 @@ const PINS = [
       ]
     ],
     "scaffold": "5244e9e64e12fe1e7d03f8045283d091b6cdb7d1c1fe54b943cd85a2f5398256",
-    "validate": "a753f02e3272427ccd7734b6c75d296948d64c016fe62681f0a28d11d997ed4d"
+    "validate": "84b21aa239db38bd7c1a5d2b13a917f7450400dcdf81aa44b13dacae3b1d6eac"
   },
   {
     "files": [
@@ -348,11 +348,11 @@ const PINS = [
       ],
       [
         "src/adapters/test-sensor.ts",
-        "e009eae7087bf0cf9e3bdb1d81185948bd3b6b191ea168653dcb3570fd572e96"
+        "50ab587382d041ae5572fef24ce3473939d6993db4e2c46ebfdc9cbe65384a21"
       ],
       [
         "src/capabilities.ts",
-        "276ba6b6f3ac3b2579856ba8ad53242978f8574f6d11f04b60e18441f0295c5c"
+        "4b6c4051d9e6eb089b76ff2d8c82ef2a2f86e8141fade718f36b7e772102d6f0"
       ],
       [
         "src/kernel.ts",
@@ -372,7 +372,7 @@ const PINS = [
       ]
     ],
     "scaffold": "8b11ccc4f1ba9c7ef838b738f84d158aaf6315a6efbc726b64598370e413877f",
-    "validate": "28e6ab06ee92daafbef35b8727d7b0284059f9c5f8bd1ad52801d3a8007aeb73"
+    "validate": "3d4ff39c6470efdd1f840bc0531bb48f92f4f924330acfa4085b123381024595"
   },
   {
     "files": [
@@ -390,7 +390,7 @@ const PINS = [
       ],
       [
         "src/capabilities.ts",
-        "4705b4f84f17daab8f0a68ed31207426e3bffbc07180aad8deef20b2dc8bad00"
+        "50f6a64aaa1bf7a77606c6f61d2c9f95fbba23731db6b2b75fa616fc0e1caa4a"
       ],
       [
         "src/kernel.ts",
@@ -428,7 +428,7 @@ const PINS = [
       ],
       [
         "src/capabilities.ts",
-        "f17ba04b0e81275dcfe9664fbfd1a1ba551cadc56d286272e956bb9df5e5b07a"
+        "54336c5fa6847045b0f8118e7ec23d068d5c195d09f5febd46d279bf980ffec3"
       ],
       [
         "src/kernel.ts",
@@ -462,7 +462,7 @@ const PINS = [
       ],
       [
         "src/adapters/q-sensor.ts",
-        "dfbfc5146f34b282d2584a1af4718f58d766b0283d5224de582852cb9bc2861d"
+        "1fd630b274397ef52a74a83b4fd919957ba6533467a79eb0c4e5496a87b05f39"
       ],
       [
         "src/capabilities.ts",
@@ -486,7 +486,7 @@ const PINS = [
       ]
     ],
     "scaffold": "40bd492948b21c561ab32d787b893080df987f7a4a6b6acad7895e2bb7fd0d63",
-    "validate": "27982cc03d8ccf42262bcdeb67a4ea446e8b04aa243006c37ec111daa4a515b5"
+    "validate": "1446df05a682a2ef5467fb35861ab16dfd9fcd555897316358020b2757e033b7"
   }
 ];
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -498,15 +498,13 @@ describe("N303 scaffold literals and identifier rules", () => {
     for (const f of scaffold({ config }).files.filter(f => f.path.endsWith(".ts"))) parse(f.content, f.path);
     inspect(content(config, "src/capabilities.ts"), QUOTED);
     expect((await importCapabilities(config))[0].name).toBe(QUOTED);
-    expect(diagnostics(config)).toEqual(diagnostics(example()));
+    expect(diagnostics(config)).toEqual([]);
   }, 30000);
-  it("A2 wiring adds no type error to the example's agent.ts", () => {
-    const lines = diagnostics(example());
-    expect(lines.filter(line => line.startsWith("src/kernel.ts|"))).toEqual([]);
-    const agentLines = lines.filter(line => line.startsWith("src/agent.ts|"));
-    expect(agentLines).toHaveLength(1);
-    expect(agentLines[0]).toMatch(/^src\/agent\.ts\|2322\|/);
-    expect(agentLines[0].split("\n")[0]).toMatch(/is not assignable to type 'MachineProfile\[\]'\.$/);
+  it("A2 the example's generated project type-checks with no errors", () => {
+    expect(diagnostics(example())).toEqual([]);
+  }, 30000);
+  it("A2b a capability with no work envelope type-checks with no errors", () => {
+    expect(diagnostics(machineConfig())).toEqual([]);
   }, 30000);
   it("SL1b control characters stay one literal", () => {
     const config = example(); config.capabilities[0].name = CONTROL;
@@ -514,7 +512,9 @@ describe("N303 scaffold literals and identifier rules", () => {
   });
   it("SL2 capability name preserves text and object keys on import", async () => {
     const keys = Object.keys((await importCapabilities(example()))[0]).sort();
-    expect(keys).toHaveLength(12);
+    expect(keys).toHaveLength(13);
+    expect(keys).toContain("envelope");
+    expect(keys).toContain("availability");
     for (const name of [CRAFTED, CRAFTED2]) {
       const config = example(); config.capabilities[0].name = name;
       const caps = await importCapabilities(config);
@@ -537,6 +537,7 @@ describe("N303 scaffold literals and identifier rules", () => {
     ["A9", "stop path", machinePath, c => { c.adapters[0].endpoints!.find(e => e.purpose === "stop")!.path = H; }],
     ["S1", "sensor kernel id", "src/adapters/shop-power-meter.ts", c => { c.kernel.kernelId = H; }],
     ["S2", "sensor firmware", "src/adapters/shop-power-meter.ts", c => { c.adapters[1].firmwareVersion = H; }],
+    ["S3", "sensor device type", "src/adapters/shop-power-meter.ts", c => { c.adapters[1].deviceType = H; }],
     ["C1", "camera kernel id", "src/adapters/qc-camera.ts", c => { c.kernel.kernelId = H; }],
     ["C2", "camera firmware", "src/adapters/qc-camera.ts", c => { c.adapters[2].firmwareVersion = H; }],
     ["P1", "capabilities kernel id", "src/capabilities.ts", c => { c.kernel.kernelId = H; }],
@@ -769,6 +770,60 @@ describe("N303 scaffold literals and identifier rules", () => {
       expect(hash(validate({ config }).summary)).toBe(PINS[index].validate);
     });
   }
+  it("SL10a envelope", async () => {
+    const cap = (await importCapabilities(example()))[0];
+    expect(cap.envelope).toEqual({ x: 762, y: 406, z: 508, unit: "mm" });
+    expect(Object.hasOwn(cap, "workEnvelope")).toBe(false);
+    const inch = example(); inch.capabilities[0].workEnvelope!.unit = "inch";
+    expect(((await importCapabilities(inch))[0].envelope as { unit: string }).unit).toBe("in");
+    const without = (await importCapabilities(machineConfig()))[0];
+    expect(Object.hasOwn(without, "envelope")).toBe(false);
+    expect(Object.hasOwn(without, "workEnvelope")).toBe(false);
+  });
+  it("SL10b availability", async () => {
+    const config = example();
+    const availability = { timezone: "UTC", windows: {
+      0: [{ start: "00:00", end: "23:59" }],
+      1: [{ start: "00:00", end: "23:59" }],
+      2: [{ start: "00:00", end: "23:59" }],
+      3: [{ start: "00:00", end: "23:59" }],
+      4: [{ start: "00:00", end: "23:59" }],
+      5: [{ start: "00:00", end: "23:59" }],
+      6: [{ start: "00:00", end: "23:59" }],
+    } };
+    for (const cap of await importCapabilities(config)) expect(cap.availability).toEqual(availability);
+    expect(content(config, "src/capabilities.ts").split("    // Every day, 00:00-23:59 UTC. Change this schedule to your own hours.").length - 1).toBe(config.capabilities.length);
+  });
+  it("SL10c profiles", async () => {
+    const config = example();
+    expect(content(config, "src/profiles.ts").startsWith('import type { MachineProfile } from "@pcc/spec";\n\nexport const profiles: MachineProfile[] = [\n')).toBe(true);
+    const dir = writeProject(config);
+    expect((await import(join(dir, "src/profiles.ts"))).profiles).toEqual([{
+      id: "profile-haas-vf2",
+      capabilityType: "cnc-3axis",
+      machineName: "Haas VF-2 CNC Mill",
+      kernelId: config.kernel.kernelId,
+      paramOverrides: [{
+        paramKey: "material",
+        restrictTo: ["aluminum-6061", "aluminum-7075", "steel-1018", "stainless-304", "brass", "delrin"],
+        overrideDefault: "aluminum-6061",
+      }],
+      pricingOverrides: { basePrice: "30.00", currency: "USDC" },
+    }]);
+  });
+  it("SL10d the sensor", () => {
+    const text = content(example(), "src/adapters/shop-power-meter.ts");
+    expect(text.split('      deviceType: "power_monitor",').length - 1).toBe(1);
+    expect(text.split('type: "sensor_data_summary"').length - 1).toBe(1);
+    expect(text).not.toContain("sensor_reading");
+  });
+  it("SL10e the envelope takes only x, y, z and unit", async () => {
+    const config = example();
+    config.capabilities[0].workEnvelope = { ...config.capabilities[0].workEnvelope!, label: "bed" } as any;
+    const cap = (await importCapabilities(config))[0];
+    expect(cap.envelope).toEqual({ x: 762, y: 406, z: 508, unit: "mm" });
+    expect(diagnostics(config)).toEqual([]);
+  }, 30000);
   it("A6 the agent builds each adapter with kernel.ts's statement", () => {
     for (const [label, fixture] of fixtures) {
       const config = fixture();

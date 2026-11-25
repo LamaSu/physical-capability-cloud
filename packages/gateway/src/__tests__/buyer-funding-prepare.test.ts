@@ -543,6 +543,18 @@ describe("servePrepareSignature", () => {
       body: { error: "escrow_not_created", message: "The marker escrow is not created." } });
     expect(fundingPrepareRow(j.scopeId)).toMatchObject({ state: "pending_signature", operatorSignature: null, servedPayload: null, signatureVerifiedAt: null });
   });
+  for (const version of [
+    `${BUYER_FUNDED_ESCROW_VERSION}-v2`,
+    BUYER_FUNDED_ESCROW_VERSION.toUpperCase(),
+    ` ${BUYER_FUNDED_ESCROW_VERSION}`,
+    `${BUYER_FUNDED_ESCROW_VERSION} `,
+  ]) it(`SIG6 near-miss version ${JSON.stringify(version)}: servePrepareSignature refuses a marker escrow whose version only resembles the buyer-funded one`, async () => {
+    const j = seedPrepare(); await prepare(j);
+    db().update(schema.escrows).set({ version }).where(eq(schema.escrows.id, marker(j).id)).run();
+    expect(await servePrepareSignature(j.scopeId, good)).toEqual({ status: 409,
+      body: { error: "escrow_not_created", message: "The marker escrow is not created." } });
+    expect(fundingPrepareRow(j.scopeId)).toMatchObject({ state: "pending_signature", operatorSignature: null, servedPayload: null, signatureVerifiedAt: null });
+  });
   it("SIG7: prepareRowAnswer includes the exact serving margin edge", async () => {
     const j = seedPrepare(); const row = await prepare(j); const edge = (row.expiry - 600) * 1000;
     expect(prepareRowAnswer(row, edge)).toEqual({ status: 202, body: pendingBody });

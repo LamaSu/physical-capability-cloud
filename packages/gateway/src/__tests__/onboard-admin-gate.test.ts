@@ -58,7 +58,7 @@ const url = (id: string, action?: string) => `/api/onboard/registrations/${id}${
 const stored = (id: string): Row => JSON.parse(JSON.stringify(getRepos().registrations.findById(id)));
 const listed = (row: Row) => ({ id: row.id, status: row.status, name: row.name, createdAt: row.createdAt });
 
-function seed(status = "submitted", tenantId?: string): Row {
+function seed(status = "submitted", tenantId?: string | null): Row {
   const n = ++sequence;
   const mark = (column: string) => `MARK-n344-${n}-${column}`;
   const row = getRepos().registrations.insert({
@@ -78,7 +78,7 @@ function seed(status = "submitted", tenantId?: string): Row {
     pricing: { baseCost: mark("pricing"), minimum: "0", currency: "USDC" },
     operator: { walletAddress: ownerId, displayName: mark("operator"), certifications: [], trainingAcknowledgments: {} },
     complianceRegulations: [mark("complianceRegulations")],
-    tenantId: tenantId ?? mark("tenantId"),
+    tenantId: tenantId === undefined ? mark("tenantId") : tenantId,
     status,
     createdAt: "2026-01-01T00:00:00.000Z",
     submittedAt: mark("submittedAt"),
@@ -115,7 +115,7 @@ async function expectRefused(id: string, action: typeof actions[number], headers
   expect(res.body).toBe('{"error":"forbidden"}');
 }
 
-async function expectStateWrite(action: typeof actions[number], headers: Headers, tenantId?: string) {
+async function expectStateWrite(action: typeof actions[number], headers: Headers, tenantId?: string | null) {
   const before = seed(action === "activate" ? "approved" : "submitted", tenantId);
   clearSpies();
   const res = await app.inject({
@@ -220,12 +220,12 @@ describe("onboard admin gates and registration replies", () => {
     }
   });
 
-  it("OA5 missing detail is 200 not_found for admins and non-admins", async () => {
+  it("OA5 missing detail is 404 not_found for admins and non-admins", async () => {
     seed();
     for (const headers of [bearer(adminKey), bearer(strangerKey)]) {
       clearSpies();
       const res = await app.inject({ url: url("missing-n344"), headers });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(404);
       expect(res.json()).toEqual({ error: "not_found" });
     }
   });
@@ -255,23 +255,27 @@ describe("onboard admin gates and registration replies", () => {
     }
   });
 
-  it("OA9 TENANT_ENFORCE makes another tenant's row missing, admins included", async () => {
+  it("OA9 TENANT_ENFORCE makes other-tenant and tenant-less rows missing for tenant-scoped callers, admins included", async () => {
     vi.stubEnv("TENANT_ENFORCE", "true");
+    const tenantless = seed("submitted", null);
+    expect(stored(tenantless.id).tenantId).toBeNull();
     for (const headers of [bearer(tbAdminKey), withAdmin(tbStrangerKey)]) {
-      const row = seed("submitted", TA);
-      clearSpies();
-      const res = await app.inject({ url: url(row.id), headers });
-      expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ error: "not_found" });
-      expect(stored(row.id)).toEqual(row);
-      for (const action of actions) {
-        const target = seed(action === "activate" ? "approved" : "submitted", TA);
+      for (const row of [seed("submitted", TA), tenantless]) {
         clearSpies();
-        const refused = await app.inject({ method: "POST", url: url(target.id, action), headers });
-        expect(refused.statusCode).toBe(404);
-        expect(refused.body).toBe('{"error":"not_found"}');
-        expectNoOperatorAudit();
-        expect(stored(target.id)).toEqual(target);
+        const res = await app.inject({ url: url(row.id), headers });
+        expect(res.statusCode).toBe(404);
+        expect(res.json()).toEqual({ error: "not_found" });
+        expect(stored(row.id)).toEqual(row);
+        for (const action of actions) {
+          const target = seed(action === "activate" ? "approved" : "submitted", row.tenantId);
+          expect(stored(target.id).tenantId).toBe(row.tenantId);
+          clearSpies();
+          const refused = await app.inject({ method: "POST", url: url(target.id, action), headers });
+          expect(refused.statusCode).toBe(404);
+          expect(refused.body).toBe('{"error":"not_found"}');
+          expectNoOperatorAudit();
+          expect(stored(target.id)).toEqual(target);
+        }
       }
     }
     const row = seed("submitted", TA);
@@ -281,6 +285,11 @@ describe("onboard admin gates and registration replies", () => {
     expect(detail.json()).toEqual({ registration: stored(row.id) });
     for (const action of ["approve", "activate", "reject"] as const) await expectStateWrite(action, bearer(taAdminKey), TA);
     delete process.env.TENANT_ENFORCE;
+    clearSpies();
+    const tenantlessDetail = await app.inject({ url: url(tenantless.id), headers: bearer(tbAdminKey) });
+    expect(tenantlessDetail.statusCode).toBe(200);
+    expect(tenantlessDetail.json()).toEqual({ registration: stored(tenantless.id) });
+    await expectStateWrite("approve", bearer(tbAdminKey), null);
     const crossTenant = seed("submitted", TA);
     clearSpies();
     const unscoped = await app.inject({ url: url(crossTenant.id), headers: bearer(tbAdminKey) });
@@ -289,29 +298,20 @@ describe("onboard admin gates and registration replies", () => {
     await expectStateWrite("approve", bearer(tbAdminKey), TA);
   });
 
-  it("OA10 owner PATCH, DELETE, repeated DELETE and prove replies carry the listing's fields", async () => {
-    const headers = bearer(ownerKey);
-    const patchRow = seed();
-    clearSpies();
-    const patch = await app.inject({ method: "PATCH", url: url(patchRow.id), headers, payload: {} });
-    expectProjection(patch, patchRow);
-    expect(stored(patchRow.id)).toEqual(patchRow);
-    const deleteRow = seed();
-    clearSpies();
-    const deleted = await app.inject({ method: "DELETE", url: url(deleteRow.id), headers });
-    expectProjection(deleted, { ...deleteRow, status: "deleted" });
-    expect(deleted.json()).toMatchObject({ soft: true, deletedAt: expect.any(String) });
-    expect(stored(deleteRow.id).status).toBe("deleted");
-    clearSpies();
-    const again = await app.inject({ method: "DELETE", url: url(deleteRow.id), headers });
-    expectProjection(again, { ...deleteRow, status: "deleted" });
-    expect(again.json().alreadyDeleted).toBe(true);
-    const proveRow = seed();
-    clearSpies();
-    const proved = await app.inject({ method: "POST", url: url(proveRow.id, "prove"), headers, payload: evidence });
-    expectProjection(proved, { ...proveRow, status: "active" });
-    expect(proved.json()).toMatchObject({ autoApproved: true, activated: true });
-    expect(stored(proveRow.id).status).toBe("active");
+  it("OA10 a key that only claims the owner's id gets 403 on PATCH, DELETE and prove, before any write or operator audit", async () => {
+    for (const [method, action, payload, verb] of [
+      ["PATCH", undefined, {}, "edit"],
+      ["DELETE", undefined, undefined, "delete"],
+      ["POST", "prove", evidence, "prove"],
+    ] as const) {
+      const row = seed();
+      clearSpies();
+      const res = await app.inject({ method, url: url(row.id, action), headers: bearer(ownerKey), payload });
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toStrictEqual({ error: "forbidden", message: `You can only ${verb} your own registration` });
+      expect(stored(row.id)).toEqual(row);
+      expectNoOperatorAudit();
+    }
   });
 
   it("OA11 owner with a valid admin header receives the full mutation replies", async () => {
@@ -352,5 +352,59 @@ describe("onboard admin gates and registration replies", () => {
     expect(isOnboardAdmin(noHeader)).toBe(true);
     const throwing = { get raw() { throw new Error("synthetic-n344-request-error"); } } as unknown as FastifyRequest;
     expect(isOnboardAdmin(throwing)).toBe(false);
+  });
+
+  it("OA13 TENANT_ENFORCE refuses approve, reject and activate outside the caller's tenant whatever the row's status", async () => {
+    vi.stubEnv("TENANT_ENFORCE", "true");
+    for (const headers of [bearer(tbAdminKey), withAdmin(tbStrangerKey)]) {
+      for (const tenantId of [TA, null]) {
+        for (const [action, status] of [
+          ["approve", "approved"],
+          ["approve", "rejected"],
+          ["reject", "approved"],
+          ["reject", "active"],
+          ["activate", "submitted"],
+          ["activate", "active"],
+        ] as const) {
+          const target = seed(status, tenantId);
+          expect(stored(target.id).tenantId).toBe(tenantId);
+          expect(stored(target.id).status).toBe(status);
+          clearSpies();
+          const res = await app.inject({ method: "POST", url: url(target.id, action), headers });
+          expect(res.statusCode).toBe(404);
+          expect(res.body).toBe('{"error":"not_found"}');
+          expectNoOperatorAudit();
+          expect(stored(target.id)).toEqual(target);
+        }
+      }
+    }
+  });
+
+  it("OA14 TENANT_ENFORCE makes other-tenant and tenant-less rows missing on detail for a tenant-scoped caller who is not an admin", async () => {
+    const tenantless = seed("submitted", null);
+    const rows = [seed("submitted", TA), tenantless];
+    expect(stored(tenantless.id).tenantId).toBeNull();
+    vi.stubEnv("TENANT_ENFORCE", "true");
+    const headers = bearer(tbStrangerKey);
+    clearSpies();
+    const reference = await app.inject({ url: url("missing-n366"), headers });
+    expect(reference.json()).toEqual({ error: "not_found" });
+    for (const row of rows) {
+      clearSpies();
+      const res = await app.inject({ url: url(row.id), headers });
+      expect(res.statusCode).toBe(reference.statusCode);
+      expect(res.json()).toEqual({ error: "not_found" });
+      expect(stored(row.id)).toEqual(row);
+    }
+    delete process.env.TENANT_ENFORCE;
+    for (const row of rows) {
+      clearSpies();
+      expectProjection(await app.inject({ url: url(row.id), headers }), row);
+    }
+  });
+
+  it("OA15 without TENANT_ENFORCE a tenant-scoped admin rejects and activates a tenant-less row", async () => {
+    await expectStateWrite("reject", bearer(tbAdminKey), null);
+    await expectStateWrite("activate", bearer(tbAdminKey), null);
   });
 });

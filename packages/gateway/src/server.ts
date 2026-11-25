@@ -21,6 +21,8 @@ import { createOperationIdTransform } from "./openapi/operation-id.js";
 import websocket from "@fastify/websocket";
 import { initStore, closeStore, getRepos, getStore } from "./db.js";
 import { resolveListenHost } from "./config/listen-host.js";
+import { isAdminCaller } from "./auth/admin-caller.js";
+import { isTenantEnforceOn } from "./config/tenant-enforce.js";
 import { shouldSeedDemoData, warnInvalidSeedDataOverride } from "./config/seed-policy.js";
 import { capabilityRoutes } from "./routes/capabilities.js";
 import { graphSearchRoutes } from "./routes/graph-search.js";
@@ -903,11 +905,16 @@ export async function createGateway(port = 3200) {
   // Agent bridge status endpoint
   app.get("/api/agents/status", async () => getAgentStatus());
   app.get("/api/agents/cards", async () => ({ cards: getAgentCards() }));
-  app.get("/api/agents/live/conversations", async () => ({
-    conversations: getConversations(),
-    source: isAgentBridgeReady() ? "live" : "mock",
-  }));
-  app.get("/api/agents/live/messages", async (req) => {
+  // Admins only: 403 before any read. Under TENANT_ENFORCE every caller receives 403.
+  app.get("/api/agents/live/conversations", async (req, reply) => {
+    if (isTenantEnforceOn() || !isAdminCaller(req)) return reply.code(403).send({ error: "forbidden" });
+    return {
+      conversations: getConversations(),
+      source: isAgentBridgeReady() ? "live" : "mock",
+    };
+  });
+  app.get("/api/agents/live/messages", async (req, reply) => {
+    if (isTenantEnforceOn() || !isAdminCaller(req)) return reply.code(403).send({ error: "forbidden" });
     const limit = parseInt((req.query as Record<string, string>).limit ?? "50", 10);
     return {
       messages: getRecentMessages(limit),

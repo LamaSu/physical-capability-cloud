@@ -849,6 +849,7 @@ describe("PATCH /api/operator/policy/:kernelId — CVP fields", () => {
     });
     const res = await app.inject({
       method: "GET",
+      headers: ADMIN_HEADERS,
       url: "/api/operator/policy/kernel-cvp-4",
     });
     expect(res.statusCode).toBe(200);

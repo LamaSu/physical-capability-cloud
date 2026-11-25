@@ -33,7 +33,9 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
-import { getCourierJobsStore } from "../services/courier-jobs-store.js";
+import { offerCaller } from "../services/job-offer-event-rules.js";
+import { publicCourierJob, publicEvent, publicEvents } from "../services/job-offer-public.js";
+import { getCourierJobsStore, type CourierJob } from "../services/courier-jobs-store.js";
 
 // Posting identity helper — prefers API key operatorId, falls back to
 // SIWE-session userId, else X-Posted-By header (matches v0.2 surface for
@@ -49,18 +51,10 @@ function resolvePoster(req: FastifyRequest): string | null {
   return null;
 }
 
-function requirePoster(req: FastifyRequest, reply: FastifyReply): string | null {
-  const p = resolvePoster(req);
-  if (!p) {
-    void reply.code(401).send({
-      error: "missing_identity",
-      message:
-        "Operator identity required. Authenticate with an API key (preferred) or set X-Posted-By.",
-    });
-    return null;
-  }
-  return p;
-}
+const MISSING_IDENTITY = {
+  error: "missing_identity",
+  message: "This action needs your API key or a wallet sign-in.",
+};
 
 const VALID_EVENT_TYPES = new Set(["pickup", "delivered", "cancelled", "note"]);
 
@@ -89,6 +83,7 @@ async function handleCreate(
       required: ["deliveryId", "pickup", "dropoff"],
     });
   }
+  const caller = offerCaller(req);
   const poster = resolvePoster(req);
   const store = getCourierJobsStore();
   const result = await store.create({
@@ -104,7 +99,7 @@ async function handleCreate(
     sourceVerifyUrl: b.sourceVerifyUrl ?? null,
     requireHeartbeat: !!b.requireHeartbeat,
     postedBy: poster,
-  });
+  }, caller);
   if (!result.ok) {
     return reply.code(400).send({
       error: "source_verify_failed",
@@ -156,14 +151,14 @@ async function handleListOpen(req: FastifyRequest<{ Querystring: CourierOpenQuer
     maxFeeUSD: maxFee != null && Number.isFinite(maxFee) ? maxFee : null,
     within,
   });
-  return { jobs: open, count: open.length, ts: new Date().toISOString() };
+  return { jobs: open.map(publicCourierJob), count: open.length, ts: new Date().toISOString() };
 }
 
 async function handleGetById(req: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) {
   const store = getCourierJobsStore();
   const j = store.get(req.params.id);
   if (!j) return reply.code(404).send({ error: "not_found" });
-  return { job: j, events: store.getEvents(j.id) };
+  return { job: publicCourierJob(j), events: publicEvents(store.getEvents(j.id)) };
 }
 
 export async function courierJobsRoutes(app: FastifyInstance) {
@@ -206,13 +201,16 @@ export async function courierJobsRoutes(app: FastifyInstance) {
     if (!b.driverAgent) {
       return reply.code(400).send({ error: "missing_field", required: ["driverAgent"] });
     }
+    const caller = offerCaller(req);
+    if (caller === null) return reply.code(401).send(MISSING_IDENTITY);
     const store = getCourierJobsStore();
     const result = await store.claim(req.params.id, {
       driverAgent: b.driverAgent,
       etaMin: b.etaMin,
       contact: b.contact,
-    });
+    }, caller);
     if (!result.ok) {
+      if (result.reason === "missing_identity") return reply.code(401).send(MISSING_IDENTITY);
       if (result.reason === "not_found") return reply.code(404).send({ error: "not_found" });
       if (result.reason === "not_open") {
         return reply.code(409).send({
@@ -222,7 +220,7 @@ export async function courierJobsRoutes(app: FastifyInstance) {
         });
       }
     }
-    return { ok: true, job: (result as { ok: true; job: unknown }).job };
+    return { ok: true, job: publicCourierJob((result as { ok: true; job: CourierJob }).job) };
   });
 
   // ── POST /api/courier-jobs/:id/events ───────────────────────────────────
@@ -237,16 +235,43 @@ export async function courierJobsRoutes(app: FastifyInstance) {
         valid: [...VALID_EVENT_TYPES],
       });
     }
+    const caller = offerCaller(req);
+    const eventKind = b.event;
     const store = getCourierJobsStore();
     const result = store.recordEvent(
       req.params.id,
       b.event as "pickup" | "delivered" | "cancelled" | "note",
-      b.driverAgent ?? null,
+      caller,
       b.proof ?? null,
       b.note ?? null,
     );
-    if (!result.ok) return reply.code(404).send({ error: "not_found" });
-    return { ok: true, status: result.status, event: result.event };
+    if (!result.ok) {
+      switch (result.reason) {
+        case "reserved_event":
+          return reply.code(400).send({ error: "reserved_event", event: eventKind });
+        case "missing_identity":
+          return reply.code(401).send(MISSING_IDENTITY);
+        case "not_found":
+          return reply.code(404).send({ error: "not_found" });
+        case "not_participant":
+          return reply.code(403).send({
+            error: "not_participant",
+            need: result.need,
+            message: result.need === "claimer"
+              ? "Only the offer's claimer may send this event."
+              : result.need === "poster"
+                ? "Only the offer's poster may send this event."
+                : "Only the offer's poster or its claimer may send events.",
+          });
+        case "invalid_transition":
+          return reply.code(409).send({
+            error: "invalid_transition",
+            event: eventKind,
+            currentStatus: result.currentStatus,
+          });
+      }
+    }
+    return { ok: true, status: result.status, event: publicEvent(result.event) };
   });
 
   // ── PATCH /api/courier-jobs/:id ─────────────────────────────────────────
@@ -259,11 +284,12 @@ export async function courierJobsRoutes(app: FastifyInstance) {
       validUntil?: string;
     };
   }>("/api/courier-jobs/:id", async (req, reply) => {
-    const poster = requirePoster(req, reply);
-    if (poster === null) return;
+    const caller = offerCaller(req);
+    if (caller === null) return reply.code(401).send(MISSING_IDENTITY);
     const store = getCourierJobsStore();
-    const result = store.patch(req.params.id, poster, req.body || {});
+    const result = store.patch(req.params.id, caller, req.body || {});
     if (!result.ok) {
+      if (result.reason === "missing_identity") return reply.code(401).send(MISSING_IDENTITY);
       if (result.reason === "not_found") return reply.code(404).send({ error: "not_found" });
       if (result.reason === "forbidden") {
         return reply.code(403).send({
@@ -278,16 +304,17 @@ export async function courierJobsRoutes(app: FastifyInstance) {
         });
       }
     }
-    return { ok: true, job: (result as { ok: true; job: unknown }).job };
+    return { ok: true, job: publicCourierJob((result as { ok: true; job: CourierJob }).job) };
   });
 
   // ── DELETE /api/courier-jobs/:id ────────────────────────────────────────
   app.delete<{ Params: { id: string } }>("/api/courier-jobs/:id", async (req, reply) => {
-    const poster = requirePoster(req, reply);
-    if (poster === null) return;
+    const caller = offerCaller(req);
+    if (caller === null) return reply.code(401).send(MISSING_IDENTITY);
     const store = getCourierJobsStore();
-    const result = store.cancel(req.params.id, poster);
+    const result = store.cancel(req.params.id, caller);
     if (!result.ok) {
+      if (result.reason === "missing_identity") return reply.code(401).send(MISSING_IDENTITY);
       if (result.reason === "not_found") return reply.code(404).send({ error: "not_found" });
       if (result.reason === "forbidden") {
         return reply.code(403).send({
@@ -303,11 +330,12 @@ export async function courierJobsRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>(
     "/api/courier-jobs/:id/heartbeat",
     async (req, reply) => {
-      const poster = requirePoster(req, reply);
-      if (poster === null) return;
+      const caller = offerCaller(req);
+      if (caller === null) return reply.code(401).send(MISSING_IDENTITY);
       const store = getCourierJobsStore();
-      const result = store.heartbeat(req.params.id, poster);
+      const result = store.heartbeat(req.params.id, caller);
       if (!result.ok) {
+        if (result.reason === "missing_identity") return reply.code(401).send(MISSING_IDENTITY);
         if (result.reason === "not_found") return reply.code(404).send({ error: "not_found" });
         if (result.reason === "forbidden") {
           return reply.code(403).send({

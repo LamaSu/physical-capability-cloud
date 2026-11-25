@@ -9,6 +9,7 @@ import { scaffold } from "../scaffolder.js";
 
 const example = fileURLToPath(new URL("../examples/cnc-shop-config.json", import.meta.url));
 const packageDir = fileURLToPath(new URL("../..", import.meta.url));
+const keyMessage = "looks like a private key, not an environment variable name; keep the key in your environment and put the variable's name here";
 const scratchDirs: string[] = [];
 function scratch(): string {
   const dir = mkdtempSync(join(tmpdir(), "pcc-cli-"));
@@ -209,6 +210,7 @@ describe("CLI frame", () => {
       ["position 42 nope", ""],
       ['{"a":1}}', " (position 7)"],
       ["{\n  \"a\": 1,\n}", " (position 12)"],
+      [" JSON at position 99", ""],
     ]) {
       const path = join(scratch(), "invalid.json");
       writeFileSync(path, text);
@@ -219,21 +221,35 @@ describe("CLI frame", () => {
     }
   });
 
-  it("CLI9: the wallet value appears in neither the text output nor --json", () => {
+  it("CLI9: the wallet value appears in neither the text output nor --json, and scaffold writes nothing for a key-shaped value", () => {
     const hex = "ab".repeat(32);
-    const config = JSON.parse(readFileSync(example, "utf8"));
-    config.kernel.walletPrivateKeyEnvVar = "0x" + hex;
-    const path = configFile(config);
-    const text = run(["validate", "--config", path]);
-    const json = run(["validate", "--config", path, "--json"]);
-    for (const result of [text, json]) {
+    for (const value of ["0x" + hex, hex]) {
+      const config = JSON.parse(readFileSync(example, "utf8"));
+      config.kernel.walletPrivateKeyEnvVar = value;
+      const path = configFile(config);
+      const text = run(["validate", "--config", path]);
+      const json = run(["validate", "--config", path, "--json"]);
+      for (const result of [text, json]) {
+        expect(result.code).toBe(1);
+        expect(result.errors).toEqual([]);
+        expect(result.logs.join("\n")).not.toContain(hex);
+      }
+      expect(JSON.parse(json.logs[0]).warnings).toContainEqual(expect.objectContaining({
+        name: "kernel.walletPrivateKeyEnvVar",
+        message: "the scaffolded agent never reads the variable named in walletPrivateKeyEnvVar; KernelAgent takes no wallet setting, so its wallet is a new random key each start",
+      }));
+      if (value === hex) {
+        expect(JSON.parse(json.logs[0]).errors).toContainEqual(expect.objectContaining({
+          name: "kernel.walletPrivateKeyEnvVar", message: keyMessage,
+        }));
+      }
+      const out = scratch();
+      const result = run(["scaffold", "--config", path, "--output", out]);
       expect(result.code).toBe(1);
-      expect(result.errors).toEqual([]);
-      expect(result.logs.join("\n")).not.toContain(hex);
+      expect(result.logs).toEqual([]);
+      expect(result.errors[0]).toBe("Configuration validation failed:\n");
+      expect(result.errors.join("\n")).not.toContain(hex);
+      expect(readdirSync(out)).toEqual([]);
     }
-    expect(JSON.parse(json.logs[0]).warnings).toContainEqual(expect.objectContaining({
-      name: "kernel.walletPrivateKeyEnvVar",
-      message: "the scaffolded agent never reads the variable named in walletPrivateKeyEnvVar; KernelAgent takes no wallet setting, so its wallet is a new random key each start",
-    }));
   });
 });

@@ -8,6 +8,7 @@ import { validate } from "../validate.js";
 type OnboardConfig = Parameters<typeof scaffold>[0]["config"];
 const packageDir = fileURLToPath(new URL("../..", import.meta.url));
 const example = (): OnboardConfig => JSON.parse(readFileSync(join(packageDir, "src/examples/cnc-shop-config.json"), "utf8"));
+const keyMessage = "looks like a private key, not an environment variable name; keep the key in your environment and put the variable's name here";
 const twoEach = (): OnboardConfig => {
   const c = example();
   c.adapters.push({ ...c.adapters[0], adapterId: "dev-mill-b", className: "MillBAdapter" }, { ...c.adapters[1], adapterId: "dev-power-b", className: "PowerMeterB" });
@@ -34,6 +35,64 @@ function refusal(config: OnboardConfig, name: string, message: string): void {
 }
 
 describe("scaffold agent wiring", () => {
+  it("K1 a key-shaped walletPrivateKeyEnvVar stops validate and scaffold, and neither prints it", () => {
+    for (const value of ["ab".repeat(32), "D".repeat(128)]) {
+      const config = example();
+      config.kernel.walletPrivateKeyEnvVar = value;
+      refusal(config, "kernel.walletPrivateKeyEnvVar", keyMessage);
+      expect(JSON.stringify(validate({ config }))).not.toContain(value);
+      let error: unknown;
+      try { scaffold({ config }); } catch (e) { error = e; }
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).not.toContain(value);
+    }
+  });
+  it("U1 .env.example drops a connection string's user:pass@ and keeps the rest", () => {
+    for (const [input, expected, dropped] of [
+      ["http://user:secret@10.0.0.5:8080/api", "http://10.0.0.5:8080/api", "user:secret@"],
+      ["opc.tcp://user:secret@plc.local:4840", "opc.tcp://plc.local:4840", "user:secret@"],
+      ["//user:secret@10.0.0.6:8080", "//10.0.0.6:8080", "user:secret@"],
+      ["user:secret@10.0.0.7:502", "10.0.0.7:502", "user:secret@"],
+      ["http://user:p@ss@10.0.0.8/x", "http://10.0.0.8/x", "user:p@ss@"],
+      ["http://token@10.0.0.9", "http://10.0.0.9", "token@"],
+      ["Svn+SSH-2.x://user:secret@10.0.0.10", "Svn+SSH-2.x://10.0.0.10", "user:secret@"],
+      ["http://10.0.0.5:8080/a@b", "http://10.0.0.5:8080/a@b", undefined],
+      ["http://10.0.0.5:8080?x=a@b", "http://10.0.0.5:8080?x=a@b", undefined],
+      ["http://10.0.0.5:8080#a@b", "http://10.0.0.5:8080#a@b", undefined],
+      ["/dev/ttyUSB0", "/dev/ttyUSB0", undefined],
+      ["COM3", "COM3", undefined],
+      ["http://192.168.1.100:8080", "http://192.168.1.100:8080", undefined],
+    ] as const) {
+      const config = example();
+      for (const adapter of config.adapters) adapter.connectionString = input;
+      const text = content(config, ".env.example");
+      for (const id of ["DEV_HAAS_VF2", "DEV_POWER_METER", "DEV_QC_CAMERA"]) once(text, "\n" + id + "_URL=" + expected + "\n");
+      if (dropped) expect(text).not.toContain(dropped);
+    }
+  });
+  it("U2 .env.example's GATEWAY_URL drops user:pass@ too", () => {
+    const config = example();
+    config.kernel.gatewayUrl = "https://user:secret@gw.example:8443/base";
+    const text = content(config, ".env.example");
+    once(text, "\nGATEWAY_URL=https://gw.example:8443/base\n");
+    expect(text).not.toContain("user:secret@");
+    once(content(example(), ".env.example"), "\nGATEWAY_URL=http://localhost:3200\n");
+  });
+  it("U3 no generated file keeps the userinfo, and the fallbacks keep the rest", () => {
+    const config = example();
+    for (const adapter of config.adapters) adapter.connectionString = "http://user:secret@10.0.0.5:8080/api";
+    config.kernel.gatewayUrl = "https://user:secret@gw.example:8443/base";
+    for (const file of scaffold({ config }).files) expect(file.content).not.toContain("user:secret");
+    for (const path of ["src/kernel.ts", "src/agent.ts"]) {
+      const text = content(config, path);
+      for (const line of [
+        '  baseUrl: process.env.DEV_HAAS_VF2_URL ?? "http://10.0.0.5:8080/api",',
+        '  readingUrl: process.env.DEV_POWER_METER_URL ?? "http://10.0.0.5:8080/api",',
+        '  captureUrl: process.env.DEV_QC_CAMERA_URL ?? "http://10.0.0.5:8080/api",',
+      ]) once(text, line);
+    }
+    once(content(config, "src/agent.ts"), 'const GATEWAY_URL = process.env.GATEWAY_URL ?? "https://gw.example:8443/base";');
+  });
   it("A1 the example's agent imports, builds and wires its three adapters", () => {
     const text = content(example(), "src/agent.ts");
     once(text, `import { profiles } from "./profiles.js";
