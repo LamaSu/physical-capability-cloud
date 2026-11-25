@@ -176,7 +176,7 @@ def separate_runner():
         return CliRunner()
 
 
-def invoke_start(tmp_path, gw, *, patch_daemon=True, kid=None):
+def invoke_start(tmp_path, gw, *, patch_daemon=True, kid=None, api_key=API_KEY):
     from pcc_node.cli import main
     with mock.patch("pcc_node.cli.is_running", return_value=(False, None)), \
          mock.patch("pcc_node.cli.detect_all", return_value=[]), \
@@ -184,7 +184,7 @@ def invoke_start(tmp_path, gw, *, patch_daemon=True, kid=None):
          mock.patch("pcc_node.cli.register_devices"), \
          mock.patch("pcc_node.cli._interactive", return_value=False):
         args = ["start", "--yes", "-c", str(tmp_path / "node-config.json"),
-                "--api-key", API_KEY, "--pcc-base", BASE]
+                "--api-key", api_key, "--pcc-base", BASE]
         if kid:
             args += ["--kernel-id", kid]
         if patch_daemon:
@@ -892,3 +892,310 @@ def test_a_challenge_removal_that_cannot_be_synced_stops_before_the_proof_is_sen
         signed(gateway)
     assert error.value.data["error"] == "registration_challenge_store"
     assert gateway.paths() == [CHALLENGES]
+
+
+# N400-C4: a gateway pause is an exact wire reply, never a permanent refusal.
+PAUSED_REGISTRATION = {"error": "feature_paused", "feature": "signups", "message": "Sign-up is paused."}
+PAUSED_PROVISION = {"error": "feature_paused", "feature": "key_minting", "message": "Creating API keys is paused."}
+NOT_RUNNING = "The node is NOT registered. Not starting."
+DAEMON_NOT_RUNNING = ("The first registration succeeded, but the daemon's own registration did not, "
+                      "so the daemon did not start and the node is not running.")
+
+
+def assert_paused_registration_error(error, body, *, hold):
+    from pcc_node import challenge_store
+    assert error.status == 409
+    assert error.data == body
+    assert error.permanent is False
+    assert error.hint is None
+    assert not os.path.exists(challenge_store.refusal_path())
+    assert os.path.exists(challenge_store.hold_path()) is hold
+
+
+def assert_paused_start(result, message="Sign-up is paused.", *, daemon=False):
+    assert result.exit_code == 1, result.output + result.stderr
+    assert result.stderr.splitlines() == [message, DAEMON_NOT_RUNNING if daemon else NOT_RUNNING]
+    for unwanted in ("already bound", "HTTP 409", "check the API key", "Registration failed"):
+        assert unwanted not in result.stderr
+
+
+@pytest.mark.parametrize("status,body,paused", [
+    (409, PAUSED_REGISTRATION, True),
+    (200, PAUSED_REGISTRATION, False), (201, PAUSED_REGISTRATION, False),
+    (403, PAUSED_REGISTRATION, False), (500, PAUSED_REGISTRATION, False),
+    (503, PAUSED_REGISTRATION, False),
+    (409, {"error": "conflict"}, False),
+    (409, {"error": "FEATURE_PAUSED", "message": "x"}, False),
+    (409, {"error": "feature_paused ", "message": "x"}, False),
+    (409, {"error": "prefix_feature_paused", "message": "x"}, False),
+    (409, {"error": "feature_paused_suffix", "message": "x"}, False),
+    (409, {"message": "x"}, False), (409, ["feature_paused"], False),
+    (409, "feature_paused", False), (409, None, False),
+])
+def test_n400_pause_definition_is_exact(status, body, paused):
+    from pcc_node.register import is_feature_paused
+    assert is_feature_paused(status, body) is paused
+
+
+@pytest.mark.parametrize("codepoint", list(range(0x20)) + list(range(0x7f, 0xa0)),
+                         ids=lambda value: "U+%04X" % value)
+def test_n400_every_unicode_cc_character_makes_a_message_unusable(codepoint):
+    from pcc_node.register import usable_message
+    assert usable_message({"message": "Sign-up" + chr(codepoint) + " is paused."}) is None
+
+
+@pytest.mark.parametrize("codepoint", list(range(0x20, 0x7f)) + list(range(0xa0, 0x100)),
+                         ids=lambda value: "U+%04X" % value)
+def test_n400_every_character_outside_cc_keeps_a_message_usable(codepoint):
+    from pcc_node.register import usable_message
+    message = "Sign-up" + chr(codepoint) + " is paused."
+    assert usable_message({"message": message}) == message
+
+
+@pytest.mark.parametrize("body", [{}, {"message": ""}, {"message": 7}, {"message": ["x"]},
+                                  {"message": None}, [], "message", None])
+def test_n400_an_unusable_message_is_not_used(body):
+    from pcc_node.register import usable_message
+    assert usable_message(body) is None
+
+
+@pytest.mark.parametrize("message", ["Sign-up is paused.", " ", "  Sign-up is paused.  ",
+                                     "\u00a0\u200b\u200d\u2028Sign-up is paused.",
+                                     "\u00a0\u200b\u2028\u00a0", "La création est en pause."])
+def test_n400_a_nonempty_message_without_cc_is_preserved(message):
+    from pcc_node.register import usable_message
+    assert usable_message({"message": message}) == message
+
+
+def test_n400_signed_registration_pause_keeps_the_hold_and_is_not_permanent(gateway, clock):
+    gateway.script_kernel = [(409, PAUSED_REGISTRATION)]
+    with pytest.raises(RegistrationError) as error:
+        signed(gateway)
+    assert_paused_registration_error(error.value, PAUSED_REGISTRATION, hold=True)
+    assert clock["sleeps"] == []
+    assert gateway.paths() == [CHALLENGES, KERNELS]
+
+
+def test_n400_start_prints_only_the_pause_and_the_registration_outcome(tmp_path, gateway):
+    gateway.script_kernel = [(409, PAUSED_REGISTRATION)]
+    result, daemon = invoke_start(tmp_path, gateway)
+    assert_paused_start(result)
+    daemon.assert_not_called()
+
+
+@pytest.mark.parametrize("message", [None, "", 7, ["x"], "Sign-up\x1b[2J is paused.",
+                                    "Sign-up\x00 is paused.", "Sign-up\x7f is paused.",
+                                    "Sign-up\x85 is paused.", "Sign-up\x9f is paused."],
+                         ids=["missing", "empty", "number", "list", "esc", "nul", "del", "nel", "c1-end"])
+@pytest.mark.parametrize("operation", ["signed", "start"])
+@pytest.mark.parametrize("older", [False, True], ids=["challenge-proof", "older-gateway"])
+def test_n400_a_pause_with_no_usable_message_still_is_not_permanent(tmp_path, gateway, message, operation, older):
+    body = {"error": "feature_paused", "feature": "signups"}
+    if message is not None:
+        body["message"] = message
+    gateway.issues_challenges = not older
+    gateway.script_kernel = [(409, body)]
+    if operation == "signed":
+        with pytest.raises(RegistrationError) as error:
+            signed(gateway)
+        assert_paused_registration_error(error.value, body, hold=not older)
+    else:
+        from pcc_node import challenge_store
+        result, daemon = invoke_start(tmp_path, gateway)
+        assert result.exit_code == 1, result.output + result.stderr
+        assert "Registration failed (HTTP 409)" in result.stderr
+        assert "already bound" not in result.stderr
+        for character in ("\x1b", "\x00", "\x7f", "\x85", "\x9f"):
+            assert character not in result.stderr
+        assert not os.path.exists(challenge_store.refusal_path())
+        assert os.path.exists(challenge_store.hold_path()) is (not older)
+        daemon.assert_not_called()
+
+
+@pytest.mark.parametrize("body", [
+    {"error": "conflict"}, {"error": "FEATURE_PAUSED", "message": "x"},
+    {"error": "feature_paused ", "message": "x"}, {"message": "x"}, ["feature_paused"],
+    {"error": "prefix_feature_paused", "message": "x"},
+    {"error": "feature_paused_suffix", "message": "x"},
+])
+@pytest.mark.parametrize("operation", ["signed", "start"])
+def test_n400_other_409s_keep_the_binding_conflict_handling(tmp_path, gateway, body, operation):
+    from pcc_node import challenge_store
+    gateway.script_kernel = [(409, body)]
+    if operation == "signed":
+        with pytest.raises(RegistrationError) as error:
+            signed(gateway)
+        assert error.value.status == 409 and error.value.data == body
+        assert error.value.permanent is True
+        assert "already bound to a different signing key" in error.value.hint
+    else:
+        result, daemon = invoke_start(tmp_path, gateway)
+        assert result.exit_code == 78, result.output + result.stderr
+        assert "already bound to a different signing key" in result.stderr
+        daemon.assert_not_called()
+    with open(challenge_store.refusal_path()) as stream:
+        assert json.load(stream)["reason"] == "registration_409"
+    assert not os.path.exists(challenge_store.hold_path())
+
+
+@pytest.mark.parametrize("operation", ["signed", "start"])
+def test_n400_a_403_with_the_paused_body_keeps_the_403_refusal(tmp_path, gateway, operation):
+    from pcc_node import challenge_store
+    gateway.script_kernel = [(403, PAUSED_REGISTRATION)]
+    if operation == "signed":
+        with pytest.raises(RegistrationError) as error:
+            signed(gateway)
+        assert error.value.status == 403 and error.value.data == PAUSED_REGISTRATION
+        assert error.value.permanent is True
+        assert error.value.hint is None
+    else:
+        result, _ = invoke_start(tmp_path, gateway)
+        assert result.exit_code == 78, result.output + result.stderr
+        assert "Registration failed (HTTP 403)" in result.stderr
+        assert "check the API key and gateway" in result.stderr
+    with open(challenge_store.refusal_path()) as stream:
+        assert json.load(stream)["reason"] == "registration_403"
+    assert os.path.exists(challenge_store.hold_path())
+
+
+@pytest.mark.parametrize("operation", ["signed", "start"])
+def test_n400_a_503_challenge_with_the_paused_body_keeps_its_retries_and_hint(tmp_path, gateway, clock, operation):
+    gateway.script_challenge = [(503, PAUSED_REGISTRATION)] * 4
+    if operation == "signed":
+        with pytest.raises(RegistrationError) as error:
+            signed(gateway)
+        assert error.value.status == 503 and error.value.data == PAUSED_REGISTRATION
+        assert error.value.permanent is False
+        assert "could not issue a registration challenge (HTTP 503)" in error.value.hint
+    else:
+        result, _ = invoke_start(tmp_path, gateway)
+        assert result.exit_code == 1, result.output + result.stderr
+        assert "Registration failed (HTTP 503)" in result.stderr
+        assert "could not issue a registration challenge (HTTP 503)" in result.stderr
+    assert len(clock["sleeps"]) == 3
+    assert gateway.paths() == [CHALLENGES] * 4
+
+
+@pytest.mark.parametrize("operation", ["signed", "start"])
+def test_n400_the_older_gateway_pause_has_no_binding_hint(tmp_path, gateway, operation):
+    gateway.issues_challenges = False
+    gateway.script_kernel = [(409, PAUSED_REGISTRATION)]
+    if operation == "signed":
+        with pytest.raises(RegistrationError) as error:
+            signed(gateway)
+        assert_paused_registration_error(error.value, PAUSED_REGISTRATION, hold=False)
+    else:
+        result, daemon = invoke_start(tmp_path, gateway)
+        assert_paused_start(result)
+        daemon.assert_not_called()
+    assert gateway.paths() == [CHALLENGES, KERNELS]
+
+
+def test_n400_a_paused_challenge_does_not_save_a_hold_or_send_a_registration(tmp_path, gateway, clock):
+    from pcc_node import challenge_store
+    gateway.script_challenge = [(409, PAUSED_REGISTRATION)]
+    with pytest.raises(RegistrationError) as error:
+        signed(gateway)
+    assert_paused_registration_error(error.value, PAUSED_REGISTRATION, hold=False)
+    assert gateway.paths() == [CHALLENGES]
+    gateway.calls.clear()
+    gateway.script_challenge = [(409, PAUSED_REGISTRATION)]
+    result, daemon = invoke_start(tmp_path, gateway)
+    assert_paused_start(result)
+    daemon.assert_not_called()
+    assert not os.path.exists(challenge_store.refusal_path())
+    assert not os.path.exists(challenge_store.hold_path())
+    assert gateway.paths() == [CHALLENGES]
+    assert clock["sleeps"] == []
+
+
+def test_n400_a_pause_in_the_daemons_registration_reports_that_it_did_not_start(tmp_path, gateway):
+    with mock.patch("pcc_node.cli.run_daemon", side_effect=RegistrationError(409, PAUSED_REGISTRATION)) as daemon:
+        result, _ = invoke_start(tmp_path, gateway, patch_daemon=False)
+    assert_paused_start(result, daemon=True)
+    daemon.assert_called_once()
+    assert gateway.paths() == [CHALLENGES, KERNELS]
+
+
+@pytest.mark.parametrize("message", [None, "", 7, ["x"], "Sign-up\x1b[2J is paused."])
+def test_n400_the_daemon_keeps_the_fallback_for_a_pause_without_a_usable_message(tmp_path, gateway, message):
+    body = {"error": "feature_paused", "feature": "signups"}
+    if message is not None:
+        body["message"] = message
+    with mock.patch("pcc_node.cli.run_daemon", side_effect=RegistrationError(409, body)):
+        result, _ = invoke_start(tmp_path, gateway, patch_daemon=False)
+    assert result.exit_code == 1, result.output + result.stderr
+    assert "Registration failed (HTTP 409)" in result.stderr
+    assert ("The first registration succeeded, but the daemon's own registration did not, "
+            "so the daemon did not start and the node is not running; check the API key and gateway, "
+            "then run pcc-node start again.") in result.stderr
+    assert "already bound" not in result.stderr
+    assert "\x1b" not in result.stderr
+
+
+def test_n400_a_provision_pause_raises_an_error_that_carries_the_message(monkeypatch):
+    from pcc_node.register import FeaturePausedError, provision_api_key
+    monkeypatch.setattr("pcc_node.register.pcc_request", lambda *args, **kwargs: (409, PAUSED_PROVISION))
+    with pytest.raises(FeaturePausedError) as error:
+        provision_api_key(BASE)
+    assert str(error.value) == "Creating API keys is paused."
+
+
+def test_n400_start_shows_the_provision_pause_before_the_api_key_advice(tmp_path, gateway, monkeypatch):
+    monkeypatch.delenv("PCC_API_KEY", raising=False)
+    with mock.patch("pcc_node.register.pcc_request", return_value=(409, PAUSED_PROVISION)) as request:
+        result, daemon = invoke_start(tmp_path, gateway, api_key="")
+    assert result.exit_code == 1, result.output + result.stderr
+    assert result.stderr.splitlines() == ["Creating API keys is paused.", "Set PCC_API_KEY env var or use --api-key."]
+    assert "Could not provision API key." not in result.stderr
+    assert "Error:" not in result.stderr
+    assert request.call_args.args[:2] == ("POST", "/api/auth/provision")
+    request.assert_called_once()
+    daemon.assert_not_called()
+
+
+@pytest.mark.parametrize("status,body", [
+    (409, {"error": "conflict"}), (409, {"error": "conflict", "message": "A different conflict."}),
+    (500, {"error": "server down"}),
+    (409, {"error": "feature_paused", "feature": "key_minting"}),
+    (409, dict(PAUSED_PROVISION, message="")), (409, dict(PAUSED_PROVISION, message=7)),
+    (409, dict(PAUSED_PROVISION, message=["x"])),
+    (409, dict(PAUSED_PROVISION, message="Creating\x1bAPI keys")),
+    (200, PAUSED_PROVISION), (403, PAUSED_PROVISION), (500, PAUSED_PROVISION),
+])
+def test_n400_other_provision_failures_keep_the_click_error(tmp_path, gateway, monkeypatch, status, body):
+    from pcc_node.register import provision_api_key
+    monkeypatch.delenv("PCC_API_KEY", raising=False)
+    with mock.patch("pcc_node.register.pcc_request", return_value=(status, body)):
+        assert provision_api_key(BASE) == ""
+        result, daemon = invoke_start(tmp_path, gateway, api_key="")
+    assert result.exit_code == 1, result.output + result.stderr
+    assert "Could not provision API key. Set PCC_API_KEY env var or use --api-key." in result.stderr
+    assert "\x1b" not in result.stderr
+    daemon.assert_not_called()
+
+
+def test_n400_discover_keeps_the_unsigned_paused_reply_in_its_failure_line(gateway, monkeypatch):
+    from pcc_node.cli import main
+    from pcc_node.discovery import DiscoveredDevice
+    device = DiscoveredDevice("192.0.2.8", None, None, [80], "octoprint", "3d-printer", 1.0)
+    monkeypatch.setattr("pcc_node.cli.discover_network", lambda **kwargs: [device])
+    monkeypatch.setattr("pcc_node.cli.device_to_adapter_config", lambda item: {"type": "3d-printer"})
+    monkeypatch.setattr("pcc_node.cli.load_or_create_keys", lambda: PAIR)
+    gateway.script_kernel = [(409, PAUSED_REGISTRATION)]
+    result = separate_runner().invoke(main, ["discover", "--register", "--api-key", API_KEY, "--pcc-base", BASE])
+    assert result.exit_code == 0, result.output + result.stderr
+    assert "Registration failed (HTTP 409): " + str(PAUSED_REGISTRATION) in result.stderr
+    assert "Sign-up is paused." in result.stderr
+    assert gateway.paths() == [KERNELS]
+
+
+def test_n400_register_devices_keeps_the_paused_body_in_its_warning(gateway, caplog):
+    from pcc_node.register import register_devices
+    gateway.script_kernel = [(409, PAUSED_REGISTRATION)]
+    with caplog.at_level(logging.WARNING, logger="pcc-node.register"):
+        result = register_devices(BASE, API_KEY, "kernel-test", [{"id": "printer", "type": "3d-printer"}])
+    assert result == [PAUSED_REGISTRATION]
+    assert "Device registration failed (HTTP 409): " + str(PAUSED_REGISTRATION) in caplog.text
+    assert "Sign-up is paused." in caplog.text
+    assert gateway.paths() == ["/api/devices/register"]
