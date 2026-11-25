@@ -50,6 +50,8 @@ EOF
 ```
 **Check:** it prints the kernel id and the start of its signing key, and `GET $BASE/api/kernels/$(cat .pcc/kernel-id)` then shows that `signingKey`. If the call refuses a kernel that already had this id, delete `.pcc/kernel-id` and run step 1 again: the kernel gets a new id. A line starting `Waiting` means pcc-node is waiting out an earlier registration attempt, for up to 11 minutes: let it finish.
 
+If a call in this phase refuses with error `feature_paused`, PCC has paused that feature. Tell the human the message, keep `.pcc/kernel-id`, and report this phase blocked. Don't retry it unless the human asks.
+
 If it refuses with "pynacl" or `signing_key_unusable`:
 1. Install the crypto extra (phase 0 step 2).
 2. If an older pcc-node made an unregistered placeholder without pynacl, retire the selected key file and delete `.pcc/node-public-key`. The placeholder can never sign. Current pcc-node refuses to create a key without pynacl.

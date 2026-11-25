@@ -44,6 +44,9 @@ from .register import (
     register_devices,
     PERMANENT_REFUSAL_EXIT,
     RegistrationError,
+    FeaturePausedError,
+    is_feature_paused,
+    usable_message,
 )
 
 
@@ -470,7 +473,12 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
     # Provision API key if missing
     if not config.pcc_api_key:
         click.echo("Provisioning API key...")
-        config.pcc_api_key = provision_api_key(config.pcc_base)
+        try:
+            config.pcc_api_key = provision_api_key(config.pcc_base)
+        except FeaturePausedError as exc:
+            click.echo(str(exc), err=True)
+            click.echo("Set PCC_API_KEY env var or use --api-key.", err=True)
+            sys.exit(1)
         if not config.pcc_api_key:
             raise click.ClickException(
                 "Could not provision API key. Set PCC_API_KEY env var or use --api-key."
@@ -482,6 +490,11 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
     try:
         register_kernel(config.pcc_base, config.pcc_api_key, config, signer=(public_key, secret_key))
     except RegistrationError as exc:
+        message = usable_message(exc.data) if is_feature_paused(exc.status, exc.data) else None
+        if message is not None:
+            click.echo(message, err=True)
+            click.echo("The node is NOT registered. Not starting.", err=True)
+            sys.exit(1)
         click.echo(
             f"Registration failed (HTTP {exc.status}) at {config.pcc_base}: {exc.data}. "
             "The node is NOT registered; check the API key and gateway. Not starting.",
@@ -523,6 +536,15 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
     try:
         run_daemon(config, on_running=_say_running)
     except RegistrationError as exc:
+        message = usable_message(exc.data) if is_feature_paused(exc.status, exc.data) else None
+        if message is not None:
+            click.echo(message, err=True)
+            click.echo(
+                "The first registration succeeded, but the daemon's own registration did not, "
+                "so the daemon did not start and the node is not running.",
+                err=True,
+            )
+            sys.exit(1)
         click.echo(
             f"Registration failed (HTTP {exc.status}) at {config.pcc_base}: {exc.data}. "
             "The first registration succeeded, but the daemon's own registration did not, so the daemon "

@@ -47,6 +47,17 @@
         "outcome": "blocked"
       }
     },
+    "prerequisites.provision-paused": {
+      "phase": "prerequisites",
+      "trigger": "The provision step stops and prints only a message: PCC has paused that feature (HTTP 409, error feature_paused).",
+      "do": "Tell the human the message. Don't retry it unless the human asks, and don't try another endpoint to get round the pause. An API key the operator already has still works.",
+      "file": "00-prerequisites.md",
+      "section": "4. An operator API key, captured without logging it",
+      "report": {
+        "phase": "prerequisites",
+        "outcome": "blocked"
+      }
+    },
     "identify.device-unreachable": {
       "phase": "identify",
       "trigger": "The device does not answer at the recorded address.",
@@ -134,6 +145,17 @@
       "report": {
         "phase": "register",
         "outcome": "failed"
+      }
+    },
+    "register.paused": {
+      "phase": "register",
+      "trigger": "A register call answers HTTP 409 with error feature_paused.",
+      "do": "PCC has paused that feature. Tell the human the message and keep .pcc/kernel-id. Don't retry it unless the human asks, and don't try another endpoint to get round the pause.",
+      "file": "05-register.md",
+      "section": "2. The kernel's signing key",
+      "report": {
+        "phase": "register",
+        "outcome": "blocked"
       }
     },
     "verify.job-missing": {

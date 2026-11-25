@@ -78,16 +78,34 @@ print(json.dumps({"publicKey": open(".pcc/node-public-key").read().strip(),
                   "email": operator["email"], "name": operator["name"]}))
 EOF
 curl -s -X POST "$(cat .pcc/base)/api/auth/provision" -H 'Content-Type: application/json' \
-  --data-binary @.pcc/provision-request.json > .pcc/provision.json
+  --data-binary @.pcc/provision-request.json -o .pcc/provision.json -w '%{http_code}' > .pcc/provision.status
 rm -f .pcc/provision-request.json
-python3 - <<'EOF'
+python3 - <<'EOF' || exit $?
 import json
-key = json.load(open(".pcc/provision.json"))["api_key"]
+import unicodedata
+try:
+    status = open(".pcc/provision.status").read().strip()
+    data = json.load(open(".pcc/provision.json"))
+except (OSError, ValueError):
+    raise SystemExit(1)
+if not isinstance(data, dict):
+    raise SystemExit(1)
+message = data.get("message")
+if (status == "409" and data.get("error") == "feature_paused"
+        and isinstance(message, str) and message
+        and not any(unicodedata.category(char) == "Cc" for char in message)):
+    raise SystemExit(message)
+key = data.get("api_key")
+if not isinstance(key, str) or not key:
+    raise SystemExit(1)
 open(".pcc/api-key", "w").write(key)
 open(".pcc/auth.header", "w").write("Authorization: Bearer " + key + "\n")
 EOF
 chmod 600 .pcc/api-key .pcc/auth.header .pcc/provision.json
 ```
+
+If the block stops and prints only a message, PCC has paused that feature (HTTP 409, error `feature_paused`). Tell the human the message. Don't retry it unless the human asks, and don't try another endpoint to get round the pause. An API key the operator already has still works.
+
 Node calls that use the operator API key send it with `curl -H @.pcc/auth.header`. That keeps it off the command line, where other users of this machine could read it (`ps`). The key can do everything the account can, so treat it like a password. Keep `.pcc/` out of any repository or chat. Delete `.pcc/provision.json` once `.pcc/api-key` is written.
 
 **Check:**

@@ -5,8 +5,12 @@ python3 -m unittest discover -s starter/bin -p 'test_*.py'
 
 import ast
 import json
+import os
 import pathlib
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 
 STARTER = pathlib.Path(__file__).resolve().parents[1]
@@ -579,6 +583,186 @@ class TestRound4(unittest.TestCase):
         # The current gateway queues a job for a stopped kernel; nothing may say it refuses one.
         for path, text in text_files():
             self.assertNotRegex(text, r"(?i)gateway (should )?refuse[sd]? (it|a new job|new jobs)", path.name)
+
+
+class TestProvisionPause(unittest.TestCase):
+    """Execute phase 0's real block, including its shell failure handling."""
+
+    PAUSED = {"error": "feature_paused", "feature": "key_minting",
+              "message": "Creating API keys is paused."}
+
+    def run_provision(self, status, body, transport_exit=0):
+        section = between(phase_text("00-prerequisites.md"), "## 4.", "## 5.")
+        block = re.search(r"```bash\n(.*?)\n```", section, re.S)
+        self.assertIsNotNone(block, "section 4 must contain its provision block")
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            state = root / ".pcc"
+            state.mkdir()
+            (state / "base").write_text("http://127.0.0.1:4310", encoding="utf-8")
+            (state / "operator.json").write_text(
+                json.dumps({"email": "operator@example.org", "name": "Bench"}), encoding="utf-8")
+            (state / "node-public-key").write_text("ab" * 32, encoding="utf-8")
+            (root / "body.json").write_text(json.dumps(body), encoding="utf-8")
+            binaries = root / "bin"
+            binaries.mkdir()
+            curl = binaries / "curl"
+            curl.write_text(
+                "#!" + sys.executable + "\n"
+                "import os, pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "code = int(os.environ['PCC_TEST_CURL_EXIT'])\n"
+                "if not code:\n"
+                "    body = pathlib.Path('body.json').read_bytes()\n"
+                "    if '-o' in args:\n"
+                "        pathlib.Path(args[args.index('-o') + 1]).write_bytes(body)\n"
+                "    else:\n"
+                "        sys.stdout.buffer.write(body)\n"
+                "if '-w' in args:\n"
+                "    sys.stdout.flush()\n"
+                "    sys.stdout.write(os.environ['PCC_TEST_HTTP_STATUS'])\n"
+                "sys.exit(code)\n", encoding="utf-8")
+            curl.chmod(0o755)
+            chmod = binaries / "chmod"
+            chmod.write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PCC_TEST_CHMOD_LOG"\n'
+                'exec /bin/chmod "$@"\n', encoding="utf-8")
+            chmod.chmod(0o755)
+            environment = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ.get("PATH", ""),
+                               PCC_TEST_CURL_EXIT=str(transport_exit), PCC_TEST_HTTP_STATUS=str(status),
+                               PCC_TEST_CHMOD_LOG=str(root / "chmod.log"))
+            result = subprocess.run(["bash"], input=block.group(1), text=True, capture_output=True,
+                                    cwd=str(root), env=environment, timeout=10)
+            files = {path.name: path.read_text(encoding="utf-8") for path in state.iterdir()}
+            return result, files, (root / "chmod.log").exists()
+
+    def assert_no_key(self, files):
+        self.assertNotIn("api-key", files)
+        self.assertNotIn("auth.header", files)
+
+    def test_paused_provision_prints_only_the_message_and_stops_before_chmod(self):
+        result, files, chmod_ran = self.run_provision(409, self.PAUSED)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((result.stdout + result.stderr).strip(), self.PAUSED["message"])
+        self.assert_no_key(files)
+        self.assertFalse(chmod_ran, "chmod must run only after the Python block succeeds")
+        self.assertEqual(files["provision.status"], "409")
+        self.assertEqual(json.loads(files["provision.json"]), self.PAUSED)
+
+    def test_success_captures_the_key_without_printing_any_reply(self):
+        key = "pcc-test-secret-sentinel"
+        result, files, chmod_ran = self.run_provision(201, {"api_key": key, "message": "sentinel-response"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout + result.stderr, "")
+        self.assertEqual(files["api-key"], key)
+        self.assertEqual(files["auth.header"], "Authorization: Bearer " + key + "\n")
+        self.assertTrue(chmod_ran)
+
+    def test_other_replies_never_print_body_values_or_write_a_key(self):
+        sentinel = "sentinel-not-for-output"
+        cases = [
+            (409, {"error": "conflict", "message": sentinel}, 0),
+            (500, {"error": "x", "detail": sentinel}, 0),
+            (200, {}, 0),
+            (409, dict(self.PAUSED, message="Creating\x1bAPI keys"), 0),
+            (200, self.PAUSED, 0),
+            ("000", None, 7),
+        ]
+        for status, body, transport_exit in cases:
+            with self.subTest(status=status, body=body, transport_exit=transport_exit):
+                result, files, _ = self.run_provision(status, body, transport_exit)
+                self.assertNotEqual(result.returncode, 0)
+                self.assert_no_key(files)
+                output = result.stdout + result.stderr
+                for hidden in (sentinel, "\x1b", "Creating", "API keys", self.PAUSED["message"]):
+                    self.assertNotIn(hidden, output)
+
+    def test_pause_requires_a_409_object_and_the_exact_error(self):
+        sentinel = "sentinel-pause-definition"
+        cases = [(status, dict(self.PAUSED, message=sentinel)) for status in (201, 403, 500)]
+        cases += [(409, {"error": error, "message": sentinel}) for error in
+                  ("FEATURE_PAUSED", "feature_paused ", "prefix_feature_paused", "feature_paused_suffix", None, 7)]
+        cases += [(409, {"message": sentinel}), (409, ["feature_paused", sentinel]),
+                  (409, "feature_paused"), (409, None)]
+        for status, body in cases:
+            with self.subTest(status=status, body=body):
+                result, files, _ = self.run_provision(status, body)
+                self.assertNotEqual(result.returncode, 0)
+                self.assert_no_key(files)
+                self.assertNotIn(sentinel, result.stdout + result.stderr)
+
+    def test_pause_messages_must_be_nonempty_strings_without_any_cc_character(self):
+        bodies = [{"error": "feature_paused", "feature": "key_minting"}]
+        bodies += [dict(self.PAUSED, message=message) for message in ("", 7, ["x"], None)]
+        bodies += [dict(self.PAUSED, message="sentinel" + chr(codepoint) + "hidden")
+                   for codepoint in list(range(0x20)) + list(range(0x7f, 0xa0))]
+        for body in bodies:
+            with self.subTest(body=body):
+                result, files, _ = self.run_provision(409, body)
+                self.assertNotEqual(result.returncode, 0)
+                self.assert_no_key(files)
+                output = result.stdout + result.stderr
+                message = body.get("message")
+                if message == "":
+                    self.assertNotEqual(output, "\n", "an empty message must not be printed")
+                elif not isinstance(message, str):
+                    self.assertNotIn(str(message), output, "a nonstring message must not be printed")
+                self.assertNotIn("sentinel", output)
+                self.assertNotIn("hidden", output)
+                self.assertNotIn("\x1b", output)
+
+    def test_usable_messages_are_preserved_including_non_cc_unicode_and_spaces(self):
+        for message in ("Creating\u00a0API\u200b keys is paused.", " ", " first and last "):
+            with self.subTest(message=message):
+                result, files, chmod_ran = self.run_provision(409, dict(self.PAUSED, message=message))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout + result.stderr, message + "\n")
+                self.assert_no_key(files)
+                self.assertFalse(chmod_ran)
+
+    def test_api_keys_must_be_nonempty_strings(self):
+        for key in ("", 7, ["sentinel"], None):
+            with self.subTest(key=key):
+                result, files, _ = self.run_provision(201, {"api_key": key})
+                self.assertNotEqual(result.returncode, 0)
+                self.assert_no_key(files)
+                self.assertNotIn("sentinel", result.stdout + result.stderr)
+
+    def test_pause_guidance_is_verbatim_and_in_its_phase(self):
+        texts = [
+            ("00-prerequisites.md", "If the block stops and prints only a message, PCC has paused that feature (HTTP 409, error `feature_paused`). Tell the human the message. Don't retry it unless the human asks, and don't try another endpoint to get round the pause. An API key the operator already has still works."),
+            ("01-identify.md", "It answers 409 with error `feature_paused` when PCC has paused device identification. Tell the human the reply's message, then use the manual."),
+            ("05-register.md", "If a call in this phase refuses with error `feature_paused`, PCC has paused that feature. Tell the human the message, keep `.pcc/kernel-id`, and report this phase blocked. Don't retry it unless the human asks."),
+        ]
+        for name, paragraph in texts:
+            with self.subTest(name=name):
+                self.assertIn("\n\n" + paragraph + "\n", phase_text(name))
+
+    def test_pause_events_are_exact_and_follow_the_phase_events(self):
+        events = json.loads((RUNBOOK / "index.json").read_text(encoding="utf-8"))["events"]
+        expected = {
+            "prerequisites.provision-paused": {
+                "phase": "prerequisites",
+                "trigger": "The provision step stops and prints only a message: PCC has paused that feature (HTTP 409, error feature_paused).",
+                "do": "Tell the human the message. Don't retry it unless the human asks, and don't try another endpoint to get round the pause. An API key the operator already has still works.",
+                "file": "00-prerequisites.md",
+                "section": "4. An operator API key, captured without logging it",
+                "report": {"phase": "prerequisites", "outcome": "blocked"},
+            },
+            "register.paused": {
+                "phase": "register",
+                "trigger": "A register call answers HTTP 409 with error feature_paused.",
+                "do": "PCC has paused that feature. Tell the human the message and keep .pcc/kernel-id. Don't retry it unless the human asks, and don't try another endpoint to get round the pause.",
+                "file": "05-register.md",
+                "section": "2. The kernel's signing key",
+                "report": {"phase": "register", "outcome": "blocked"},
+            },
+        }
+        for name, event in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(events.get(name), event)
+                phase_events = [key for key, value in events.items() if value["phase"] == event["phase"]]
+                self.assertEqual(phase_events[-1], name)
 
 
 class TestRound5(unittest.TestCase):

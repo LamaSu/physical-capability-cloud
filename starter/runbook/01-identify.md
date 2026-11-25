@@ -24,6 +24,8 @@ curl -s -X POST "$(cat .pcc/base)/api/onboard/identify-device" \
 ```
 It needs an LLM on the gateway, and answers 503 where there is none. Then use the manual. Pass `clarifyingQuestions` to the human only if you can't answer them yourself.
 
+It answers 409 with error `feature_paused` when PCC has paused device identification. Tell the human the reply's message, then use the manual.
+
 ## 3. Record what you found
 Later phases read it from `.pcc/device.json`. Write only what the device, manual or label told you. **Never invent a serial number or firmware version:** unknown is `null`.
 ```bash

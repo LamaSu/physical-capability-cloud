@@ -13,6 +13,7 @@ import logging
 import re
 import secrets
 import time
+import unicodedata
 from http.client import HTTPException
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
@@ -39,6 +40,24 @@ def _jitter(step):
 
 def _sleep(seconds):
     time.sleep(seconds)
+
+
+def is_feature_paused(status, data):
+    """Only the gateway's exact HTTP 409 feature_paused reply is a pause."""
+    return status == 409 and isinstance(data, dict) and data.get("error") == "feature_paused"
+
+
+def usable_message(data):
+    """Return a non-empty gateway message with no Unicode Cc characters."""
+    message = data.get("message") if isinstance(data, dict) else None
+    if (isinstance(message, str) and message
+            and not any(unicodedata.category(char) == "Cc" for char in message)):
+        return message
+    return None
+
+
+class FeaturePausedError(RuntimeError):
+    """Provisioning was paused; the error carries the gateway's usable message."""
 
 
 class RegistrationError(RuntimeError):
@@ -135,6 +154,11 @@ def provision_api_key(pcc_base, email=""):
     -------
     str
         The provisioned API key, or empty string on failure.
+
+    Raises
+    ------
+    FeaturePausedError
+        When the gateway pauses provisioning with a usable message.
     """
     status, data = pcc_request(
         "POST", "/api/auth/provision",
@@ -148,6 +172,10 @@ def provision_api_key(pcc_base, email=""):
             return key
 
     log.warning(f"API key provisioning failed (HTTP {status}): {data}")
+    if is_feature_paused(status, data):
+        message = usable_message(data)
+        if message is not None:
+            raise FeaturePausedError(message)
     return ""
 
 
@@ -373,6 +401,9 @@ def register_kernel_signed(pcc_base, api_key, payload, public_key_hex, secret_ke
         except (HTTPException, OSError) as exc:
             raise RegistrationError(exc.code if isinstance(exc, HTTPError) else 0,
                                     {"error": "registration_response_unreadable"}) from exc
+        if is_feature_paused(status, data):
+            # The gateway did not use this challenge; keep the hold for it.
+            raise RegistrationError(status, data)
         if 200 <= status < 300 or status == 409:
             clear_hold()
         if not 200 <= status < 300:
@@ -389,7 +420,8 @@ def register_kernel_signed(pcc_base, api_key, payload, public_key_hex, secret_ke
             raise RegistrationError(exc.code if isinstance(exc, HTTPError) else 0,
                                     {"error": "registration_response_unreadable"}) from exc
         if not 200 <= status < 300:
-            raise RegistrationError(status, data, _binding_conflict_hint(public_key_hex) if status == 409 else None)
+            hint = _binding_conflict_hint(public_key_hex) if status == 409 and not is_feature_paused(status, data) else None
+            raise RegistrationError(status, data, hint)
     if not isinstance(data, dict):
         raise RegistrationError(0, {"error": "malformed_registration_response"})
     kernel = data.get("kernel")
