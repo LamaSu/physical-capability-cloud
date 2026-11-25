@@ -6,6 +6,15 @@ const MODEL_VISION = "claude-sonnet-4-6";
 const MAX_PHOTO_BYTES = 6 * 1024 * 1024;
 const RATE_PER_HOUR = 30;
 
+export const IDENTIFY_DEVICE_GLOBAL_LIMIT = 120;
+export const IDENTIFY_DEVICE_GLOBAL_WINDOW_MS = 3_600_000;
+
+let identifyDeviceBudget: { count: number; windowStart: number } | undefined;
+
+export function __resetIdentifyDeviceBudgetForTest(): void {
+  identifyDeviceBudget = undefined;
+}
+
 const KNOWN_ADAPTERS = ["hamilton", "opentrons", "octoprint", "sila", "modbus", "opcua", "mock"] as const;
 type KnownAdapter = (typeof KNOWN_ADAPTERS)[number];
 
@@ -95,6 +104,19 @@ export async function identifyDeviceRoutes(app: FastifyInstance) {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
       return reply.status(503).send({ error: "Device identification temporarily unavailable" });
+    }
+
+    // Reserve a model call synchronously across every app in this process.
+    const budgetNow = Date.now();
+    if (!identifyDeviceBudget || budgetNow - identifyDeviceBudget.windowStart > IDENTIFY_DEVICE_GLOBAL_WINDOW_MS) {
+      identifyDeviceBudget = { count: 1, windowStart: budgetNow };
+    } else if (identifyDeviceBudget.count >= IDENTIFY_DEVICE_GLOBAL_LIMIT) {
+      return reply.status(429).send({
+        error: "Device identification is busy right now. Try again later.",
+        retry_after_seconds: IDENTIFY_DEVICE_GLOBAL_WINDOW_MS / 1000,
+      });
+    } else {
+      identifyDeviceBudget.count++;
     }
 
     const client = new Anthropic({ apiKey, maxRetries: 1 });
