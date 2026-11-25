@@ -45,11 +45,14 @@
  */
 
 import type { FastifyInstance } from "fastify";
+import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { getStore } from "../db.js";
 import { sql } from "@pcc/store";
+import { isOnboardAdmin } from "./onboard.js";
+import { canOnboardChat, canOnboardChatGlobally, ONBOARD_CHAT_GLOBAL_WINDOW_MS } from "../middleware/security-hardening.js";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -214,7 +217,7 @@ function ensureSchema(): void {
 }
 
 function generateConversationId(): string {
-  return `cnv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  return `cnv_${randomBytes(16).toString("hex")}`;
 }
 
 function loadConversation(id: string): ConversationRecord | null {
@@ -276,11 +279,18 @@ async function executeToolCall(
 
   // Interpolate {param} -> input[param] and remember which keys went into the path
   const pathParams = new Set<string>();
+  let invalidParam: string | undefined;
   path = path.replace(/\{([^}]+)\}/g, (_, key: string) => {
+    if (invalidParam !== undefined) return "";
     pathParams.add(key);
     const v = input[key];
-    return v == null ? "" : encodeURIComponent(String(v));
+    const encoded = v == null ? "" : encodeURIComponent(String(v));
+    if (encoded === "" || encoded === "." || encoded === "..") invalidParam ??= key;
+    return encoded;
   });
+  if (invalidParam !== undefined) {
+    return { status: 400, result: { error: "invalid_path_param", param: invalidParam } };
+  }
 
   let url = path;
   let payload: Record<string, unknown> | undefined;
@@ -351,6 +361,7 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { id: string } }>(
     "/api/onboard/chat/:id",
     async (req, reply) => {
+      if (!isOnboardAdmin(req)) return reply.status(404).send({ error: "not_found" });
       const record = loadConversation(req.params.id);
       if (!record) return reply.status(404).send({ error: "not_found" });
       return {
@@ -366,10 +377,15 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
     Body: {
       conversationId?: string;
       message?: string;
-      /** Optional model override — defaults to ANTHROPIC_MODEL / claude-sonnet-4-6. */
-      model?: string;
     };
   }>("/api/onboard/chat", async (req, reply) => {
+    if (!canOnboardChat(req.ip)) {
+      return reply.status(429).send({
+        error: "rate_limited",
+        message: "Too many chat messages from this address. Try again in a few minutes.",
+        retry_after_seconds: 600,
+      });
+    }
     const body = req.body ?? {};
     const message = body.message?.trim();
     if (!message) {
@@ -377,6 +393,15 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
     }
     if (message.length > 8_000) {
       return reply.status(400).send({ error: "message_too_long", message: "Keep each message under 8000 chars." });
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "model")) {
+      return reply.status(400).send({
+        error: "model_not_allowed",
+        message: "The onboarding chat chooses its own model.",
+      });
+    }
+    if (body.conversationId && (typeof body.conversationId !== "string" || !/^cnv_[0-9a-f]{32}$/.test(body.conversationId))) {
+      return reply.status(404).send({ error: "conversation_not_found" });
     }
 
     const now = new Date().toISOString();
@@ -436,9 +461,17 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
+    if (!canOnboardChatGlobally()) {
+      return reply.status(429).send({
+        error: "chat_busy",
+        message: "The onboarding chat is busy right now. Try again later.",
+        retry_after_seconds: ONBOARD_CHAT_GLOBAL_WINDOW_MS / 1000,
+      });
+    }
     const toolByName = new Map<string, AgentPackageTool>();
     for (const t of pkg.tools) {
       if (!t.name || !t.input_schema) continue;
+      if (t.endpoint?.path === "/api/auth" || t.endpoint?.path.startsWith("/api/auth/")) continue;
       toolByName.set(t.name, t);
     }
     const tools = Array.from(toolByName.values()).map((t) => ({
@@ -460,7 +493,7 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
       let res;
       try {
         res = await client.messages.create({
-          model: body.model ?? DEFAULT_MODEL,
+          model: DEFAULT_MODEL,
           max_tokens: 4096,
           system: pkg.system_prompt,
           tools,

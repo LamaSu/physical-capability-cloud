@@ -26,6 +26,7 @@ import {
   _resetAgentPackageCache,
 } from "../routes/onboard-chat.js";
 import { initStore, closeStore } from "../db.js";
+import { __resetOnboardChatForTest } from "../middleware/security-hardening.js";
 
 // ---------------------------------------------------------------------------
 // Mocks — keep the runtime narrow so the route can wire its own DB safely.
@@ -74,6 +75,7 @@ describe("/api/onboard/chat — registration + schema", () => {
   const savedKey = process.env.ANTHROPIC_API_KEY;
 
   beforeEach(async () => {
+    __resetOnboardChatForTest();
     delete process.env.ANTHROPIC_API_KEY;
     _resetAnthropicCache();
     _resetAgentPackageCache();
@@ -144,6 +146,8 @@ describe("/api/onboard/chat — no API key path (placeholder mode)", () => {
   const savedKey = process.env.ANTHROPIC_API_KEY;
 
   beforeEach(async () => {
+    __resetOnboardChatForTest();
+    vi.stubEnv("PCC_ADMIN_KEY", "synthetic-chat-admin-secret");
     delete process.env.ANTHROPIC_API_KEY;
     _resetAnthropicCache();
     _resetAgentPackageCache();
@@ -197,7 +201,7 @@ describe("/api/onboard/chat — no API key path (placeholder mode)", () => {
     const id = first.json().conversationId as string;
 
     // Fetch the saved conversation
-    const lookup = await app.inject({ method: "GET", url: `/api/onboard/chat/${id}` });
+    const lookup = await app.inject({ method: "GET", url: `/api/onboard/chat/${id}`, headers: { "x-admin-key": "synthetic-chat-admin-secret" } });
     expect(lookup.statusCode).toBe(200);
     const conv = lookup.json();
     expect(conv.conversationId).toBe(id);
@@ -216,7 +220,7 @@ describe("/api/onboard/chat — no API key path (placeholder mode)", () => {
     expect(second.statusCode).toBe(200);
     expect(second.json().conversationId).toBe(id);
 
-    const lookup2 = await app.inject({ method: "GET", url: `/api/onboard/chat/${id}` });
+    const lookup2 = await app.inject({ method: "GET", url: `/api/onboard/chat/${id}`, headers: { "x-admin-key": "synthetic-chat-admin-secret" } });
     expect(lookup2.json().messages.length).toBe(4);
   });
 
@@ -231,6 +235,7 @@ describe("/api/onboard/chat — tool execution dispatch (no LLM, mocked client)"
   const savedKey = process.env.ANTHROPIC_API_KEY;
 
   beforeEach(async () => {
+    __resetOnboardChatForTest();
     process.env.ANTHROPIC_API_KEY = "test-key";
     _resetAnthropicCache();
     _resetAgentPackageCache();
@@ -277,6 +282,7 @@ describe.skipIf(!RUN_LIVE)("/api/onboard/chat — live LLM smoke (requires ANTHR
   let app: FastifyInstance;
 
   beforeEach(async () => {
+    __resetOnboardChatForTest();
     _resetAnthropicCache();
     _resetAgentPackageCache();
     app = await buildApp();
