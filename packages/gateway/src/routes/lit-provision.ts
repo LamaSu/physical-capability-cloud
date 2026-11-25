@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 /**
  * Lit Protocol key provisioning for operators.
  * When an operator registers, they get a scoped Lit usage API key
@@ -19,6 +20,7 @@ export async function litProvisionRoutes(app: FastifyInstance) {
   // Provisions a scoped Lit usage key for an operator.
   // Uses the ACCOUNT key (LIT_API_KEY) to create a limited usage key.
   app.post("/api/lit/provision", async (req, reply) => {
+    if (!isFeatureEnabled("key_minting")) return reply.code(409).send(featurePaused("key_minting"));
     const refusal = refuseCookieCredentialWrite(req);
     if (refusal) return reply.status(401).send(refusal);
     const body = (req.body ?? {}) as {

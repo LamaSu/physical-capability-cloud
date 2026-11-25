@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 /**
  * Conversational no-code onboarding chat (closes coord dc4d1ec8).
  *
@@ -379,6 +380,7 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
       message?: string;
     };
   }>("/api/onboard/chat", async (req, reply) => {
+    if (!isFeatureEnabled("onboard_chat")) return reply.code(409).send(featurePaused("onboard_chat"));
     if (!canOnboardChat(req.ip)) {
       return reply.status(429).send({
         error: "rate_limited",

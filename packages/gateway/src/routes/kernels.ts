@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { KernelRegistrationChallengeInput, Result } from "@pcc/spec";
 import { getKernelFacade } from "../facades/index.js";
@@ -65,6 +66,7 @@ export async function kernelRoutes(app: FastifyInstance) {
   app.log.info(`PCC_KERNEL_LEGACY_SIGNING_PROOF=${legacySigningProofAllowed() ? "allow" : "deny"}`);
 
   app.post<{ Body: KernelRegistrationChallengeInput }>("/api/kernels/registration-challenges", async (req, reply) => {
+    if (!isFeatureEnabled("signups")) return reply.code(409).send(featurePaused("signups"));
     if (isAnonymous(authorityOf(req))) return reply.code(401).send(AUTHENTICATION_REQUIRED);
     try {
       const challenge = issueKernelRegistrationChallenge(req.body, authorityOf(req));
@@ -177,6 +179,7 @@ export async function kernelRoutes(app: FastifyInstance) {
    * Returns 200 + { kernel, created: false } when already exists (heartbeat update).
    */
   app.post<{ Body: CreateKernelInput }>("/api/kernels", async (req, reply) => {
+    if (!isFeatureEnabled("signups")) return reply.code(409).send(featurePaused("signups"));
     // apiGate authenticates this mutation. Ownership is the stable operator
     // identity, never the replaceable API-key record id.
     const actorId = (req as any).operatorId ?? (req as any).userId;

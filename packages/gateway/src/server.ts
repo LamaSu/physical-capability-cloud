@@ -181,6 +181,7 @@ import { agentFeedbackRoutes } from "./routes/agent-feedback.js";
 import { funnelTrackerPlugin } from "./services/funnel-tracker.js";
 import { adminObservabilityRoutes } from "./routes/admin-observability.js";
 import { adminPostureRoutes } from "./routes/admin-posture.js";
+import { adminFeatureRoutes } from "./routes/admin-features.js";
 import { logBootPosture } from "./services/posture.js";
 import { setSessionStore } from "@pcc/orchestrator-sdk";
 import { OrchestratorSessionStore } from "./services/orchestrator-session-store.js";
@@ -672,6 +673,7 @@ export async function createGateway(port = 3200) {
   // PCC_FUNNEL_ENABLED=true.
   await app.register(adminObservabilityRoutes);
   await app.register(adminPostureRoutes);
+  await app.register(adminFeatureRoutes);
 
   // REST routes
   await app.register(capabilityRoutes);

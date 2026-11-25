@@ -13,3 +13,12 @@
 
 process.env.PCC_DB_PATH = process.env.PCC_DB_PATH ?? ":memory:";
 process.env.WORKFLOW_DB_PATH = process.env.WORKFLOW_DB_PATH ?? ":memory:";
+
+// Existing route suites predate deploy-off key minting and may replace the store.
+// Install before test imports/beforeAll; N400 suites unmock this module to exercise
+// the real read, seed and persistence without a production test-mode branch.
+import { vi } from "vitest";
+vi.mock("./src/services/feature-switches.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./src/services/feature-switches.js")>();
+  return { ...actual, isFeatureEnabled: () => true };
+});

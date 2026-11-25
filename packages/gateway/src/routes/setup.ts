@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 /**
  * Setup agent endpoints.
  *
@@ -752,6 +753,7 @@ export async function setupRoutes(app: FastifyInstance) {
   // ── POST /api/setup/test-job ──────────────────────────────────────────────
 
   app.post<{ Body: TestJobBody }>("/api/setup/test-job", async (req, reply) => {
+    if (!isFeatureEnabled("job_submission")) return reply.code(409).send(featurePaused("job_submission"));
    try {
     const { kernelId, deviceId, assuranceTier = 0, queueOnly } = req.body ?? {};
 

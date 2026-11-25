@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 /**
  * Commentary Streaming Route — POST /api/commentary/stream
  *
@@ -73,6 +74,7 @@ function writeSseChunk(reply: FastifyReply, chunk: CommentaryChunk): boolean {
 }
 
 async function handleStream(req: FastifyRequest, reply: FastifyReply) {
+  if (!isFeatureEnabled("commentary")) return reply.code(409).send(featurePaused("commentary"));
   const body = (req.body ?? {}) as CommentaryBody;
   const query = (req.query ?? {}) as CommentaryQuery;
 

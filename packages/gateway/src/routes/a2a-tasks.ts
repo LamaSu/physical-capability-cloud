@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 /**
  * A2A v1.0 Tasks JSON-RPC adapter.
  *
@@ -978,6 +979,10 @@ async function dispatchTasksSend(
       }
 
       case "pcc-submit": {
+        if (!isFeatureEnabled("job_submission")) {
+          const paused = featurePaused("job_submission");
+          return rpcError(rpcId, -32001, paused.message, { skill, error: paused.error, feature: paused.feature });
+        }
         const bound = bindA2ABuyer(skillParams, principal, admin);
         if (!bound.ok) return rpcError(rpcId, -32001, bound.body.message, { skill, reason: bound.body.reason });
         const quote = await createPccQuote(bound.params as unknown as PccSubmitParams);
@@ -1029,6 +1034,10 @@ async function dispatchTasksSend(
       }
 
       case "pcc-author-integration": {
+        if (!isFeatureEnabled("signups")) {
+          const paused = featurePaused("signups");
+          return rpcError(rpcId, -32001, paused.message, { skill, error: paused.error, feature: paused.feature });
+        }
         const artifacts = await handlePccAuthorIntegration(skillParams as PccAuthorIntegrationParams);
         const task: A2ATask = {
           ...baseTask,

@@ -1,3 +1,4 @@
+import { isFeatureEnabled, featurePaused } from "../services/feature-switches.js";
 /**
  * Negotiation Session API — the structured pre-lock-in protocol
  * between a user agent and an operator's kernel.
@@ -641,6 +642,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>(
     "/api/negotiate/session/:id/commit",
     async (req, reply) => {
+      if (!isFeatureEnabled("job_submission")) return reply.code(409).send(featurePaused("job_submission"));
       try {
         const { db } = getStore();
         const row = db.select().from(negotiationSessions)
