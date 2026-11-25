@@ -164,7 +164,7 @@ describe("rehearsal R0: the pack matches the gateway it describes", () => {
     const shape = full.dtos.JobOffer.shape;
     expect(shape.claimedByKernelId).toBeDefined();
     expect(shape.claimedBy).toBeUndefined();
-    expect(shape.posterDid).toBeDefined();
+    expect(shape.posterDid).toBeUndefined();
     expect(shape.requireHeartbeat).toBeDefined();
   });
 
@@ -682,5 +682,55 @@ describe("verdict 102g: offers are claims, the report schema is contract v1, and
       payload: { kernelId: "kernel_create_probe", type: "lab.absorbance", name: "probe capability" } });
     expect(created.statusCode, created.body).toBeLessThan(300);
     expect(getRepos().capabilities.findByKernel("kernel_create_probe").length).toBeGreaterThan(0);
+  });
+});
+
+describe("idempotencyKey is a random token made once per order, never the user's email, name, phone or address", () => {
+  const R = "a random token you create once per order (a UUID, for example) and reuse on every retry of that post. Never the user's email, name, phone or address.";
+  const flat = (t: string) => t.replace(/\s+/g, " ");
+  const full = pkg as unknown as {
+    system_prompt: string;
+    dtos: { RequirementsByCategory: { common_optional_fields: { idempotencyKey: string } } };
+  };
+  const keyWindows = (text: string) => text.split(/\\n|\n/)
+    .filter((line) => line.includes("idempotencyKey"))
+    .map((line) => line.slice(line.indexOf("idempotencyKey")));
+
+  it("I1: the pack's prompt and requirements text and each skill copy carry the rule sentence", () => {
+    for (const [subject, text] of [
+      ["system_prompt", full.system_prompt],
+      ["dtos.RequirementsByCategory.common_optional_fields.idempotencyKey", full.dtos.RequirementsByCategory.common_optional_fields.idempotencyKey],
+    ]) {
+      expect(flat(text), `${PACK[0][0]}: ${subject}`).toContain(flat(R));
+    }
+    for (const [file, text] of PACK.filter(([file]) => SKILLS.includes(file))) {
+      expect(flat(text), `${file}: skill text`).toContain(flat(R));
+    }
+  });
+
+  it("I2: no idempotencyKey text holds an email, name, phone, address or street placeholder, or an @", () => {
+    for (const [file, text] of PACK) {
+      for (const window of keyWindows(text)) {
+        expect(window, file).not.toMatch(/\{[^{}\s]*(?:mail|name|phone|address|addr|street|customer|user|zip|postcode|postal|tel|mobile|city)[^{}\s]*\}/i);
+        expect(window, file).not.toContain("@");
+      }
+    }
+  });
+
+  it("I3: no idempotencyKey text holds the pizza walkthrough's street words", () => {
+    for (const [file, text] of PACK) {
+      for (const window of keyWindows(text)) {
+        expect(window, file).not.toContain("728");
+        expect(window, file).not.toMatch(/geary/i);
+      }
+    }
+  });
+
+  it("I4: every example idempotencyKey value is a per-order {uuid} token", () => {
+    for (const [file, text] of PACK) {
+      const values = Array.from(text.matchAll(/idempotencyKey(?:\\?["'`])?\s*[:=]\s*\\?(["'`])([^"'`\s\\]+)\\?\1/g), (match) => match[2]);
+      expect(values.length, file).toBeGreaterThan(0);
+      for (const value of values) expect(value, file).toContain("{uuid}");
+    }
   });
 });
