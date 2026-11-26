@@ -201,7 +201,7 @@ class PCCGatewayClient:
         new_jobs = [j for j in jobs if j.get("id") not in self._seen_jobs]
         return new_jobs
 
-    def send_heartbeat(self, status_str: str = "online", accepting_jobs: Optional[bool] = None) -> bool:
+    def send_heartbeat(self, status_str: str = "online", accepting_jobs: Optional[bool] = None, *, reason=None) -> bool:
         """POST heartbeat to keep the kernel marked online.
 
         ``accepting_jobs=False`` tells the gateway this node takes no jobs, so
@@ -215,6 +215,9 @@ class PCCGatewayClient:
             "timestamp": time.time(),
             **marker,
         }
+        if reason is not None:
+            marker["reason"] = reason
+            payload["reason"] = reason
         http_status, _ = self._post("/api/operator/heartbeat", payload)
         if http_status not in (200, 201):
             # Fall back to the standard kernel heartbeat endpoint

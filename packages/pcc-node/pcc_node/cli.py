@@ -2,6 +2,7 @@
 
 Commands:
   pcc-node start   -- Detect, configure, register, and run the daemon
+  pcc-node operate -- Run jobs on a bound device
   pcc-node detect  -- Just detect hardware
   pcc-node status  -- Check if the daemon is running
   pcc-node config  -- Interactive configuration
@@ -1370,3 +1371,65 @@ def support_cmd(message, config_file, pcc_base, api_key, attach_logs, check):
         click.echo(f"Failed to send message (HTTP {status})")
         if isinstance(body, dict):
             click.echo(f"  {body.get('error', body)}")
+
+
+@main.command()
+@click.option("--config-file", "-c", default="./pcc-node.json", help="Node config file")
+@click.option("--pcc-base", envvar="PCC_BASE", default=PUBLIC_GATEWAY, help="PCC gateway URL")
+@click.option("--api-key", envvar="PCC_API_KEY", default="", help="PCC API key")
+@click.option("--kernel-id", envvar="KERNEL_ID", default="", help="Kernel id")
+@click.option("--binding", type=click.Path(dir_okay=False), help="Device binding file")
+@click.option("--stop", is_flag=True, help="Set the host stop")
+@click.option("--clear-stop", is_flag=True, help="Clear the host stop")
+@click.option("--reset-breaker", is_flag=True, help="Reset the device breaker")
+def operate(config_file, pcc_base, api_key, kernel_id, binding, stop, clear_stop, reset_breaker):
+    """Run gateway jobs on one bound device."""
+    import signal
+    import threading
+    from .operating.devicelock import clear_stop as remove_stop, write_stop
+    from .operating.gate import CircuitBreaker
+    from .operating.operate import run, validate_binding
+
+    if sum((stop, clear_stop, reset_breaker)) > 1:
+        raise click.ClickException("Choose at most one stop or breaker action")
+    try:
+        if stop:
+            write_stop()
+            return
+        if clear_stop:
+            remove_stop()
+            return
+        if not binding:
+            raise ValueError("A binding is required")
+        data = validate_binding(load_config_data(binding))
+        if reset_breaker:
+            CircuitBreaker(data["serial"]).reset()
+            return
+        public_hex, secret_hex = _load_node_keys()
+        config_data = _existing_config_data(config_file)
+        target, _ = _resolve_target(pcc_base, config_file, config_data)
+        config = NodeConfig.from_dict(config_data or {})
+        api_key = api_key or config.pcc_api_key
+        kernel_id = kernel_id or config.kernel_id
+        if not api_key or not kernel_id:
+            raise ValueError("API key and kernel id are required")
+        stop_event = threading.Event()
+        process_stop = threading.Event()
+
+        def halt(signum, frame):
+            process_stop.set()
+            stop_event.set()
+
+        previous = {}
+        try:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                previous[sig] = signal.signal(sig, halt)
+            result = run(data, target, api_key, kernel_id, public_hex, secret_hex, stop_event,
+                         process_stop=process_stop, message=click.echo)
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+        if result:
+            raise SystemExit(result)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from None

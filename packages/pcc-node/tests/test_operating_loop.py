@@ -194,6 +194,9 @@ class FakeLock:
             raise OSError("record not durable")
         self.states[key] = "terminal"
 
+    def record_state(self, key):
+        return self.states.get(key)
+
 
 class ProtocolShapeTests(unittest.TestCase):
     """DeviceRuntime/JobPort are structural Protocols; fakes satisfy them

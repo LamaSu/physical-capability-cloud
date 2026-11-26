@@ -222,6 +222,9 @@ class _FreeLock:
     def mark_terminal(self, key, outcome):
         self.states[key] = "terminal"
 
+    def record_state(self, key):
+        return self.states.get(key)
+
 
 def _get(base, path):
     u = urlparse(base)

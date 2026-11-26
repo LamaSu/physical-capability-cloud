@@ -313,6 +313,13 @@ class HostDeviceLock:
         self._create(base + ".reserved", b"", may_exist=True)
         return "reserved"
 
+    def record_state(self, job_key: str) -> Optional[str]:
+        base = _name(job_key)
+        for state in ("terminal", "start_sent", "reserved"):
+            if self._present(base + "." + state):
+                return state
+        return None
+
     def mark_start_sent(self, job_key: str) -> None:
         """Record, durably and just before the device is driven, that this job's start is being sent."""
         self._create(_name(job_key) + ".start_sent", b"")
@@ -329,3 +336,86 @@ class HostDeviceLock:
         for fd in (records, directory):
             if fd is not None:
                 os.close(fd)
+
+
+_STOP_FILE = "stop"
+
+
+def _marker_directory() -> int:
+    parent = os.path.dirname(os.path.abspath(DEFAULT_DIRECTORY))
+    if not os.path.isdir(parent):
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+    return _open_private_dir(DEFAULT_DIRECTORY)
+
+
+def _marker_state(name: str) -> str:
+    try:
+        directory = _marker_directory()
+        try:
+            try:
+                info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                return "clear"
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                return "unavailable"
+            return "stopped"
+        finally:
+            os.close(directory)
+    except (OSError, ValueError):
+        return "unavailable"
+
+
+def _write_marker(name: str) -> None:
+    directory = _marker_directory()
+    try:
+        try:
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _FILE_FLAGS, 0o600, dir_fd=directory)
+        except FileExistsError:
+            return
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def _remove_marker(name: str) -> None:
+    directory = _marker_directory()
+    try:
+        try:
+            os.unlink(name, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def write_stop() -> None:
+    _write_marker(_STOP_FILE)
+
+
+def clear_stop() -> None:
+    _remove_marker(_STOP_FILE)
+
+
+def read_stop_state() -> str:
+    return _marker_state(_STOP_FILE)
+
+
+def _breaker_name(serial: str) -> str:
+    return _name("device:" + serial) + ".breaker"
+
+
+def breaker_open(serial: str) -> bool:
+    return _marker_state(_breaker_name(serial)) != "clear"
+
+
+def write_breaker(serial: str) -> None:
+    _write_marker(_breaker_name(serial))
+
+
+def reset_breaker(serial: str) -> None:
+    _remove_marker(_breaker_name(serial))

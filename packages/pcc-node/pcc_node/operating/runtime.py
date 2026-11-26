@@ -80,6 +80,7 @@ _METHODS = ("POST", "PUT")
 _MAX_RESPONSE_BYTES = 1 << 20
 _MAX_LOG_BYTES = 4 << 20
 _IDLE_CHECK_S = 10.0
+DEVICE_STOP_TIMEOUT_S = 10.0
 # How often a request, a connect or a wait between polls checks whether it must stop.
 _WATCH_S = 0.02
 _CONNECTING = {errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY, getattr(errno, "WSAEWOULDBLOCK", errno.EWOULDBLOCK)}
@@ -184,6 +185,18 @@ class OperationBinding:
             timeout_s=timeout,
             refusals=tuple(refusals),
         )
+
+
+@dataclass(frozen=True)
+class DeviceStop:
+    method: str
+    path: str
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "DeviceStop":
+        if not isinstance(value, dict) or value.get("method") not in _METHODS:
+            raise BindingError("device.stop.method must be POST or PUT")
+        return cls(value["method"], _check_path(value.get("path"), "device.stop.path", run_id=True))
 
 
 def _check_path(path: Any, where: str, *, run_id: bool = False) -> str:
@@ -582,6 +595,7 @@ class AdapterRuntime:
         public_hex: str,
         secret_hex: str,
         *,
+        device_stop: Optional[DeviceStop] = None,
         source: str = "device",
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -590,6 +604,7 @@ class AdapterRuntime:
         self._keys = (public_hex, secret_hex)
         self._status = status
         self._bindings = dict(bindings)
+        self._device_stop = device_stop
         self._source = source
         self._clock = clock
         # Generation-scoped cancel (verdict 117b): a cancel names the run in progress, or the
@@ -611,6 +626,7 @@ class AdapterRuntime:
             {name: OperationBinding.from_dict(name, b) for name, b in operations.items()},
             public_hex,
             secret_hex,
+            device_stop=DeviceStop.from_dict(device["stop"]) if "stop" in device else None,
             **kwargs,
         )
 
@@ -618,6 +634,16 @@ class AdapterRuntime:
     def signer(self) -> str:
         """The ``0x``-prefixed Ed25519 public key that signs this runtime's evidence."""
         return self._signer
+
+    @property
+    def has_device_stop(self) -> bool:
+        return self._device_stop is not None
+
+    def timeout_s(self, operation: str) -> float:
+        return self._bindings[operation].timeout_s
+
+    def failed_states(self, operation: str) -> Tuple[str, ...]:
+        return self._bindings[operation].failed
 
     def cancel(self) -> None:
         """Stop the run in progress, or the next run if none is in progress.
@@ -639,7 +665,7 @@ class AdapterRuntime:
             return False
         return answer.body.get(self._status.field) in self._status.idle
 
-    def run(self, operation: str, params: Dict[str, Any], *, claim: Any) -> RunResult:
+    def run(self, operation: str, params: Dict[str, Any], *, claim: Any, last_check=None) -> RunResult:
         """Run one bound operation for a claimed job, with already-checked params, and sign what the device reports.
 
         ``claim`` is the job's claim (a :class:`~pcc_node.operating.jobport.ClaimedJob`): its
@@ -652,7 +678,7 @@ class AdapterRuntime:
             generation = self._generation
         result = RunResult(False, error="runtime_error")
         try:
-            result = self._run(operation, params, claim, generation)
+            result = self._run(operation, params, claim, generation, last_check)
             return result
         finally:
             with self._gen_lock:
@@ -663,7 +689,7 @@ class AdapterRuntime:
                     self._cancel_upto = generation + 1
             self._running.release()
 
-    def _run(self, operation: str, params: Dict[str, Any], claim: Any, generation: int) -> RunResult:
+    def _run(self, operation: str, params: Dict[str, Any], claim: Any, generation: int, last_check=None) -> RunResult:
         if not _claim_ok(claim):
             return RunResult(False, error="no_claim")
         binding = self._bindings.get(operation)
@@ -698,6 +724,13 @@ class AdapterRuntime:
         except (TypeError, ValueError):
             return RunResult(False, error="param_not_json:not_started")
         key = idempotency_key(claim.job_id, claim.kernel_id, claim.claim_token)
+        if last_check is not None:
+            try:
+                refusal = last_check()
+            except Exception:
+                return RunResult(False, error="gate_error")
+            if refusal is not None:
+                return RunResult(False, error=refusal)
         try:
             started = call(binding.method, binding.path, body, headers={"Idempotency-Key": key})
         except _Abort as halt:
@@ -746,6 +779,12 @@ class AdapterRuntime:
                 self._wait(binding.poll_interval_s, deadline, stop)
         except _Abort as halt:
             # The device was started: whatever stopped the run, its state is unknown.
+            if self._device_stop is not None:
+                try:
+                    _request(self._device_stop.method, self._base + _run_path(self._device_stop.path, segment),
+                             deadline=self._clock() + DEVICE_STOP_TIMEOUT_S, clock=self._clock)
+                except Exception:
+                    pass
             evidence = self._evidence(operation, run_id, record, None, claim)
             return RunResult(False, output=record, evidence=evidence, error=f"{halt.reason}:device_state_unknown")
 

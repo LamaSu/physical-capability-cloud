@@ -84,7 +84,7 @@ class TestSigningIsMandatory:
 class TestClaim:
     def test_claims_the_first_mappable_job_through_the_atomic_claim(self):
         gw = FakeGateway({
-            ("GET", JOBS): (200, {"jobs": [
+            ("GET", JOBS): (200, {"emergencyStop": "clear", "jobs": [
                 {"id": "j-other-type", "kernelId": KERNEL, "capabilityType": "manufacturing.fdm"},
                 {"id": "j-other-kernel", "kernelId": "kernel_someone_else", "capabilityType": "lab.absorbance"},
                 {"id": "j-1", "kernelId": KERNEL, "capabilityType": "lab.absorbance"},
@@ -101,7 +101,7 @@ class TestClaim:
         assert all(api_key == "k-operator" for *_, api_key in gw.calls)
 
     def test_never_claims_a_job_twice_and_never_fails_one_it_cannot_run(self):
-        gw = FakeGateway({("GET", JOBS): (200, {"jobs": [
+        gw = FakeGateway({("GET", JOBS): (200, {"emergencyStop": "clear", "jobs": [
             {"id": "j-1", "kernelId": KERNEL, "capabilityType": "lab.absorbance"},
             {"id": "j-2", "kernelId": KERNEL, "capabilityType": "manufacturing.fdm"},
         ]}), ("POST", CLAIM_J1): CLAIMED_J1})
@@ -118,7 +118,7 @@ class TestClaim:
         (404, {"error": "not found"}),
     ])
     def test_a_refused_or_malformed_claim_is_not_a_claim(self, answer):
-        gw = FakeGateway({("GET", JOBS): (200, {"jobs": [{"id": "j-1", "kernelId": KERNEL, "capabilityType": "lab.absorbance"}]}),
+        gw = FakeGateway({("GET", JOBS): (200, {"emergencyStop": "clear", "jobs": [{"id": "j-1", "kernelId": KERNEL, "capabilityType": "lab.absorbance"}]}),
                           ("POST", CLAIM_J1): answer})
         port, _ = _port(gw)
         assert port.claim_next(KERNEL) is None
@@ -130,7 +130,7 @@ class TestClaim:
         assert gw.calls == []
 
     def test_an_unreadable_queue_claims_nothing(self):
-        for answer in [(500, {"error": "x"}), (200, "not json"), (200, {"jobs": "nope"}), (0, {"error": "down"})]:
+        for answer in [(500, {"error": "x"}), (200, "not json"), (200, {"emergencyStop": "clear", "jobs": "nope"}), (0, {"error": "down"})]:
             port, _ = _port(FakeGateway({("GET", JOBS): answer}))
             assert port.claim_next(KERNEL) is None
 

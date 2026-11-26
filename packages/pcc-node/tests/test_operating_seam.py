@@ -95,7 +95,7 @@ class _Gateway:
 
     def __call__(self, method, path, body=None, **_kwargs):
         if method == "GET" and path.startswith("/api/operator/jobs?"):
-            return 200, {"jobs": [{"id": "job-1", "capabilityType": "lab.absorbance", "kernelId": KERNEL}]}
+            return 200, {"emergencyStop": "clear", "jobs": [{"id": "job-1", "capabilityType": "lab.absorbance", "kernelId": KERNEL}]}
         if method == "POST" and path == "/api/operator/jobs/job-1/claim":
             return 200, {"claimed": True, "jobId": "job-1", "claimToken": "tok-1", "leaseSeconds": 60}
         if method == "POST" and path == "/api/operator/jobs/job-1/claim/renew":

@@ -244,6 +244,8 @@ class DeviceLock(Protocol):
         """Durably record that the job's run ended with a known outcome."""
         ...
 
+    def record_state(self, job_key: str) -> Optional[str]: ...
+
 
 def _gate_open(gate: Any) -> bool:
     """Only an answer of exactly True opens the gate; anything else, or an exception, keeps it shut."""
@@ -420,6 +422,15 @@ def _run_once(profile: Any, runtime: Any, jobs: Any, job: Any, *, gate: Any, loc
     # isn't alive, is never run (steward #5933): the claim is what gives it to this node alone.
     if not _claimed(job):
         return fail("no_claim")
+
+    key = _job_key(job)
+    if key is not None:
+        try:
+            state = lock.record_state(key)
+        except Exception:
+            return fail("run_record_unavailable")
+        if state == "start_sent":
+            return fail("job_needs_reconciliation")
 
     # Step 1: resolve the buyer's typed parameters. A port that raises has resolved nothing.
     try:

@@ -72,7 +72,7 @@ class Gateway:
         with self.lock:
             self.calls.append((method, path, body))
         if method == "GET" and path == JOBS:
-            return 200, {"jobs": self.jobs}
+            return 200, {"emergencyStop": "clear", "jobs": self.jobs}
         if method == "POST" and path.endswith("/claim/renew"):
             time.sleep(self.renew_hold_s)
             code, answer = self.renew

@@ -68,7 +68,7 @@ class Gateway:
     def __call__(self, method, path, body=None, *, base_url, api_key, **kwargs):
         self.calls.append((method, path, body))
         if method == "GET" and path == JOBS:
-            return 200, {"jobs": [j for j in self.jobs if j["id"] not in self.claimed]}
+            return 200, {"emergencyStop": "clear", "jobs": [j for j in self.jobs if j["id"] not in self.claimed]}
         if method == "POST" and path.startswith("/api/operator/jobs/") and path.endswith("/claim"):
             if self.failing_claims:
                 self.failing_claims -= 1

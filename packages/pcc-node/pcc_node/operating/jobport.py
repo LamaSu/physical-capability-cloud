@@ -139,6 +139,15 @@ class Lease:
                 self._dead = True  # a lease that lapsed stays lapsed, even if a late renewal succeeds
             return not self._dead
 
+    def remaining_s(self) -> float:
+        with self._lock:
+            now = self._clock()
+            if now >= self._deadline:
+                self._dead = True
+            if self._dead:
+                return 0.0
+            return max(0.0, max(self._deadline, self._hold_until) - now)
+
     def release(self) -> None:
         """End the lease: the job is finished, or abandoned."""
         with self._lock:
@@ -190,6 +199,11 @@ class ClaimedJob:
     claim_token: str = field(default="", repr=False)
     kernel_id: str = ""
     lease: Optional[Lease] = field(default=None, repr=False, compare=False)
+
+    reclaim_at: Optional[float] = None
+
+    def lease_remaining_s(self) -> float:
+        return self.lease.remaining_s() if self.lease is not None else 0.0
 
     def lease_alive(self) -> bool:
         return self.lease is not None and self.lease.alive()
@@ -247,6 +261,8 @@ class GatewayJobPort:
         *,
         status: str = "queued",
         request: Request = pcc_request,
+        observer=None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         assert_ed25519_available(public_hex, secret_hex)
         self._base = base_url
@@ -258,6 +274,8 @@ class GatewayJobPort:
         self._secret_hex = secret_hex
         self._status = status
         self._request = request
+        self._observer = observer
+        self._clock = clock
         self._seen: Set[str] = set()
         self._stored: Dict[str, bool] = {}
         self._failure: Dict[str, str] = {}
@@ -277,14 +295,25 @@ class GatewayJobPort:
     def _call(self, method: str, path: str, body: Optional[dict] = None) -> Tuple[int, Any]:
         return self._request(method, path, body, base_url=self._base, api_key=self._api_key)
 
+    def refresh_stop(self) -> Tuple[int, Any]:
+        sent_at = self._clock()
+        try:
+            status, body = self._call("GET", f"/api/operator/jobs?kernelId={quote(self._kernel_id, safe='')}&status={quote(self._status, safe='')}")
+        except Exception:
+            status, body = 0, None
+        if self._observer is not None:
+            self._observer(status, body, sent_at)
+        return status, body
+
     def claim_next(self, kernel_id: str) -> Optional[ClaimedJob]:
         """Atomically claim the next queued job this node can run, with a live lease, or return None."""
         if kernel_id != self._kernel_id:
             log.warning("asked to claim for kernel %s, but this port serves %s", kernel_id, self._kernel_id)
             return None
         self._settle_owed()
-        status, body = self._call("GET", f"/api/operator/jobs?kernelId={quote(kernel_id, safe='')}&status={quote(self._status, safe='')}")
-        if status != 200 or not isinstance(body, dict) or not isinstance(body.get("jobs"), list):
+        status, body = self.refresh_stop()
+        if (status != 200 or not isinstance(body, dict) or body.get("emergencyStop") != "clear"
+                or not isinstance(body.get("jobs"), list)):
             return None
         for job in body["jobs"]:
             if not isinstance(job, dict):
@@ -321,8 +350,13 @@ class GatewayJobPort:
                 if not accepted and failed_status != 409:
                     self._owed[job_id] = token
                 continue
+            reclaim_at = claimed.get("reclaimAt") if "reclaimAt" in claimed else None
+            if "reclaimAt" in claimed:
+                if (isinstance(reclaim_at, bool) or not isinstance(reclaim_at, (int, float))
+                        or not math.isfinite(reclaim_at) or reclaim_at <= 0):
+                    reclaim_at = 0.0
             return ClaimedJob(job_id=job_id, operation=operation, capability_type=cap_type, claim_token=token,
-                              kernel_id=self._kernel_id, lease=lease)
+                              kernel_id=self._kernel_id, lease=lease, reclaim_at=reclaim_at)
         return None
 
     def _renew(self, job_id: str, token: str) -> Renewal:
