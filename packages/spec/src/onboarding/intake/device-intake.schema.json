@@ -3372,7 +3372,7 @@
           "x-pcc-neverDefault": false,
           "x-pcc-confirmationRequired": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "A self-signing instrument raises the evidence ceiling — but only once its signing key is registered (companion primitive: receipt.kernel_signed).",
+          "x-pcc-why": "A self-signing instrument raises the evidence ceiling — but only once its signing key is registered (primitive: ident.registered_key).",
           "x-pcc-ifUnknown": {
             "research": "find-evidence-signals"
           },

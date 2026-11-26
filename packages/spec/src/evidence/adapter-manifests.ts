@@ -29,7 +29,8 @@ import type { CsdEvidenceTier } from "../csd/schema.js";
 /**
  * The "digital receipt core" shared by every Ed25519 kernel-signed connector.
  * receipt.kernel_signed is the earned tier-1; confirm.execution_mode kills the
- * mock-success class; ident.registered_key is the signing dependency;
+ * mock-success class; ident.registered_key resolves the signer in its pinned
+ * registry (since vocabulary v3, N395, receipt.kernel_signed doesn't depend on it);
  * artifact.hash is the integrity floor; decl.self_attested is the tier-0 floor.
  * This set is tier-1 eligible on its own.
  */

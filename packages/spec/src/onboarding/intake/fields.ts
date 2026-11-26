@@ -714,7 +714,7 @@ export const INTAKE_FIELDS: readonly IntakeFieldDef[] = [
     group: "evidence",
     class: "C",
     question: "Does the instrument cryptographically sign its own output?",
-    why: "A self-signing instrument raises the evidence ceiling — but only once its signing key is registered (companion primitive: receipt.kernel_signed).",
+    why: "A self-signing instrument raises the evidence ceiling — but only once its signing key is registered (primitive: ident.registered_key).",
     fills: [
       { artifact: "evidencePlan", path: "receipt.kernel_signed" },
       { artifact: "evidencePlan", path: "ident.registered_key" },
@@ -722,7 +722,7 @@ export const INTAKE_FIELDS: readonly IntakeFieldDef[] = [
     requiredFor: ["tier1-intake-complete"],
     // "maps to receipt.kernel_signed plus ident.registered_key (stub under the
     // lockstep rule)" — recorded against ident.registered_key (verifierStatus
-    // "stub"), the weaker/gating half of the pair, so the field's declared
+    // "stub"), the weaker half of the pair, so the field's declared
     // status matches the registry exactly with no special-case exception.
     evidencePrimitive: { id: "ident.registered_key", status: "stub" },
     ifUnknown: { research: "find-evidence-signals" },
