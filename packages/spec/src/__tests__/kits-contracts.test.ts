@@ -1040,8 +1040,8 @@ describe("astra pack 112b", () => {
     expect(evidenceIsExecutable(2, [{ id: "approval.expert" }])).toBe(false);
     expect(evidenceIsExecutable(2, [payer, { id: "capture.photo_nonced" }])).toBe(false);
     expect(evidenceIsExecutable(2, [payer, { id: "made.up_primitive" }])).toBe(false);
-    // Today no tier 1 set is executable: receipt.kernel_signed and confirm.execution_mode depend on the stub
-    // ident.registered_key.
+    // A tier 1 set that names the stub ident.registered_key is not executable. Since vocabulary v3 (N395),
+    // neither receipt.kernel_signed nor confirm.execution_mode depends on it, even transitively.
     const chain = [{ id: "ident.registered_key" }, { id: "receipt.kernel_signed" }, { id: "confirm.execution_mode" }];
     expect(evidenceIsExecutable(1, chain)).toBe(false);
   });
