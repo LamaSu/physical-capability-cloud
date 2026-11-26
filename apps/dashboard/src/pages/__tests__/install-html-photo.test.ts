@@ -81,6 +81,89 @@ async function expectRefusal(message: string) {
   expect(document.getElementById("resolver-err")!.style.display).toBe("");
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+function stubImagePhoto(failure?: "reader" | "image") {
+  const photo = stubPhoto();
+  vi.stubGlobal("createImageBitmap", undefined);
+  const source = "data:image/png;base64,c291cmNl";
+  const reader = {
+    result: null as string | null,
+    onload: null as (() => void) | null,
+    onerror: null as (() => void) | null,
+    readAsDataURL: vi.fn((_file: File) => {
+      queueMicrotask(() => {
+        if (failure === "reader") reader.onerror!();
+        else {
+          reader.result = source;
+          reader.onload!();
+        }
+      });
+    }),
+  };
+  let imageSrc = "";
+  const image = {
+    naturalWidth: 4000,
+    naturalHeight: 3000,
+    width: 40,
+    height: 30,
+    onload: null as (() => void) | null,
+    onerror: null as (() => void) | null,
+    close: vi.fn(),
+    get src() { return imageSrc; },
+    set src(value: string) { imageSrc = value; },
+  };
+  const setSrc = vi.spyOn(image, "src", "set").mockImplementation((value: string) => {
+    imageSrc = value;
+    expect(image.onload).toEqual(expect.any(Function));
+    expect(image.onerror).toEqual(expect.any(Function));
+    expect(value).toBe(source);
+    queueMicrotask(() => {
+      if (failure === "image") image.onerror!();
+      else image.onload!();
+    });
+  });
+  const makeReader = vi.fn(function () { return reader; });
+  const makeImage = vi.fn(function () { return image; });
+  const createObjectURL = vi.fn();
+  vi.stubGlobal("FileReader", makeReader);
+  vi.stubGlobal("Image", makeImage);
+  vi.stubGlobal("URL", { createObjectURL });
+  return { ...photo, source, reader, image, setSrc, makeReader, makeImage, createObjectURL };
+}
+
+function stubPendingPhotos() {
+  const photo = stubPhoto();
+  const first = {
+    ...deferred<typeof photo.bitmap>(),
+    bitmap: photo.bitmap,
+    dataUrl: PREFIX + "A".repeat(4096),
+    status: "✓ photo attached (3 KB)",
+  };
+  const second = {
+    ...deferred<typeof photo.bitmap>(),
+    bitmap: { width: 4000, height: 3000, close: vi.fn() },
+    dataUrl: PREFIX + "B".repeat(8192),
+    status: "✓ photo attached (6 KB)",
+  };
+  photo.decode.mockReset().mockReturnValueOnce(first.promise).mockReturnValue(second.promise);
+  photo.toDataURL.mockImplementation(() =>
+    photo.ctx.drawImage.mock.lastCall?.[0] === first.bitmap ? first.dataUrl : second.dataUrl);
+  return { photo, first, second };
+}
+
+async function pressEnter() {
+  document.getElementById("device-text")!.dispatchEvent(new KeyboardEvent("keydown", {
+    key: "Enter", bubbles: true, cancelable: true,
+  }));
+  await vi.advanceTimersByTimeAsync(0);
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   fetchMock.mockReset();
@@ -390,5 +473,266 @@ describe("/install.html photo sending and status", () => {
       .toBeLessThan(photo.ctx.drawImage.mock.invocationCallOrder[0]);
     await pressIdentify();
     expectPhotoPost(DATA_URL);
+  });
+
+  it("L8a: an orientation-option rejection retries once without options and sends the closed bitmap", async () => {
+    const photo = stubPhoto();
+    photo.decode.mockRejectedValueOnce(new TypeError("unsupported orientation"));
+    boot();
+    const file = await pickPhoto();
+
+    expect(photo.decode.mock.calls).toEqual([[file, { imageOrientation: "from-image" }], [file]]);
+    expect(photo.ctx.drawImage).toHaveBeenCalledTimes(1);
+    expect(photo.ctx.drawImage).toHaveBeenCalledWith(photo.bitmap, 0, 0, 1238, 928);
+    expect(photo.bitmap.close).toHaveBeenCalledTimes(1);
+    expect(document.getElementById("photo-status")!.classList.contains("ok")).toBe(true);
+    await pressIdentify();
+    expectPhotoPost(DATA_URL);
+  });
+
+  it("L8b: two decode rejections refuse the photo and enable Identify again", async () => {
+    const photo = stubPhoto();
+    photo.decode.mockRejectedValue(new TypeError("decode failed"));
+    boot();
+    const file = await pickPhoto();
+
+    expect(photo.decode.mock.calls).toEqual([[file, { imageOrientation: "from-image" }], [file]]);
+    expect(photo.bitmap.close).not.toHaveBeenCalled();
+    await expectRefusal(UNREADABLE);
+  });
+
+  it("L8c: a successful first decode never makes a second decode", async () => {
+    const photo = stubPhoto();
+    boot();
+    const file = await pickPhoto();
+
+    expect(photo.decode.mock.calls).toEqual([[file, { imageOrientation: "from-image" }]]);
+    await pressIdentify();
+    expectPhotoPost(DATA_URL);
+  });
+
+  it("L9a: without createImageBitmap the reader's data URL loads an image and shares JPEG scaling", async () => {
+    const photo = stubImagePhoto();
+    boot();
+    const file = await pickPhoto();
+
+    expect(photo.makeReader).toHaveBeenCalledTimes(1);
+    expect(photo.reader.readAsDataURL).toHaveBeenCalledTimes(1);
+    expect(photo.reader.readAsDataURL).toHaveBeenCalledWith(file);
+    expect(photo.makeImage).toHaveBeenCalledTimes(1);
+    expect(photo.setSrc).toHaveBeenCalledTimes(1);
+    expect(photo.setSrc).toHaveBeenCalledWith(photo.source);
+    expect(photo.image.src).toBe(photo.source);
+    expect(photo.createObjectURL).not.toHaveBeenCalled();
+    expect(photo.ctx.fillRect).toHaveBeenCalledTimes(1);
+    expect(photo.ctx.fillRect).toHaveBeenCalledWith(0, 0, 1238, 928);
+    expect(photo.fillStyles).toEqual(["#ffffff"]);
+    expect(photo.ctx.fillRect.mock.invocationCallOrder[0])
+      .toBeLessThan(photo.ctx.drawImage.mock.invocationCallOrder[0]);
+    expect(photo.ctx.drawImage).toHaveBeenCalledTimes(1);
+    expect(photo.ctx.drawImage).toHaveBeenCalledWith(photo.image, 0, 0, 1238, 928);
+    expect(photo.toDataURL).toHaveBeenCalledTimes(1);
+    expect(photo.toDataURL).toHaveBeenCalledWith("image/jpeg", 0.85);
+    expect(photo.encodedSizes).toEqual([[1238, 928]]);
+    expect(photo.image.close).not.toHaveBeenCalled();
+    expect(document.getElementById("photo-status")!.classList.contains("ok")).toBe(true);
+    await pressIdentify();
+    expectPhotoPost(DATA_URL);
+  });
+
+  it("L9b: an image load error refuses the photo after one data URL read", async () => {
+    const photo = stubImagePhoto("image");
+    boot();
+    const file = await pickPhoto();
+
+    expect(photo.reader.readAsDataURL).toHaveBeenCalledTimes(1);
+    expect(photo.reader.readAsDataURL).toHaveBeenCalledWith(file);
+    expect(photo.makeImage).toHaveBeenCalledTimes(1);
+    expect(photo.setSrc).toHaveBeenCalledTimes(1);
+    expect(photo.setSrc).toHaveBeenCalledWith(photo.source);
+    expect(photo.ctx.drawImage).not.toHaveBeenCalled();
+    await expectRefusal(UNREADABLE);
+  });
+
+  it("L9c: a reader error refuses the photo after one data URL read", async () => {
+    const photo = stubImagePhoto("reader");
+    boot();
+    const file = await pickPhoto();
+
+    expect(photo.reader.readAsDataURL).toHaveBeenCalledTimes(1);
+    expect(photo.reader.readAsDataURL).toHaveBeenCalledWith(file);
+    expect(photo.ctx.drawImage).not.toHaveBeenCalled();
+    await expectRefusal(UNREADABLE);
+  });
+
+  it("L10a: an earlier pick finishing last leaves the newest photo and its KB attached", async () => {
+    const { first, second } = stubPendingPhotos();
+    boot();
+    const input = document.getElementById("device-photo") as HTMLInputElement;
+    const valueSetter = vi.spyOn(input, "value", "set");
+    const status = document.getElementById("photo-status")!;
+    const button = document.getElementById("identify-btn") as HTMLButtonElement;
+    await pickPhoto();
+    await pickPhoto();
+    second.resolve(second.bitmap);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(status.textContent).toBe(second.status);
+    expect(status.classList.contains("ok")).toBe(true);
+    expect(button.disabled).toBe(false);
+
+    first.resolve(first.bitmap);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(status.textContent).toBe(second.status);
+    expect(status.classList.contains("ok")).toBe(true);
+    expect(button.disabled).toBe(false);
+    expect(valueSetter).not.toHaveBeenCalled();
+    await pressIdentify();
+    expectPhotoPost(second.dataUrl);
+  });
+
+  it("L10b: an earlier pick finishing first leaves the newest pick preparing and disabled", async () => {
+    const { first, second } = stubPendingPhotos();
+    boot();
+    await pickPhoto();
+    await pickPhoto();
+    const input = document.getElementById("device-photo") as HTMLInputElement;
+    Object.defineProperty(input, "files", { configurable: true, value: [] });
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    const valueSetter = vi.spyOn(input, "value", "set");
+    first.resolve(first.bitmap);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(document.getElementById("photo-status")!.textContent).toBe("Preparing the photo…");
+    expect(document.getElementById("photo-status")!.classList.contains("ok")).toBe(false);
+    expect((document.getElementById("identify-btn") as HTMLButtonElement).disabled).toBe(true);
+    expect(valueSetter).not.toHaveBeenCalled();
+    second.resolve(second.bitmap);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(document.getElementById("photo-status")!.textContent).toBe(second.status);
+    await pressIdentify();
+    expectPhotoPost(second.dataUrl);
+  });
+
+  it("L10c: an earlier unreadable pick cannot clear the newest photo, input, status or request button", async () => {
+    const { photo, first, second } = stubPendingPhotos();
+    const request = deferred<Awaited<ReturnType<typeof fetchMock>>>();
+    fetchMock.mockReturnValueOnce(request.promise);
+    boot();
+    await pickPhoto();
+    await pickPhoto();
+    second.resolve(second.bitmap);
+    await vi.advanceTimersByTimeAsync(0);
+    const input = document.getElementById("device-photo") as HTMLInputElement;
+    const valueSetter = vi.spyOn(input, "value", "set");
+    await pressIdentify();
+    expectPhotoPost(second.dataUrl);
+    photo.decode.mockRejectedValue(new TypeError("retry failed"));
+    first.reject(new TypeError("first decode failed"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(document.getElementById("photo-status")!.textContent).toBe(second.status);
+    expect(document.getElementById("photo-status")!.classList.contains("ok")).toBe(true);
+    expect(valueSetter).not.toHaveBeenCalled();
+    const button = document.getElementById("identify-btn") as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.textContent).toBe("Identifying…");
+    request.resolve({ ok: true, status: 200, json: async () => ({ candidates: [] }) });
+    await vi.advanceTimersByTimeAsync(0);
+    fetchMock.mockClear();
+    await pressIdentify();
+    expectPhotoPost(second.dataUrl);
+  });
+
+  it("L11a: a replacement pick clears ok and blocks click and Enter without changing the page", async () => {
+    const { first, second } = stubPendingPhotos();
+    boot();
+    await pickPhoto();
+    first.resolve(first.bitmap);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(document.getElementById("photo-status")!.classList.contains("ok")).toBe(true);
+    document.getElementById("results")!.innerHTML = '<div class="candidate">Existing device results</div>';
+    (document.getElementById("device-text") as HTMLInputElement).value = "Prusa MK4";
+    await pickPhoto();
+
+    const button = document.getElementById("identify-btn") as HTMLButtonElement;
+    expect(document.getElementById("photo-status")!.textContent).toBe("Preparing the photo…");
+    expect(document.getElementById("photo-status")!.classList.contains("ok")).toBe(false);
+    expect(button.disabled).toBe(true);
+    const before = document.body.innerHTML;
+    await pressIdentify("Prusa MK4");
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pressEnter();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(document.getElementById("resolver-err")!.style.display).toBe("none");
+    expect(document.body.innerHTML).toBe(before);
+
+    second.resolve(second.bitmap);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(button.disabled).toBe(false);
+    await pressIdentify("Prusa MK4");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string))
+      .toEqual({ text: "Prusa MK4", photoBase64: second.dataUrl });
+  });
+
+  it("L11b: a request ending during a preparation renders its reply but leaves Identify disabled", async () => {
+    const photo = stubPhoto();
+    const decode = deferred<typeof photo.bitmap>();
+    photo.decode.mockReturnValueOnce(decode.promise);
+    const request = deferred<Awaited<ReturnType<typeof fetchMock>>>();
+    fetchMock.mockReturnValueOnce(request.promise);
+    boot();
+    await pressIdentify("Prusa MK4");
+    await pickPhoto();
+    request.resolve({
+      ok: true, status: 200,
+      json: async () => ({ candidates: [], clarifyingQuestions: ["Which controller?"] }),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(document.getElementById("results")!.textContent).toContain("Which controller?");
+    const button = document.getElementById("identify-btn") as HTMLButtonElement;
+    expect(button.textContent).toBe("Identify →");
+    expect(button.disabled).toBe(true);
+    expect(document.getElementById("photo-status")!.textContent).toBe("Preparing the photo…");
+    decode.resolve(photo.bitmap);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(button.disabled).toBe(false);
+    expect(button.textContent).toBe("Identify →");
+  });
+
+  it("L11c: a photo finishing during a request keeps Identifying disabled until the request ends", async () => {
+    stubPhoto();
+    const request = deferred<Awaited<ReturnType<typeof fetchMock>>>();
+    fetchMock.mockReturnValueOnce(request.promise);
+    boot();
+    await pressIdentify("Prusa MK4");
+    await pickPhoto();
+
+    const button = document.getElementById("identify-btn") as HTMLButtonElement;
+    expect(document.getElementById("photo-status")!.classList.contains("ok")).toBe(true);
+    expect(button.disabled).toBe(true);
+    expect(button.textContent).toBe("Identifying…");
+    request.resolve({ ok: true, status: 200, json: async () => ({ candidates: [] }) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(button.disabled).toBe(false);
+    expect(button.textContent).toBe("Identify →");
+  });
+
+  it("L11d: Enter during a request sends nothing else and leaves the page unchanged", async () => {
+    const request = deferred<Awaited<ReturnType<typeof fetchMock>>>();
+    fetchMock.mockReturnValue(request.promise);
+    boot();
+    await pressIdentify("Prusa MK4");
+    const before = document.body.innerHTML;
+    const timers = vi.getTimerCount();
+    await pressEnter();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(document.body.innerHTML).toBe(before);
+    expect(vi.getTimerCount()).toBe(timers);
+    request.resolve({ ok: true, status: 200, json: async () => ({ candidates: [] }) });
+    await vi.advanceTimersByTimeAsync(0);
   });
 });

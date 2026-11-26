@@ -209,6 +209,9 @@ const cmdBlock     = document.getElementById('cmd-block');
 const cmdEl        = document.getElementById('cmd');
 
 let photoDataUrl = null;
+let photoPick = 0;
+let photoPreparing = false;
+let identifyInFlight = false;
 const PHOTO_MAX_EDGE = 1568;
 const PHOTO_MAX_AREA = 1150000;
 const PHOTO_JPEG_QUALITY = 0.85;
@@ -217,16 +220,35 @@ const IDENTIFY_WAIT_MS = 90000;
 
 async function scalePhoto(file) {
   let bitmap;
+  let image;
   try {
-    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    if (typeof createImageBitmap === 'function') {
+      try {
+        bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+      } catch {
+        bitmap = await createImageBitmap(file);
+      }
+    } else {
+      image = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = reject;
+        reader.onload = () => {
+          const decoded = new Image();
+          decoded.onload = () => resolve(decoded);
+          decoded.onerror = reject;
+          decoded.src = reader.result;
+        };
+        reader.readAsDataURL(file);
+      });
+    }
   } catch {
     return { ok: false, reason: 'unreadable' };
   }
   try {
     let canvas;
     try {
-      const w = bitmap.width;
-      const h = bitmap.height;
+      const w = bitmap ? bitmap.width : image.naturalWidth;
+      const h = bitmap ? bitmap.height : image.naturalHeight;
       const sEdge = PHOTO_MAX_EDGE / Math.max(w, h);
       const sArea = Math.sqrt(PHOTO_MAX_AREA / (w * h));
       let width = w;
@@ -254,9 +276,9 @@ async function scalePhoto(file) {
       if (!ctx) return { ok: false, reason: 'unreadable' };
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, width, height);
-      ctx.drawImage(bitmap, 0, 0, width, height);
+      ctx.drawImage(bitmap || image, 0, 0, width, height);
     } finally {
-      bitmap.close();
+      if (bitmap) bitmap.close();
     }
     const dataUrl = canvas.toDataURL('image/jpeg', PHOTO_JPEG_QUALITY);
     return dataUrl.length > PHOTO_MAX_CHARS
@@ -271,7 +293,16 @@ photoBtn.addEventListener('click', () => photoFileEl.click());
 photoFileEl.addEventListener('change', async () => {
   const f = photoFileEl.files && photoFileEl.files[0];
   if (!f) return;
+  const pick = ++photoPick;
+  photoDataUrl = null;
+  photoPreparing = true;
+  photoStatus.textContent = 'Preparing the photo…';
+  photoStatus.classList.remove('ok');
+  identifyBtn.disabled = photoPreparing || identifyInFlight;
   const scaled = await scalePhoto(f);
+  if (pick !== photoPick) return;
+  photoPreparing = false;
+  identifyBtn.disabled = photoPreparing || identifyInFlight;
   if (!scaled.ok) {
     photoStatus.textContent = scaled.reason === 'too_large'
       ? 'This photo is too large to send, even after scaling it down. Try another photo.'
@@ -298,6 +329,7 @@ deviceTextEl.addEventListener('keydown', (e) => {
 });
 
 async function identify() {
+  if (photoPreparing || identifyInFlight) return;
   const text = deviceTextEl.value.trim();
   if (!text && !photoDataUrl) {
     showErr('Type a device name or attach a photo first.');
@@ -305,7 +337,8 @@ async function identify() {
   }
   resolverErr.style.display = 'none';
   resultsEl.innerHTML = '<div class="candidate"><span class="spinner"></span> Identifying…</div>';
-  identifyBtn.disabled = true;
+  identifyInFlight = true;
+  identifyBtn.disabled = photoPreparing || identifyInFlight;
   identifyBtn.textContent = 'Identifying…';
 
   let data;
@@ -334,7 +367,8 @@ async function identify() {
     return;
   } finally {
     clearTimeout(timer);
-    identifyBtn.disabled = false;
+    identifyInFlight = false;
+    identifyBtn.disabled = photoPreparing || identifyInFlight;
     identifyBtn.textContent = 'Identify →';
   }
 
