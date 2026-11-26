@@ -735,4 +735,65 @@ describe("/install.html photo sending and status", () => {
     request.resolve({ ok: true, status: 200, json: async () => ({ candidates: [] }) });
     await vi.advanceTimersByTimeAsync(0);
   });
+
+  it("L11e: click and Enter with empty text during a replacement preparation send nothing and leave the page unchanged", async () => {
+    const { first, second } = stubPendingPhotos();
+    boot();
+    await pickPhoto();
+    first.resolve(first.bitmap);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(document.getElementById("photo-status")!.textContent).toBe(first.status);
+    await pickPhoto();
+    (document.getElementById("device-text") as HTMLInputElement).value = "";
+
+    const before = document.body.innerHTML;
+    document.getElementById("identify-btn")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pressEnter();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(document.getElementById("resolver-err")!.style.display).toBe("none");
+    expect(document.body.innerHTML).toBe(before);
+    second.resolve(second.bitmap);
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("L11f: Enter during a preparation sends nothing and keeps the existing error showing unchanged", async () => {
+    const { first } = stubPendingPhotos();
+    boot();
+    await pressIdentify();
+    const error = document.getElementById("resolver-err")!;
+    const message = "Type a device name or attach a photo first.";
+    expect(error.textContent).toBe(message);
+    expect(error.style.display).toBe("");
+    await pickPhoto();
+    (document.getElementById("device-text") as HTMLInputElement).value = "Prusa MK4";
+
+    const before = document.body.innerHTML;
+    await pressEnter();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(error.style.display).toBe("");
+    expect(error.textContent).toBe(message);
+    expect(document.body.innerHTML).toBe(before);
+    first.resolve(first.bitmap);
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("L11g: click and Enter with emptied text during a request send nothing else and leave the page unchanged", async () => {
+    const request = deferred<Awaited<ReturnType<typeof fetchMock>>>();
+    fetchMock.mockReturnValueOnce(request.promise);
+    boot();
+    await pressIdentify("Prusa MK4");
+    (document.getElementById("device-text") as HTMLInputElement).value = "";
+
+    const before = document.body.innerHTML;
+    document.getElementById("identify-btn")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pressEnter();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(document.getElementById("resolver-err")!.style.display).toBe("none");
+    expect(document.body.innerHTML).toBe(before);
+    request.resolve({ ok: true, status: 200, json: async () => ({ candidates: [] }) });
+    await vi.advanceTimersByTimeAsync(0);
+  });
 });
