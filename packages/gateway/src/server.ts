@@ -228,16 +228,22 @@ export async function createGateway(port = 3200) {
   }
 
   // Global error handler — intercepts known client errors (malformed bodies, etc.)
-  // and returns a clean 400 instead of letting them bubble as 500s to Sentry.
+  // and returns a clean 4xx reply instead of letting them bubble as 500s to Sentry.
   // Registered after Sentry so Sentry's onError hook still fires for 500s.
   app.setErrorHandler((error, request, reply) => {
     if (isWalletRequest(request.url)) {
       const status = (error.statusCode ?? 500) >= 500 ? 500 : 400;
       return reply.status(status).send({ error: status === 500 ? "internal_error" : "invalid_request" });
     }
-    // FST_ERR_CTP_BODY_TOO_LARGE or body size mismatch
+    // FST_ERR_CTP_BODY_TOO_LARGE: the body is over the route's limit
+    if (error.code === "FST_ERR_CTP_BODY_TOO_LARGE") {
+      return reply.status(413).send({
+        error: "payload_too_large",
+        message: "Request body is too large",
+      });
+    }
+    // FST_ERR_CTP_INVALID_CONTENT_LENGTH or another Content-Length mismatch
     if (
-      error.code === "FST_ERR_CTP_BODY_TOO_LARGE" ||
       error.code === "FST_ERR_CTP_INVALID_CONTENT_LENGTH" ||
       error.code === "FST_ERR_CTP_BODY_SIZE_MISMATCH" ||
       (error.message && (error.message.includes("Content-Length") || error.message.includes("body size")))

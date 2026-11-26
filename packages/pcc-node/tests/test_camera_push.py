@@ -5,11 +5,11 @@ push_camera_frame() POSTs each frame to the relay's camera route. The receiver, 
 takes {frame: base64 JPEG, capturedAt?} from the kernel's operator, binds the frame to the :kernelId
 in the path (it reads no kernelId from the body) and answers 201. Anything else is a refusal: 401
 without a key, 403 for a caller who is not the kernel's operator (relay_access_denied) or a closed
-relay (relay_disabled), 400 invalid_request over the 1 MiB body limit, 400 without a frame.
+relay (relay_disabled), 413 payload_too_large over the 1 MiB body limit, 400 without a frame.
 The relay administration gate runs before body parsing: a closed relay returns 403 relay_disabled
 to an ordinary node even for an oversized upload. After the relay gate, apiGate (401) and the scope
 checker (403) also run before body parsing; for an authenticated operator, the global 1 MiB limit
-and error handler produce 400. The camera route's larger 5 MB check is unreachable.
+and error handler produce 413. The camera route's larger 5 MB check is unreachable.
 
 Only the capture is stubbed here (no camera). push_camera_frame(), pcc_request() and the gateway
 transport are the real ones, against a loopback gateway that records exactly what arrives.
@@ -32,8 +32,8 @@ KEY = "k-" + "operator-bearer"
 KERNEL = "kernel-0a1b2c3d4e5f"  # the shape generate_config() gives a kernel id
 JPEG = b"\xff\xd8" + bytes(range(256)) * 2 + b"\xff\xd9"
 RECEIVED = {"id": "frame_x", "kernelId": KERNEL, "capturedAt": "2026-10-09T19:00:00Z", "framesKept": 1}
-OVERSIZE_RESPONSE = (400, {"error": "invalid_request",
-                           "message": "Request body size did not match Content-Length header"})
+OVERSIZE_RESPONSE = (413, {"error": "payload_too_large",
+                           "message": "Request body is too large"})
 
 
 class Gateway:
@@ -113,7 +113,7 @@ def test_the_kernel_id_is_one_path_segment(kernel_id, segment):
     (302, {}),
     (500, {"error": "internal"}),
     (503, {"error": "unavailable"}),
-], ids=["400-no-frame", "401", "403-not-the-operator", "403-relay-closed", "400-too-large", "302", "500", "503"])
+], ids=["400-no-frame", "401", "403-not-the-operator", "403-relay-closed", "413-too-large", "302", "500", "503"])
 def test_a_refused_frame_is_reported_as_not_pushed(status, body):
     gateway = Gateway(status=status, body=body)
     try:
@@ -140,7 +140,7 @@ def test_no_frame_sends_nothing():
     assert gateway.requests == []
 
 
-def test_oversize_gateway_response_is_a_nonfatal_http_400(monkeypatch, caplog):
+def test_oversize_gateway_response_is_a_nonfatal_http_413(monkeypatch, caplog):
     # Exercise the real HTTP parser/transport without a sandbox socket. The
     # scripted reply represents the body-limit decision after relay admission.
     status, body = OVERSIZE_RESPONSE
@@ -156,4 +156,4 @@ def test_oversize_gateway_response_is_a_nonfatal_http_400(monkeypatch, caplog):
     assert _push(gateway.url, frame=b"x" * 786_432) is False
     assert body_sizes[0] > 1_048_576
     assert gateway.paths() == [f"/api/relay/{KERNEL}/camera/frame"]
-    assert "Camera frame push failed: HTTP 400" in caplog.text
+    assert "Camera frame push failed: HTTP 413" in caplog.text
