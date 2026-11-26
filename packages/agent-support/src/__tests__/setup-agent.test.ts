@@ -817,6 +817,7 @@ describe("SetupAgent", () => {
     it.each([
       { label: "a line feed between words", vendor: "Prusa\nResearch", make: "Prusa Research" },
       { label: "a trailing carriage return and line feed", vendor: "Prusa\r\n", make: "Prusa" },
+      { label: "a format character, a line feed and an escape at the ends", vendor: "\u200B\nPrusa\u001B", make: "Prusa" },
     ])("cleans a vendor with $label", async ({ vendor, make }) => {
       vi.stubGlobal("fetch", makeFetchMock({
         identifyDevice: {
@@ -846,6 +847,7 @@ describe("SetupAgent", () => {
       { label: "a mixed run", model: "MK\r\n\u2028\t\u001B4", expectedModel: "MK 4" },
       { label: "a run with a format character inside", model: "MK\n\u200B\n4", expectedModel: "MK 4" },
       { label: "a leading tab and a trailing line feed", model: "\tMK4\n", expectedModel: "MK4" },
+      { label: "two runs", model: "MK\n4\tS", expectedModel: "MK 4 S" },
     ])("cleans a model with $label", async ({ model, expectedModel }) => {
       vi.stubGlobal("fetch", makeFetchMock({
         identifyDevice: {
@@ -891,6 +893,8 @@ describe("SetupAgent", () => {
       { label: "Cyrillic", vendor: "\u0421\u0442\u0430\u043D\u043E\u043A", model: "16\u041A20" },
       { label: "CJK with a character outside the BMP", vendor: "\u{20BB7}\u91CE", model: "\u65CB\u76E4 NC-7" },
       { label: "an inner no-break space, digits and punctuation", vendor: "Prusa\u00A0Research", model: "MK3.9/S+ (#2, 2024)" },
+      { label: "a run of ordinary spaces", vendor: "Prusa  Research", model: "MK4" },
+      { label: "a private-use character", vendor: "Prusa\uE000", model: "MK4" },
     ])("keeps $label unchanged", async ({ vendor, model }) => {
       vi.stubGlobal("fetch", makeFetchMock({
         identifyDevice: {
@@ -936,7 +940,23 @@ describe("SetupAgent", () => {
       const body = { error: "Model returned unparseable output", raw: "MODEL TEXT" };
       const json = vi.fn().mockResolvedValue(body);
       const text = vi.fn().mockResolvedValue(JSON.stringify(body));
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 413, json, text }));
+      const arrayBuffer = vi.fn().mockResolvedValue(new ArrayBuffer(0));
+      const blob = vi.fn().mockResolvedValue(new Blob());
+      const formData = vi.fn().mockResolvedValue(new FormData());
+      const bodyRead = vi.fn();
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: false,
+        status: 413,
+        json,
+        text,
+        arrayBuffer,
+        blob,
+        formData,
+        get body() {
+          bodyRead();
+          return null;
+        },
+      }));
       const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
       expect(fetch).toHaveBeenCalledOnce();
       expect(result).toStrictEqual({
@@ -946,6 +966,10 @@ describe("SetupAgent", () => {
       });
       expect(json).not.toHaveBeenCalled();
       expect(text).not.toHaveBeenCalled();
+      expect(arrayBuffer).not.toHaveBeenCalled();
+      expect(blob).not.toHaveBeenCalled();
+      expect(formData).not.toHaveBeenCalled();
+      expect(bodyRead).not.toHaveBeenCalled();
     });
   });
 
