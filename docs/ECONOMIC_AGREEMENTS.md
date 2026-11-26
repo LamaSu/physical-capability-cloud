@@ -117,8 +117,8 @@ These selectors are how **participation** is expressed. A clause that applies on
 | `pass_through` | `cost: Amount`, `markupBps: bps`, `costRef: Id \| null` | `cost + floor(cost × markupBps / 10000)`. `costRef` names the quote the cost came from. |
 | `percent` | `bps: bps`, `of: "gross" \| "net"`, `min: Amount \| null`, `max: Amount \| null`, `rateSource: RateSource \| null` | Proportional share of the base (§4.3), then clamped to `[min, max]`. |
 | `residual` | (none) | Whatever of the unit's net is left after every other clause (§4.4). |
-| `metered` | `rate: Amount`, `meter: Id` | **Refused** (`ECONOMICS_UNDECIDED_OD4`). Metering across jobs is an open operator decision. |
-| `downstream` | `bps: bps`, `horizon: Id` | **Refused** (`ECONOMICS_UNDECIDED_OD4`). Revenue participation in future deals is an open operator decision. |
+| `metered` | `rate: Amount`, `meter: Id` | **Refused** (`ECONOMICS_UNDECIDED_OD4`). Metering across jobs isn't supported yet. |
+| `downstream` | `bps: bps`, `horizon: Id` | **Refused** (`ECONOMICS_UNDECIDED_OD4`). A share of revenue in later deals isn't supported yet. |
 
 If `min` and `max` are both set, `min <= max`. A `percent` rule with `bps = 0` and no `min` is refused as meaningless (`SCHEMA_INVALID`).
 
@@ -191,7 +191,7 @@ A `distribution` payee is the licensor's own declared division of the payment, f
 
 For every other rule kind, "equal" means equal in every field. A license states its percent directly, so a required `percent` rule's `rateSource` must be `null` (schema). A `per: "agreement"` requirement needs a `fixed` or `pass_through` rule (schema), as its clause does (§2.4). `requirementId`s are unique within a license, and `party`s are unique within one `distribution` (schema). Every `distribution` party must be a party of the agreement (`UNKNOWN_REFERENCE`).
 
-`fieldsOfUse` and `regions` hold ids or `"*"`, meaning any. `authority` says how the licensor's right to license the subject is established. It is set by the server resolver, not by the licensor: `registry-anchored` means the licensor holds the subject's registered identity (ContributorNFT / IP registration with the published schedule), and `externally-attested` means an off-platform attestation.
+`fieldsOfUse` and `regions` hold ids or `"*"`, meaning any. `authority` says how the licensor's right to license the subject is established. It is set by the server resolver, not by the licensor. `registry-anchored` means an IP anchor (§9) links the subject to this license's `licenseId@version` and terms hash, and the binding checks that link at accept. `externally-attested` means an off-platform attestation. No check for one exists yet, so the binding refuses a license that claims it (§9).
 
 ### 2.6 Intended use
 
@@ -468,6 +468,7 @@ A valid agreement's ids are printable ASCII, and its labels exclude control char
 - `rightsTermsHash = H("PCC:rights-terms:v1", { licenses, use })`. This covers the rights facts only.
 - `economicTermsHash = H("PCC:economic-terms:v1", { currency, payer, parties, units, splits, clauses, fee })`. This covers the payment facts only.
 - `agreementHash = H("PCC:economic-agreement:v1", { agreementId, version, supersedes, asOf, terms, economicTermsHash, rightsTermsHash })`.
+- `licenseTermsHash(license) = H("PCC:license-terms:v1", license)`, over one license normalized as above, without its `authority`. It covers `licenseId`, `version`, `label`, `licensor`, `subject`, `class`, `shareAlikeTag`, `grants`, `requires`, `validFrom` and `validUntil`. `authority` is PCC's label for how the right is established, so an IP's holder mints over the terms alone. An IP anchor carries this hash (§9). It is not §12.1's `licenseHash`, which hashes a license as written, authority included.
 
 A change to any rights fact moves `rightsTermsHash` and leaves `economicTermsHash` alone. A change to any payment fact does the reverse. Both move `agreementHash`. **Accepting an agreement means binding `agreementHash`** into the funded deal (composition's accepted-plan compiler owns where). The two terms hashes do not cover the envelope (`asOf`, `version`, `supersedes`, `terms`), and `asOf` decides which licenses are in force and which rate a schedule gives. They are carried beside `agreementHash` only so that a mismatch can say which half moved. A version changed after acceptance therefore no longer matches what was accepted: `verifyAcceptedAgreement(accepted, agreement)`, given the three accepted hashes, answers `AGREEMENT_HASH_MISMATCH` with `changed` listing what moved: `rights`, `economics`, or `envelope` when neither terms hash moved but the agreement's own fields did.
 
@@ -545,9 +546,16 @@ At accept time the accepted-plan compiler asks economics to split each unit's ne
 | `UNIT_SET_MISMATCH`, `GROSS_MISMATCH` | The units are not the plan's nodes, or a gross is not the server's quote. |
 | `UNIT_FACTS_MISMATCH` | A unit's components (with their uses) or measures are not what the server says runs in it. A licensed component therefore cannot be left out or under-counted. |
 | `QUOTE_NOT_COVERED` | A unit's gross is less than its operator's live quote. |
+| `LICENSE_NOT_CURRENT`, `LICENSE_UNANCHORED`, `LICENSE_ATTESTATION_UNSUPPORTED` | A license fails the IP anchor checks below. Those checks also answer `LICENSE_MISMATCH` and `PARTY_MISMATCH`. |
 | `COMPILE_REFUSED` | The compile, given the server's fee, schedules, rate facts, authority floor and forbidden recipients, refuses. The detail lists the codes. |
 | `FEE_RULE_DIVERGED` | The compile's per-unit fee differs from the plan's. |
 | `OPERATOR_BELOW_QUOTE` | The unit pays the operator's payout address less than `quote − floor(quote × feeBps / 10000)`. |
+
+**IP anchors.** Under OD-4, an IP's NFT links it to its license terms, and any agreement that uses what the IP covers must carry those terms. An anchor is the server's record of that link: `{ subject, licenseId, version, termsHash, nft: { chainId, contract, tokenId }, payTo }`, where `payTo` is the IP's payout wallet. The server facts hold anchors as `ipAnchors`, at most one per subject. The list is optional, and absent means none. Each anchor must name a license the registry holds at `licenseId@version` for the same subject, or every split is refused (`SERVER_FACTS_INVALID`). `termsHash` is that license's `licenseTermsHash` (§6). After the unit checks and before the compile, with or without accepted hashes, the binding checks, in this order:
+1. Each component a unit uses that has an anchor, in `ref` order. Every license the agreement cites for it must be the anchor's `licenseId@version` (`LICENSE_NOT_CURRENT`), even when another version is registered and in force. Its `licenseTermsHash` must equal the anchor's `termsHash` (`LICENSE_MISMATCH`). Its licensor's registry address must be the anchor's `payTo` (`PARTY_MISMATCH`), so the licensor is paid at the IP's wallet. A used component with an anchor and no license is refused by the compile (`RIGHTS_UNKNOWN`).
+2. Each license the agreement cites, in `licenseId@version` order. One at `externally-attested` is refused (`LICENSE_ATTESTATION_UNSUPPORTED`), because no check for an outside attestation exists yet. One at `registry-anchored` needs an anchor for its subject that names its `licenseId@version` and terms hash (`LICENSE_UNANCHORED`).
+
+The binding reads no chain: `ipAnchors` comes from the server, like the rest of the facts. Only the licensor is paid at the anchor's wallet. A distribution's parties are paid at their registry addresses.
 
 **The operator's quote is its price for its own work.** What an agreement adds (licenses, modules, methods, the composer's margin) is on top of the quote, paid by the buyer. It is never taken out of the operator's price.
 - Each plan unit carries the operator's live `quote`. `g`, what the buyer funds, is the agreement's unit gross.
@@ -560,7 +568,7 @@ On success it returns each unit's payouts in plan order, with `agreementHash` an
 
 ## 10. What is out of scope in v1
 
-- Cross-job metering and downstream revenue participation (refused, OD-4).
+- Cross-job metering and a share of later revenue (`metered`, `downstream`). They aren't supported yet, so they are refused (`ECONOMICS_UNDECIDED_OD4`). Under OD-4, an IP's royalties are paid in each contract that uses the IP.
 - Currency conversion and tax.
 - Any rule an agent writes as code.
 - An exact rate for an `exponential-decay` segment below its starting rate (unverifiable, §2.4).
@@ -634,13 +642,13 @@ A Kit version (a capability or terms template) carries an ordinary License (§2.
 - **Where kits use it.** A Kit manifest (`pcc.capability-kit/v1`) pins its License by this hash, in `economics.economicTermsHash` (kits #4102). The field shares its name with an agreement's `economicTermsHash` (§6), but it holds a different value, under a different domain.
 - **Result:** `{ ok: true, hash }`, or `{ ok: false, reason }`. The reason is free text, not a code.
 
-Example: this License's canonical JSON is 788 bytes. Its one requirement is `kitRoyaltyRequirement({ bps: 50, lineage: ["carol", "bob", "ann"] })` (§12.2).
+Example: this License's canonical JSON is 792 bytes. Its one requirement is `kitRoyaltyRequirement({ bps: 50, lineage: ["carol", "bob", "ann"] })` (§12.2).
 
 ```
-{"authority":"registry-anchored","class":"permissive","grants":{"commercialUse":true,"compose":true,"fieldsOfUse":["*"],"modify":true,"regions":["*"],"resell":true},"label":"Kit license","licenseId":"kit-license","licensor":"carol","requires":{"attribution":true,"payments":[{"payee":{"distribution":[{"party":"ann","role":null,"subject":null,"weight":1},{"party":"bob","role":null,"subject":null,"weight":2},{"party":"carol","role":null,"subject":null,"weight":4}]},"per":"using-unit","requirementId":"kit-royalty","role":"protocol-author","rule":{"bps":50,"kind":"percent","max":null,"min":null,"of":"gross","rateSource":null}}]},"shareAlikeTag":null,"subject":"kit:sha256:abababababababababababababababababababababababababababababababab","validFrom":null,"validUntil":null,"version":1}
+{"authority":"counterparty-accepted","class":"permissive","grants":{"commercialUse":true,"compose":true,"fieldsOfUse":["*"],"modify":true,"regions":["*"],"resell":true},"label":"Kit license","licenseId":"kit-license","licensor":"carol","requires":{"attribution":true,"payments":[{"payee":{"distribution":[{"party":"ann","role":null,"subject":null,"weight":1},{"party":"bob","role":null,"subject":null,"weight":2},{"party":"carol","role":null,"subject":null,"weight":4}]},"per":"using-unit","requirementId":"kit-royalty","role":"protocol-author","rule":{"bps":50,"kind":"percent","max":null,"min":null,"of":"gross","rateSource":null}}]},"shareAlikeTag":null,"subject":"kit:sha256:abababababababababababababababababababababababababababababababab","validFrom":null,"validUntil":null,"version":1}
 ```
 
-Its `licenseHash` is `0x1112bfa7d0da2195b118df02734b16a1d7ba93848157ec7eacd5922974b83686`.
+Its `licenseHash` is `0x4b3817d000e55d778ebef804b324c677a3fd87e5bf977031ea64b8521e51c44c`.
 
 ### 12.2 The lineage and its distribution
 
@@ -689,7 +697,7 @@ A refused input answers `{ ok: false, reason }`, with a free-text reason.
 
 **The one-unit agreement** is `kitSplitAgreement(gross, input)`:
 - One unit, `job`, at the given gross. It uses the kit component `kit:kit-split` once.
-- The kit's License, `kit-license` version 1, whose licensor is `lineage[0]`. It is `permissive` and `registry-anchored`. It grants commercial use, composing, reselling and modifying in any field of use and region, requires attribution, and has one payment requirement: `kitRoyaltyRequirement({ bps: licenseBps, lineage })`.
+- The kit's License, `kit-license` version 1, whose licensor is `lineage[0]`. It is `permissive` and `counterparty-accepted`. It grants commercial use, composing, reselling and modifying in any field of use and region, requires attribution, and has one payment requirement: `kitRoyaltyRequirement({ bps: licenseBps, lineage })`.
 - A split, `lineage`, whose members are the distribution's parties at their weights.
 - The clause `kit-royalty`: a `percent` of `gross` at `licenseBps`, paid to the split `lineage` in every unit that uses the kit, under `kit-license` version 1.
 - The clause `operator`: the `residual`, paid to `kit-split:operator`.

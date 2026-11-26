@@ -13,9 +13,11 @@ export * from "./refusals.js";
 export {
   AGREEMENT_DOMAIN,
   ECONOMIC_TERMS_DOMAIN,
+  LICENSE_TERMS_DOMAIN,
   RIGHTS_TERMS_DOMAIN,
   domainHash,
   hashNormalizedAgreement,
+  licenseTermsHash,
   normalizeAgreement,
   type AgreementHashes,
 } from "./hash.js";

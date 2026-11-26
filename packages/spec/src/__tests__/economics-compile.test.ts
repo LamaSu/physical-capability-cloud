@@ -384,7 +384,7 @@ describe("rights", () => {
     const c = ok(compileEconomics(lab()));
     expect(c.rights).toEqual([
       { licenseId: "lic-hplc-protocol", version: 2, subject: "csd:hplc-assay@2", licensor: "protocol-author", class: "permissive", attributionRequired: true, authority: "counterparty-accepted", compatible: true },
-      { licenseId: "lic-peak-detect", version: 3, subject: "model:peak-detect@3", licensor: "model-author", class: "proprietary", attributionRequired: true, authority: "registry-anchored", compatible: true },
+      { licenseId: "lic-peak-detect", version: 3, subject: "model:peak-detect@3", licensor: "model-author", class: "proprietary", attributionRequired: true, authority: "counterparty-accepted", compatible: true },
     ]);
   });
 });

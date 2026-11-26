@@ -485,7 +485,7 @@ function checkStructure(
       out.push(
         refusal(
           "ECONOMICS_UNDECIDED_OD4",
-          `clause "${c.clauseId}" is ${c.rule.kind}: contingent cross-job economics are an open operator decision (OD-4) and are refused, not approximated`,
+          `clause "${c.clauseId}" is ${c.rule.kind}: cross-job metering and a share of later revenue aren't supported yet, so the clause is refused, not approximated. Under OD-4, an IP's royalties are paid in each contract that uses the IP`,
           ["clause", c.clauseId],
         ),
       );
