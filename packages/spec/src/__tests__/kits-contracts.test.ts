@@ -56,9 +56,9 @@ import { computeCsdEligibility } from "../evidence/eligibility.js";
 import { canonicalize } from "../util/canonical.js";
 
 /**
- * Run `fn` with the named primitives' verifiers marked live, then restore them. No tier 1-3 set is
- * executable with today's registry (ident.registered_key, which every live tier-1 primitive depends
- * on, is a stub), so the positive tier 1-3 cases need this to exist at all.
+ * Run `fn` with the named primitives' verifiers marked live, then restore them. A set that names a stub
+ * (here ident.registered_key) is not executable with today's registry, so the cases that need such a
+ * set to be executable use this.
  */
 function withLiveVerifiers<T>(ids: string[], fn: () => T): T {
   const touched = EVIDENCE_PRIMITIVES.filter((p) => ids.includes(p.id));
@@ -1105,7 +1105,7 @@ describe("astra pack 112b", () => {
   it("the executable flag must equal evidenceIsExecutable, in both directions, and funded kinds need it true", () => {
     const payer = { id: "approval.payer" };
     const truthful = "executable must be true exactly when requiredPrimitives is a complete tier-eligible set with live verifiers (evidenceIsExecutable)";
-    // A funded offer with an executable requirement: the tier 0 floor (no tier 1-3 set is executable today).
+    // A funded offer with an executable requirement: the tier 0 floor.
     expect(parses({ ...fundedOffer(), evidence: evidence(0, []) })).toBe(true);
     expect(parses({ ...fundedOffer(), evidence: evidence(0, [{ id: "decl.self_attested" }]) })).toBe(true);
     // Payer approval alone at tier 2 is not executable, so a funded offer cannot carry it.
