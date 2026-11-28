@@ -41,13 +41,13 @@
           ]
         }
       ],
-      "templateHash": "0xd322bbf8ce4e002cc115e9d2727629256688a5c2be0d47588029161362479ec0",
-      "defaultAgreementHash": "0xe3441aee9bc6d4a3f313af5c316a9bdf1a55a737d54254fa1af79ecc29b6465f",
+      "templateHash": "0xdc2bc29b2b5d4e37c2aba6d6b53e331501d8c5def930dc7800b809dcb6b188db",
+      "defaultAgreementHash": "0x584e288c58b3260f2d35c6ec381501d327eab3907e7d420d710159c14854bff3",
       "nonDefault": {
         "params": {
           "printPrice": "30000000"
         },
-        "agreementHash": "0xcaafb59c4dae8950172f99d1624262965551f339016bf4bd92cb861459100f60",
+        "agreementHash": "0xeebe78cf57208b17d24aad305a8defe0bf6f3c096606af83a124b6c9a7a25ec7",
         "units": {
           "print": {
             "gross": "30000000",
@@ -157,14 +157,14 @@
           ]
         }
       ],
-      "templateHash": "0x483945b60677679be1ff0864fe7a550ddd2bc84a983bfdeefbad7a09306e5353",
-      "defaultAgreementHash": "0x7b0314dfe34e3a760af43386aa3a9e6f943088bcf9e27c09b17355806870154e",
+      "templateHash": "0x24c6354a3581d6787d1546c71f950d6a6af98dc68f7d0c11c6a61b7027d31681",
+      "defaultAgreementHash": "0xef515667450e4431002483506f554d61c0d683d0ae0b59285f59325f208da5ea",
       "nonDefault": {
         "params": {
           "mailGross": "9000000",
           "postageMarkupBps": 500
         },
-        "agreementHash": "0x6fb46cbaf6853af720cdbbbc635fd1745e0744c6c4dd82e26c95d523a6b9e32d",
+        "agreementHash": "0xc690358550a3d58464622dff99959adbd00a1fec3e1fdb97d9e06f9f99db19f6",
         "units": {
           "a-print": {
             "gross": "14000000",
@@ -410,14 +410,14 @@
           ]
         }
       ],
-      "templateHash": "0xedd83932c030c2b021e9539373496dc2cf1030aa3166e5767322c4bdb4ae2663",
-      "defaultAgreementHash": "0x9882e856ecc0ae27de73d047fbead3199b7832c82a1d9b348edc5eb8f2c56dcd",
+      "templateHash": "0xa8086953fc90cf39b5486aec052ea7be72fa8a1fccb5bf36941b7b04faf652de",
+      "defaultAgreementHash": "0xcdfff079e4fdd0143fd8601ffa4cf8546c4ca3610d81ca97cdbf2d7e005fcc9d",
       "nonDefault": {
         "params": {
           "assayGross": "420000000",
           "protocolBps": 100
         },
-        "agreementHash": "0xa174c5fc0adf8d28c41e2c85c18af88368fd8924d2e1936aa6ef86fcceafe3d5",
+        "agreementHash": "0x535ea1a19dada9545a626eb7ff2d1064995b739f4ab1e8faa7672ecbe3bfd31b",
         "units": {
           "assay": {
             "gross": "420000000",

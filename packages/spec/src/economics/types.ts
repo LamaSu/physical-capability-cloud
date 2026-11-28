@@ -183,7 +183,7 @@ export const PercentRuleSchema = z
 
 export const ResidualRuleSchema = z.object({ kind: z.literal("residual") }).strict();
 
-/** Parsed so they can be refused loudly (OD-4 is an operator decision), never silently reinterpreted. */
+/** Parsed so they can be refused loudly (cross-job metering and a share of later revenue aren't supported yet), never silently reinterpreted. */
 export const MeteredRuleSchema = z.object({ kind: z.literal("metered"), rate: AmountSchema, meter: IdSchema }).strict();
 export const DownstreamRuleSchema = z
   .object({ kind: z.literal("downstream"), bps: BpsSchema, horizon: IdSchema })

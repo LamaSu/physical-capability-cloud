@@ -19,6 +19,7 @@ import type { EconomicAgreement, License, RequirableRule, Rule, Split, Unit } fr
 export const RIGHTS_TERMS_DOMAIN = "PCC:rights-terms:v1";
 export const ECONOMIC_TERMS_DOMAIN = "PCC:economic-terms:v1";
 export const AGREEMENT_DOMAIN = "PCC:economic-agreement:v1";
+export const LICENSE_TERMS_DOMAIN = "PCC:license-terms:v1";
 
 const encoder = new TextEncoder();
 
@@ -77,6 +78,12 @@ function normalizeLicense(l: License): License {
         .sort((a, b) => cmpStr(a.requirementId, b.requirementId)),
     },
   };
+}
+
+/** Normalized license terms, independent of PCC's authority label. */
+export function licenseTermsHash(license: License): ReturnType<typeof domainHash> {
+  const { authority: _authority, ...terms } = normalizeLicense(license);
+  return domainHash(LICENSE_TERMS_DOMAIN, terms);
 }
 
 function normalizeUnit(u: Unit): Unit {

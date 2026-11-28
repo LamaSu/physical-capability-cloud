@@ -3,9 +3,9 @@
   "schedules": "examples.ts PRINTER_KIT_SCHEDULE is supplied as the rate schedule body",
   "agreements": {
     "ex1-spare-printer": {
-      "agreementHash": "0xe3441aee9bc6d4a3f313af5c316a9bdf1a55a737d54254fa1af79ecc29b6465f",
+      "agreementHash": "0x584e288c58b3260f2d35c6ec381501d327eab3907e7d420d710159c14854bff3",
       "economicTermsHash": "0xf4e303b2b9dd3f3fd2bc3fed6d72069c2c501bd570cb30073b7b969c81b62d21",
-      "rightsTermsHash": "0xae352124c22f63382795002d7c5b2c990d503d2a4e92b516935e9f471f224dbb",
+      "rightsTermsHash": "0xf401b364bc25b19f519a631b530ea7ab5c5a505accadbfc1835b090628e014c9",
       "units": {
         "print": {
           "gross": "25000000",
@@ -25,9 +25,9 @@
       }
     },
     "ex2-print-and-mail": {
-      "agreementHash": "0x7b0314dfe34e3a760af43386aa3a9e6f943088bcf9e27c09b17355806870154e",
+      "agreementHash": "0xef515667450e4431002483506f554d61c0d683d0ae0b59285f59325f208da5ea",
       "economicTermsHash": "0xb12981491848f1adcbce1758e02c4accb1f9646cc9995ef41ad2fd84588d45ac",
-      "rightsTermsHash": "0x37af2501e5d9f4aec2cca8f84a4640953c822340a918470781e64941b74ba812",
+      "rightsTermsHash": "0x21d05cc78447dbf3b16e477c5b5fb8203b7a2da425a051df9c8ad2bb66445f04",
       "units": {
         "a-print": {
           "gross": "14000000",
@@ -108,9 +108,9 @@
       }
     },
     "ex4-lab-assay": {
-      "agreementHash": "0x9882e856ecc0ae27de73d047fbead3199b7832c82a1d9b348edc5eb8f2c56dcd",
+      "agreementHash": "0xcdfff079e4fdd0143fd8601ffa4cf8546c4ca3610d81ca97cdbf2d7e005fcc9d",
       "economicTermsHash": "0xf63b0ebbc8e4618f94e1a5699592dd6c477b36260ad7ea68229e2683273dd0f9",
-      "rightsTermsHash": "0x14eca04c115bbc46b919498f451ea31c238d53e817005a1d113d8b8a57f2b796",
+      "rightsTermsHash": "0x6774e6b119596ea8c8388cd59ff53dc9516a2d5e9bd0daa137085663e25f4a0a",
       "units": {
         "assay": {
           "gross": "400000000",

@@ -264,7 +264,7 @@ function agreementFor(gross: bigint, t: KitSplitTerms): EconomicAgreement {
         requires: { attribution: true, payments: [requirement] },
         validFrom: null,
         validUntil: null,
-        authority: "registry-anchored",
+        authority: "counterparty-accepted",
       },
     ],
     use: { commercial: true, composite: false, resell: false, fieldOfUse: "*", region: "*", modifies: [], outbound: { class: "proprietary", shareAlikeTag: null } },

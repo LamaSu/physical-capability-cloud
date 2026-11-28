@@ -27,7 +27,7 @@
 import { canonicalize } from "../util/canonical.js";
 import type { RateSchedule } from "../types/rate-schedule.js";
 import { compileEconomics } from "./compile.js";
-import { cmpStr } from "./hash.js";
+import { cmpStr, licenseTermsHash } from "./hash.js";
 import { MAX_INPUT_ARRAY_LENGTH, snapshotJson } from "./input.js";
 import type { CaptureClassId } from "./rates.js";
 import { z } from "zod";
@@ -92,6 +92,16 @@ export interface ServerUnitFacts {
   measures: ReadonlyArray<{ key: string; value: string }>;
 }
 
+/** The server's record of the IP NFT's link to license terms and the IP's payout wallet. */
+export interface IpAnchor {
+  subject: string;
+  licenseId: string;
+  version: number;
+  termsHash: string;
+  nft: { chainId: number; contract: string; tokenId: string };
+  payTo: string;
+}
+
 /** What the server knows, independently of anything the caller sent. */
 export interface ServerEconomicsFacts {
   /** The plan's server-resolved fee: the same values the accepted-plan compiler prices with. */
@@ -108,6 +118,8 @@ export interface ServerEconomicsFacts {
   intendedUse: IntendedUse;
   /** The server's registry copies of licenses. An agreement may cite only these, and only verbatim. */
   licenses: readonly License[];
+  /** IP NFT links to the current license terms and payout wallet, at most one per subject. */
+  ipAnchors?: readonly IpAnchor[];
   /** Registry payout addresses of the parties licenses name (licensors and distribution parties). */
   parties: ReadonlyArray<{ partyId: string; payTo: string }>;
   /** Per plan node: what runs in it. Every unit must be listed, an empty list included. */
@@ -147,6 +159,9 @@ export const BIND_REFUSAL_CODES = [
   "GROSS_MISMATCH",
   "UNIT_FACTS_MISMATCH",
   "QUOTE_NOT_COVERED",
+  "LICENSE_NOT_CURRENT",
+  "LICENSE_UNANCHORED",
+  "LICENSE_ATTESTATION_UNSUPPORTED",
   "COMPILE_REFUSED",
   "FEE_RULE_DIVERGED",
   "OPERATOR_BELOW_QUOTE",
@@ -171,6 +186,27 @@ export const ServerEconomicsFactsSchema = z
     maxAgreementAgeSeconds: SafeTimeSchema.optional(),
     intendedUse: IntendedUseSchema,
     licenses: z.array(LicenseSchema).max(1024),
+    ipAnchors: z
+      .array(
+        z
+          .object({
+            subject: IdSchema,
+            licenseId: IdSchema,
+            version: z.number().int().min(1).max(1_000_000_000),
+            termsHash: z.string().regex(/^0x[0-9a-f]{64}$/),
+            nft: z
+              .object({
+                chainId: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+                contract: AddressSchema,
+                tokenId: AmountSchema,
+              })
+              .strict(),
+            payTo: AddressSchema,
+          })
+          .strict(),
+      )
+      .max(1024)
+      .optional(),
     parties: z
       .array(z.object({ partyId: IdSchema, payTo: AddressSchema }).strict())
       .max(4096)
@@ -194,7 +230,20 @@ export const ServerEconomicsFactsSchema = z
     forbiddenRecipients: z.array(AddressSchema).max(64),
     authorityFloor: AuthoritySchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((facts, ctx) => {
+    const anchors = facts.ipAnchors ?? [];
+    if (new Set(anchors.map((a) => a.subject)).size !== anchors.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["ipAnchors"], message: "an IP subject is anchored twice" });
+    }
+    const licenses = new Map(facts.licenses.map((l) => [`${l.licenseId}@${l.version}`, l]));
+    for (const [i, anchor] of anchors.entries()) {
+      const license = licenses.get(`${anchor.licenseId}@${anchor.version}`);
+      if (license === undefined || license.subject !== anchor.subject) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["ipAnchors", i], message: "the anchor must name a registered license for its subject" });
+      }
+    }
+  });
 
 /** One own data property, read once. An accessor, a missing key or a Proxy trap that throws reads as not ok. */
 function ownData(from: unknown, key: string): { ok: true; value: unknown } | { ok: false } {
@@ -367,6 +416,33 @@ export function netSplitterFor(input: NetSplitterInput): PlanSplitter {
         !sameMultiset(unit.measures, f.measures, (m) => `${m.key}\u0000${m.value}`)
       ) {
         return refuse("UNIT_FACTS_MISMATCH", u.nodeId);
+      }
+    }
+
+    const anchors = server.ipAnchors ?? [];
+    const anchorsBySubject = new Map(anchors.map((a) => [a.subject, a]));
+    const licenseKey = (l: License) => `${l.licenseId}@${l.version}`;
+    const licensesByKey = [...ag.licenses].sort((a, b) => cmpStr(licenseKey(a), licenseKey(b)));
+    const componentRefs = [...new Set(ag.units.flatMap((u) => u.components.map((c) => c.ref)))].sort(cmpStr);
+    for (const ref of componentRefs) {
+      const anchor = anchorsBySubject.get(ref);
+      if (anchor === undefined) continue;
+      for (const license of licensesByKey.filter((l) => l.subject === ref)) {
+        const key = licenseKey(license);
+        if (key !== `${anchor.licenseId}@${anchor.version}`) return refuse("LICENSE_NOT_CURRENT", key);
+        if (licenseTermsHash(license) !== anchor.termsHash) return refuse("LICENSE_MISMATCH", key);
+        if (registeredPayTo.get(license.licensor) !== lower(anchor.payTo)) return refuse("PARTY_MISMATCH", license.licensor);
+      }
+    }
+    for (const license of licensesByKey) {
+      const key = licenseKey(license);
+      if (license.authority === "externally-attested") return refuse("LICENSE_ATTESTATION_UNSUPPORTED", key);
+      const anchor = anchorsBySubject.get(license.subject);
+      if (
+        license.authority === "registry-anchored" &&
+        (anchor === undefined || `${anchor.licenseId}@${anchor.version}` !== key || anchor.termsHash !== licenseTermsHash(license))
+      ) {
+        return refuse("LICENSE_UNANCHORED", key);
       }
     }
 
