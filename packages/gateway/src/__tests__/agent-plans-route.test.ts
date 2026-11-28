@@ -14,7 +14,7 @@
 import { createHash } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import { describe, it, expect } from "vitest";
-import { acceptedDealDigest, type CompiledAcceptedPlan, type EvidenceRequirement } from "@pcc/spec";
+import { acceptedDealDigest, computeSubjectBlockHash, computeAcceptedPolicyDigest, type SubjectBlockFields, type CompiledAcceptedPlan, type EvidenceRequirement } from "@pcc/spec";
 import { agentPlanRoutes, authenticatedPrincipal, type AgentPlanRouteDeps, type ConsumeReservation } from "../routes/agent-plans.js";
 import { bindDeal, MAX_UNITS_PER_DEAL, type DealEncoder } from "../services/agent-plan-deal.js";
 import { acceptExternalPlan, planIdForReservation, type ExternalPlanSubmission, type ReservationRecord, type SeamDeps } from "../services/external-plan-seam.js";
@@ -25,6 +25,7 @@ const OP_PRINT = A("aa");
 const OP_MAIL = A("bb");
 const PAYER = A("11");
 const FEE = A("fe");
+const Z = A("cc");
 const PROGRAM = `0x${"d2".repeat(32)}`;
 const NOW = 1_900_000_000;
 const PRINT = "document-print-and-mail";
@@ -93,7 +94,39 @@ class ReservationStoreStandIn {
 /** Stand-in for escrow's encoder: one deterministic bytes32 per unit, derived from the deal and the unit's place. */
 const unitIdOf = (plan: CompiledAcceptedPlan, jobId: string, m: number) =>
   `0x${createHash("sha256").update(`${plan.acceptedDealDigest}|${jobId}|${m}`).digest("hex")}`;
-const standInEncoder: DealEncoder = (plan) => plan.jobs.map((j) => ({ jobId: j.jobId, unitIds: j.units.map((_, m) => unitIdOf(plan, j.jobId, m)) }));
+function policyFor(address: string) {
+  const word = (b: string) => `0x${b.repeat(32)}` as `0x${string}`;
+  const subject: SubjectBlockFields = {
+    payer: word("a1"),
+    operatorPrincipal: word("a2"),
+    operatorSettlementAddress: address as `0x${string}`,
+    authorizedTuplesRoot: word("a3"),
+    expertSetRoot: word("a4"),
+    executorSetRoot: word("a5"),
+    expectedRecipient: word("a6"),
+    targetSystemIdentity: word("a7"),
+    committedProgramHash: word("a8"),
+    recipeRef: word("a9"),
+    sampleManifestRef: word("ab"),
+    childrenRoot: word("ac"),
+    operatingEnvelopeHash: word("ad"),
+    expectedRouteArea: word("ae"),
+    expectedLocationHash: word("af"),
+    captureNonceAnchor: word("b1"),
+    challengeAnchor: word("b2"),
+    integrityGrade: 1,
+  };
+  const termsHash = word("bc");
+  const bindingsRoot = word("cd");
+  const acceptedPolicyDigest = computeAcceptedPolicyDigest({ termsHash, subjectBlockHash: computeSubjectBlockHash(subject), bindingsRoot });
+  return { subject, termsHash, bindingsRoot, acceptedPolicyDigest };
+}
+
+const standInEncoder: DealEncoder = (plan) => plan.jobs.map((j) => ({
+  jobId: j.jobId,
+  unitIds: j.units.map((_, m) => unitIdOf(plan, j.jobId, m)),
+  ...policyFor(j.operator.toLowerCase()),
+}));
 
 interface WorldOpts {
   caps?: LiveCapability[];
@@ -571,6 +604,290 @@ function compiledPlan(): CompiledAcceptedPlan {
   if (!r.ok) throw new Error("setup");
   return r.plan;
 }
+
+type PolicyJob = ReturnType<DealEncoder>[number] & ReturnType<typeof policyFor>;
+
+function withPolicy(edit: (job: PolicyJob, index: number) => void): DealEncoder {
+  return (plan) => standInEncoder(plan).map((j, i) => {
+    const job = j as PolicyJob;
+    edit(job, i);
+    return job;
+  });
+}
+
+async function checkPolicyRoute(name: string, encoder: DealEncoder, detail: string | null) {
+  const { store, deps } = world({ encoder });
+  const wiring = deps.accept as { consumeReservation: ConsumeReservation };
+  const consume = wiring.consumeReservation;
+  let consumeCount = 0;
+  wiring.consumeReservation = (...args) => {
+    consumeCount++;
+    return consume(...args);
+  };
+  const app = await appWith(deps);
+  try {
+    const res = await accept(app, dag());
+    if (detail === null) {
+      expect.soft([name, res.statusCode, consumeCount, store.state("resv-1")]).toEqual([name, 200, 1, "consumed"]);
+    } else {
+      const body = res.json();
+      expect.soft([name, res.statusCode, body.error, body.reason, body.detail]).toEqual([name, 500, "deal-binding-failed", "encoder-mismatch", detail]);
+      expect.soft([name, consumeCount]).toEqual([name, 0]);
+    }
+  } finally {
+    await app.close();
+  }
+}
+
+describe("N447: accepted-policy digest and payout address binding", () => {
+  it("N447 C2.1: a valid digest over another settlement address is refused before consume", async () => {
+    await checkPolicyRoute("another address", withPolicy((job, i) => {
+      if (i === 0) Object.assign(job, policyFor(Z));
+    }), "settlement-address:0");
+  });
+
+  it("N447 C2.1b: settlement binds to the node's payTo, even when it differs from the operator", () => {
+    for (const [name, address, detail] of [["operator", OP_PRINT, "settlement-address:0"], ["payTo", Z, null]] as const) {
+      const plan = structuredClone(compiledPlan());
+      plan.nodeToUnit.find((b) => b.jobIndex === 0)!.canonicalPlan.payTo = Z;
+      const result = bindDeal(plan, [], withPolicy((job, i) => {
+        if (i === 0) Object.assign(job, policyFor(address));
+      }));
+      if (detail === null) expect.soft([name, result.ok]).toEqual([name, true]);
+      else expect.soft([name, result]).toEqual([name, { ok: false, reason: "encoder-mismatch", detail }]);
+    }
+  });
+
+  it("N447 C2.2: every job is checked in order, with all four checks applied job by job", async () => {
+    const rows = [
+      ["swapped", OP_MAIL, OP_PRINT, "settlement-address:0"],
+      ["first", Z, OP_MAIL, "settlement-address:0"],
+      ["second", OP_PRINT, Z, "settlement-address:1"],
+      ["mixed", Z, null, "settlement-address:0"],
+    ] as const;
+    for (const [name, first, second, detail] of rows) {
+      await checkPolicyRoute(name, withPolicy((job, i) => {
+        const address = i === 0 ? first : second;
+        if (address === null) Reflect.deleteProperty(job, "subject");
+        else Object.assign(job, policyFor(address));
+      }), detail);
+    }
+  });
+
+  it("N447 C2.3: an absent subject is a subject refusal, not a failed jobs snapshot", async () => {
+    await checkPolicyRoute("absent subject", withPolicy((job, i) => {
+      if (i === 0) Reflect.deleteProperty(job, "subject");
+    }), "subject:0");
+  });
+
+  it("N447 C2.5: uppercase words pass, while a mixed-case subject address is refused", async () => {
+    for (const name of ["upper words", "mixed-case address"]) {
+      await checkPolicyRoute(name, withPolicy((job, i) => {
+        if (i !== 0) return;
+        if (name === "upper words") {
+          for (const field of ["termsHash", "bindingsRoot", "acceptedPolicyDigest"] as const) {
+            job[field] = `0x${job[field].slice(2).toUpperCase()}`;
+          }
+        } else {
+          job.subject.operatorSettlementAddress = `0xA${OP_PRINT.slice(3)}`;
+        }
+      }), name === "upper words" ? null : "subject:0");
+    }
+  });
+
+  it("N447 C2.6: a changed subject field fails the digest before comparing the address", async () => {
+    for (const name of ["field", "field and address"]) {
+      await checkPolicyRoute(name, withPolicy((job, i) => {
+        if (i !== 0) return;
+        job.subject.integrityGrade = 2;
+        if (name === "field and address") job.subject.operatorSettlementAddress = Z;
+      }), "policy-digest:0");
+    }
+  });
+
+  it("N447 C2.7: a changing address getter is refused without ever running it", async () => {
+    let reads = 0;
+    await checkPolicyRoute("address getter", withPolicy((job, i) => {
+      if (i !== 0) return;
+      Object.assign(job, policyFor(Z));
+      Object.defineProperty(job.subject, "operatorSettlementAddress", {
+        enumerable: true,
+        configurable: true,
+        get: () => ++reads === 1 ? OP_PRINT : Z,
+      });
+    }), "subject:0");
+    expect.soft(reads).toBe(0);
+  });
+
+  it("N447 C2.8: spec refuses inherited, extra, accessor, hidden, missing and malformed subject fields", async () => {
+    let ghostKeyCalls = 0;
+    const rows: Array<[string, (subject: SubjectBlockFields) => SubjectBlockFields]> = [
+      ["inherited field", (s) => {
+        const copy = { ...s };
+        Reflect.deleteProperty(copy, "payer");
+        return Object.assign(Object.create({ payer: s.payer }), copy);
+      }],
+      ["extra inherited field", (s) => Object.assign(Object.create({ extra: s.payer }), s)],
+      ["extra own field", (s) => Object.assign(s, { extra: s.payer })],
+      ["extra symbol field", (s) => Object.assign(s, { [Symbol("extra")]: s.payer })],
+      ["throwing payer getter", (s) => Object.defineProperty(s, "payer", { enumerable: true, get: () => { throw new Error("getter"); } })],
+      ["non-enumerable payer", (s) => Object.defineProperty(s, "payer", { enumerable: false })],
+      ["missing integrityGrade", (s) => { Reflect.deleteProperty(s, "integrityGrade"); return s; }],
+      ["short payer", (s) => ({ ...s, payer: s.payer.slice(0, -1) as `0x${string}` })],
+      ["ghost key", (s) => new Proxy(s, { ownKeys: (target) => {
+        ghostKeyCalls++;
+        return [...Reflect.ownKeys(target), "ghost"];
+      } })],
+    ];
+    for (const [name, replace] of rows) {
+      await checkPolicyRoute(name, withPolicy((job, i) => {
+        if (i === 0) job.subject = replace(job.subject);
+      }), "subject:0");
+    }
+    expect.soft(["ghost key", ghostKeyCalls]).toEqual(["ghost key", 1]);
+  });
+
+  it("N447 C2.8 (i) getPrototypeOf: a subject whose getPrototypeOf trap throws is a subject refusal", async () => {
+    let calls = 0;
+    await checkPolicyRoute("getPrototypeOf", withPolicy((job, i) => {
+      if (i !== 0) return;
+      job.subject = new Proxy(job.subject, { getPrototypeOf: () => {
+        calls++;
+        throw new Error("getPrototypeOf");
+      } });
+    }), "subject:0");
+    expect.soft(calls).toBe(1);
+  });
+
+  it("N447 C2.8 (i) ownKeys: a subject whose ownKeys trap throws is a subject refusal", async () => {
+    let calls = 0;
+    await checkPolicyRoute("ownKeys", withPolicy((job, i) => {
+      if (i !== 0) return;
+      job.subject = new Proxy(job.subject, { ownKeys: () => {
+        calls++;
+        throw new Error("ownKeys");
+      } });
+    }), "subject:0");
+    expect.soft(calls).toBe(1);
+  });
+
+  it("N447 C2.8 (i) getOwnPropertyDescriptor: a subject whose getOwnPropertyDescriptor trap throws is a subject refusal", async () => {
+    let calls = 0;
+    await checkPolicyRoute("getOwnPropertyDescriptor", withPolicy((job, i) => {
+      if (i !== 0) return;
+      job.subject = new Proxy(job.subject, { getOwnPropertyDescriptor: () => {
+        calls++;
+        throw new Error("getOwnPropertyDescriptor");
+      } });
+    }), "subject:0");
+    expect.soft(calls).toBe(1);
+  });
+
+  it("N447 C2.9: third-party split legs do not supply the settlement address", () => {
+    for (const [name, address, detail] of [["payTo", OP_PRINT, null], ["third party", Z, "settlement-address:0"]] as const) {
+      const plan = structuredClone(compiledPlan());
+      const unit = plan.jobs[0]!.units[0]!;
+      const payTo = plan.nodeToUnit.find((b) => b.jobIndex === 0)!.canonicalPlan.payTo as `0x${string}`;
+      unit.payouts = [{ recipient: Z, amount: 1n }, { recipient: payTo, amount: unit.n - 1n }];
+      const result = bindDeal(plan, [], withPolicy((job, i) => {
+        if (i === 0) Object.assign(job, policyFor(address));
+      }));
+      if (detail === null) expect.soft([name, result.ok]).toEqual([name, true]);
+      else expect.soft([name, result]).toEqual([name, { ok: false, reason: "encoder-mismatch", detail }]);
+    }
+  });
+
+  it("N447 C2.10: every node binding in an interleaved operator's job must match", () => {
+    const X = A("e1");
+    const Y = A("e2");
+    const opOf: Record<string, string> = { a: X, b: Y, c: X };
+    const caps: LiveCapability[] = ["a", "b", "c"].map((x) => ({ id: `cap-${x}`, type: "mail.drop", kernelId: `k-${x}`, pricing: { currency: "USDC", baseCost: "3.25", minimum: "3.25" }, assuranceTiers: [0], tenantId: null }));
+    const kernels: LiveKernel[] = ["a", "b", "c"].map((x) => ({ id: `k-${x}`, operatorAddress: opOf[x]!, status: "online" }));
+    const nodes = ["a", "b", "c"].map((x) => ({ nodeId: x, capabilityId: `cap-${x}`, price: "3.25", currency: "USDC", tierKey: "tier0", kernelId: `k-${x}`, operator: opOf[x]! }));
+    const edges = [{ from: "a", to: "b" }, { from: "b", to: "c" }];
+    const { deps } = world({ caps, kernels });
+    const compiled = acceptExternalPlan(dag({ nodes, edges }), { principal: BUYER }, (deps.accept as { seam: SeamDeps }).seam);
+    expect(compiled.ok).toBe(true);
+    if (!compiled.ok) return;
+    for (const [name, address] of [["first", X], ["last", Z]] as const) {
+      const plan = structuredClone(compiled.plan);
+      plan.nodeToUnit.find((b) => b.nodeId === "c")!.canonicalPlan.payTo = Z;
+      const result = bindDeal(plan, edges, withPolicy((job, i) => {
+        if (i === 0) Object.assign(job, policyFor(address));
+      }));
+      expect.soft([name, result]).toEqual([name, { ok: false, reason: "encoder-mismatch", detail: "settlement-address:0" }]);
+    }
+  });
+
+  it("N447 C2.11: all three words are form-checked before the subject", async () => {
+    const rows: Array<[string, "termsHash" | "bindingsRoot" | "acceptedPolicyDigest", "absent" | "short" | "array", boolean]> = [];
+    for (const field of ["termsHash", "bindingsRoot", "acceptedPolicyDigest"] as const) {
+      rows.push([`${field} absent`, field, "absent", false], [`${field} short`, field, "short", false]);
+      rows.push([`${field} array`, field, "array", false]);
+    }
+    rows.push(["short termsHash and absent subject", "termsHash", "short", true]);
+    for (const [name, field, form, absentSubject] of rows) {
+      await checkPolicyRoute(name, withPolicy((job, i) => {
+        if (i !== 0) return;
+        if (form === "absent") Reflect.deleteProperty(job, field);
+        else if (form === "array") Reflect.set(job, field, [job[field]]);
+        else job[field] = job[field].slice(0, -1) as `0x${string}`;
+        if (absentSubject) Reflect.deleteProperty(job, "subject");
+      }), "policy-hashes:0");
+    }
+  });
+
+  it("N447 C2.12: each job-level policy field is read exactly once", async () => {
+    const reads = { subject: 0, termsHash: 0, bindingsRoot: 0, acceptedPolicyDigest: 0 };
+    await checkPolicyRoute("read once", withPolicy((job, i) => {
+      if (i !== 0) return;
+      const first = { ...job };
+      const other = { ...policyFor(Z), termsHash: `0x${"de".repeat(32)}`, bindingsRoot: `0x${"ef".repeat(32)}` };
+      for (const field of ["subject", "termsHash", "bindingsRoot", "acceptedPolicyDigest"] as const) {
+        Object.defineProperty(job, field, { enumerable: true, configurable: true, get: () => ++reads[field] === 1 ? first[field] : other[field] });
+      }
+    }), null);
+    expect.soft(reads).toEqual({ subject: 1, termsHash: 1, bindingsRoot: 1, acceptedPolicyDigest: 1 });
+  });
+
+  it("N447 C2.13: hash and address compare both use the subject's descriptor copy", async () => {
+    let reads = 0;
+    await checkPolicyRoute("proxy address", withPolicy((job, i) => {
+      if (i !== 0) return;
+      Object.assign(job, policyFor(Z));
+      job.subject = new Proxy(job.subject, { get: (target, key, receiver) => {
+        reads++;
+        return key === "operatorSettlementAddress" ? OP_PRINT : Reflect.get(target, key, receiver);
+      } });
+    }), "settlement-address:0");
+    expect.soft(reads).toBe(0);
+  });
+
+  it("N447 C2.14: unit-count refusal precedes policy checks", () => {
+    for (const [name, detail] of [["dangling", "unit-count"], ["intact", "settlement-address:0"]] as const) {
+      const plan = structuredClone(compiledPlan());
+      if (name === "dangling") plan.nodeToUnit = plan.nodeToUnit.slice(0, 1);
+      const result = bindDeal(plan, [], withPolicy((job, i) => {
+        if (i === 0) Object.assign(job, policyFor(Z));
+      }));
+      expect.soft([name, result]).toEqual([name, { ok: false, reason: "encoder-mismatch", detail }]);
+    }
+  });
+
+  it("N447 C2.15: an all-own subject over a null-prototype parent binds on its own fields", async () => {
+    let reads = 0;
+    await checkPolicyRoute("own fields", withPolicy((job, i) => {
+      if (i !== 0) return;
+      const parent = Object.assign(Object.create(null), { operatorSettlementAddress: Z });
+      Object.defineProperty(parent, "extra", { enumerable: true, get: () => {
+        reads++;
+        return Z;
+      } });
+      job.subject = Object.assign(Object.create(parent), job.subject);
+    }), null);
+    expect.soft(reads).toBe(0);
+  });
+});
 
 describe("authenticatedPrincipal", () => {
   it("is the gate's identity, lowercased and trimmed; nothing else counts", () => {

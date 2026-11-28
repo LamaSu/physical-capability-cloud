@@ -20,20 +20,26 @@
  * Its OUTPUT is read once into owned data and checked against the deal before anything is emitted:
  *   - the same jobs, in the same order;
  *   - one id per unit, and every id a bytes32;
- *   - all ids distinct.
+ *   - all ids distinct;
+ *   - each reported accepted-policy digest recomputes from its reported termsHash, bindings root and subject;
+ *   - that subject commits every node's payout address in its job.
  * A mismatch is an encoder fault: nothing is bound, and the route consumes no reservation. VCR's
  * 64-unit limit is checked BEFORE the encoder runs (a plan-size refusal, not an encoder fault).
  */
 
-import type { CompiledAcceptedPlan } from "@pcc/spec";
+import { computeSubjectBlockHash, computeAcceptedPolicyDigest, type SubjectBlockFields, type CompiledAcceptedPlan } from "@pcc/spec";
 
 /** VCR's deal-binding limit (#2475): a deal names at most 64 settlement units. */
 export const MAX_UNITS_PER_DEAL = 64;
 
-/** One job as escrow's compiler encoded it: the job id it was given, and its unit ids in unit order. */
+/** One job as escrow's compiler encoded it, with unit ids in unit order and its reported policy inputs. */
 export interface EncodedJob {
   jobId: string;
   unitIds: readonly string[];
+  acceptedPolicyDigest: `0x${string}`;
+  termsHash: `0x${string}`;
+  bindingsRoot: `0x${string}`;
+  subject: SubjectBlockFields;
 }
 
 /** Escrow's compiler, bound by the route to the deployment and oracle's hashes. One entry per plan job, in plan order. */
@@ -60,22 +66,53 @@ function lengthOf(a: readonly unknown[]): number | null {
   return typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : null;
 }
 
+/** Preserve the subject's shape for spec's admission checks, without invoking any getter. */
+function copySubject(subject: unknown): SubjectBlockFields | null {
+  try {
+    if (typeof subject !== "object" || subject === null) return null;
+    const prototype = Reflect.getPrototypeOf(subject);
+    const keys = Reflect.ownKeys(subject);
+    const copy = Object.create(prototype) as SubjectBlockFields;
+    for (const key of keys) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(subject, key);
+      if (descriptor === undefined) return null;
+      Object.defineProperty(copy, key, descriptor);
+    }
+    return copy;
+  } catch {
+    return null;
+  }
+}
+
+interface EncodedSnapshot {
+  jobId: unknown;
+  unitIds: unknown[] | null;
+  acceptedPolicyDigest: unknown;
+  termsHash: unknown;
+  bindingsRoot: unknown;
+  subject: SubjectBlockFields | null;
+}
+
 /**
  * The encoder's answer, copied once into owned data: every property is read once, and so is every
  * array's length. Null for an answer that cannot be read as a list of jobs. Reading never throws.
  */
-function snapshotEncoded(res: unknown, maxJobs: number): Array<{ jobId: unknown; unitIds: unknown[] | null }> | null {
+function snapshotEncoded(res: unknown, maxJobs: number): EncodedSnapshot[] | null {
   try {
     if (!Array.isArray(res)) return null;
     const count = lengthOf(res);
     if (count === null || count > maxJobs) return null;
-    const out: Array<{ jobId: unknown; unitIds: unknown[] | null }> = [];
+    const out: EncodedSnapshot[] = [];
     for (let i = 0; i < count; i++) {
       const job: unknown = res[i];
       if (typeof job !== "object" || job === null) return null;
       const r = job as Record<string, unknown>;
       const jobId: unknown = r.jobId;
       const idsRaw: unknown = r.unitIds;
+      const acceptedPolicyDigest: unknown = r.acceptedPolicyDigest;
+      const termsHash: unknown = r.termsHash;
+      const bindingsRoot: unknown = r.bindingsRoot;
+      const subject = copySubject(r.subject);
       let unitIds: unknown[] | null = null;
       if (Array.isArray(idsRaw)) {
         const n = lengthOf(idsRaw);
@@ -84,7 +121,7 @@ function snapshotEncoded(res: unknown, maxJobs: number): Array<{ jobId: unknown;
           for (let k = 0; k < n; k++) unitIds.push(idsRaw[k]);
         }
       }
-      out.push({ jobId, unitIds });
+      out.push({ jobId, unitIds, acceptedPolicyDigest, termsHash, bindingsRoot, subject });
     }
     return out;
   } catch {
@@ -152,6 +189,38 @@ export function bindDeal(
   // (astra, round 1 of #391). Two nodes on one unit, or a unit no node maps to, is an encoder mismatch.
   if (new Set(unitOf.values()).size !== unitOf.size) return mismatch("binding-not-one-to-one");
   if (unitIds.length !== unitCount) return mismatch("unit-count");
+
+  for (const [j, e] of encoded.entries()) {
+    if (typeof e.termsHash !== "string" || !BYTES32.test(e.termsHash) ||
+        typeof e.bindingsRoot !== "string" || !BYTES32.test(e.bindingsRoot) ||
+        typeof e.acceptedPolicyDigest !== "string" || !BYTES32.test(e.acceptedPolicyDigest)) {
+      return mismatch(`policy-hashes:${j}`);
+    }
+    const termsHash = e.termsHash.toLowerCase() as `0x${string}`;
+    const bindingsRoot = e.bindingsRoot.toLowerCase() as `0x${string}`;
+    const acceptedPolicyDigest = e.acceptedPolicyDigest.toLowerCase();
+    const subject = e.subject;
+    if (subject === null) return mismatch(`subject:${j}`);
+    let subjectBlockHash: `0x${string}`;
+    try {
+      subjectBlockHash = computeSubjectBlockHash(subject);
+    } catch {
+      return mismatch(`subject:${j}`);
+    }
+    try {
+      if (computeAcceptedPolicyDigest({ termsHash, subjectBlockHash, bindingsRoot }) !== acceptedPolicyDigest) {
+        return mismatch(`policy-digest:${j}`);
+      }
+    } catch {
+      return mismatch(`policy-digest:${j}`);
+    }
+    for (const b of plan.nodeToUnit) {
+      if (b.jobIndex === j && subject.operatorSettlementAddress.toLowerCase() !== b.canonicalPlan.payTo.toLowerCase()) {
+        return mismatch(`settlement-address:${j}`);
+      }
+    }
+  }
+
   const position = new Map(unitIds.map((id, i) => [id, i]));
   const bindings = plan.nodeToUnit.map((b) => ({
     digest: plan.acceptedDealDigest,

@@ -271,6 +271,7 @@ export type CompileViolation =
   | { code: "currency-mismatch" }
   | { code: "obligation-exceeds-reservation"; obligation: string; reservation: string }
   | { code: "too-many-units-for-operator"; operator: string; count: number }
+  | { code: "multiple-payout-addresses-for-operator"; operator: string; nodeIds: string[] }
   | { code: "payout-sum-mismatch"; nodeId: string; sum: string; net: string }
   | { code: "commitment-refused"; reason: string }
   | { code: "economics-refused"; reason: string }
@@ -766,6 +767,9 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
   }
   for (const [op, ids] of byOperator) {
     if (ids.length > MAX_UNITS_PER_JOB) v.push({ code: "too-many-units-for-operator", operator: op, count: ids.length });
+    if (new Set(ids.map((id) => byId.get(id)!.payoutAddress.toLowerCase())).size > 1) {
+      v.push({ code: "multiple-payout-addresses-for-operator", operator: op, nodeIds: ids });
+    }
   }
 
   if (v.length > 0 || order === null || !r || currencyDecimals === undefined) {
