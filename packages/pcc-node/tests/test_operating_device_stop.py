@@ -23,12 +23,10 @@ def check_halt(tmp_path, monkeypatch, cause):
     lock = devicelock.HostDeviceLock(binding()["device"]["url"], serial="serial-1")
 
     def request(method, url, body=None, **kwargs):
-        log.append((method, url, body, kwargs))
+        log.append((method, url, body, kwargs, now[0]))
         if url.endswith("/status"):
             return runtime._Answer(200, {"state": "idle"}, True)
         if url.endswith("/cancel"):
-            assert "stop" not in kwargs and body is None
-            assert kwargs["deadline"] == now[0] + 10.0
             return runtime._Answer(200, {}, True)
         if method == "POST":
             return runtime._Answer(201, {"id": "run /one"}, True)
@@ -47,6 +45,8 @@ def check_halt(tmp_path, monkeypatch, cause):
         if cause:
             assert len(stops) == 1
             assert stops[0][:3] == ("POST", binding()["device"]["url"] + "/runs/run%20%2Fone/cancel", None)
+            assert "stop" not in stops[0][3]
+            assert stops[0][3]["deadline"] == stops[0][4] + runtime.DEVICE_STOP_TIMEOUT_S
             assert log.index(stops[0]) > next(i for i, entry in enumerate(log) if entry[0] == "POST")
             assert outcome.reason == cause + ":device_state_unknown"
             completions = [body for method, path, body in gateway.calls if path == "/api/operator/job-status"]

@@ -116,3 +116,43 @@ def test_RC1_start_sent_record_reads_nothing_and_completes_once(tmp_path, monkey
     finally:
         job.lease.release()
         lock.close()
+
+
+def test_RC1_unreadable_record_fails_before_any_device_request(tmp_path, monkeypatch):
+    monkeypatch.setattr(devicelock, "DEFAULT_DIRECTORY", str(tmp_path))
+    monkeypatch.setattr(devicelock, "read_device_identity", lambda *args, **kwargs: "serial-1")
+    device_log = []
+
+    def request(method, url, body=None, **kwargs):
+        device_log.append((method, url, body))
+        if url.endswith("/status"):
+            return runtime._Answer(200, {"state": "idle"}, True)
+        if method == "POST":
+            return runtime._Answer(201, {"id": "run-1"}, True)
+        return runtime._Answer(200, {"status": "done"}, True)
+
+    def record_state(job_key):
+        raise devicelock.DeviceLockError("unreadable")
+
+    monkeypatch.setattr(runtime, "_request", request)
+    key_pair = keys()
+    gateway = Gateway()
+    port = make_port(gateway, key_pair)
+    job = port.claim_next("kernel-1")
+    lock = devicelock.HostDeviceLock(binding()["device"]["url"], serial="serial-1")
+    monkeypatch.setattr(lock, "record_state", record_state)
+    profile = build_r0_plate_reader_profile(kernel_id="kernel-1", device_id="reader-1")
+    inner = AdapterRuntime.from_profile(binding()["device"], *key_pair)
+    try:
+        gateway.calls.clear()
+        outcome = run_once(profile, inner, port, job, gate=Gate(), lock=lock)
+        assert not outcome.ran and not outcome.passed
+        assert outcome.reason == "run_record_unavailable"
+        assert device_log == []
+        assert len(gateway.calls) == 1
+        method, path, body = gateway.calls[0]
+        assert (method, path) == ("POST", "/api/operator/job-status")
+        assert body["status"] == "failed" and body["metadata"]["reason"] == "run_record_unavailable"
+    finally:
+        job.lease.release()
+        lock.close()

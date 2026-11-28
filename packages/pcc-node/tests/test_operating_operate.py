@@ -115,6 +115,48 @@ def test_GS1_claim_poll_stop_after_fresh_clear_sends_no_claim(tmp_path, monkeypa
     assert clear.code == 0 and len(clear.claims()) == 1
 
 
+def test_GS1_claim_poll_not_clear_after_fresh_clear_sends_no_claim(tmp_path, monkeypatch):
+    bodies = [queued_body("unavailable"),
+              {"jobs": [{"id": "job-1", "capabilityType": "lab.absorbance"}]},
+              queued_body(False), queued_body(None)]
+    for index, body in enumerate(bodies):
+        directory = tmp_path / str(index)
+        directory.mkdir(mode=0o700)
+        gateway = Gateway()
+        gateway.polls = [(200, queued_body("clear"))] + [(200, body)] * 12
+        result = operate_run(directory, monkeypatch, gateway=gateway)
+        assert result.code == 0 and not result.claims()
+        assert result.device_log and all(method == "GET" and url.endswith("/status")
+                                         for method, url, *_ in result.device_log)
+        assert len([entry for entry in gateway.calls if entry[1].startswith("/api/operator/jobs?")]) >= 2
+
+
+def test_GS1_raising_stop_check_or_breaker_sends_no_claim(tmp_path, monkeypatch):
+    original = operate.GatedRuntime
+
+    def unavailable(*args, **kwargs):
+        raise OSError("unavailable")
+
+    for cause in ("stop", "breaker"):
+        directory = tmp_path / cause
+        directory.mkdir(mode=0o700)
+        checks = []
+
+        def gated_runtime(*args, **kwargs):
+            gated = original(*args, **kwargs)
+            if cause == "stop":
+                gated.reader = SimpleNamespace(check=unavailable)
+            else:
+                gated.breaker = SimpleNamespace(is_open=unavailable)
+            checks.append(gated.allows_jobs())
+            return gated
+
+        monkeypatch.setattr(operate, "GatedRuntime", gated_runtime)
+        result = operate_run(directory, monkeypatch)
+        assert checks == [False]
+        assert result.code == 0 and not result.claims() and result.device_log == []
+
+
 def test_GS1_stop_file_sends_no_claim(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_setup_logging", lambda verbose: None)
     monkeypatch.setattr(devicelock, "DEFAULT_DIRECTORY", str(tmp_path))
@@ -154,6 +196,23 @@ def test_OP1_operate_is_run_loops_only_caller():
         "0cb3daafd1c5ccc16f1a0abc0c29929ff4690dc33925d13b70ce384877a3d5b7")
 
 
+def test_OP1_no_module_imports_run_loop_outside_operate():
+    root = Path(__file__).resolve().parents[1]
+    imports = []
+    for file in (root / "pcc_node").rglob("*.py"):
+        if file.relative_to(root).as_posix() == "pcc_node/operating/operate.py":
+            continue
+        for node in ast.walk(ast.parse(file.read_text())):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level:
+                    package = file.relative_to(root).parts[:-node.level]
+                    module = ".".join(package + tuple(module.split(".")))
+                if module == "pcc_node.operating.loop" and any(name.name == "run_loop" for name in node.names):
+                    imports.append(file.relative_to(root).as_posix())
+    assert imports == []
+
+
 def test_HB1_failed_run_heartbeat_carries_status_and_reason(tmp_path, monkeypatch):
     result = operate_run(tmp_path, monkeypatch, state="failed")
     assert result.code == 0 and len(result.claims()) == 1
@@ -166,6 +225,36 @@ def test_HB1_failed_run_heartbeat_carries_status_and_reason(tmp_path, monkeypatc
     clear = operate_run(next_dir, monkeypatch)
     assert clear.code == 0 and clear.heartbeats[1][1]["status"] == "online"
     assert "reason" not in clear.heartbeats[1][1]
+
+
+def test_HB1_passed_run_after_failed_run_heartbeat_is_online(tmp_path, monkeypatch):
+    completions = []
+
+    class TwoJobs(Gateway):
+        def __call__(self, method, path, body=None, **kwargs):
+            if method == "GET" and path.startswith("/api/operator/jobs?"):
+                job_id = "job-1" if not completions else "job-2"
+                self.polls = [(200, {"emergencyStop": "clear", "jobs": [
+                    {"id": job_id, "capabilityType": "lab.absorbance"}]})]
+            answer = super().__call__(method, path, body, **kwargs)
+            if path == "/api/operator/job-status":
+                completions.append(body)
+            return answer
+
+    def request(method, url, body=None, **kwargs):
+        if url.endswith("/status"):
+            return runtime._Answer(200, {"state": "idle"}, True)
+        if method == "POST":
+            return runtime._Answer(201, {"id": "run-1" if not completions else "run-2"}, True)
+        return runtime._Answer(200, {"status": "failed" if not completions else "done"}, True)
+
+    result = operate_run(tmp_path, monkeypatch, gateway=TwoJobs(), device_request=request)
+    assert result.code == 0 and len(result.claims()) == 2
+    assert [body["status"] for body in completions] == ["failed", "completed"]
+    bodies = [body for _, body in result.heartbeats]
+    assert len(bodies) >= 3
+    assert bodies[1]["status"] == "error" and bodies[1]["reason"] == "run_failed"
+    assert bodies[-1]["status"] == "online" and "reason" not in bodies[-1]
 
 
 def test_HB1_passed_run_heartbeat_is_online(tmp_path, monkeypatch):
@@ -361,12 +450,27 @@ def test_cli_uses_config_environment_and_flag_values(tmp_path, monkeypatch):
             answer = gateway(method, path, body, **kwargs)
             if path == "/api/operator/job-status":
                 assert body["kernelId"] == expected[2] and body["status"] == "completed"
+                timer.cancel()
                 installed[signal.SIGTERM](signal.SIGTERM, None)
             return answer
 
         monkeypatch.setattr(operate, "pcc_request", gateway_request)
-        result = CliRunner().invoke(cli.main, ["operate", "--binding", str(file), "-c", str(config)] + options,
-                                    env=variables)
+        timed_out = threading.Event()
+
+        def stop_wait():
+            timed_out.set()
+            installed[signal.SIGTERM](signal.SIGTERM, None)
+
+        timer = threading.Timer(30.0, stop_wait)
+        timer.daemon = True
+        timer.start()
+        try:
+            result = CliRunner().invoke(cli.main, ["operate", "--binding", str(file), "-c", str(config)] + options,
+                                        env=variables)
+        finally:
+            timer.cancel()
+            timer.join()
+        assert not timed_out.is_set(), "wait for completed job status exceeded 30 s"
         assert result.exit_code == 0, (result.output, result.exception)
         assert received and all(item == expected[:2] for item in received)
         assert signal.SIGINT in installed and signal.SIGTERM in installed

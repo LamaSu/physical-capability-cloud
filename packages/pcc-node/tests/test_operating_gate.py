@@ -4,6 +4,7 @@ import json
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
@@ -96,7 +97,9 @@ def last(env, grant_id, **changes):
 
 def refused_poll(env, answer, reason):
     env.gateway.polls = [answer]
-    result = env.gated.run("runPlate", env.params, claim=env.job)
+    with patch.object(env.gated, "_mint", wraps=env.gated._mint) as calls:
+        result = env.gated.run("runPlate", env.params, claim=env.job)
+        assert calls.call_count == 0
     assert result.error == reason and not result.ok
     assert env.gated._grants == {} and env.log == []
     fresh_clear(env)
@@ -172,6 +175,22 @@ def test_HG1c_expired_grant_is_grant_expired(env):
     env.now[0] += RUN_GRANT_TTL_MS / 1000.0 + 1.0
     assert last(env, grant_id) == "grant_expired"
     assert last(env, mint(env)) is None
+
+
+def test_HG1c_lease_under_the_cap_expires_the_grant(env, monkeypatch):
+    lease_s = env.inner.timeout_s("runPlate") + 1.0
+    assert env.inner.timeout_s("runPlate") < lease_s < RUN_GRANT_TTL_MS / 1000.0
+    claim = replace(env.job, lease=LiveLease(lease_s))
+
+    def run(operation, params, *, claim, last_check):
+        env.now[0] += lease_s + 1.0
+        fresh_clear(env)
+        return RunResult(False, error=last_check())
+
+    monkeypatch.setattr(env.inner, "run", run)
+    result = env.gated.run("runPlate", env.params, claim=claim)
+    assert not result.ok and result.error == "grant_expired"
+    assert not env.gated._grants and not env.log
 
 
 def test_HG1c_unminted_grant_is_grant_not_minted(env):
@@ -288,7 +307,9 @@ def test_GT1_circuit_open(env):
     grant_id = mint(env)
     devicelock.write_breaker("serial-1")
     assert not env.gated.allows_jobs()
-    assert env.gated.run("runPlate", env.params, claim=env.job).error == "circuit_open"
+    with patch.object(env.gated, "_mint", wraps=env.gated._mint) as calls:
+        assert env.gated.run("runPlate", env.params, claim=env.job).error == "circuit_open"
+        assert calls.call_count == 0
     assert last(env, grant_id) == "circuit_open"
     assert not env.log
     env.breaker.reset()
