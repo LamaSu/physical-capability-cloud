@@ -99,7 +99,7 @@ describe("accepted-plan compiler — happy paths", () => {
         nodes: [
           node({ nodeId: "print", operator: OP_A, payoutAddress: ADDR("a1") }),
           node({ nodeId: "mail", operator: OP_B, payoutAddress: ADDR("b1") }),
-          node({ nodeId: "proof", operator: OP_A, payoutAddress: ADDR("a2") }),
+          node({ nodeId: "proof", operator: OP_A, payoutAddress: ADDR("a1") }),
         ],
         edges: [
           { from: "print", to: "mail" },
@@ -113,7 +113,7 @@ describe("accepted-plan compiler — happy paths", () => {
     expect(r.plan.jobs[0]!.nodeIds).toEqual(["print", "proof"]);
     expect(r.plan.jobs[1]!.nodeIds).toEqual(["mail"]);
     const recipientsA = r.plan.jobs[0]!.units.flatMap((u) => u.payouts.map((p) => p.recipient));
-    expect(recipientsA).toEqual([ADDR("a1"), ADDR("a2")]);
+    expect(recipientsA).toEqual([ADDR("a1"), ADDR("a1")]);
     expect(r.plan.jobs[1]!.units[0]!.payouts[0]!.recipient).toBe(ADDR("b1"));
     // milestoneIndex restarts per job
     expect(r.plan.jobs[0]!.units.map((u) => u.milestoneIndex)).toEqual([0n, 1n]);
@@ -195,6 +195,23 @@ describe("accepted-plan compiler — determinism (settlement order is independen
 });
 
 describe("accepted-plan compiler — REQUIRED negative controls", () => {
+  it("N447 C1.1: one operator cannot name two payout addresses, across operator spellings", () => {
+    for (const [name, operator] of [["one spelling", OP_A], ["two spellings", ADDR("AA")]] as const) {
+      const r = compileAcceptedPlan(plan({ nodes: [node({ nodeId: "print", operator }), node({ nodeId: "mail", payoutAddress: ADDR("a2") })] }));
+      expect.soft([name, r]).toEqual([name, { ok: false, violations: [{ code: "multiple-payout-addresses-for-operator", operator: OP_A, nodeIds: ["print", "mail"] }] }]);
+    }
+  });
+
+  it("N447 C1.2: every node's payout address is checked, with nodeIds in canonical order", () => {
+    for (const name of ["print", "mail", "proof"]) {
+      const r = compileAcceptedPlan(plan({
+        nodes: ["proof", "mail", "print"].map((nodeId) => node({ nodeId, payoutAddress: ADDR(nodeId === name ? "a2" : "a1") })),
+        edges: [{ from: "print", to: "mail" }, { from: "mail", to: "proof" }],
+      }));
+      expect.soft([name, r]).toEqual([name, { ok: false, violations: [{ code: "multiple-payout-addresses-for-operator", operator: OP_A, nodeIds: ["print", "mail", "proof"] }] }]);
+    }
+  });
+
   it("total compiled obligation exceeds the reservation -> refused", () => {
     const r = compileAcceptedPlan(plan({ reservation: { reservationId: "resv-1", requestId: "req-1", currency: "USDC", maxAmountBaseUnits: 20n * USDC - 1n } }));
     expect(r.ok).toBe(false);
@@ -518,6 +535,11 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
   // operator's floor is its quote's net, 9,000,000 - 211,500 = 8,788,500, which is exactly what tenPercent
   // leaves it. An omitted quote is the GROSS and leaves no room for a royalty (astra round 6, F).
   const fee235 = plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: plan().nodes.map((n) => ({ ...n, quoteBaseUnits: 9n * USDC })) });
+
+  it("N447 C1.3: an economics split cannot bypass one payout address per operator", () => {
+    const r = withSplit({ ...fee235, nodes: fee235.nodes.map((n) => n.nodeId === "mail" ? { ...n, payoutAddress: ADDR("a2") } : n) }, tenPercent);
+    expect(r).toEqual({ ok: false, violations: [{ code: "multiple-payout-addresses-for-operator", operator: OP_A, nodeIds: ["print", "mail"] }] });
+  });
 
   it("splits each unit's net exactly, seals both terms hashes, and receives units in canonical order", () => {
     const seen: string[][] = [];
