@@ -26,6 +26,11 @@
       "types": "./dist/vnext/index.d.ts",
       "import": "./dist/vnext/index.js",
       "default": "./dist/vnext/index.js"
+    },
+    "./job-policy": {
+      "types": "./dist/job-policy/index.d.ts",
+      "import": "./dist/job-policy/index.js",
+      "default": "./dist/job-policy/index.js"
     }
   },
   "scripts": {
@@ -44,7 +49,8 @@
     "@metaplex-foundation/umi": "^1.5.1",
     "@metaplex-foundation/umi-bundle-defaults": "^1.5.1",
     "@pcc/spec": "workspace:*",
-    "viem": "^2"
+    "viem": "^2",
+    "zod": "^3.23.0"
   },
   "devDependencies": {
     "typescript": "^5.4.0",

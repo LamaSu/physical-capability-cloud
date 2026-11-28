@@ -7,8 +7,8 @@ import { custom, decodeFunctionData, encodeFunctionResult, hashTypedData, toHex,
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { VNextSettlementEscrowABI, VNextSettlementEscrowFactoryABI, policySalt, predictEscrow } from "@pcc/contracts/vnext";
 import { DRY_RUN_UNIT_TESTNET_V1 } from "@pcc/spec/funding";
-import { loadJobPolicyInput } from "../../../print-host/src/policy-json.js";
-import { computeJobPolicyCommitments, prepareJobPolicyAcceptance, validateHostTerms } from "../../../print-host/src/operator-signing.js";
+import { loadJobPolicyInput } from "@pcc/contracts/job-policy";
+import { computeJobPolicyCommitments, prepareJobPolicyAcceptance, validateHostTerms } from "@pcc/contracts/job-policy";
 import { buyerFundingRoutes } from "../routes/buyer-funding.js";
 import { operatorRoutes } from "../routes/operator.js";
 import { __setVNextTransportForTest } from "../services/vnext-rpc-client.js";
