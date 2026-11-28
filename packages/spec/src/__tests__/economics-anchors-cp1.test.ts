@@ -273,6 +273,22 @@ describe("economics IP anchors", () => {
     expect(answer(bind(AG, facts([L2, L3], [anchor(2, T2, PRIYA), anchor(2, T2, PRIYA)])))).toBe("economics:SERVER_FACTS_INVALID:ipAnchors");
   });
 
+  it("CP1 F6b: a repeated subject is refused wherever its copies sit and however they differ", () => {
+    const a2 = anchor(2, T2, PRIYA);
+    const aX = { ...anchor(2, TX, PRIYA), subject: "kit:other@1", licenseId: "lic-other-kit" };
+    const LB: License = { ...L2, licenseId: "lic-octoprint-fdm-alt", version: 7 };
+    const aB = { ...anchor(7, licenseTermsHash(LB), "0x00000000000000000000000000000000009a1a04"), licenseId: "lic-octoprint-fdm-alt" };
+    aB.nft.tokenId = "8";
+    for (const f of [
+      facts([L2, LX], [a2, aX, a2]),
+      facts([L2, LB], [aB, a2]),
+      facts([L2, LX], [aX, a2, a2]),
+      facts([L2, LX], [a2, a2, aX]),
+    ]) {
+      expect(answer(bind(AG, f, null))).toBe("economics:SERVER_FACTS_INVALID:ipAnchors");
+    }
+  });
+
   it("CP1 F7: every anchor must name a registered license for the same subject", () => {
     expect(answer(bind(AG, facts([L2, L3], [anchor(9, T2, PRIYA)])))).toBe("economics:SERVER_FACTS_INVALID:ipAnchors.0");
     expect(answer(bind(AG, facts([L2, L3], [{ ...anchor(2, T2, PRIYA), subject: "kit:other@1" }])))).toBe("economics:SERVER_FACTS_INVALID:ipAnchors.0");
