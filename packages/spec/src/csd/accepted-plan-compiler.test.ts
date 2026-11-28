@@ -212,6 +212,31 @@ describe("accepted-plan compiler — REQUIRED negative controls", () => {
     }
   });
 
+  it("N447 C1.6: a second operator's two payout addresses are refused", () => {
+    const r = compileAcceptedPlan(plan({
+      nodes: [
+        node({ nodeId: "print", operator: OP_A, payoutAddress: ADDR("a1") }),
+        node({ nodeId: "mail", operator: OP_B, payoutAddress: ADDR("b1") }),
+        node({ nodeId: "proof", operator: OP_B, payoutAddress: ADDR("b2") }),
+      ],
+      edges: [{ from: "print", to: "mail" }, { from: "mail", to: "proof" }],
+    }));
+    expect(r).toEqual({ ok: false, violations: [{ code: "multiple-payout-addresses-for-operator", operator: OP_B, nodeIds: ["mail", "proof"] }] });
+  });
+
+  it("N447 C1.7: one operator's two payout addresses and too many units are both refused, in either node order", () => {
+    const many = Array.from({ length: MAX_UNITS_PER_JOB + 1 }, (_, i) => node({
+      nodeId: `n${String(i).padStart(2, "0")}`,
+      payoutAddress: ADDR(i === 8 ? "a2" : "a1"),
+      grossBaseUnits: USDC,
+    }));
+    const r = compileAcceptedPlan(plan({ nodes: many, edges: [] }));
+    const reversed = compileAcceptedPlan(plan({ nodes: [...many].reverse(), edges: [] }));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(codes(r)).toEqual(["multiple-payout-addresses-for-operator", "too-many-units-for-operator"]);
+    expect(reversed).toEqual(r);
+  });
+
   it("total compiled obligation exceeds the reservation -> refused", () => {
     const r = compileAcceptedPlan(plan({ reservation: { reservationId: "resv-1", requestId: "req-1", currency: "USDC", maxAmountBaseUnits: 20n * USDC - 1n } }));
     expect(r.ok).toBe(false);

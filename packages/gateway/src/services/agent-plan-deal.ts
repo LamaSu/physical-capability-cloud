@@ -21,7 +21,7 @@
  *   - the same jobs, in the same order;
  *   - one id per unit, and every id a bytes32;
  *   - all ids distinct;
- *   - each reported accepted-policy digest recomputes from its terms, bindings root and subject;
+ *   - each reported accepted-policy digest recomputes from its reported termsHash, bindings root and subject;
  *   - that subject commits every node's payout address in its job.
  * A mismatch is an encoder fault: nothing is bound, and the route consumes no reservation. VCR's
  * 64-unit limit is checked BEFORE the encoder runs (a plan-size refusal, not an encoder fault).

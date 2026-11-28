@@ -720,6 +720,7 @@ describe("N447: accepted-policy digest and payout address binding", () => {
   });
 
   it("N447 C2.8: spec refuses inherited, extra, accessor, hidden, missing and malformed subject fields", async () => {
+    let ghostKeyCalls = 0;
     const rows: Array<[string, (subject: SubjectBlockFields) => SubjectBlockFields]> = [
       ["inherited field", (s) => {
         const copy = { ...s };
@@ -733,12 +734,53 @@ describe("N447: accepted-policy digest and payout address binding", () => {
       ["non-enumerable payer", (s) => Object.defineProperty(s, "payer", { enumerable: false })],
       ["missing integrityGrade", (s) => { Reflect.deleteProperty(s, "integrityGrade"); return s; }],
       ["short payer", (s) => ({ ...s, payer: s.payer.slice(0, -1) as `0x${string}` })],
+      ["ghost key", (s) => new Proxy(s, { ownKeys: (target) => {
+        ghostKeyCalls++;
+        return [...Reflect.ownKeys(target), "ghost"];
+      } })],
     ];
     for (const [name, replace] of rows) {
       await checkPolicyRoute(name, withPolicy((job, i) => {
         if (i === 0) job.subject = replace(job.subject);
       }), "subject:0");
     }
+    expect.soft(["ghost key", ghostKeyCalls]).toEqual(["ghost key", 1]);
+  });
+
+  it("N447 C2.8 (i) getPrototypeOf: a subject whose getPrototypeOf trap throws is a subject refusal", async () => {
+    let calls = 0;
+    await checkPolicyRoute("getPrototypeOf", withPolicy((job, i) => {
+      if (i !== 0) return;
+      job.subject = new Proxy(job.subject, { getPrototypeOf: () => {
+        calls++;
+        throw new Error("getPrototypeOf");
+      } });
+    }), "subject:0");
+    expect.soft(calls).toBe(1);
+  });
+
+  it("N447 C2.8 (i) ownKeys: a subject whose ownKeys trap throws is a subject refusal", async () => {
+    let calls = 0;
+    await checkPolicyRoute("ownKeys", withPolicy((job, i) => {
+      if (i !== 0) return;
+      job.subject = new Proxy(job.subject, { ownKeys: () => {
+        calls++;
+        throw new Error("ownKeys");
+      } });
+    }), "subject:0");
+    expect.soft(calls).toBe(1);
+  });
+
+  it("N447 C2.8 (i) getOwnPropertyDescriptor: a subject whose getOwnPropertyDescriptor trap throws is a subject refusal", async () => {
+    let calls = 0;
+    await checkPolicyRoute("getOwnPropertyDescriptor", withPolicy((job, i) => {
+      if (i !== 0) return;
+      job.subject = new Proxy(job.subject, { getOwnPropertyDescriptor: () => {
+        calls++;
+        throw new Error("getOwnPropertyDescriptor");
+      } });
+    }), "subject:0");
+    expect.soft(calls).toBe(1);
   });
 
   it("N447 C2.9: third-party split legs do not supply the settlement address", () => {
@@ -778,15 +820,17 @@ describe("N447: accepted-policy digest and payout address binding", () => {
   });
 
   it("N447 C2.11: all three words are form-checked before the subject", async () => {
-    const rows: Array<[string, "termsHash" | "bindingsRoot" | "acceptedPolicyDigest", "absent" | "short", boolean]> = [];
+    const rows: Array<[string, "termsHash" | "bindingsRoot" | "acceptedPolicyDigest", "absent" | "short" | "array", boolean]> = [];
     for (const field of ["termsHash", "bindingsRoot", "acceptedPolicyDigest"] as const) {
       rows.push([`${field} absent`, field, "absent", false], [`${field} short`, field, "short", false]);
+      rows.push([`${field} array`, field, "array", false]);
     }
     rows.push(["short termsHash and absent subject", "termsHash", "short", true]);
     for (const [name, field, form, absentSubject] of rows) {
       await checkPolicyRoute(name, withPolicy((job, i) => {
         if (i !== 0) return;
         if (form === "absent") Reflect.deleteProperty(job, field);
+        else if (form === "array") Reflect.set(job, field, [job[field]]);
         else job[field] = job[field].slice(0, -1) as `0x${string}`;
         if (absentSubject) Reflect.deleteProperty(job, "subject");
       }), "policy-hashes:0");
@@ -828,6 +872,20 @@ describe("N447: accepted-policy digest and payout address binding", () => {
       }));
       expect.soft([name, result]).toEqual([name, { ok: false, reason: "encoder-mismatch", detail }]);
     }
+  });
+
+  it("N447 C2.15: an all-own subject over a null-prototype parent binds on its own fields", async () => {
+    let reads = 0;
+    await checkPolicyRoute("own fields", withPolicy((job, i) => {
+      if (i !== 0) return;
+      const parent = Object.assign(Object.create(null), { operatorSettlementAddress: Z });
+      Object.defineProperty(parent, "extra", { enumerable: true, get: () => {
+        reads++;
+        return Z;
+      } });
+      job.subject = Object.assign(Object.create(parent), job.subject);
+    }), null);
+    expect.soft(reads).toBe(0);
   });
 });
 
